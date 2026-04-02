@@ -52,23 +52,25 @@
 
 ### 3.1 Electron 层
 
-| 关注点 | 选型 | 说明 |
-|--------|------|------|
-| 构建工具 | electron-vite | Vite 统一管理 main/preload/renderer 三端构建 |
-| 打包分发 | electron-builder | 跨平台打包（macOS DMG / Windows EXE） |
-| 主进程职责 | 生命周期 + 安全 + 守护 | 子进程管理、窗口管理、context isolation、preload 最小暴露面 |
+| 关注点 | 选型 | 版本约束 | 说明 |
+|--------|------|---------|------|
+| Electron | electron | **锁定 35.x** | Playwright E2E 在 Electron 36 上有已知启动失败问题 |
+| 构建工具 | electron-vite (alex8088) 5.x | 基于 Vite 6 | 注意 npm 上有两个同名包，使用 alex8088 版本 |
+| 打包分发 | electron-builder 26.x | | macOS arm64 需设置 `com.apple.security.cs.allow-jit` entitlement |
+| 主进程职责 | 仅生命周期 + 安全 + 守护 | | 子进程管理、窗口管理、context isolation、preload 最小暴露面 |
 
 ### 3.2 Renderer 前端
 
-| 关注点 | 选型 | 说明 |
-|--------|------|------|
-| 框架 | React 19 + TypeScript | 成熟生态，组件化开发 |
-| 构建 | Vite（electron-vite 内置） | 快速 HMR |
-| 样式 | Tailwind CSS v4 | 照片类 UI 需大量自定义布局 |
-| 组件库 | shadcn/ui | 基于 Radix UI，源码级引入可自定义 |
-| 服务端状态 | TanStack Query | 管理 FastAPI 请求的缓存/重试/loading |
-| 客户端状态 | Zustand | **严格限于纯 UI 状态**（选中态、布局模式、面板展开等） |
-| 虚拟列表 | @tanstack/react-virtual | 数千张照片场景下必须虚拟化渲染 |
+| 关注点 | 选型 | 版本 | 注意事项 |
+|--------|------|------|---------|
+| 框架 | React + TypeScript | 19.x | `defaultProps` 已移除，用 ES6 默认参数；全局 `JSX` namespace 移除，用 `React.JSX` |
+| 构建 | Vite（electron-vite 内置） | 6.x | |
+| 样式 | Tailwind CSS | **v4** | **重大变更**：不再使用 `tailwind.config.ts`，改为 CSS 内 `@theme` 指令；用 `@tailwindcss/vite` 插件；`@import "tailwindcss"` 替代 `@tailwind` 指令 |
+| 组件库 | shadcn/ui | latest | **必须用 `tw-animate-css`** 替代 `tailwindcss-animate`；需添加 `@custom-variant dark (&:is(.dark *))` |
+| 服务端状态 | TanStack Query | v5 | React 19 完全兼容 |
+| 客户端状态 | Zustand | v5 | **陷阱**：selector 返回新对象引用会导致死循环，必须用 `useShallow` |
+| 虚拟列表 | @tanstack/react-virtual | 3.x | 设置 `useFlushSync: false` 避免控制台警告 |
+| 国际化 | i18next + react-i18next | i18next 24.x / react-i18next 17.x | **从项目初始化即引入**，文案放 JSON 文件不硬编码 |
 
 **TanStack Query 与 Zustand 的边界**：
 
@@ -78,26 +80,43 @@
 
 ### 3.3 Python 后端
 
-| 关注点 | 选型 | 说明 |
-|--------|------|------|
-| Web 框架 | FastAPI | async 原生，Pydantic 类型严格，自带 Swagger |
-| ASGI 服务器 | uvicorn | 标准 ASGI，配合 FastAPI |
-| VLM 客户端 | openai (Python SDK) | 异步调用，兼容所有 OpenAI 协议后端 |
-| 数据库 | SQLite + aiosqlite | 单用户桌面应用，零部署成本，**启用 WAL 模式** |
-| 图像处理 | Pillow + rawpy | JPEG/PNG 及 RAW 格式（CR2/CR3/NEF/ARW） |
-| EXIF 读取 | exifread | 纯 Python，无外部依赖 |
-| 配置管理 | pydantic-settings | 类型安全，支持 .env |
+| 关注点 | 选型 | 版本 | 注意事项 |
+|--------|------|------|---------|
+| Web 框架 | FastAPI | 0.135+ | **注意**：默认严格 Content-Type 检查，前端 fetch 必须带 `Content-Type: application/json` |
+| ASGI 服务器 | uvicorn | 0.42+ | PyInstaller 需 `collect_submodules('uvicorn')`；Windows `console=False` 会崩溃需重定向 stdout |
+| VLM 客户端 | openai SDK | 2.30+ | AsyncOpenAI 支持 base_url 覆盖，兼容 Ollama/vLLM/LM Studio |
+| 数据库 | SQLite + aiosqlite | 0.22+ | **WAL 模式 + busy_timeout=5000**；0.22 起必须显式 close 连接 |
+| 图像处理 | Pillow + rawpy | Pillow 12.x / rawpy 0.23+ | rawpy 0.23.1 已有 macOS arm64 原生 wheel |
+| EXIF 读取 | Pillow 内置 `Image.getexif()` | | 已有 Pillow 依赖，不额外引入 exifread |
+| 配置管理 | pydantic-settings | 2.13+ | 与 Pydantic v2 + FastAPI 无缝集成 |
+| 结构化日志 | structlog | 25.x | 支持 JSON/logfmt/console 多格式输出，可接管 uvicorn 日志 |
 
 ### 3.4 推理后端兼容矩阵
 
-所有推理后端通过 OpenAI 兼容协议接入，Python 后端代码零改动。
+所有推理后端通过 OpenAI 兼容协议接入，Python 后端代码零改动。**模型范围有限定**，不是所有模型都可自由选择——仅支持经过验证的 VLM 模型（见下方允许列表）。
 
-| 后端 | 安装方式 | 适合场景 |
-|------|---------|---------|
-| Ollama（默认） | 一键安装 + `ollama pull` | 大多数用户 |
-| LM Studio | GUI 安装 | 偏好图形界面的用户 |
-| vLLM | pip install | 有独显的高级用户 |
-| 云端 API | 填写 API key + base_url | 无 GPU 用户 |
+| 后端 | 安装方式 | API 端点 | 已验证兼容性 | 适合场景 |
+|------|---------|---------|-------------|---------|
+| Ollama（默认） | 一键安装 + `ollama pull` | `localhost:11434/v1` | `/chat/completions`, `/models` | 大多数用户 |
+| LM Studio | GUI 安装 | `localhost:1234/v1` | `/chat/completions`, `/completions`, `/embeddings`, `/models` | 偏好图形界面的用户 |
+| vLLM | pip install | `localhost:8000/v1` | `/chat/completions`, `/models`, `/responses` | 有独显的高级用户 |
+| 云端 API | 填写 API key + base_url | 用户配置 | 取决于提供商 | 无 GPU 用户 |
+
+**LM Studio 兼容性注意**：
+- `response_format` 参数不保证支持
+- Function calling 支持取决于加载的模型
+- 视觉能力取决于模型（必须加载 VL 模型）
+- Provider 适配层的 `json_reliability` 对 LM Studio 应设为 0.6
+
+**允许的模型列表**（初始版本，后续按评测结果扩展）：
+
+| 模型 | 参数量 | 支持后端 | 备注 |
+|------|--------|---------|------|
+| qwen2.5-vl:4b | 4B | Ollama, LM Studio, vLLM | 默认推荐 |
+| qwen2.5-vl:7b | 7B | Ollama, LM Studio, vLLM | 更高精度 |
+| 后续按评测结果扩展 | | | |
+
+用户选择模型时从允许列表中选择，而非自由输入。高级用户可通过配置文件解锁自定义模型（需自行承担兼容性风险）。
 
 ## 4. 项目目录结构
 
@@ -116,9 +135,12 @@ PlumeLens/
 │   │   ├── stores/              # Zustand stores（仅纯 UI 状态）
 │   │   ├── hooks/               # 自定义 hooks
 │   │   ├── lib/                 # 工具函数
+│   │   ├── i18n/                # 国际化
+│   │   │   ├── locales/         # 翻译文件 (zh-CN.json, en.json)
+│   │   │   └── index.ts         # i18next 初始化
 │   │   └── App.tsx
 │   ├── index.html
-│   └── tailwind.config.ts
+│   └── app.css                  # Tailwind v4 入口（@import "tailwindcss" + @theme）
 │
 ├── engine/                      # Python 后端
 │   ├── api/
@@ -225,6 +247,8 @@ PlumeLens/
 
 #### analysis_results 表
 
+分析结果由 **模型版本 + 提示词版本** 双维度控制。
+
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | id | TEXT PK | UUID |
@@ -236,11 +260,25 @@ PlumeLens/
 | quality_score | REAL | 画质评分 0-1（冗余字段，加速排序） |
 | raw_response | TEXT | VLM 原始返回（调试用） |
 | created_at | TEXT | 分析时间 |
-| version | INTEGER DEFAULT 1 | 结果版本号（重新分析时递增） |
+| is_active | BOOLEAN DEFAULT true | 是否为当前展示版本 |
 
-索引：`(photo_id, prompt_version, model_name)`, `(species)`, `(quality_score)`
+索引：`(photo_id, prompt_version, model_name)`, `(photo_id, is_active)`, `(species)`, `(quality_score)`
 
-**缓存键**：`(file_hash, prompt_version, model_name)` — 同一张照片 + 同一 prompt + 同一模型不重复分析。换 prompt 或换模型后自动重新分析。
+**缓存键**：`(file_hash, prompt_version, model_name)` — 同一张照片 + 同一 prompt + 同一模型不重复分析。
+
+**版本控制语义**：
+
+- 每次分析生成新记录，不覆盖旧记录
+- `is_active = true` 的记录为当前展示版本（同一 photo_id 仅一条 active）
+- 切换模型或更新 prompt 后，新分析结果自动标记为 active，旧结果保留（`is_active = false`）
+- 用户可手动触发"重新分析"：使用当前模型 + 当前 prompt 重跑，生成新记录并标记为 active
+- 旧版本结果永久保留，可用于评测对比和回溯
+
+**触发重新分析的场景**：
+
+1. prompt 版本更新 → 自动提示用户是否重跑受影响的照片
+2. 用户手动切换模型 → 该模型下无结果的照片需重新分析
+3. 用户手动选择"重新分析" → 覆盖当前 active 结果
 
 #### task_queue 表
 
@@ -369,10 +407,10 @@ class RetryStrategy:
 
 | Provider | vision | streaming | json_schema | json_reliability | max_image |
 |----------|--------|-----------|-------------|-----------------|-----------|
-| Ollama (Qwen2.5-VL) | true | true | false | 0.7 | 4096×4096 |
-| vLLM | true | true | true | 0.9 | 4096×4096 |
-| OpenAI API | true | true | true | 0.99 | 2048×2048 |
-| LM Studio | true | true | false | 0.6 | 因模型而异 |
+| Ollama (Qwen2.5-VL) | true | true | false | 0.7 | 4096×4096 | `response_format` 部分支持 |
+| vLLM | true | true | true | 0.9 | 4096×4096 | 支持 `response_format: json_schema` |
+| OpenAI API | true | true | true | 0.99 | 2048×2048 | 完整功能支持 |
+| LM Studio | 因模型而异 | true | false | 0.6 | 因模型而异 | 必须加载 VL 模型才支持 vision；function calling 因模型而异 |
 
 **适配逻辑**：
 
@@ -560,9 +598,13 @@ Python 后端作为 Electron 子进程，打包分发需要把 Python 运行时 
 
 **关键注意事项**：
 - PyInstaller 打包后体积约 50-80MB（不含 torch，体积可控）
-- macOS 和 Windows 需要分别打包（CI 中完成）
+- macOS 和 Windows 需要分别打包（CI 中完成，PyInstaller 不支持交叉编译）
 - **尽早验证**：项目骨架搭建完成后即做一次打包测试，避免后期踩坑
-- rawpy 依赖的 libraw 是 C 库，需确保 PyInstaller 能正确捕获
+- rawpy 的 libraw C 库：`pyinstaller-hooks-contrib` 提供了 hook，但需实测确认 `.dylib` / `.dll` 被正确捕获，否则需在 spec 文件中手动添加 `binaries`
+- uvicorn 必须配置 `collect_submodules('uvicorn')` 隐藏导入
+- Windows 特有问题：`console=False` 会导致 uvicorn 因无 stdout 而崩溃，需在启动 uvicorn 前重定向 stdout/stderr，并调用 `multiprocessing.freeze_support()`
+- macOS 分发需要代码签名 + 公证（`--codesign-identity` + `--osx-entitlements-file`）
+- Windows Defender 可能误报 PyInstaller 产物——已知长期问题，无完美解决方案
 
 ### 11.3 CI 打包流水线
 
@@ -583,20 +625,21 @@ jobs:
 
 ### 12.1 Python
 
-| 工具 | 用途 |
-|------|------|
-| uv | 包管理 + 虚拟环境 |
-| ruff | lint + format（line-length = 100） |
-| pyright (strict) | 静态类型检查 |
-| pytest + pytest-asyncio | 测试框架 |
+| 工具 | 用途 | 注意事项 |
+|------|------|---------|
+| uv 0.11+ | 包管理 + 虚拟环境 | lockfile 为 `uv.lock`（TOML），PyInstaller 阶段可 `uv export --format requirements-txt` |
+| ruff 0.15+ | lint + format（line-length = 100） | 0.15 引入 2026 style guide，建议锁定版本避免大 diff |
+| pyright | 静态类型检查 | **FastAPI 路由层用 basic 模式**（`Depends()` / `Field()` 有误报），其余代码 strict |
+| pytest + pytest-asyncio | 测试框架 | |
+| structlog 25.x | 结构化日志 | 需配置接管 uvicorn 日志（见 structlog stdlib integration 文档） |
 
 ### 12.2 前端
 
-| 工具 | 用途 |
-|------|------|
-| ESLint + Prettier | 代码规范 |
-| Vitest | 组件/逻辑单元测试 |
-| Playwright | Electron 全流程 E2E 测试 |
+| 工具 | 用途 | 注意事项 |
+|------|------|---------|
+| ESLint + Prettier | 代码规范 | |
+| Vitest | 组件/逻辑单元测试 | |
+| Playwright | Electron 全流程 E2E | **锁定 Electron 35.x**；Tracing 不支持 Electron；不支持测试原生菜单/系统托盘 |
 
 ### 12.3 CI (GitHub Actions)
 
@@ -628,3 +671,53 @@ OpenAI Chat Completions API（`/v1/chat/completions`）。
 - 图片通过 base64 data URL 传入 `image_url` 字段
 - 支持流式响应（streaming）以获取实时输出
 - 发送前由 Provider 适配层根据能力声明预处理（图片缩放、格式选择等）
+
+## 14. 离线与异常状态处理
+
+### 14.1 推理后端不可达
+
+| 场景 | 行为 |
+|------|------|
+| Ollama 未启动 | 诊断页提示"Ollama 未运行"，引导启动 |
+| 云端 API 网络断开 | 前端显示离线状态标识，新分析任务排队等待 |
+| 网络恢复 | 自动检测并恢复，消费等待队列 |
+| 推理超时 | 根据 Provider RetryStrategy 重试，超过次数标记为 failed |
+
+### 14.2 已有数据离线浏览
+
+推理后端不可达时，已分析的结果正常浏览（数据在本地 SQLite），仅新分析功能不可用。前端需明确区分：
+- 在线模式：全功能
+- 离线模式：浏览/筛选/导出正常，分析功能灰置并提示原因
+
+## 15. 兼容性风险矩阵
+
+经逐一查阅官方文档确认的已知风险，按严重性排序：
+
+### 15.1 高风险（必须在开发初期解决）
+
+| 风险 | 组件 | 影响 | 对策 |
+|------|------|------|------|
+| Playwright 启动失败 | Electron 36 + Playwright | E2E 测试无法运行 | 锁定 Electron 35.x |
+| selector 死循环 | Zustand v5 | 前端页面卡死 | 所有返回对象的 selector 使用 `useShallow` |
+| PyInstaller 打包 uvicorn | PyInstaller + uvicorn | 打包后启动崩溃 | `collect_submodules('uvicorn')` + Windows stdout 重定向 |
+| PyInstaller 打包 rawpy | PyInstaller + libraw C 库 | RAW 图片无法解码 | 尽早验证，必要时手动添加 binaries |
+
+### 15.2 中风险（需留意但有明确解决路径）
+
+| 风险 | 组件 | 影响 | 对策 |
+|------|------|------|------|
+| 配置格式大改 | Tailwind CSS v4 | 配置方式完全不同 | 使用 CSS `@theme` 指令 + `@tailwindcss/vite`，不创建 tailwind.config.ts |
+| 动画包更换 | shadcn/ui + Tailwind v4 | 组件动画失效 | 安装 `tw-animate-css` 替代 `tailwindcss-animate` |
+| pyright 误报 | pyright strict + FastAPI | 大量类型错误噪音 | API 路由层降为 basic 模式 |
+| Content-Type 严格检查 | FastAPI 0.135+ | 前端请求被拒 | fetch 请求统一带 `Content-Type: application/json` |
+| CR3 格式支持 | rawpy (libraw) | 部分 Canon 新机型照片无法打开 | rawpy 0.23+ 内置 libraw 0.21（支持 CR3），但需实测具体机型 |
+
+### 15.3 低风险（已有解决方案）
+
+| 风险 | 组件 | 对策 |
+|------|------|------|
+| React 19 类型变更 | react-i18next | 升级至 react-i18next 17.x |
+| flushSync 警告 | @tanstack/react-virtual | 设置 `useFlushSync: false` |
+| aiosqlite 连接清理 | aiosqlite 0.22+ | 使用 context manager 或显式 `await conn.close()` |
+| electron-builder arm64 | electron-builder + macOS | 设置 JIT entitlement |
+| SQLite 写并发 | aiosqlite + WAL | 单写连接 + `PRAGMA busy_timeout=5000` |
