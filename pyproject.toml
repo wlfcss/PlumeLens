@@ -1,0 +1,48 @@
+[project]
+name = "plumelens-engine"
+version = "0.1.0"
+description = "PlumeLens Python backend - VLM-powered bird photo analysis"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.135.0",
+    "uvicorn[standard]>=0.34.0",
+    "aiosqlite>=0.22.0",
+    "openai>=2.0.0",
+    "pillow>=12.0.0",
+    "rawpy>=0.23.0",
+    "pydantic-settings>=2.13.0",
+    "structlog>=25.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.25.0",
+    "ruff>=0.9.0",
+    "pyright>=1.1.390",
+    "httpx>=0.28.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["engine"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+src = ["engine"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "ASYNC"]
+
+[tool.pyright]
+pythonVersion = "3.11"
+typeCheckingMode = "strict"
+include = ["engine"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests/engine"]
+asyncio_mode = "auto"

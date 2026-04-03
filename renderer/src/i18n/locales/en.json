@@ -1,0 +1,11 @@
+{
+  "app": {
+    "title": "PlumeLens",
+    "subtitle": "Helping bird photographers quickly filter their shots"
+  },
+  "status": {
+    "connecting": "Connecting to backend...",
+    "connected": "Backend connected",
+    "error": "Backend connection failed"
+  }
+}
