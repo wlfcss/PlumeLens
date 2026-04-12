@@ -1,12 +1,12 @@
 # PlumeLens / 鉴翎 — 项目交接文档
 
-> 本文档记录截至 2026-04-11 的所有已完成工作、待决策事项和背景知识，供新环境下的 Claude Code 会话完整接续。
+> 本文档记录截至 2026-04-12 的所有已完成工作、待决策事项和背景知识，供新环境下的 Claude Code 会话完整接续。
 
 ## 1. 项目定位
 
 **PlumeLens / 鉴翎**：辅助鸟类摄影爱好者快速筛选鸟类照片的桌面应用。
 
-核心场景：摄影师外拍回来，导入数百至数千张照片，应用自动分析每张照片的画质、构图等维度，快速筛选出最佳作品。
+核心场景：摄影师外拍回来，导入数百至数千张照片，应用自动分析每张照片的画质，快速筛选出最佳作品。
 
 GitHub: https://github.com/wlfcss/PlumeLens
 
@@ -22,32 +22,36 @@ GitHub: https://github.com/wlfcss/PlumeLens
 
 ## 3. 已完成的工作
 
-### 3.1 Git 提交历史
+### 3.1 管线架构（已确定）
+
+经过 lingjian-v2 项目 15+ 轮评测验证，**纯 ONNX 三模型管线**已确定为最终方案，VLM 方案已完全放弃：
 
 ```
-3ea09bd feat: 搭建完整项目骨架
-58eae68 docs: 整合用户反馈及全栈兼容性验证
-b4afadf docs: 整合五大补充项及细节建议到技术规划
-4dfedda docs: 完整技术规划存档
-00fbcb0 chore: 初始化 PlumeLens / 鉴翎 项目
+原片 → 缩放1440px → YOLOv26l-bird-det.onnx (conf≥0.35)
+                        ↓ bbox
+         box×1.0 裁切 → CLIPIQA+(×0.35) + HyperIQA(×0.65) → 4档分级
 ```
 
-### 3.2 技术规划（已完成、已存档）
+| 模型 | 文件 | 大小 | 用途 |
+|------|------|------|------|
+| YOLOv26l-bird-det | `engine/models/yolo26l-bird-det.onnx` | 95.4 MB | 鸟类目标检测（wlfcss 个人训练） |
+| CLIPIQA+ | `engine/models/clipiqa_plus.onnx` | 1.2 MB | 语义画质评估 |
+| HyperIQA | `engine/models/hyperiqa.onnx` | 0.4 MB | 技术画质评估 |
 
-完整技术规划见 `docs/TECHNICAL_SPEC.md`，涵盖：
+4 档分级：`<0.33` 淘汰 / `0.33-0.43` 记录 / `0.43-0.60` 可用 / `≥0.60` 精选
 
-- 系统架构图（Electron + FastAPI + 推理后端三层）
-- 技术栈明细（含版本号和每个组件的已知兼容性问题）
-- 项目目录结构
-- SQLite 数据库设计（photos / analysis_results / task_queue 三表 + 索引）
-- 运行时硬化（context isolation、子进程守护、统一日志、崩溃转储、诊断页）
-- Provider 适配层设计（ProviderCapabilities 数据类 + 4 个预置 Profile）
-- 性能控制面（并发控制、backpressure、可中断点）
-- 质量评测集结构
-- 打包分发方案（PyInstaller 注意事项）
-- 兼容性风险矩阵（15 项，按严重性分级，附对策）
+性能：Recall 97.6%，~573ms/张（M5 Max，CoreML+CPU）
 
-### 3.3 项目骨架（已完成，75 个文件）
+### 3.2 项目骨架 + 管线模块
+
+**管线模块** (`engine/pipeline/`, 7 文件)：
+- `models.py` — Pydantic 数据模型（BoundingBox, QualityScores, QualityGrade, BirdAnalysis, PipelineResult）
+- `preprocess.py` — 图像加载（Pillow + rawpy）、letterbox 缩放、bbox 裁切、CHW/batch 变换
+- `detector.py` — BirdDetector: YOLO ONNX 推理封装
+- `quality.py` — QualityAssessor: CLIPIQA+ & HyperIQA 双模型评分
+- `grader.py` — score → 4 档分级
+- `manager.py` — PipelineManager: 生命周期 + 编排 + 版本计算
+- `__init__.py` — 导出 PipelineManager 和所有数据模型
 
 **Electron 主进程** (4 文件)：
 - `electron/main.ts` — BrowserWindow + context isolation + CSP + IPC handlers
@@ -65,102 +69,72 @@ b4afadf docs: 整合五大补充项及细节建议到技术规划
 - `renderer/src/stores/ui-store.ts` — Zustand v5 最小 store + useShallow 导出
 - `renderer/src/hooks/use-backend.ts` — TanStack Query 健康检查 hook
 
-**Python 后端** (25 文件)：
+**Python 后端** (25+ 文件)：
 - `engine/main.py` — FastAPI app + lifespan + health router
-- `engine/core/config.py` — Pydantic Settings (PLUMELENS_ 前缀)
+- `engine/core/config.py` — Pydantic Settings（含管线配置：模型目录、EP、阈值、权重）
 - `engine/core/logging.py` — structlog 配置
-- `engine/core/lifespan.py` — 生命周期（日志初始化、数据目录创建）
+- `engine/core/lifespan.py` — 生命周期（日志初始化、数据目录创建、PipelineManager 加载）
 - `engine/core/database.py` — placeholder (WAL 模式待实现)
-- `engine/api/routes/health.py` — GET /health → {"status": "ok"}
-- `engine/llm/provider.py` — ProviderCapabilities + RetryStrategy + 4 预置 Profile（Ollama/vLLM/LMStudio/OpenAI）
-- 其余 services/ prompts/ llm/ 均为 placeholder（含 TODO 注释描述职责）
+- `engine/api/routes/health.py` — GET /health → 含 pipeline 状态（模型加载、EP、版本）
+- 其余 services/ 均为 placeholder（含 TODO 注释描述职责）
 
-**测试**：
-- `tests/engine/conftest.py` — httpx AsyncClient fixture
-- `tests/engine/test_api/test_health.py` — health 端点测试（已通过）
-- `tests/renderer/app.test.tsx` — App 冒烟测试（已通过）
+**测试** (28 个测试通过)：
+- `tests/engine/conftest.py` — httpx AsyncClient fixture + mock PipelineManager
+- `tests/engine/test_api/test_health.py` — health 端点测试（含 pipeline 状态检查）
+- `tests/engine/test_pipeline/test_detector.py` — 4 个检测器测试（mock ONNX session）
+- `tests/engine/test_pipeline/test_quality.py` — 3 个画质评估测试
+- `tests/engine/test_pipeline/test_grader.py` — 7 个分级测试
+- `tests/engine/test_pipeline/test_preprocess.py` — 11 个预处理测试
+- `tests/renderer/app.test.tsx` — App 冒烟测试
 - Playwright 配置就绪（`playwright.config.ts`）
 
 **CI**：
 - `.github/workflows/ci.yml` — backend (ruff + pyright + pytest) + frontend (eslint + tsc + vitest)
-- `.github/workflows/eval.yml` — 质量评测（手动触发 placeholder）
+- `.github/workflows/eval.yml` — 管线质量评测（手动触发 placeholder）
 
-**配置**：
-- `electron.vite.config.ts` — 三端构建（main/preload/renderer 自定义路径）
-- `tsconfig.json` + `tsconfig.node.json` + `tsconfig.web.json` — TypeScript 项目引用
-- `eslint.config.js` — v9 flat config + typescript-eslint
-- `vitest.config.ts` — jsdom + @/ 别名
-- `components.json` — shadcn/ui (new-york style, Tailwind v4)
-- `electron-builder.yml` — appId, extraResources engine/
-- `pyproject.toml` — 在项目根目录（非 engine/ 内），hatchling 构建，packages=["engine"]
+### 3.3 已删除的 VLM 代码
+
+以下目录在管线改造中已完全删除：
+- `engine/llm/` — VLM Provider 适配层（provider.py, client.py, parser.py）
+- `engine/prompts/` — VLM Prompt 模板（registry.py, v1/analyze.py 等）
 
 ### 3.4 验证状态
 
 所有检查已通过：
 - ruff check engine/ ✅
-- pytest tests/engine/ (1 passed) ✅
+- pyright engine/ ✅
+- pytest tests/engine/ (28 passed) ✅
 - vitest run (1 passed) ✅
 - eslint . ✅
 - tsc --noEmit ✅
 
-## 4. 待决策：主处理管线
+## 4. 待实现功能
 
-**这是当前最重要的未决事项。**
+以下按优先级排列：
 
-### 4.1 背景
+### 4.1 后端核心（必须）
+- `engine/core/database.py` — SQLite WAL 模式，建表（photos / analysis_results / task_queue）
+- `engine/services/scanner.py` — 文件夹扫描（递归、EXIF 读取、file hash）
+- `engine/services/analyzer.py` — 管线编排（缓存检查、调用 PipelineManager、写入结果）
+- `engine/services/queue.py` — 批量任务队列（状态机、断点续跑）
+- `engine/services/cache.py` — 缓存管理（键：file_hash + pipeline_version）
+- `engine/services/ranker.py` — 排序服务
+- `engine/services/thumbnail.py` — 缩略图生成
 
-开发者在 lingjian-v2 中做了大量 VLM + IQA 管线对比测试（162 个结果文件，15+ 轮 prompt 迭代）。经多轮验证后确认的最佳管线为 **hybrid v4**：
+### 4.2 API 路由
+- `engine/api/routes/library.py` — 图库管理（导入、列表、筛选）
+- `engine/api/routes/analysis.py` — 分析任务（启动、进度 SSE、结果查询）
+- `engine/api/routes/settings.py` — 设置管理
 
-```
-原片 → Qwen3.5-2B (768px) 检测 → box×1.0 裁切 → CLIPIQA+ & HyperIQA 评分
-```
+### 4.3 前端 UI
+- 图库浏览页面
+- 分析进度页面
+- 照片详情页面
+- 设置页面
 
-关键参数（来自 lingjian-v2/benchmark/ranking/）：
-- 检测模型：Qwen3.5-2B @ 768px
-- 裁切：box × 1.0（紧裁切）
-- IQA 权重：0.3 × CLIPIQA+ + 0.7 × HyperIQA
-- 分级阈值：<0.33 淘汰 / 0.33-0.43 记录 / 0.43-0.60 可用 / ≥0.60 精选
-- 测试数据：95 张标注 ground truth（ground_truth_v2.json + v2_crop.json）
-
-### 4.2 架构冲突
-
-该管线中 CLIPIQA+ 和 HyperIQA 依赖 `pyiqa`（底层是 torch），与"Python 后端不装 torch"的轻量原则冲突。
-
-### 4.3 讨论中的方向
-
-最近讨论了三个演进方向：
-
-**方向 A：用 YOLO 替代 2B VLM 做检测**
-- 开发者提出考虑自行标注数据微调 YOLO 替代 Qwen3.5-2B
-- lingjian-v2 已有 `yolo26x-seg.onnx` 可直接使用
-- 优势：YOLO ONNX 推理 ~50ms（vs VLM ~800ms），无需 Ollama，确定性输出无需解析
-
-**方向 B：三个模型全部 ONNX 化**
-- YOLO (检测) + CLIPIQA+ (ONNX) + HyperIQA (ONNX) = 纯 ONNX 管线
-- 整条管线不依赖 torch、不依赖 Ollama
-- 单张 ~300ms，千张 ~5 分钟
-- 完美符合"快速筛选"定位
-
-**方向 C：VLM 降级为可选增强**
-- 主管线为纯 ONNX 快速筛选
-- VLM 作为二阶段可选功能（物种识别、构图评价等文字解读）
-- 但开发者最后一条消息是 "vlm 已经没有意义了看起来？"
-
-### 4.4 待确认
-
-开发者说"先不急，我再考虑一下"。需要确认：
-
-1. **主管线方案**：纯 ONNX（YOLO + IQA）还是保留 VLM 在某个环节？
-2. **YOLO 模型来源**：复用 lingjian-v2 的 yolo26x-seg.onnx，还是自行标注微调？
-3. **IQA 模型 ONNX 转换**：CLIPIQA+ 和 HyperIQA 能否成功转 ONNX？需要验证
-4. **VLM 是否保留**：完全砍掉 Provider 适配层/Prompt 版本管理，还是保留为可选模块？
-
-**一旦管线确定，以下文件需要更新：**
-- `docs/TECHNICAL_SPEC.md` — 架构图、技术栈（可能删除 openai SDK，新增 onnxruntime）
-- `开发指引` — 关键约束部分
-- `engine/llm/` — 可能重构为 `engine/inference/` 或 `engine/ml/`
-- `engine/prompts/` — 如果砍掉 VLM 则删除
-- `pyproject.toml` — 依赖变更
+### 4.4 未来增强
+- 物种分类模型（`engine/models/species.onnx`，slot 已预留）
+- Eval 框架（`evals/run_eval.py`，目前为 placeholder）
 
 ## 5. 技术栈快速参考
 
@@ -184,10 +158,14 @@ b4afadf docs: 整合五大补充项及细节建议到技术规划
 | Python | >=3.11 | 当前开发环境为 3.12 |
 | FastAPI | >=0.135.0 | 默认严格 Content-Type，前端 fetch 带 application/json |
 | uvicorn | >=0.34.0 | PyInstaller 需 collect_submodules |
+| onnxruntime | >=1.24.0 | CoreML EP 有 bug（model_path），IQA 暂用 CPU |
+| numpy | >=2.0.0 | 图像处理 + ONNX 推理数据 |
+| Pillow | >=12.0.0 | 图像加载，用 `Image.Resampling.LANCZOS` |
+| rawpy | >=0.23.0 | RAW 格式支持 |
 | aiosqlite | >=0.22.0 | WAL 模式 + busy_timeout=5000，需显式 close |
 | structlog | >=25.0.0 | JSON 日志，需配置接管 uvicorn 日志 |
-| pyright | strict | **API 路由层用 basic**（Depends/Field 误报） |
-| ruff | >=0.9.0 | line-length=100, 0.15 有 style guide 变化 |
+| pyright | strict | **API 路由层及 ONNX 推理层 basic 模式** |
+| ruff | >=0.9.0 | line-length=100 |
 | uv | 系统工具 | pyproject.toml 在项目根目录，packages=["engine"] |
 
 ### 关键文件位置
@@ -196,11 +174,11 @@ b4afadf docs: 整合五大补充项及细节建议到技术规划
 |------|------|
 | `pyproject.toml` | **在项目根目录**（非 engine/ 内），Python 依赖 + 工具配置 |
 | `electron.vite.config.ts` | 三端构建，自定义路径（electron/ + renderer/） |
-| `docs/TECHNICAL_SPEC.md` | 完整技术规划（架构、数据库设计、兼容性矩阵） |
+| `docs/TECHNICAL_SPEC.md` | 完整技术规划（架构、数据库设计、管线详细说明） |
 | `开发指引` | 本地开发指引（简版约束） |
-| `engine/llm/provider.py` | Provider 适配层（唯一有实际代码的 placeholder，含 4 个预置 Profile） |
+| `engine/pipeline/manager.py` | PipelineManager（ONNX 管线生命周期 + 编排） |
 
-## 6. 开发环境搭建（新电脑）
+## 6. 开发环境搭建
 
 ```bash
 # 1. 克隆仓库
@@ -219,7 +197,7 @@ npx eslint .                  # ESLint
 npx tsc --noEmit              # TypeScript
 npx vitest run                # 前端测试
 uv run ruff check engine/     # Python lint
-uv run python -m pytest tests/engine/ -v  # 后端测试
+uv run python -m pytest tests/engine/ -v  # 后端测试（28 个）
 
 # 5. 启动开发（Electron + Vite HMR + Python 后端）
 npm start
@@ -227,22 +205,17 @@ npm start
 
 注意：`npm start` 会通过 electron-vite 启动 Electron，Electron 主进程会自动 spawn Python 后端（`uv run uvicorn engine.main:app`）。
 
-## 7. lingjian-v2 测试数据参考路径
+## 7. lingjian-v2 参考
 
-后续管线开发可能需要参考的 lingjian-v2 文件：
+管线方案源自 lingjian-v2 的评测验证，以下文件可供参考：
 
 | 文件 | 内容 |
 |------|------|
-| `benchmark/ranking/run_hybrid_v4.py` | hybrid v4 管线实现（2B 检测 + CLIPIQA+ + HyperIQA） |
-| `benchmark/ranking/run_v4_new1.py` | v4 在完整数据集上的运行（含 0.3C+0.7H 权重） |
+| `benchmark/ranking/run_hybrid_v4.py` | hybrid v4 管线实现 |
 | `benchmark/ranking/analyze_weighting.py` | CLIPIQA+/HyperIQA 权重优化分析 |
 | `benchmark/ranking/ground_truth_v2.json` | 95 张照片人工标注 |
-| `benchmark/ranking/ground_truth_v2_crop.json` | 77 张裁切版本标注 |
 | `benchmark/ranking/results/benchmark_summary.json` | 多模型对比摘要 |
-| `benchmark/ranking/prompts.py` | v9.1 prompt（最优 VLM prompt，如果保留 VLM） |
-| `benchmark/ranking/schema.py` | v9.1 输出 schema（8 字段） |
-| `engine/ml/quality_clf.py` | ONNX Sobel 边缘质量评估实现 |
-| `engine/models/yolo26x-seg.onnx` | 现有 YOLO 鸟类检测模型 |
+| `engine/ml/quality_clf.py` | ONNX 质量评估实现参考 |
 
 ## 8. 协作偏好（写入 Claude Code memory）
 

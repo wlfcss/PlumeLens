@@ -1,13 +1,13 @@
 """Quality evaluation script.
 
 Usage:
-    python evals/run_eval.py --prompt v1 --model qwen2.5-vl:4b
+    python evals/run_eval.py --pipeline-version v1-xxxx
 
-Evaluates VLM analysis quality against golden baselines.
+Evaluates ONNX pipeline analysis quality against golden baselines.
 """
 
 # TODO: Implement evaluation pipeline
 # - Load dataset images from evals/dataset/
-# - Run analysis with specified prompt + model
+# - Run ONNX pipeline analysis (YOLO detection + CLIPIQA+/HyperIQA scoring)
 # - Compare against evals/golden/ baselines
-# - Output metrics: species accuracy, quality correlation, JSON parse rate
+# - Output metrics: detection recall, quality score correlation, grading accuracy

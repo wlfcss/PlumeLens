@@ -3,22 +3,16 @@ name: Quality Evaluation
 on:
   workflow_dispatch:
     inputs:
-      prompt_version:
-        description: 'Prompt version (e.g. v1)'
-        required: true
-        default: 'v1'
-      model_name:
-        description: 'Model name (e.g. qwen2.5-vl:4b)'
-        required: true
-        default: 'qwen2.5-vl:4b'
+      pipeline_version:
+        description: 'Pipeline version to evaluate (e.g. v1-a3b2c1d4)'
+        required: false
+        default: 'latest'
 
 jobs:
   evaluate:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          lfs: true
       - uses: astral-sh/setup-uv@v6
       - run: cd engine && uv sync
-      - run: echo "TODO - run evals/run_eval.py with prompt=${{ inputs.prompt_version }} model=${{ inputs.model_name }}"
+      - run: echo "TODO - run evals/run_eval.py with pipeline=${{ inputs.pipeline_version }}"

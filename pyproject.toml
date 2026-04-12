@@ -1,7 +1,7 @@
 [project]
 name = "plumelens-engine"
 version = "0.1.0"
-description = "PlumeLens Python backend - VLM-powered bird photo analysis"
+description = "PlumeLens Python backend - ONNX pipeline bird photo analysis"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.135.0",

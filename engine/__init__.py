@@ -1,1 +1,1 @@
-"""PlumeLens Engine - VLM-powered bird photo analysis backend."""
+"""PlumeLens Engine - ONNX pipeline bird photo analysis backend."""
