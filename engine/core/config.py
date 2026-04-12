@@ -25,12 +25,18 @@ class Settings(BaseSettings):
     yolo_confidence: float = 0.35
     yolo_input_size: int = 1440
 
+    # Pipeline — crop strategy
+    crop_expand_ratio: float = 1.0
+
     # Pipeline — IQA fusion weights
     clipiqa_weight: float = 0.35
     hyperiqa_weight: float = 0.65
 
     # Pipeline — grading thresholds (reject_max, record_max, usable_max)
     grade_thresholds: tuple[float, float, float] = (0.33, 0.43, 0.60)
+
+    # Pipeline — preprocess code version (bump manually when resize/normalize/color changes)
+    preprocess_version: int = 1
 
     # Pipeline — concurrency
     analysis_concurrency: int = 2

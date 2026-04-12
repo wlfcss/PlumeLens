@@ -55,7 +55,7 @@
 
 | 关注点 | 选型 | 版本约束 | 说明 |
 |--------|------|---------|------|
-| Electron | electron | **锁定 35.x** | Playwright E2E 在 Electron 36 上有已知启动失败问题 |
+| Electron | electron | **E2E 基线 pin 35.x** | Playwright 在 Electron 36 上有已知启动失败问题；按季度评估升级，避免 Chromium 版本滞后 |
 | 构建工具 | electron-vite (alex8088) 5.x | 基于 Vite 6 | 注意 npm 上有两个同名包，使用 alex8088 版本 |
 | 打包分发 | electron-builder 26.x | | macOS arm64 需设置 `com.apple.security.cs.allow-jit` entitlement |
 | 主进程职责 | 仅生命周期 + 安全 + 守护 | | 子进程管理、窗口管理、context isolation、preload 最小暴露面 |
@@ -83,7 +83,7 @@
 
 | 关注点 | 选型 | 版本 | 注意事项 |
 |--------|------|------|---------|
-| Web 框架 | FastAPI | 0.135+ | **注意**：默认严格 Content-Type 检查，前端 fetch 必须带 `Content-Type: application/json` |
+| Web 框架 | FastAPI | 0.132+ | **注意**：0.132 起默认严格 Content-Type 检查，前端 fetch 必须带 `Content-Type: application/json` |
 | ASGI 服务器 | uvicorn | 0.42+ | PyInstaller 需 `collect_submodules('uvicorn')`；Windows `console=False` 会崩溃需重定向 stdout |
 | ONNX 推理 | onnxruntime | 1.24+ | 支持 CPU/CoreML/CUDA Execution Provider；CoreML 在 1.24 有 IQA 模型 bug，暂用 CPU |
 | 数值计算 | numpy | 2.0+ | ONNX 输入输出均为 numpy ndarray |
@@ -236,11 +236,12 @@ PlumeLens/
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| id | TEXT PK | 文件内容哈希（SHA-256 前 16 字节） |
+| id | TEXT PK | UUID（首扫时生成） |
 | file_path | TEXT NOT NULL | 原始文件绝对路径 |
 | file_name | TEXT NOT NULL | 文件名 |
-| file_size | INTEGER | 文件大小（字节） |
-| file_hash | TEXT UNIQUE | 完整 SHA-256 哈希 |
+| file_size | INTEGER NOT NULL | 文件大小（字节） |
+| file_mtime | TEXT NOT NULL | 文件修改时间 |
+| file_hash | TEXT | 完整内容 SHA-256（后台补算，初始为 NULL） |
 | format | TEXT | 文件格式（JPEG/CR3/NEF/ARW 等） |
 | width | INTEGER | 原图宽度 |
 | height | INTEGER | 原图高度 |
@@ -250,7 +251,15 @@ PlumeLens/
 | created_at | TEXT | 记录创建时间 |
 | library_id | TEXT FK | 所属照片库 |
 
-索引：`(library_id, created_at)`, `(file_hash)`
+索引：`(library_id, created_at)`, `(file_hash)`, `(file_path)` UNIQUE
+
+**两阶段导入策略**：
+
+首扫体验优先，避免全量 SHA-256 阻塞导入流程（数千张 30-50MB RAW 全量哈希非常耗时）：
+
+- **阶段 1 — 轻指纹**：`path + size + mtime`，快速建库、生成缩略图、即可浏览
+- **阶段 2 — 后台补强哈希**：后台 worker 逐张计算完整 SHA-256，用于去重和强缓存
+- 分析任务在 `file_hash` 可用前不启动，前端提示"正在准备中"
 
 #### analysis_results 表
 
@@ -269,23 +278,30 @@ PlumeLens/
 | created_at | TEXT | 分析时间 |
 | is_active | BOOLEAN DEFAULT true | 是否为当前展示版本 |
 
-索引：`(photo_id, pipeline_version)` UNIQUE, `(photo_id, is_active)`, `(quality_score)`, `(grade)`
+索引：`(photo_id, pipeline_version)` UNIQUE, `(quality_score)`, `(grade)`
 
-**缓存键**：`(file_hash, pipeline_version)` — 同一张照片 + 同一管线版本不重复分析。ONNX 推理是确定性的。
+```sql
+-- 保证每张照片只有一条 active 结果
+CREATE UNIQUE INDEX uq_analysis_active
+ON analysis_results(photo_id)
+WHERE is_active = 1;
+```
+
+**缓存键**：`(file_hash, pipeline_version)` — 同一张照片 + 同一管线版本只保留一条结果。ONNX 推理是确定性的，同一输入必得同一输出。
 
 **版本控制语义**：
 
-- 每次分析生成新记录，不覆盖旧记录
-- `is_active = true` 的记录为当前展示版本（同一 photo_id 仅一条 active）
-- 管线版本变更后（模型更新或评分参数调整），新分析结果自动标记为 active，旧结果保留
-- 用户可手动触发"重新分析"：使用当前管线版本重跑，生成新记录并标记为 active
+- `(photo_id, pipeline_version)` UNIQUE：同版本同照片只保留一条结果，确定性推理不需要多条
+- 管线版本变更后（模型/参数/预处理变更），新分析结果插入新行并标记为 active，旧版本 `is_active` 置 false
+- 用户手动"重新分析"：当前 pipeline_version 已有结果时，直接覆盖该行（`INSERT OR REPLACE`）
 - 旧版本结果永久保留，可用于评测对比和回溯
+- 部分唯一索引 `uq_analysis_active` 在数据库层保证"每张照片至多一条 active"，不依赖应用逻辑
 
 **触发重新分析的场景**：
 
-1. 模型文件更新（pipeline_version 自动变更）→ 自动提示用户是否重跑
-2. 评分参数调整（IQA 权重或分级阈值变更）→ pipeline_version 变更
-3. 用户手动选择"重新分析" → 覆盖当前 active 结果
+1. 模型文件更新 → pipeline_version 自动变更 → 新版本插入新行
+2. 评分参数调整（IQA 权重/分级阈值/预处理参数变更）→ pipeline_version 变更
+3. 用户手动"重新分析" → 同版本覆盖（理论结果相同，供用户确认用）
 
 #### task_queue 表
 
@@ -321,10 +337,12 @@ processing → paused (用户暂停) → pending (用户恢复)
 
 ### 6.1 Electron 安全
 
+- **Sandbox**：`sandbox: true` 显式声明（Electron 20+ 默认开启，但不应依赖默认值）
 - **Context Isolation**：`contextIsolation: true`，`nodeIntegration: false`
 - **Preload 最小暴露面**：preload 仅暴露必要的 API 桥接方法，不暴露 `ipcRenderer` 本身
 - **CSP**：renderer 严格 Content Security Policy，禁止 inline script / eval
-- **协议注册**：自定义 `plumelens://` 协议提供缩略图访问，不直接暴露 file:// 路径
+- **协议注册**：自定义 `plumelens://` 协议提供缩略图访问，不直接暴露 file:// 路径；注意 `protocol.handle` 的路径编码和 scheme 注册策略
+- **本地 HTTP 信任边界**（详见 §13.1）：后端仅绑定 `127.0.0.1`，Electron 启动时生成一次性 token，后端所有请求必须在 header 中携带该 token 验证身份
 
 ```typescript
 // preload.ts — 仅暴露这些方法
@@ -440,12 +458,36 @@ class PipelineManager:
 
 ```python
 pipeline_version = f"v1-{sha256(
+    # 模型身份
     yolo_checksum + clipiqa_checksum + hyperiqa_checksum
+    # 评分参数
     + clipiqa_weight + hyperiqa_weight + grade_thresholds
+    # 检测参数
+    + yolo_confidence + yolo_input_size
+    # 裁切策略
+    + crop_expand_ratio
+    # 预处理版本（任何 resize/letterbox/normalization/color 变更需递增）
+    + preprocess_version
+    # 运行时环境
+    + onnxruntime_version + execution_providers
 )[:8]}"
 ```
 
-任何模型文件变更或评分参数调整都会改变版本号，自动使所有缓存结果失效。
+**版本输入的完整清单**：
+
+| 输入 | 说明 | 变更影响 |
+|------|------|---------|
+| 三模型 SHA-256 checksum | 模型文件身份 | 模型替换 → 结果变化 |
+| IQA 权重 (clipiqa/hyperiqa) | 综合分计算 | 权重调整 → 评分变化 |
+| 分级阈值 (3 档) | 分级逻辑 | 阈值调整 → 分级变化 |
+| 检测置信度阈值 | YOLO 过滤 | 阈值调整 → 检测数量变化 |
+| YOLO 输入尺寸 | letterbox 目标尺寸 | 尺寸变更 → 检测结果变化 |
+| 裁切策略 (expand ratio) | bbox 裁切范围 | 裁切比例 → IQA 输入变化 |
+| 预处理版本号 | resize/normalize/color 代码版本 | 代码变更需手动递增 |
+| onnxruntime 版本 | 推理引擎 | 版本升级可能改变浮点结果 |
+| Execution Provider 组合 | 实际推理后端 | CoreML vs CPU 可能产生微小浮点差异 |
+
+**设计原理**：同一模型文件 ≠ 同一运行语义。onnxruntime 官方将 CPU/CUDA/CoreML 视为不同执行后端；CoreML 存在平台相关的浮点行为差异。将 EP 纳入版本计算可保证"结果可重现"的承诺。
 
 ### 7.5 物种分类（预留）
 
@@ -501,16 +543,46 @@ analysis_queue_max_pending: int = 100 # 队列最大待处理数（backpressure 
 
 网格浏览时只加载 grid 级别，切换到单张预览时按需加载 preview 级别。显著降低前端内存占用。
 
+**RAW 缩略图优化**：RAW 文件内嵌有相机生成的 JPEG 预览图（rawpy `extract_thumb()`），通常分辨率足够用于 grid 甚至 preview 级别。应优先使用内嵌预览，避免完整 RAW 解码的高 CPU 开销：
+
+```
+RAW 文件 → rawpy.extract_thumb()
+  ├── 成功 → 用内嵌 JPEG 生成 grid/preview 缩略图
+  └── 失败/尺寸不够 → 回退完整 rawpy 解码
+```
+
+这会显著改善首次扫描出图速度和缩略图 worker 的 CPU 占用。
+
+### 8.5 ORT 线程调优
+
+ONNX Runtime 提供 `intra_op_num_threads` 和 `inter_op_num_threads` 调优入口。当分析 worker、RAW 解码 worker、缩略图 worker 并发运行时，线程争抢会成为吞吐瓶颈。
+
+| 配置项 | 默认 | 说明 |
+|--------|------|------|
+| `ort_intra_op_threads` | 0 (ORT 自动) | 单个 OP 的并行线程数 |
+| `ort_inter_op_threads` | 0 (ORT 自动) | OP 间并行线程数 |
+
+**性能目标**应从"单张延迟"扩展为"按硬件档位的 photos/hour"：
+
+| 硬件档位 | 单张延迟 | 预估吞吐 (photos/hour) |
+|---------|---------|----------------------|
+| Apple Silicon (CoreML) | ~573ms | ~4,000+ |
+| 中端 x86 (CPU only) | ~950ms | ~2,500+ |
+| 低端 / 老旧设备 | ~2,000ms | ~1,000+ |
+
+实际吞吐需在并发场景下实测验证（RAW 解码、JPEG 编码、SQLite 写入、ORT 线程争抢会同时消耗 CPU）。
+
 ## 9. 关键设计决策
 
 ### 9.1 Pipeline 版本管理
 
 分析管线版本是数据一致性的核心：
 
-- pipeline_version 由模型文件校验和 + 评分参数（IQA 权重、分级阈值）的 SHA-256 哈希生成
-- 确定性：相同模型 + 相同参数 = 相同 pipeline_version = 相同分析结果
+- pipeline_version 由完整输入向量的 SHA-256 哈希生成（详见 §7.4）
+- 完整输入包括：模型校验和、评分参数、检测参数、裁切策略、预处理版本、ORT 版本、EP 组合
+- 确定性：相同输入向量 = 相同 pipeline_version = 相同分析结果
 - 缓存键 `(file_hash, pipeline_version)` 保证结果一致性
-- 版本变更自动触发：模型文件替换、权重调整、阈值修改
+- 版本变更自动触发：模型文件替换、参数调整、ORT 升级、EP 切换
 
 ### 9.2 批量任务队列
 
@@ -532,14 +604,25 @@ analysis_queue_max_pending: int = 100 # 队列最大待处理数（backpressure 
 ### 9.4 图像预处理流水线
 
 ```
-原图 (RAW/JPEG, 30-50MB)
-  ↓ rawpy 解码（RAW）或 Pillow 读取（JPEG/PNG）
-  ↓ 并发控制：raw_decode_workers 限制 RAW 解码并发
+扫描阶段（阶段 1 — 轻指纹）：
+  文件系统遍历 → path + size + mtime → 建库 → 即可浏览
+  ↓ 并行启动缩略图 worker
+
+缩略图生成：
+  RAW 文件:
+    ├── rawpy.extract_thumb() → 内嵌 JPEG 预览（优先）
+    └── 失败/尺寸不够 → rawpy 完整解码（回退）
+  JPEG/PNG:
+    └── Pillow 读取
+  ↓ 并发控制：thumbnail_workers 限制并发
   ├── → grid 缩略图（长边 384px, JPEG 80%）→ 缓存
   └── → preview 缩略图（长边 1920px, JPEG 85%）→ 缓存
+
+后台补强（阶段 2）：
+  逐张计算完整 SHA-256 → 写入 photos.file_hash → 解锁分析任务
 ```
 
-缩略图在文件夹扫描阶段由 worker 池异步生成，不阻塞 UI 和后续分析流程。
+缩略图在文件夹扫描阶段由 worker 池异步生成，不阻塞 UI。分析任务在 `file_hash` 就绪后才可启动。
 
 **RAW 格式兼容性**：
 - rawpy 底层依赖 libraw，CR3（Canon R5/R6/R7 等）需要 libraw >= 0.20
@@ -611,11 +694,20 @@ Python 后端作为 Electron 子进程，打包分发需要把 Python 运行时 
 | 开发期 | 系统 Python + uv | 开发者自行安装 Python 和 uv |
 | 分发期 | PyInstaller 单目录模式 | 将 engine/ 打包为独立可执行目录，随 Electron 一起分发 |
 
+**⚠️ 里程碑 0 — 打包验收项（必须在骨架完成后立即验证）**：
+
+不通过此验证，后续所有 UI 和功能开发都没有意义。最小闭环打包测试清单：
+
+- [ ] 能启动 Electron
+- [ ] 能拉起 Python 后端进程
+- [ ] 能加载至少一个 ONNX InferenceSession
+- [ ] 能打开一张 RAW 文件
+- [ ] 能写入 structlog 日志
+
 **关键注意事项**：
 - PyInstaller 打包后体积约 200-250MB（含 onnxruntime，不含 torch，体积可控）
 - ONNX 模型文件（97MB）作为 extraResources 随 Electron 一起分发
 - macOS 和 Windows 需要分别打包（CI 中完成，PyInstaller 不支持交叉编译）
-- **尽早验证**：项目骨架搭建完成后即做一次打包测试，避免后期踩坑
 - rawpy 的 libraw C 库：`pyinstaller-hooks-contrib` 提供了 hook，但需实测确认 `.dylib` / `.dll` 被正确捕获
 - uvicorn 必须配置 `collect_submodules('uvicorn')` 隐藏导入
 - onnxruntime 的 C++ 共享库需确保被 PyInstaller 正确捕获
@@ -674,11 +766,21 @@ push / PR 触发:
 
 ### 13.1 Electron ↔ Python Backend
 
-本地 HTTP（`http://localhost:{动态端口}`），FastAPI 启动后通过 stdout 通知 Electron 实际端口。
+本地 HTTP（`http://127.0.0.1:{动态端口}`），FastAPI 启动后通过 stdout 通知 Electron 实际端口。
 
 - 常规请求：REST API（JSON）
 - 分析进度：SSE（Server-Sent Events）+ 轮询降级
 - 缩略图访问：自定义 `plumelens://` 协议或静态文件服务
+
+**本地信任边界**：
+
+"本地所以安全"是不够的。本机其他进程也可以调用 localhost API，需要主动防御：
+
+1. **后端仅绑定 `127.0.0.1`**：`uvicorn --host 127.0.0.1`，拒绝非本机连接
+2. **一次性 token 验证**：Electron 启动时生成随机 token，通过环境变量传递给 Python 子进程；后端中间件校验所有请求的 `Authorization: Bearer {token}` header
+3. **备选方案**：Unix domain socket (macOS/Linux) / Named pipe (Windows)，彻底消除端口暴露
+
+当前方案选择"绑定 127.0.0.1 + 一次性 token"，兼顾安全性和调试便利性。
 
 ### 13.2 Python Backend ↔ ONNX Runtime
 
@@ -714,7 +816,7 @@ push / PR 触发:
 
 | 风险 | 组件 | 影响 | 对策 |
 |------|------|------|------|
-| Playwright 启动失败 | Electron 36 + Playwright | E2E 测试无法运行 | 锁定 Electron 35.x |
+| Playwright 启动失败 | Electron 36 + Playwright | E2E 测试无法运行 | E2E 基线 pin Electron 35.x，按季度评估升级 |
 | selector 死循环 | Zustand v5 | 前端页面卡死 | 所有返回对象的 selector 使用 `useShallow` |
 | PyInstaller 打包 uvicorn | PyInstaller + uvicorn | 打包后启动崩溃 | `collect_submodules('uvicorn')` + Windows stdout 重定向 |
 | PyInstaller 打包 rawpy | PyInstaller + libraw C 库 | RAW 图片无法解码 | 尽早验证，必要时手动添加 binaries |
@@ -727,7 +829,7 @@ push / PR 触发:
 | 配置格式大改 | Tailwind CSS v4 | 配置方式完全不同 | 使用 CSS `@theme` 指令 + `@tailwindcss/vite`，不创建 tailwind.config.ts |
 | 动画包更换 | shadcn/ui + Tailwind v4 | 组件动画失效 | 安装 `tw-animate-css` 替代 `tailwindcss-animate` |
 | pyright 误报 | pyright strict + FastAPI/onnxruntime | 大量类型错误噪音 | API 路由层及 ONNX 推理层降为 basic 模式 |
-| Content-Type 严格检查 | FastAPI 0.135+ | 前端请求被拒 | fetch 请求统一带 `Content-Type: application/json` |
+| Content-Type 严格检查 | FastAPI 0.132+ | 前端请求被拒 | fetch 请求统一带 `Content-Type: application/json` |
 | CR3 格式支持 | rawpy (libraw) | 部分 Canon 新机型照片无法打开 | rawpy 0.23+ 内置 libraw 0.21（支持 CR3），但需实测具体机型 |
 | PyInstaller 打包 onnxruntime | PyInstaller + onnxruntime C++ 库 | 推理功能不可用 | 尽早验证，确认 .dylib/.dll 被正确捕获 |
 

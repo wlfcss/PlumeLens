@@ -174,14 +174,33 @@ class PipelineManager:
         )
 
     def _compute_version(self, checksums: dict[str, str]) -> str:
-        """Compute deterministic pipeline version from model checksums + parameters."""
+        """Compute deterministic pipeline version from full input vector.
+
+        Includes: model checksums, scoring params, detection params, crop strategy,
+        preprocess version, onnxruntime version, and execution provider combination.
+        """
+        import onnxruntime as ort
+
         h = hashlib.sha256()
+        # Model identity
         for key in sorted(checksums):
             h.update(f"{key}:{checksums[key]}".encode())
-        # Include scoring parameters
+        # Scoring parameters
         h.update(f"cw:{self._settings.clipiqa_weight}".encode())
         h.update(f"hw:{self._settings.hyperiqa_weight}".encode())
         h.update(f"gt:{self._settings.grade_thresholds}".encode())
+        # Detection parameters
+        h.update(f"yc:{self._settings.yolo_confidence}".encode())
+        h.update(f"ys:{self._settings.yolo_input_size}".encode())
+        # Crop strategy
+        h.update(f"cr:{self._settings.crop_expand_ratio}".encode())
+        # Preprocess code version (bump manually when resize/normalize/color changes)
+        h.update(f"pp:{self._settings.preprocess_version}".encode())
+        # Runtime environment
+        h.update(f"ort:{ort.__version__}".encode())
+        # Actual execution providers in use
+        ep_str = ",".join(sorted(self._model_providers.values()))
+        h.update(f"ep:{ep_str}".encode())
         return f"v1-{h.hexdigest()[:8]}"
 
     def close(self) -> None:
@@ -257,7 +276,7 @@ class PipelineManager:
                 y1=box.y1,
                 x2=box.x2,
                 y2=box.y2,
-                expand_ratio=1.0,
+                expand_ratio=self._settings.crop_expand_ratio,
             )
 
             scores = self._assessor.assess(crop)

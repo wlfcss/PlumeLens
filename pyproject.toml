@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "PlumeLens Python backend - ONNX pipeline bird photo analysis"
 requires-python = ">=3.11"
 dependencies = [
-    "fastapi>=0.135.0",
+    "fastapi>=0.132.0",
     "uvicorn[standard]>=0.34.0",
     "aiosqlite>=0.22.0",
     "onnxruntime>=1.24.0",
