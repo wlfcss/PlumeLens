@@ -1,6 +1,6 @@
 {
   "compilerOptions": {
-    "target": "ES2022",
+    "target": "ES2023",
     "module": "ESNext",
     "moduleResolution": "bundler",
     "composite": true,
@@ -10,7 +10,8 @@
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
     "outDir": "./out",
-    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "resolveJsonModule": true,
     "types": ["vite/client"],
     "paths": {
       "@/*": ["./renderer/src/*"]
@@ -18,6 +19,7 @@
   },
   "include": [
     "renderer/src/**/*.ts",
-    "renderer/src/**/*.tsx"
+    "renderer/src/**/*.tsx",
+    "renderer/src/**/*.json"
   ]
 }

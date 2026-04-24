@@ -10,6 +10,8 @@ interface PlumeLensAPI {
 
 declare global {
   interface Window {
-    plumelens: PlumeLensAPI
+    plumelens?: PlumeLensAPI
   }
 }
+
+export {}

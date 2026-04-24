@@ -1,6 +1,5 @@
 """Tests for quality score grading."""
 
-import pytest
 
 from engine.pipeline.grader import grade
 from engine.pipeline.models import QualityGrade

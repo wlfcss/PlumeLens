@@ -4,7 +4,6 @@ from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
-
 from engine.pipeline.quality import QualityAssessor
 
 
