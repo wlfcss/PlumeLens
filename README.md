@@ -15,7 +15,7 @@
 ## 分析管线
 
 ```
-原片 → 缩放1440px → YOLOv26l-bird-det (conf≥0.35)
+原片 → letterbox1280 (114 填充) → YOLOv26l-bird-det v1.0 (conf≥0.5, NMS-free)
                         ↓ bbox
          裁切 → CLIPIQA+(×0.35) + HyperIQA(×0.65) → 4档分级
 ```

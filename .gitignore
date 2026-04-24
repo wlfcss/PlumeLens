@@ -36,3 +36,8 @@ coverage/
 
 # Logs
 *.log
+
+# Model distribution archives (models are checked in as .onnx directly)
+*.tar.gz
+*.tgz
+*.zip

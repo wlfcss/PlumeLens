@@ -18,11 +18,15 @@ OrtSession: TypeAlias = object  # onnxruntime.InferenceSession
 class BirdDetector:
     """Wraps YOLOv26l-bird-det.onnx for bird detection.
 
-    Input:  float32 [1, 3, 1440, 1440] RGB 0-1
+    Model: yolo26l-bird v1.0 (single class, NMS-free end-to-end).
+
+    Input:  float32 [1, 3, 1280, 1280] RGB 0-1, letterboxed with 114/255 fill
     Output: float32 [1, 300, 6] → (x1, y1, x2, y2, conf, class_id)
+            Top-k 300 slots (NMS-free end-to-end); low-confidence slots filled
+            with conf ~0 and filtered by caller. Bbox in letterboxed coords.
     """
 
-    def __init__(self, session: OrtSession, input_size: int = 1440) -> None:
+    def __init__(self, session: OrtSession, input_size: int = 1280) -> None:
         self._session = session
         self._input_size = input_size
         # Cache input/output names
@@ -32,13 +36,14 @@ class BirdDetector:
     def detect(
         self,
         image: NDArray[np.float32],
-        confidence_threshold: float = 0.35,
+        confidence_threshold: float = 0.5,
     ) -> list[BoundingBox]:
         """Run bird detection on an image.
 
         Args:
             image: Input image [H, W, 3] float32 0-1.
             confidence_threshold: Minimum confidence to keep a detection.
+                0.5 for photography (recommended), 0.25 for high-recall.
 
         Returns:
             List of BoundingBox in original image coordinates.
@@ -55,6 +60,7 @@ class BirdDetector:
             {self._input_name: input_tensor},
         )
         # outputs[0] shape: [1, 300, 6] → (x1, y1, x2, y2, conf, class_id)
+        # 300 是导出时的 top-k 槽位；NMS-free 但空槽位 conf≈0，由下游阈值过滤
         raw_dets: NDArray[np.float32] = outputs[0][0]  # [300, 6]
 
         # Filter by confidence

@@ -27,20 +27,20 @@ GitHub: https://github.com/wlfcss/PlumeLens
 经过 lingjian-v2 项目 15+ 轮评测验证，**纯 ONNX 三模型管线**已确定为最终方案，VLM 方案已完全放弃：
 
 ```
-原片 → 缩放1440px → YOLOv26l-bird-det.onnx (conf≥0.35)
+原片 → letterbox1280 (114 填充) → YOLOv26l-bird-det.onnx v1.0 (conf≥0.5, NMS-free)
                         ↓ bbox
          box×1.0 裁切 → CLIPIQA+(×0.35) + HyperIQA(×0.65) → 4档分级
 ```
 
 | 模型 | 文件 | 大小 | 用途 |
 |------|------|------|------|
-| YOLOv26l-bird-det | `engine/models/yolo26l-bird-det.onnx` | 95.4 MB | 鸟类目标检测（wlfcss 个人训练） |
+| YOLOv26l-bird-det v1.0 | `engine/models/yolo26l-bird-det.onnx` | 99.9 MB | 鸟类目标检测（wlfcss 个人训练，Test mAP@0.5=0.936） |
 | CLIPIQA+ | `engine/models/clipiqa_plus.onnx` | 1.2 MB | 语义画质评估 |
 | HyperIQA | `engine/models/hyperiqa.onnx` | 0.4 MB | 技术画质评估 |
 
 4 档分级：`<0.33` 淘汰 / `0.33-0.43` 记录 / `0.43-0.60` 可用 / `≥0.60` 精选
 
-性能：Recall 97.6%，~573ms/张（M5 Max，CoreML+CPU）
+性能：v1.0 Test Recall 90.2%, mAP@0.5 93.6%；YOLO ONNX CPU ~534ms/张（M5 Max，整体管线待重测）
 
 ### 3.2 项目骨架 + 管线模块
 

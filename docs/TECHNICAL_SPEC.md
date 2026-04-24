@@ -99,7 +99,7 @@
 
 | 模型 | 文件 | 大小 | 输入 | 输出 | 用途 |
 |------|------|------|------|------|------|
-| YOLOv26l-bird-det | `yolo26l-bird-det.onnx` | 95.4 MB | float32 [1,3,1440,1440] RGB 0-1 | [1,300,6] (x1,y1,x2,y2,conf,cls) | 鸟类目标检测 |
+| YOLOv26l-bird-det v1.0 | `yolo26l-bird-det.onnx` | 99.9 MB | float32 [1,3,1280,1280] RGB 0-1, letterbox 114 填充 | [1,300,6] top-k 槽位 (x1,y1,x2,y2,conf,cls)，NMS-free 空槽位 conf≈0 | 鸟类目标检测（Test mAP@0.5=0.936, Recall=0.902） |
 | CLIPIQA+ | `clipiqa_plus.onnx` | 1.2 MB | float32 [1,3,H,W] 动态尺寸 | [1,1] score 0-1 | 语义画质评估 |
 | HyperIQA | `hyperiqa.onnx` | 0.4 MB | float32 [1,3,H,W] 动态尺寸 | [1,1,1] score 0-1 | 技术画质评估 |
 
@@ -113,15 +113,18 @@
 
 **性能基准**（M5 Max, onnxruntime 1.24）：
 
+> ⚠️ 以下数据基于旧版 YOLO 模型（imgsz=1440）。v1.0 模型使用 imgsz=1280，YOLO ONNX CPU 实测约 534ms（MODEL_CARD §3），整体管线数据待重测后更新。
+
 | 模型 | CoreML | CPU |
 |------|--------|-----|
-| YOLO | 130ms | 497ms |
+| YOLO (旧 1440) | 130ms | 497ms |
+| YOLO v1.0 (1280) | — (待测) | ~534ms |
 | CLIPIQA+ | — | 138ms |
 | HyperIQA | — | 315ms |
-| **全管线** | **~573ms** | **~950ms** |
+| **全管线 (旧)** | **~573ms** | **~950ms** |
 
 **模型版权**：
-- `yolo26l-bird-det.onnx`：由 wlfcss 个人训练产出，他人使用需注明来源
+- `yolo26l-bird-det.onnx`（v1.0, 2026-04-24）：由 wlfcss 个人训练产出，原项目 `yolo-split-new`，他人使用需注明来源。完整模型卡见 [engine/models/yolo26l-bird-det.MODEL_CARD.md](../engine/models/yolo26l-bird-det.MODEL_CARD.md)
 - `clipiqa_plus.onnx` / `hyperiqa.onnx`：基于公开 IQA 研究模型的 ONNX 导出
 
 ## 4. 项目目录结构
@@ -406,8 +409,8 @@ Electron Main Process
 ```
 原图 (RAW/JPEG, 30-50MB)
   ↓ Pillow/rawpy 读取 → float32 [H,W,3] RGB 0-1
-  ↓ letterbox 缩放至 1440×1440
-  ↓ YOLOv26l-bird-det.onnx (conf ≥ 0.35)
+  ↓ letterbox 缩放至 1280×1280 (114 灰色填充)
+  ↓ YOLOv26l-bird-det.onnx v1.0 (conf ≥ 0.5, NMS-free end-to-end)
   ↓ 输出 N 个鸟类 bounding box
   ↓ 对每个 bbox:
   │   ├── box×1.0 裁切

@@ -21,9 +21,9 @@ class Settings(BaseSettings):
     yolo_provider: str = "auto"
     iqa_provider: str = "cpu"  # CoreML has bug in onnxruntime 1.24
 
-    # Pipeline — detection
-    yolo_confidence: float = 0.35
-    yolo_input_size: int = 1440
+    # Pipeline — detection (yolo26l-bird v1.0: imgsz=1280, conf=0.5 for photography)
+    yolo_confidence: float = 0.5
+    yolo_input_size: int = 1280
 
     # Pipeline — crop strategy
     crop_expand_ratio: float = 1.0
@@ -36,7 +36,8 @@ class Settings(BaseSettings):
     grade_thresholds: tuple[float, float, float] = (0.33, 0.43, 0.60)
 
     # Pipeline — preprocess code version (bump manually when resize/normalize/color changes)
-    preprocess_version: int = 1
+    # v2: letterbox fill 0.5 → 114/255 (YOLO standard, matches training)
+    preprocess_version: int = 2
 
     # Pipeline — concurrency
     analysis_concurrency: int = 2

@@ -80,15 +80,22 @@ def _load_raw(path: Path) -> NDArray[np.float32]:
     return arr
 
 
+# YOLO 标准 letterbox 填充值：114/255 ≈ 0.447（训练时一致）
+YOLO_LETTERBOX_FILL: float = 114.0 / 255.0
+
+
 def resize_letterbox(
     image: NDArray[np.float32],
     target_size: int,
 ) -> tuple[NDArray[np.float32], float, tuple[int, int]]:
     """Resize image with letterboxing to fit target_size x target_size.
 
+    使用 YOLO 标准的 114（灰色）填充值，与训练 pipeline 一致；
+    用 0.5 会让填充分布与训练不一致，影响画面边缘目标的检测精度。
+
     Args:
         image: Input image [H, W, 3] float32 0-1.
-        target_size: Target square dimension (e.g. 1440).
+        target_size: Target square dimension (e.g. 1280).
 
     Returns:
         (resized_image, scale, (pad_top, pad_left))
@@ -104,8 +111,8 @@ def resize_letterbox(
     pil_resized = pil_img.resize((new_w, new_h), Image.Resampling.LANCZOS)
     resized = np.asarray(pil_resized, dtype=np.float32) / 255.0
 
-    # Create letterboxed canvas (pad with 0.5 gray, common for YOLO)
-    canvas = np.full((target_size, target_size, 3), 0.5, dtype=np.float32)
+    # 使用 YOLO 标准 114 灰度填充
+    canvas = np.full((target_size, target_size, 3), YOLO_LETTERBOX_FILL, dtype=np.float32)
     pad_top = (target_size - new_h) // 2
     pad_left = (target_size - new_w) // 2
     canvas[pad_top : pad_top + new_h, pad_left : pad_left + new_w] = resized
