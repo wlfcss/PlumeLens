@@ -1,0 +1,38 @@
+{
+  "weights": "/Users/wlfcss/Desktop/workspace/yolo-split\u200c/runs/pose/nabirds_pose5_stage1/weights/best.pt",
+  "manifest": "/Users/wlfcss/Desktop/workspace/yolo-split\u200c/datasets/nabirds_pose5/metadata/image_manifest.csv",
+  "dataset_root": "/Users/wlfcss/Desktop/workspace/yolo-split\u200c/datasets/nabirds_pose5",
+  "split": "val",
+  "num_images": 24633,
+  "box_threshold": 0.05,
+  "expanded_box_margin": 0.15,
+  "best_eye": {
+    "eye_threshold": 0.45,
+    "tp": 24112,
+    "fp": 268,
+    "tn": 185,
+    "fn": 68,
+    "precision": 0.9890073831009024,
+    "recall": 0.997187758478081,
+    "accuracy": 0.9863597612958227,
+    "f1": 0.9930807248764414,
+    "support": 24180,
+    "count": 24633
+  },
+  "best_head": {
+    "head_threshold": 0.35,
+    "eye_threshold": 0.1,
+    "tp": 24209,
+    "fp": 34,
+    "tn": 28,
+    "fn": 22,
+    "precision": 0.9985975333085839,
+    "recall": 0.9990920721389955,
+    "accuracy": 0.9976948092042975,
+    "f1": 0.9988447415109131,
+    "support": 24231,
+    "count": 24293,
+    "eligible_count": 24293,
+    "ambiguous_count": 340
+  }
+}

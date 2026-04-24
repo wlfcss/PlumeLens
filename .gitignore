@@ -41,3 +41,11 @@ coverage/
 *.tar.gz
 *.tgz
 *.zip
+
+# DINOv3 backbone (1.2GB, exceeds GitHub 100MB per-file limit).
+# Run scripts/export_dinov3_backbone.py to regenerate locally, or fetch from
+# the release artifact bundle during distribution packaging.
+engine/models/dinov3_backbone.onnx
+# PyTorch weights cache (used only by the export script)
+engine/models/.cache/
+.ruff_cache/
