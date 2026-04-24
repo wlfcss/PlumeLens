@@ -9,7 +9,7 @@ import structlog
 
 logger = structlog.stdlib.get_logger()
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 # SQL 放在模块常量里便于审阅与测试
 _SCHEMA_STATEMENTS: tuple[str, ...] = (
@@ -108,6 +108,17 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
     CREATE INDEX IF NOT EXISTS ix_queue_library_status
         ON task_queue(library_id, status);
     """,
+    # --- photo_decisions：用户对每张照片的复核决定 ---
+    # 独立一张表而非扩展 photos，避免 scan 流程触及 user decision 数据
+    """
+    CREATE TABLE IF NOT EXISTS photo_decisions (
+        photo_id TEXT PRIMARY KEY,
+        decision TEXT NOT NULL,  -- unreviewed / selected / maybe / rejected
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (photo_id) REFERENCES photos(id) ON DELETE CASCADE
+    );
+    """,
+    "CREATE INDEX IF NOT EXISTS ix_decisions_decision ON photo_decisions(decision);",
 )
 
 

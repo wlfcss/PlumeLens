@@ -176,9 +176,11 @@ async def library_detail(request: Request, library_id: str) -> LibraryDetail:
     async with db.conn.execute(
         "SELECT p.id, p.file_path, p.file_name, p.format, p.width, p.height, "
         "p.thumb_grid, p.thumb_preview, p.created_at, "
-        "ar.pipeline_version, ar.grade, ar.quality_score, ar.bird_count, ar.species "
+        "ar.pipeline_version, ar.grade, ar.quality_score, ar.bird_count, ar.species, "
+        "pd.decision "
         "FROM photos p "
         "LEFT JOIN analysis_results ar ON ar.photo_id = p.id AND ar.is_active = 1 "
+        "LEFT JOIN photo_decisions pd ON pd.photo_id = p.id "
         "WHERE p.library_id = ? "
         "ORDER BY p.created_at ASC",
         (library_id,),
@@ -211,6 +213,7 @@ async def library_detail(request: Request, library_id: str) -> LibraryDetail:
                 int(r["bird_count"]) if r["bird_count"] is not None else None
             ),
             species=(str(r["species"]) if r["species"] is not None else None),
+            decision=(str(r["decision"]) if r["decision"] is not None else "unreviewed"),
         )
         for r in rows
     ]

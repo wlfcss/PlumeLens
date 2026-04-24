@@ -66,6 +66,8 @@ class PhotoRow(BaseModel):
     quality_score: float | None = None
     bird_count: int | None = None
     species: str | None = None
+    # User layer：当前用户决定（默认 unreviewed）
+    decision: str = "unreviewed"
 
 
 class LibraryDetail(BaseModel):
