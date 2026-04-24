@@ -22,10 +22,12 @@ async def test_health_includes_pipeline_status(client: AsyncClient) -> None:
     assert "ready" in pipeline
     assert "version" in pipeline
     assert "models" in pipeline
+    assert "quality_available" in pipeline
     assert "pose_available" in pipeline
     assert "species_available" in pipeline
     # Mock pipeline is not ready; enhancements unavailable
     assert pipeline["ready"] is False
+    assert pipeline["quality_available"] is False
     assert pipeline["pose_available"] is False
     assert pipeline["species_available"] is False
 

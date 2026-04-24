@@ -335,11 +335,16 @@ class PipelineManager:
 
     @property
     def is_ready(self) -> bool:
-        """True if core modules (detector + quality assessor) are loaded.
+        """True if at minimum the detector is loaded.
 
-        Pose and species are considered enhancements — not required for is_ready.
+        检测器是所有后续步骤的入口，没它整个管线无意义。IQA/pose/species 均为
+        增强模块，单独缺失时 analyze() 会对应降级（grade 默认 usable，跳过对应步骤）。
         """
-        return self._detector is not None and self._assessor is not None
+        return self._detector is not None
+
+    @property
+    def quality_available(self) -> bool:
+        return self._assessor is not None
 
     @property
     def pose_available(self) -> bool:
@@ -364,10 +369,9 @@ class PipelineManager:
         Enhancement: head+eye visible AND grade ≥ species_min_grade → species classify
         """
         if not self.is_ready:
-            msg = "Pipeline not ready: core models not loaded"
+            msg = "Pipeline not ready: detector model not loaded"
             raise RuntimeError(msg)
         assert self._detector is not None
-        assert self._assessor is not None
 
         start = time.perf_counter()
         result = await asyncio.to_thread(self._analyze_sync, image_path, photo_id)
@@ -377,7 +381,6 @@ class PipelineManager:
     def _analyze_sync(self, image_path: Path, photo_id: str) -> PipelineResult:
         """Synchronous pipeline execution (runs in thread pool)."""
         assert self._detector is not None
-        assert self._assessor is not None
 
         image = load_image(image_path)
         img_h, img_w = image.shape[:2]
@@ -420,8 +423,14 @@ class PipelineManager:
                 except Exception:
                     logger.exception("Pose detection failed", photo_id=photo_id)
 
-            # Step 3b: quality assessment
-            scores = self._assessor.assess(crop)
+            # Step 3b: quality assessment (降级：IQA 模型缺失时用固定分数)
+            if self._assessor is not None:
+                scores = self._assessor.assess(crop)
+            else:
+                # IQA 模型未加载 → 返回中性分数 0.5，grade 降级为 USABLE
+                from engine.pipeline.models import QualityScores
+
+                scores = QualityScores(clipiqa=0.5, hyperiqa=0.5, combined=0.5)
             bird_grade = grade(scores.combined, self._settings.grade_thresholds)
 
             # Step 4: species classification (gated)

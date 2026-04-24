@@ -6,6 +6,7 @@ node_modules/
 release/
 dist/
 out/
+build/pyinstaller/
 
 # IDE
 .idea/

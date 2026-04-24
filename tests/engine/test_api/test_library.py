@@ -33,6 +33,7 @@ async def real_client(tmp_path: Path):
     await db.connect()
     mock_pipeline = MagicMock()
     mock_pipeline.is_ready = False
+    mock_pipeline.quality_available = False
     mock_pipeline.pose_available = False
     mock_pipeline.species_available = False
     mock_pipeline.pipeline_version = "test-v1"

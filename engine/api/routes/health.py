@@ -18,6 +18,7 @@ async def health_check(request: Request) -> dict[str, Any]:
         "pipeline": {
             "ready": pipeline.is_ready,
             "version": pipeline.pipeline_version,
+            "quality_available": pipeline.quality_available,
             "pose_available": pipeline.pose_available,
             "species_available": pipeline.species_available,
             "models": {

@@ -34,6 +34,7 @@ async function mockBackend(page: Page, state: MockState = { libraries: [] }): Pr
         pipeline: {
           ready: true,
           version: 'v1-mocktest',
+          quality_available: true,
           pose_available: true,
           species_available: true,
           models: {

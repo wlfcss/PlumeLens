@@ -54,6 +54,7 @@ async def client_with_lib(tmp_path: Path):
     # mock pipeline: ready + analyze returns fake
     pipeline = MagicMock()
     pipeline.is_ready = True
+    pipeline.quality_available = True
     pipeline.pose_available = False
     pipeline.species_available = False
     pipeline.pipeline_version = "v1-test"
