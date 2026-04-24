@@ -27,23 +27,24 @@ def main() -> None:
     rows = pq.read_table(SOURCE).to_pylist()
     rows.sort(key=lambda r: r["canonical_sci"])
 
-    # 只保留 DINOv3 实际训练过的 1018 种（分类模型对 498 未训练类输出不可信，
-    # 前端展示 Wikipedia 介绍时避免与模型能力失配）
+    # 全部 1516 种都进 bundle（中国鸟类名录 v12.0 完整集），但每条带 `is_trained`：
+    # - 自动识别路径（后端 SpeciesClassifier）只会输出 is_trained=True 的 1018 种
+    # - 用户手动标注时仍可从 1516 种中挑选（含 498 个稀有种）
     trained_set: set[str] = set()
     if TRAINED_JSON.exists():
         data = json.loads(TRAINED_JSON.read_text(encoding="utf-8"))
         trained_set = set(data.get("trained", []))
-        print(f"Filtering to {len(trained_set)} trained species "
-              f"(see {TRAINED_JSON}; others excluded)")
+        print(
+            f"Tagging trained species (1018 auto-recognisable) "
+            f"out of {len(rows)} total (manual tagging covers all)"
+        )
     else:
-        print(f"WARNING: {TRAINED_JSON} not found; bundling all 1516 species")
+        print(f"WARNING: {TRAINED_JSON} not found; is_trained will default to false")
 
     # 编译成索引结构：{ canonical_sci: {...} }，按 sci 直接 O(1) 查询
     index: dict[str, dict] = {}
     for r in rows:
         sci = r["canonical_sci"]
-        if trained_set and sci not in trained_set:
-            continue
         index[sci] = {
             "zh_title": r.get("zh_title"),
             "zh_extract": r.get("zh_extract"),
@@ -52,6 +53,8 @@ def main() -> None:
             "en_extract": r.get("en_extract"),
             "en_url": r.get("en_url"),
             "image_url": r.get("image_url"),
+            # True = 可被自动识别；False = 名录收录但训练样本不足，仅支持手动标注
+            "is_trained": sci in trained_set,
         }
 
     OUTPUT.parent.mkdir(parents=True, exist_ok=True)
