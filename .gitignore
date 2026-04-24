@@ -33,6 +33,14 @@ coverage/
 
 # Claude Code
 .claude/worktrees/
+.claude/scheduled_tasks.lock
+.claude/settings.local.json
+
+# Playwright
+test-results/
+playwright-report/
+tests/e2e/smoke.spec.ts-snapshots/*-actual.png
+tests/e2e/smoke.spec.ts-snapshots/*-diff.png
 
 # Logs
 *.log

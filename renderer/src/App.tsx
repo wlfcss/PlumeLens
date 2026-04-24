@@ -27,6 +27,7 @@ import {
 import { useTranslation } from 'react-i18next'
 
 import { useBackendHealth } from '@/hooks/use-backend'
+import { useImportLibrary, useLibraries } from '@/hooks/use-library'
 import type {
   AnalysisStatus,
   ArchiveTab,
@@ -424,11 +425,37 @@ export default function App() {
     matchesQuery([species.name, species.latinName, species.summary], deferredSearch),
   )
 
+  const { data: realLibraries } = useLibraries()
+  const importLibrary = useImportLibrary()
+
+  // 后端真数据就绪时，用真 library 列表替换 mock 的 folders（仅 folders 层，
+  // photos 等仍保留 mock 作为 UI 过渡，直到后端 analysis 结果字段齐全）
+  useEffect(() => {
+    if (!realLibraries || realLibraries.length === 0) return
+    setWorkspace((current) => ({
+      ...current,
+      folders: realLibraries.map((lib) => ({
+        id: lib.id,
+        displayName: lib.display_name,
+        parentPath: lib.parent_path,
+        rootPath: lib.root_path,
+        status: lib.status,
+        totalCount: lib.total_count,
+        analyzedCount: lib.analyzed_count,
+        recursive: lib.recursive,
+        lastOpenedAt: lib.last_opened_at,
+        lastScannedAt: lib.last_scanned_at ?? lib.last_opened_at,
+        lastAnalyzedAt: lib.last_analyzed_at,
+      })),
+    }))
+  }, [realLibraries])
+
   async function handleChooseFolder() {
     const path = await window.plumelens?.openFolder?.()
     if (!path) return
-    const imported = createImportedFolder(path)
 
+    // 先乐观更新 UI（用 mock data generator）
+    const imported = createImportedFolder(path)
     startTransition(() => {
       setWorkspace((current) => mergeWorkspace(current, imported))
       setRoute('selection')
@@ -436,6 +463,14 @@ export default function App() {
       setActiveQuickFilter('all')
       setViewMode('grouped')
     })
+
+    // 同时触发真 API 导入（失败不影响 mock UI；成功后 useLibraries 会自动 refetch）
+    try {
+      await importLibrary.mutateAsync({ root_path: path })
+    } catch (err) {
+      // 后端不可用时保持 mock 体验，只记录不报错
+      console.warn('Library import to backend failed:', err)
+    }
   }
 
   function handleNavigate(nextRoute: AppRoute) {

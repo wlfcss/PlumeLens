@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
-import { useState, useEffect } from 'react'
+import { useEffect, useState } from 'react'
 
 export interface BackendHealth {
   status: string
@@ -19,19 +19,25 @@ export interface BackendHealth {
   }
 }
 
+// Dev/test fallback. 在 Electron 打包环境里这个值会被 preload 覆盖；
+// 在 vite dev server（含 Playwright E2E）下作为直连本地后端的默认值。
+const FALLBACK_BACKEND_URL = 'http://127.0.0.1:8000'
+
 export function useBackendHealth() {
-  const [backendUrl, setBackendUrl] = useState<string | null>(null)
+  const [backendUrl, setBackendUrl] = useState<string | null>(FALLBACK_BACKEND_URL)
 
   useEffect(() => {
-    // In Electron, get URL from preload API
-    if (window.plumelens) {
-      window.plumelens.getBackendUrl().then(setBackendUrl)
+    // In Electron, override with the dynamic port from the preload API
+    if (typeof window !== 'undefined' && window.plumelens) {
+      window.plumelens.getBackendUrl().then((url) => {
+        if (url) setBackendUrl(url)
+      })
       window.plumelens.onBackendReady((url) => setBackendUrl(url))
     }
   }, [])
 
   const query = useQuery({
-    queryKey: ['backend-health'],
+    queryKey: ['backend-health', backendUrl],
     queryFn: async () => {
       if (!backendUrl) throw new Error('No backend URL')
       const res = await fetch(`${backendUrl}/health`, {
