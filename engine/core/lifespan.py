@@ -8,6 +8,7 @@ import structlog
 from fastapi import FastAPI
 
 from engine.core.config import settings
+from engine.core.database import Database
 from engine.core.logging import setup_logging
 from engine.pipeline.manager import PipelineManager
 
@@ -24,6 +25,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
 
     await logger.ainfo("PlumeLens Engine starting", data_dir=str(settings.data_dir))
 
+    # Open SQLite database (WAL + schema migration)
+    db = Database(settings.data_dir / "plumelens.db")
+    await db.connect()
+    app.state.db = db
+
     # Load ONNX pipeline
     pipeline = PipelineManager(settings)
     await pipeline.initialize()
@@ -36,4 +42,5 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
 
     # Shutdown
     app.state.pipeline.close()
+    await app.state.db.close()
     await logger.ainfo("PlumeLens Engine shutting down")
