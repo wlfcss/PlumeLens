@@ -28,6 +28,7 @@ import { useTranslation } from 'react-i18next'
 
 import { useBackendHealth } from '@/hooks/use-backend'
 import { useImportLibrary, useLibraries } from '@/hooks/use-library'
+import { getSpeciesWiki } from '@/lib/species-wiki'
 import type {
   AnalysisStatus,
   ArchiveTab,
@@ -1568,18 +1569,50 @@ function ArchiveScreen({
       <aside className="archive-detail">
         <SectionLabel label={t('archive.detail.label')} />
         {activeSpecies ? (
-          <div className="archive-detail__content">
-            <div className="inspector-preview" style={{ backgroundImage: activeSpecies.coverGradient }} />
-            <h2>{activeSpecies.name}</h2>
-            <small>{activeSpecies.latinName}</small>
-            <p>{activeSpecies.summary}</p>
-            <div className="stat-stack">
-              <StatRow label={t('archive.species.photoCount')} value={activeSpecies.photoCount} />
-              <StatRow label={t('archive.species.firstSeen')} value={activeSpecies.firstSeenAt.slice(0, 10)} />
-              <StatRow label={t('archive.species.lastSeen')} value={activeSpecies.lastSeenAt.slice(0, 10)} />
-              <StatRow label={t('archive.species.bestScore')} value={activeSpecies.bestScore.toFixed(2)} />
-            </div>
-          </div>
+          (() => {
+            const wiki = getSpeciesWiki(activeSpecies.latinName)
+            const extract = wiki?.zh_extract ?? wiki?.en_extract ?? activeSpecies.summary
+            const sourceUrl = wiki?.zh_url ?? wiki?.en_url ?? null
+            const imageUrl = wiki?.image_url ?? null
+            return (
+              <div className="archive-detail__content">
+                {imageUrl ? (
+                  <div
+                    className="inspector-preview"
+                    style={{
+                      backgroundImage: `url(${imageUrl})`,
+                      backgroundSize: 'cover',
+                      backgroundPosition: 'center',
+                    }}
+                  />
+                ) : (
+                  <div
+                    className="inspector-preview"
+                    style={{ backgroundImage: activeSpecies.coverGradient }}
+                  />
+                )}
+                <h2>{activeSpecies.name}</h2>
+                <small>{activeSpecies.latinName}</small>
+                <p className="archive-detail__extract">{extract}</p>
+                {sourceUrl ? (
+                  <a
+                    className="archive-detail__source"
+                    href={sourceUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    Wikipedia →
+                  </a>
+                ) : null}
+                <div className="stat-stack">
+                  <StatRow label={t('archive.species.photoCount')} value={activeSpecies.photoCount} />
+                  <StatRow label={t('archive.species.firstSeen')} value={activeSpecies.firstSeenAt.slice(0, 10)} />
+                  <StatRow label={t('archive.species.lastSeen')} value={activeSpecies.lastSeenAt.slice(0, 10)} />
+                  <StatRow label={t('archive.species.bestScore')} value={activeSpecies.bestScore.toFixed(2)} />
+                </div>
+              </div>
+            )
+          })()
         ) : (
           <p>{t('archive.detail.empty')}</p>
         )}

@@ -1572,6 +1572,37 @@ button:disabled {
   font-size: 11px;
 }
 
+.archive-detail__extract {
+  color: var(--pl-fg-2);
+  font-size: 13px;
+  line-height: 1.7;
+  max-height: 240px;
+  overflow-y: auto;
+  padding-right: 8px;
+}
+
+.archive-detail__extract::-webkit-scrollbar {
+  width: 4px;
+}
+
+.archive-detail__extract::-webkit-scrollbar-thumb {
+  background: var(--pl-border-1);
+  border-radius: 2px;
+}
+
+.archive-detail__source {
+  color: var(--pl-fg-3);
+  font-family: var(--pl-font-data);
+  font-size: 11px;
+  text-decoration: none;
+  transition: color var(--pl-motion-fast) var(--pl-ease);
+  align-self: flex-start;
+}
+
+.archive-detail__source:hover {
+  color: var(--pl-accent);
+}
+
 .overlay-backdrop {
   position: fixed;
   inset: 0;
