@@ -220,7 +220,6 @@ GitHub: https://github.com/wlfcss/PlumeLens
 | `electron.vite.config.ts` | 三端构建（main/preload/renderer），自定义路径 |
 | `docs/TECHNICAL_SPEC.md` | 完整技术规划（架构、数据库设计、5 模型管线详细说明） |
 | `docs/PRODUCT_UX_PLAN.md` | 产品与交互方案（顶层路由、页面职责、UX 原则） |
-| `开发指引` / `` | 开发指引（两份同步内容） |
 | `engine/pipeline/manager.py` | PipelineManager（ONNX 管线生命周期 + 编排 + 版本哈希） |
 | `engine/models/README.md` | 5 个模型清单与指标 |
 | `scripts/export_dinov3_backbone.py` | DINOv3 backbone ONNX 导出脚本（一次性） |

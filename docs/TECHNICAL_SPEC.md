@@ -252,7 +252,6 @@ PlumeLens/
 ├── pyproject.toml               # Python 项目配置（uv，在根目录）
 ├── package.json                 # Electron + 前端依赖
 ├── electron-builder.yml         # 打包配置
-├── 开发指引 /         # 开发指引（内容一致，跨 agent 兼容）
 ├── README.md
 └── LICENSE                      # GPL-3.0
 ```
