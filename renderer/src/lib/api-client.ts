@@ -140,6 +140,19 @@ export interface AnalysisProgressEvent {
   current_photo_id: string | null
 }
 
+// Decisions
+export type DecisionValue = 'unreviewed' | 'selected' | 'maybe' | 'rejected'
+
+export interface DecisionRow {
+  photo_id: string
+  decision: DecisionValue
+}
+
+export interface DecisionCountsResponse {
+  library_id: string
+  counts: Record<DecisionValue, number>
+}
+
 // ---------------- Endpoints ----------------
 
 export const api = {
@@ -188,4 +201,22 @@ export const api = {
     const base = await getBackendUrl()
     return `${base}/analysis/library/${libraryId}/progress`
   },
+
+  // Decisions
+  getDecision: (photoId: string) =>
+    request<DecisionRow>(`/decisions/photo/${photoId}`),
+  setDecision: (photoId: string, decision: DecisionValue) =>
+    request<DecisionRow>(`/decisions/photo/${photoId}`, {
+      method: 'PUT',
+      body: JSON.stringify({ decision }),
+    }),
+  batchSetDecisions: (updates: Array<[string, DecisionValue]>) =>
+    request<{ updated: number }>('/decisions/batch', {
+      method: 'POST',
+      body: JSON.stringify({ updates }),
+    }),
+  listLibraryDecisions: (libraryId: string) =>
+    request<DecisionRow[]>(`/decisions/library/${libraryId}`),
+  libraryDecisionCounts: (libraryId: string) =>
+    request<DecisionCountsResponse>(`/decisions/library/${libraryId}/counts`),
 }

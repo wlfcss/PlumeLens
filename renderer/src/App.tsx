@@ -27,7 +27,9 @@ import {
 import { useTranslation } from 'react-i18next'
 
 import { useBackendHealth } from '@/hooks/use-backend'
+import { useBatchSetDecisions, useSetDecision } from '@/hooks/use-decisions'
 import { useImportLibrary, useLibraries } from '@/hooks/use-library'
+import type { DecisionValue } from '@/lib/api-client'
 import { getSpeciesWiki } from '@/lib/species-wiki'
 import type {
   AnalysisStatus,
@@ -428,6 +430,8 @@ export default function App() {
 
   const { data: realLibraries } = useLibraries()
   const importLibrary = useImportLibrary()
+  const setDecisionMutation = useSetDecision(activeFolderId)
+  const batchSetDecisionsMutation = useBatchSetDecisions(activeFolderId)
 
   // 后端真数据就绪时，用真 library 列表替换 mock 的 folders（仅 folders 层，
   // photos 等仍保留 mock 作为 UI 过渡，直到后端 analysis 结果字段齐全）
@@ -491,6 +495,7 @@ export default function App() {
   }
 
   function handleSetDecision(photoId: string, decision: SelectionDecision) {
+    // 乐观更新本地 state（即时反馈）
     startTransition(() => {
       setWorkspace((current) => ({
         ...current,
@@ -500,6 +505,16 @@ export default function App() {
       }))
       setFocusedPhotoId(photoId)
     })
+    // 异步落库（后端不可用时保持 mock 体验）
+    setDecisionMutation.mutate(
+      { photoId, decision: decision as DecisionValue },
+      {
+        onError: (err) => {
+          // 仅记录 — 乐观 UI 不回滚，下次 refetch 会纠正
+          console.warn('Failed to persist decision:', err)
+        },
+      },
+    )
   }
 
   function handleOpenReview(photoId: string) {
@@ -521,6 +536,12 @@ export default function App() {
     )[0]
     if (!bestPhoto) return
 
+    const updates: Array<[string, DecisionValue]> = comparePhotoIds.map((pid) => [
+      pid,
+      pid === bestPhoto.id ? 'selected' : 'rejected',
+    ])
+
+    // 乐观更新
     startTransition(() => {
       setWorkspace((current) => ({
         ...current,
@@ -533,6 +554,12 @@ export default function App() {
         }),
       }))
       clearCompare()
+    })
+    // 批量落库
+    batchSetDecisionsMutation.mutate(updates, {
+      onError: (err) => {
+        console.warn('Failed to persist batch decisions:', err)
+      },
     })
   }
 

@@ -39,7 +39,6 @@ class TestRealONNXLoad:
 
     def test_yolo_detector_real_inference(self) -> None:
         import onnxruntime as ort
-
         from engine.pipeline.detector import BirdDetector
 
         sess = ort.InferenceSession(
@@ -57,7 +56,6 @@ class TestRealONNXLoad:
 
     def test_quality_assessor_real_inference(self) -> None:
         import onnxruntime as ort
-
         from engine.pipeline.quality import QualityAssessor
 
         clip = ort.InferenceSession(
@@ -80,7 +78,6 @@ class TestRealONNXLoad:
 
     def test_pose_detector_real_inference(self) -> None:
         import onnxruntime as ort
-
         from engine.pipeline.pose import PoseDetector
 
         sess = ort.InferenceSession(
