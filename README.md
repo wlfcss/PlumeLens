@@ -51,14 +51,18 @@
 - [Python](https://www.python.org/) 3.11+
 - [uv](https://docs.astral.sh/uv/) (Python 包管理)
 
-## 开发状态
+## 开发状态（2026-04-25）
 
-- ✅ 5 个 ONNX 模型已就位（检测 + 姿态 + 双画质 + 鸟种识别）
-- ✅ 前端三路由高保真工作台（开始 / 选片 / 羽迹）已完成
-- ✅ 后端管线模块（检测 + 画质）已就绪
-- 🟡 姿态 + 物种推理封装待并入 PipelineManager
-- 🟡 后端 services（扫描 / 分析 / 队列 / 缩略图 / 缓存）待实现
-- 🟡 前端 mock 数据待替换为真 API + TanStack Query
+- ✅ 5 模型 ONNX 管线全部就位并联调通过（检测 + 姿态 + 双画质 + 鸟种识别）
+- ✅ 前端三路由高保真工作台（开始 / 选片 / 羽迹）
+- ✅ 后端完整：database / scanner / thumbnail / cache / analyzer / queue / decisions + 全部 API 路由
+- ✅ 前端 TanStack Query 接入真 API：libraries / decisions mutations
+- ✅ 物种 Wikipedia 介绍本地打包（1516 种，无需联网）
+- ✅ 里程碑 0：PyInstaller 打包 engine 验证通过（229 MB 分发 binary）
+- ✅ 测试覆盖：155 pytest（含真 ONNX 加载集成测试）+ 15 Playwright E2E（含视觉回归）
+- 🟡 Electron 主进程 E2E（需先做 electron-builder 打包）
+- 🟡 App.tsx 1889 行按 pages/components 拆分（UX PLAN §21 P1）
+- 🟡 Windows 打包（当前只在 macOS 验证）
 
 ## 许可证
 

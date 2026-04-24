@@ -1,6 +1,6 @@
 # PlumeLens / 鉴翎 — 项目交接文档
 
-> 本文档记录截至 2026-04-24 的所有已完成工作、待实现事项和背景知识，供新环境下的 Claude Code 会话完整接续。
+> 本文档记录截至 2026-04-25 的所有已完成工作、待实现事项和背景知识，供新环境下的 Claude Code 会话完整接续。
 
 ## 1. 项目定位
 
@@ -96,15 +96,16 @@ GitHub: https://github.com/wlfcss/PlumeLens
 **脚本** (`scripts/`)：
 - `export_dinov3_backbone.py` — 从 PyTorch 包导出 DINOv3 backbone + ensemble heads ONNX（一次性离线工具）
 
-**测试** (30 个测试通过)：
+**测试** (后端 155 + 前端 1 + E2E 15 = 171 passed)：
 - `tests/engine/conftest.py` — httpx AsyncClient fixture + mock PipelineManager
-- `tests/engine/test_api/test_health.py` — health 端点测试（含 pipeline 状态检查）
-- `tests/engine/test_pipeline/test_detector.py` — 4 个检测器测试
-- `tests/engine/test_pipeline/test_quality.py` — 3 个画质评估测试
-- `tests/engine/test_pipeline/test_grader.py` — 7 个分级测试
-- `tests/engine/test_pipeline/test_preprocess.py` — 13 个预处理测试（含 114 填充值锁定）
+- `tests/engine/test_api/` — health / library / analysis / decisions 集成测试
+- `tests/engine/test_pipeline/test_*.py` — 管线模块单测（detector/pose/quality/species/grader/preprocess/models）
+- `tests/engine/test_pipeline/test_integration.py` — **真 ONNX 加载**的 smoke 测试（捕获 mock 测试遗漏的 bug）
+- `tests/engine/test_services/` — scanner / thumbnail / cache / analyzer / queue / decisions
+- `tests/engine/test_core/test_database.py` — SQLite schema + 约束
 - `tests/renderer/app.test.tsx` — App 冒烟测试
-- Playwright 配置就绪
+- `tests/e2e/smoke.spec.ts` — 路由 / 视觉回归 / 健康指示灯（11 个）
+- `tests/e2e/decisions.spec.ts` — 选片 + 羽迹物种详情（5 个）
 
 **CI**：
 - `.github/workflows/ci.yml` — backend (ruff + pyright + pytest) + frontend (eslint + tsc + vitest)
@@ -122,33 +123,57 @@ GitHub: https://github.com/wlfcss/PlumeLens
 - **模型评级 vs 用户决定分离**：淘汰/记录/可用/精选（模型）vs 待看/已选/待定/淘汰（用户）
 - 工程底线（§20.4）：typecheck 必须真实执行、ES2023、sandbox: true、window.plumelens 类型齐全等
 
-### 3.4 验证状态（2026-04-24）
+### 3.4 验证状态（2026-04-25）
 
 所有检查已通过：
 - ruff check engine/ tests/ ✅
 - pyright engine/ tests/ ✅
-- pytest tests/engine/ (**30 passed**) ✅
+- pytest tests/engine/ (**155 passed**) ✅
 - vitest run (1 passed) ✅
+- playwright test (**15 passed，含 3 张视觉基线 + 物种页 + decision 流**) ✅
 - eslint . ✅
 - `npm run typecheck`（tsc --build --noEmit）✅
+
+### 3.5 里程碑 0 — PyInstaller 打包闭环（2026-04-25 完成）
+
+- `engine/__main__.py` — `python -m engine` 统一入口，端口自动分配
+- `scripts/plumelens-engine.spec` — PyInstaller 单目录打包
+- 产物 `dist/plumelens-engine/` 229 MB 独立分发，正确捕获 libonnxruntime/libraw/libarrow 等原生库
+- 6 模型全加载验证通过（include IQA 修复后的重导出版本）
+- 优雅启动 / 关闭，stdout 通过 `PLUMELENS_PORT <n>` 协议与 Electron 主进程握手
+
+### 3.6 审计发现：CLIPIQA+/HyperIQA 从未加载过的 bug（已修）
+
+PyInstaller 真实运行暴露：项目 2026-04-12 起携带的 CLIPIQA+/HyperIQA ONNX 是
+external_data 格式但 `.onnx.data` 伴随文件从未入库，两个模型**从未真正加载**。
+所有 pytest 用 mock 绕过，这个漏洞藏了两周。
+
+修复（commit `6e7a347`）：
+- `scripts/export_iqa_onnx.py` 从 pyiqa 重新导出 inline-weights ONNX
+- CLIPIQA+ 293 MB，HyperIQA 104 MB（都超 GitHub 100MB 上限，.gitignore 排除）
+- `engine/pipeline/quality.py` 加 ImageNet 预处理（resize 224 + normalize）
+- `tests/engine/test_pipeline/test_integration.py` 新增真 ONNX 加载测试防止同类 regression
+- YOLO provider 默认 CoreML → CPU（CoreML EP 有 GatherElements op bug）
+- `PipelineManager.is_ready` 放宽为只要 detector 加载，IQA 缺失时自动降级为固定分数 0.5
 
 ## 4. 待实现功能
 
 按 PRODUCT_UX_PLAN §21 优先级：
 
-### 4.1 P0 — 打通"选片"主工作台真实闭环
+### 4.1 P0 — 打通"选片"主工作台真实闭环（✅ 已完成）
 
-- `engine/core/database.py` — SQLite WAL 模式，建表（photos / analysis_results / task_queue）
-- `engine/pipeline/pose.py` — 姿态模型封装 + 决策规则（复用 bird_visibility MODEL_CARD §6.2）
-- `engine/pipeline/species.py` — DINOv3 编排（双尺度 backbone + ensemble heads + taxonomy 查询）
-- `BirdAnalysis` 数据模型扩展：`pose`（keypoints + head_visible / eye_visible）、`species_candidates`（top-K + confidence + metadata）
-- `engine/services/scanner.py` — 文件夹扫描（递归、EXIF、轻指纹 + 后台 hash）
-- `engine/services/analyzer.py` — 管线编排（缓存检查、PipelineManager 调用、SSE 进度推送）
-- `engine/services/queue.py` — 批量任务队列（状态机、断点续跑）
-- `engine/services/cache.py` — 结果缓存 `(file_hash, pipeline_version)`
-- `engine/services/thumbnail.py` — RAW embedded preview 优先 + 双级缩略图
-- `engine/api/routes/library.py` + `analysis.py` — 图库 / 分析任务 / 进度 SSE API
-- 前端替换 `mock-workspace` 为真 API + TanStack Query mutations
+**后端已全部落地**：
+- ✅ `engine/core/database.py` — SQLite WAL + 5 表（libraries/photos/analysis_results/task_queue/photo_decisions）
+- ✅ `engine/pipeline/` 所有模块 — detector/pose/quality/species/grader/preprocess/manager
+- ✅ `engine/services/` — scanner/thumbnail/cache/analyzer/queue/decisions
+- ✅ `engine/api/routes/` — health/library/analysis（含 SSE）/decisions
+- ✅ 前端：real API 接入（`useLibraries` / `useImportLibrary` / `useSetDecision` / `useBatchSetDecisions`）
+- ✅ `handleSetDecision` / `handleKeepBestOne` 乐观更新 + 异步 mutation
+
+**剩余过渡期技术债**（PRODUCT_UX_PLAN §20.3）：
+- 前端 mock-workspace 仍承载照片/分组/场景标签等 UI 数据（待 scanner 真跑时从后端拉取替换）
+- 前端 UI 的 `SelectionDecision` 和后端 `Decision` 值严格一致但未共享类型定义
+- App.tsx 1889 行未按 pages/components 拆分
 
 ### 4.2 P1 — 羽迹模块接入 + App.tsx 拆分
 
