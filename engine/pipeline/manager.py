@@ -224,12 +224,30 @@ class PipelineManager:
                     str(ensemble_path), providers=providers
                 )
                 taxonomy = SpeciesTaxonomy(taxonomy_path)
+
+                # 载入 trained species 名单（只有 1018 种有训练，其余 498 个槽位
+                # 权重是初始化状态；推理时把未训练类概率清零避免误报）
+                trained_sci: set[str] | None = None
+                trained_path = models_dir / "species_trained.json"
+                if trained_path.exists():
+                    import json
+
+                    trained_sci = set(
+                        json.loads(trained_path.read_text(encoding="utf-8"))
+                        .get("trained", [])
+                    )
+                    await logger.ainfo(
+                        "Loaded trained species list",
+                        count=len(trained_sci),
+                    )
+
                 self._species = SpeciesClassifier(
                     backbone_session=bb_sess,
                     ensemble_session=en_sess,
                     taxonomy=taxonomy,
                     top_k=self._settings.species_top_k,
                     min_confidence=self._settings.species_min_confidence,
+                    trained_sci=trained_sci,
                 )
                 self._model_status["dinov3_backbone"] = True
                 self._model_status["species_ensemble"] = True

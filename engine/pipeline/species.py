@@ -141,6 +141,10 @@ class SpeciesClassifier:
 
     输入约束：调用方必须先用 expand_bbox_to_square() 把 YOLO bbox 转成方形 +
     margin 的 crop，再传入本类。
+
+    **训练类过滤**：head 输出 1516 维对齐《中国鸟类名录 v12.0》全名单，但实际
+    训练仅 1018 种有数据（另 498 个槽位权重保留在初始化状态）。构造时可传入
+    trained_sci 集合，推理时把未训练类的概率清零，避免偶然的高分误报。
     """
 
     def __init__(
@@ -150,12 +154,22 @@ class SpeciesClassifier:
         taxonomy: SpeciesTaxonomy,
         top_k: int = 5,
         min_confidence: float = DEFAULT_MIN_CONFIDENCE,
+        trained_sci: set[str] | None = None,
     ) -> None:
         self._backbone = backbone_session
         self._ensemble = ensemble_session
         self._taxonomy = taxonomy
         self._top_k = top_k
         self._min_confidence = min_confidence
+
+        # 预计算未训练类的 index mask（O(1) 查询）
+        self._trained_mask: NDArray[np.bool_] | None = None
+        if trained_sci is not None:
+            mask = np.zeros(len(taxonomy), dtype=bool)
+            for idx in range(len(taxonomy)):
+                if taxonomy.sci_at(idx) in trained_sci:
+                    mask[idx] = True
+            self._trained_mask = mask
 
         # Cache IO names
         self._bb_in: str = backbone_session.get_inputs()[0].name  # type: ignore[union-attr]
@@ -187,7 +201,11 @@ class SpeciesClassifier:
         # Ensemble forward；按 ONNX 实际输入名组装 feed dict
         feed = {name: feats[name] for name in self._en_in_names}
         probs_out = self._ensemble.run([self._en_out], feed)  # type: ignore[union-attr]
-        probs: NDArray[np.float32] = probs_out[0][0]  # (1516,)
+        probs: NDArray[np.float32] = probs_out[0][0].copy()  # (1516,)
+
+        # Zero out untrained classes so they never surface in top-K
+        if self._trained_mask is not None:
+            probs[~self._trained_mask] = 0.0
 
         # Top-K
         k = min(self._top_k, probs.shape[0])

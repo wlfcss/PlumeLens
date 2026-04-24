@@ -203,3 +203,56 @@ class TestSpeciesClassifier:
         results = classifier.classify(img)
         # 主要验证 feed dict 构造不报错
         assert len(results) == 1
+
+
+class TestTrainedFilter:
+    """验证 trained_sci mask 能把未训练类从 top-K 结果中彻底剔除。"""
+
+    def test_untrained_classes_zeroed_out(self) -> None:
+        # 10 个槽位，假设只有偶数 index 训练过
+        num = 10
+        probs = np.zeros(num, dtype=np.float32)
+        # 给未训练的 index 3 设最高概率，模拟"未训练类偶然 fire"
+        probs[3] = 0.9
+        # 训练过的 index 2 设次高
+        probs[2] = 0.5
+
+        rows = [{"canonical_sci": f"S_{i}"} for i in range(num)]
+        tax = _FakeTaxonomy(rows)
+        trained = {f"S_{i}" for i in range(num) if i % 2 == 0}  # 偶数
+
+        feat = np.random.randn(1, 2048).astype(np.float32)
+        classifier = SpeciesClassifier(
+            backbone_session=_make_backbone_session(feat),
+            ensemble_session=_make_ensemble_session(probs),
+            taxonomy=tax,
+            top_k=5,
+            min_confidence=0.0,  # 不因低置信度过滤，专测 trained mask
+            trained_sci=trained,
+        )
+        img = np.random.rand(100, 100, 3).astype(np.float32)
+        results = classifier.classify(img)
+
+        # 未训练的 index 3 ("S_3") 应该不出现；top-1 应是 index 2
+        sci_set = {c.canonical_sci for c in results}
+        assert "S_3" not in sci_set
+        assert results[0].canonical_sci == "S_2"
+
+    def test_no_mask_preserves_all_classes(self) -> None:
+        """trained_sci=None 时行为不变（向后兼容）。"""
+        num = 5
+        probs = np.zeros(num, dtype=np.float32)
+        probs[2] = 0.8
+
+        rows = [{"canonical_sci": f"X_{i}"} for i in range(num)]
+        tax = _FakeTaxonomy(rows)
+        feat = np.random.randn(1, 2048).astype(np.float32)
+        classifier = SpeciesClassifier(
+            backbone_session=_make_backbone_session(feat),
+            ensemble_session=_make_ensemble_session(probs),
+            taxonomy=tax,
+            min_confidence=0.0,
+        )
+        img = np.random.rand(50, 50, 3).astype(np.float32)
+        results = classifier.classify(img)
+        assert results[0].canonical_sci == "X_2"
