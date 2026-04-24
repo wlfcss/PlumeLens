@@ -19,7 +19,10 @@
 |------|------|------|
 | `bird_visibility_config.json` | 1 KB | 姿态模型校准阈值 |
 | `species_taxonomy.parquet` | 68 KB | 1516 种鸟类分类表（中/拉丁/英文名 + IUCN + 保护等级） |
+| `species_wiki.parquet` | 925 KB | 1516 种 Wikipedia 首段介绍（zh + en + 缩略图 URL，zh 99.3% / en 99.9% 覆盖） |
 | `*.MODEL_CARD.md` | — | 各模型交付文档 |
+
+`species_wiki.parquet` schema：`canonical_sci` (主键与 taxonomy 对齐) + `zh_title/zh_extract/zh_url` + `en_title/en_extract/en_url` + `image_url` + `updated_at`。由 [`scripts/fetch_species_wiki.py`](../../scripts/fetch_species_wiki.py) 通过 MediaWiki action API 批量爬取。
 
 **合计：~1.5 GB**
 
