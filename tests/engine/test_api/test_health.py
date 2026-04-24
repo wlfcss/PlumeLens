@@ -22,5 +22,24 @@ async def test_health_includes_pipeline_status(client: AsyncClient) -> None:
     assert "ready" in pipeline
     assert "version" in pipeline
     assert "models" in pipeline
-    # Mock pipeline is not ready
+    assert "pose_available" in pipeline
+    assert "species_available" in pipeline
+    # Mock pipeline is not ready; enhancements unavailable
     assert pipeline["ready"] is False
+    assert pipeline["pose_available"] is False
+    assert pipeline["species_available"] is False
+
+
+@pytest.mark.asyncio
+async def test_health_lists_all_six_models(client: AsyncClient) -> None:
+    response = await client.get("/health")
+    data = response.json()
+    models = data["pipeline"]["models"]
+    assert set(models.keys()) == {
+        "yolo",
+        "bird_visibility",
+        "clipiqa",
+        "hyperiqa",
+        "dinov3_backbone",
+        "species_ensemble",
+    }

@@ -7,6 +7,8 @@ export interface BackendHealth {
   pipeline: {
     ready: boolean
     version: string
+    pose_available: boolean
+    species_available: boolean
     models: Record<
       string,
       {

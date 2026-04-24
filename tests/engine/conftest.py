@@ -11,12 +11,16 @@ def _make_mock_pipeline() -> MagicMock:
     """Create a mock PipelineManager for tests that don't need real ONNX models."""
     pipeline = MagicMock()
     pipeline.is_ready = False
+    pipeline.pose_available = False
+    pipeline.species_available = False
     pipeline.pipeline_version = "test-v1-00000000"
     pipeline.model_status = {
         "yolo": False,
+        "bird_visibility": False,
         "clipiqa": False,
         "hyperiqa": False,
-        "species": False,
+        "dinov3_backbone": False,
+        "species_ensemble": False,
     }
     pipeline.model_providers = {}
     return pipeline
