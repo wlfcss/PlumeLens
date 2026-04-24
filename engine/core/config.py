@@ -18,10 +18,12 @@ class Settings(BaseSettings):
     models_dir: Path = Path(__file__).resolve().parent.parent / "models"
 
     # Pipeline — execution providers ("auto" / "coreml" / "cuda" / "cpu")
-    yolo_provider: str = "auto"
-    iqa_provider: str = "cpu"  # CoreML has bug in onnxruntime 1.24
-    pose_provider: str = "cpu"  # CoreML coverage poor for YOLO26-pose
-    species_provider: str = "cpu"  # CoreML ViT coverage ~30%, fallback to CPU
+    # YOLO CoreML EP 有 GatherElements op 的 Out-of-range 索引 bug（onnxruntime 1.24），
+    # 暂用 CPU 保稳；单张 1280 推理约 530ms on M5 Max CPU，可接受。
+    yolo_provider: str = "cpu"
+    iqa_provider: str = "cpu"
+    pose_provider: str = "cpu"
+    species_provider: str = "cpu"
 
     # Pipeline — detection (yolo26l-bird v1.0: imgsz=1280, conf=0.5 for photography)
     yolo_confidence: float = 0.5

@@ -51,10 +51,13 @@ tests/e2e/smoke.spec.ts-snapshots/*-diff.png
 *.tgz
 *.zip
 
-# DINOv3 backbone (1.2GB, exceeds GitHub 100MB per-file limit).
-# Run scripts/export_dinov3_backbone.py to regenerate locally, or fetch from
-# the release artifact bundle during distribution packaging.
+# 大 ONNX 模型 (超 GitHub 100 MB 单文件上限，避开 LFS 开销)：
+# DINOv3 backbone (1.2 GB) — scripts/export_dinov3_backbone.py
+# CLIPIQA+ (293 MB) / HyperIQA (104 MB) — scripts/export_iqa_onnx.py
+# 分发时由 electron-builder extraResources 打包进安装包
 engine/models/dinov3_backbone.onnx
+engine/models/clipiqa_plus.onnx
+engine/models/hyperiqa.onnx
 # PyTorch weights cache (used only by the export script)
 engine/models/.cache/
 .ruff_cache/

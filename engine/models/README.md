@@ -8,8 +8,8 @@
 |------|------|------|------|
 | YOLOv26l-bird-det v1.0 | `yolo26l-bird-det.onnx` | 99.9 MB | 鸟类目标检测 |
 | bird_visibility v1.0 | `bird_visibility.onnx` | 98.0 MB | 头部/眼睛关键点 + 可见性判定 |
-| CLIPIQA+ | `clipiqa_plus.onnx` | 1.2 MB | 语义画质评估 |
-| HyperIQA | `hyperiqa.onnx` | 0.4 MB | 技术画质评估 |
+| CLIPIQA+ | `clipiqa_plus.onnx` | 293 MB | 语义画质评估（含 CLIP ViT backbone） |
+| HyperIQA | `hyperiqa.onnx` | 104 MB | 技术画质评估（含 ResNet50 backbone + HyperNet forward_patch） |
 | DINOv3 backbone | `dinov3_backbone.onnx` | 1.2 GB | 鸟种分类特征提取（frozen，**不入 git**，见下文） |
 | DINOv3 ensemble heads | `species_ensemble.onnx` | 83 MB | 7-head 集成 → 1516 种 softmax |
 
@@ -118,12 +118,20 @@ bbox crop → square pad → 双尺度 Resize+CenterCrop (512 & 640)
 
 ### CLIPIQA+ / HyperIQA
 
-基于公开 IQA 研究模型（CLIPIQA+、HyperIQA）导出的 ONNX。
+由 `scripts/export_iqa_onnx.py` 从 [pyiqa](https://github.com/chaofengc/IQA-PyTorch) 预训练权重导出。
 
-- **输入**：float32 [1, 3, H, W] 动态尺寸
+- **输入**：float32 [1, 3, 224, 224]，ImageNet 标准化（mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]）
 - **输出**：[1, 1] score 0-1
 - **融合权重**：0.35 × CLIPIQA+ + 0.65 × HyperIQA（在 `engine/core/config.py`）
 - **分级阈值**：`<0.33` 淘汰 / `0.33-0.43` 记录 / `0.43-0.60` 可用 / `≥0.60` 精选
+
+**重要**：`engine/pipeline/quality.py` 的 `QualityAssessor` 内部自动做 resize + normalize。
+传入任意 `[H, W, 3] float32 0-1` 的 crop 即可，不需要调用方预处理。
+
+**历史教训**：2026-04-12 ~ 2026-04-25 期间项目携带的 IQA ONNX 是 external-data
+格式 (`.onnx.data` 伴随文件缺失)，所有 pytest 都 mock 了 ONNX session 导致这个
+bug 从未被发现。本次修复 (commit `3daec3f`+) 重新导出为 inline-weights 并新增
+`test_integration.py` 加载真实 ONNX 做 smoke test，避免同类 regression。
 
 ## 版权说明
 
