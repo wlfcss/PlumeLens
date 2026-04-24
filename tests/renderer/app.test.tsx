@@ -26,6 +26,6 @@ function renderWithProviders(ui: React.ReactElement) {
 describe('App', () => {
   it('renders the app title', () => {
     renderWithProviders(<App />)
-    expect(screen.getByText('鉴翎')).toBeInTheDocument()
+    expect(screen.getAllByText('鉴翎').length).toBeGreaterThan(0)
   })
 })

@@ -1,6 +1,22 @@
 import { useQuery } from '@tanstack/react-query'
 import { useState, useEffect } from 'react'
 
+export interface BackendHealth {
+  status: string
+  version: string
+  pipeline: {
+    ready: boolean
+    version: string
+    models: Record<
+      string,
+      {
+        loaded: boolean
+        provider: string | null
+      }
+    >
+  }
+}
+
 export function useBackendHealth() {
   const [backendUrl, setBackendUrl] = useState<string | null>(null)
 
@@ -20,7 +36,7 @@ export function useBackendHealth() {
         headers: { 'Content-Type': 'application/json' },
       })
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
-      return res.json() as Promise<{ status: string; version: string }>
+      return res.json() as Promise<BackendHealth>
     },
     enabled: !!backendUrl,
     refetchInterval: 10000,

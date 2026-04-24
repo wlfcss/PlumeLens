@@ -6,30 +6,50 @@ import { ProcessManager } from './process-manager'
 let mainWindow: BrowserWindow | null = null
 let processManager: ProcessManager | null = null
 
+const windowBounds = {
+  width: 1680,
+  height: 1040,
+  minWidth: 1360,
+  minHeight: 860,
+} as const
+
 function createWindow(): void {
   mainWindow = new BrowserWindow({
-    width: 1400,
-    height: 900,
-    minWidth: 900,
-    minHeight: 600,
-    backgroundColor: '#0a0a0f',
+    ...windowBounds,
+    backgroundColor: '#050505',
     titleBarStyle: 'hiddenInset',
     webPreferences: {
-      preload: join(__dirname, '../preload/index.js'),
+      preload: join(__dirname, '../preload/index.mjs'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false,
+      sandbox: true,
     },
   })
 
   // CSP
   session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
+    const contentSecurityPolicy = is.dev
+      ? [
+          "default-src 'self' http://localhost:5173 ws://localhost:5173;",
+          "script-src 'self' 'unsafe-inline' 'unsafe-eval' http://localhost:5173;",
+          "style-src 'self' 'unsafe-inline';",
+          "connect-src 'self' http://127.0.0.1:* http://localhost:5173 ws://localhost:5173;",
+          "img-src 'self' data: blob:;",
+          "font-src 'self' data:;",
+        ].join(' ')
+      : [
+          "default-src 'self';",
+          "script-src 'self';",
+          "style-src 'self' 'unsafe-inline';",
+          "connect-src 'self' http://127.0.0.1:*;",
+          "img-src 'self' data: blob:;",
+          "font-src 'self' data:;",
+        ].join(' ')
+
     callback({
       responseHeaders: {
         ...details.responseHeaders,
-        'Content-Security-Policy': [
-          "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' http://127.0.0.1:*; img-src 'self' data: blob:",
-        ],
+        'Content-Security-Policy': [contentSecurityPolicy],
       },
     })
   })

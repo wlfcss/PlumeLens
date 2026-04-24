@@ -1,11 +1,278 @@
 {
   "app": {
     "title": "鉴翎",
-    "subtitle": "辅助鸟类摄影爱好者快速筛选鸟类照片"
+    "subtitle": "辅助鸟类摄影爱好者快速筛选鸟类照片",
+    "tagline": "PLUMELENS"
+  },
+  "nav": {
+    "start": "开始",
+    "selection": "选片",
+    "archive": "羽迹",
+    "primary": "主导航",
+    "search": "搜索文件夹、文件名或物种"
+  },
+  "common": {
+    "export": "导出",
+    "expand": "展开",
+    "collapse": "收起",
+    "settings": "设置",
+    "close": "关闭"
   },
   "status": {
-    "connecting": "正在连接后端服务...",
-    "connected": "后端已连接",
+    "connecting": "正在连接后端",
+    "connected": "本地引擎就绪",
     "error": "后端连接失败"
+  },
+  "start": {
+    "kicker": "本地智能筛片工作台",
+    "title": "阅尽千鸟，鉴翎独选",
+    "subtitle": "智能模型鉴定识别，助您聚焦每一次振翅",
+    "primaryAction": "选择照片文件夹",
+    "secondaryAction": "继续上次文件夹",
+    "recentFolders": "最近文件夹",
+    "resumeTitle": "从上次处理的位置继续",
+    "emptyRecentTitle": "首次使用，从导入开始",
+    "emptyRecentLead": "还没有最近处理记录",
+    "emptyRecentBody": "选择照片文件夹后，这里会保留最近工作入口",
+    "emptyRecentBadge": "首次进入",
+    "entries": "项",
+    "systemStatus": "系统状态",
+    "localEndpoint": "本地端点",
+    "localOnly": "所有推理均在本机执行，不上传照片",
+    "localPromise": "本地优先",
+    "localPromiseBody": "原始文件夹只读不写，分析结果和缩略图统一集中存储，可先筛片，之后再按需导出结果",
+    "pipelineReadiness": "管线就绪度",
+    "pipelineState": "管线状态",
+    "monitor": "本地筛片监视器",
+    "heroSignals": {
+      "local": "本地计算",
+      "workflow": "文件夹优先",
+      "focus": "鸟片专用"
+    },
+    "status": {
+      "engine": "引擎",
+      "detector": "检测",
+      "pose": "姿态",
+      "species": "物种",
+      "ready": "已就绪",
+      "pending": "准备中",
+      "training": "即将接入"
+    }
+  },
+  "selection": {
+    "currentFolder": "当前文件夹",
+    "folderStatus": {
+      "idle": "未开始",
+      "scanning": "正在扫描",
+      "hashing": "计算哈希中",
+      "analyzing_partial": "分析进行中",
+      "ready": "可继续选片",
+      "updating": "增量更新中",
+      "path_missing": "路径失效",
+      "exporting": "正在导出",
+      "error": "发生错误"
+    },
+    "analysisStatus": {
+      "pending": "待分析",
+      "running": "分析中",
+      "done": "已完成",
+      "failed": "失败"
+    },
+    "sidebar": {
+      "label": "文件夹导航",
+      "title": "当前工作集",
+      "inProgress": "进行中",
+      "recent": "最近使用",
+      "pathMissing": "路径失效"
+    },
+    "folderHeader": {
+      "recursive": "递归扫描已开启",
+      "lastScan": "最近扫描",
+      "update": "更新文件夹",
+      "resume": "继续分析"
+    },
+    "report": {
+      "label": "文件夹报告",
+      "title": "当前文件夹整体概览",
+      "topFrames": "代表作预览",
+      "userProgress": "人工筛选进度"
+    },
+    "metrics": {
+      "totalPhotos": "总照片数",
+      "birdPhotos": "有鸟照片",
+      "selectPhotos": "精选",
+      "newSpeciesCount": "新增种",
+      "selectedCount": "已选",
+      "maybeCount": "待定",
+      "rejectedCount": "淘汰",
+      "speciesCount": "识别物种数",
+      "semanticScore": "语义质量",
+      "technicalScore": "技术质量",
+      "poseScore": "姿态表现",
+      "birdCount": "鸟数量",
+      "group": "所在组"
+    },
+    "quickFilters": {
+      "all": "全部",
+      "unreviewed": "待看",
+      "selected": "已选",
+      "maybe": "待定",
+      "rejected": "淘汰",
+      "select": "精选",
+      "new_species": "新增种",
+      "bird": "有鸟",
+      "no_bird": "无鸟"
+    },
+    "sort": {
+      "score": "综合评分",
+      "shot_at": "拍摄时间",
+      "recent": "最近操作",
+      "name": "文件名"
+    },
+    "viewModes": {
+      "grouped": "组视图",
+      "flat": "平铺",
+      "selected_only": "仅已选"
+    },
+    "filter": {
+      "advanced": "进阶筛选"
+    },
+    "group": {
+      "photos": "张照片",
+      "bestScore": "组内最高",
+      "keepBest": "保留最佳 1 张"
+    },
+    "grade": {
+      "reject": "淘汰",
+      "record": "记录",
+      "usable": "可用",
+      "select": "精选"
+    },
+    "decision": {
+      "unreviewed": "待看",
+      "selected": "已选",
+      "maybe": "待定",
+      "rejected": "淘汰"
+    },
+    "poseTags": {
+      "eye_visible": "见眼",
+      "head_clean": "头部完整",
+      "wings_open": "展翅",
+      "perched": "停栖",
+      "multi_bird": "多鸟"
+    },
+    "problemTags": {
+      "no_bird": "无鸟",
+      "subject_small": "主体太小",
+      "eye_soft": "眼不清",
+      "head_occluded": "头部遮挡",
+      "wing_cropped": "翅膀截断",
+      "low_species_confidence": "物种置信低"
+    },
+    "sceneTags": {
+      "perched_portrait": "停栖特写",
+      "flight_pass": "飞版掠过",
+      "multiple_birds": "多鸟场景",
+      "record_shot": "记录片"
+    },
+    "photo": {
+      "noBird": "未检测到鸟",
+      "birdsDetected": "只鸟",
+      "frameLabel": "帧"
+    },
+    "actions": {
+      "select": "选中",
+      "maybe": "待定",
+      "reject": "淘汰",
+      "compare": "加入对比"
+    },
+    "inspector": {
+      "label": "信息抽屉",
+      "active": "当前选中照片",
+      "idle": "快速上下文",
+      "score": "综合分",
+      "problemFocus": "问题焦点",
+      "cleanFrame": "主体条件良好",
+      "clear": "取消选中",
+      "idleTitle": "先选中一张照片",
+      "idleBody": "这里会显示当前照片的分数、姿态、物种和问题标签，帮助你少开一次完整复核"
+    },
+    "review": {
+      "label": "深度复核",
+      "scoreBreakdown": "评分拆解",
+      "species": "物种候选",
+      "why": "为什么是这个评级"
+    },
+    "reviewReasons": {
+      "no_bird": "当前帧没有检测到有效鸟主体，更适合直接淘汰或保留为空片记录",
+      "new_species": "识别到了高价值的新增种候选，姿态和清晰度也足以支撑进一步复核",
+      "top_pick": "主体姿态和质量都很稳，已经进入当前组的推荐保留序列",
+      "has_issues": "主体可用，但仍存在会影响最终判断的问题标签，建议与同组照片一起比较",
+      "user_selected": "这张已经被你标记为已选，适合作为导出候选进一步确认",
+      "candidate": "模型给出了积极信号，但还需要人工再看一轮以决定是否保留"
+    },
+    "compare": {
+      "label": "对比模式",
+      "title": "相似照片并排对比",
+      "action": "进入对比",
+      "keepBest": "保留最佳 1 张"
+    },
+    "empty": {
+      "title": "还没有可处理的文件夹",
+      "body": "先回到开始页选择一个照片文件夹，系统会完成扫描、分析并生成当前工作台",
+      "action": "返回开始"
+    }
+  },
+  "archive": {
+    "label": "长期沉淀",
+    "title": "跨文件夹回看照片与物种记录",
+    "summary": {
+      "photos": "照片总数",
+      "species": "物种总数",
+      "selected": "已选照片",
+      "newSpecies": "新增种"
+    },
+    "tabs": {
+      "photos": "照片",
+      "species": "物种"
+    },
+    "detail": {
+      "label": "鸟志",
+      "title": "当前物种详情",
+      "empty": "选择一个物种"
+    },
+    "species": {
+      "photoCount": "照片数",
+      "bestScore": "最佳分",
+      "firstSeen": "首次拍到",
+      "lastSeen": "最近拍到",
+      "distribution": "地理分布",
+      "distributionMap": "物种分布与我的拍摄足迹"
+    }
+  },
+  "export": {
+    "label": "导出",
+    "title": "准备出片",
+    "confirm": "开始导出",
+    "scope": {
+      "label": "导出范围",
+      "selected": "已选照片"
+    },
+    "structure": {
+      "label": "目录结构",
+      "keep": "保留原始目录结构"
+    },
+    "bundle": {
+      "label": "附带内容",
+      "report": "包含报告与清单"
+    },
+    "summary": {
+      "label": "导出摘要"
+    }
+  },
+  "background": {
+    "scan": "扫描",
+    "analysis": "分析",
+    "export": "导出"
   }
 }

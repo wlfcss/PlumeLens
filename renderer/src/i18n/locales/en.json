@@ -1,11 +1,278 @@
 {
   "app": {
     "title": "PlumeLens",
-    "subtitle": "Helping bird photographers quickly filter their shots"
+    "subtitle": "Helping bird photographers quickly filter their shots",
+    "tagline": "PLUMELENS"
+  },
+  "nav": {
+    "start": "Start",
+    "selection": "Select",
+    "archive": "Trail",
+    "primary": "Primary navigation",
+    "search": "Search folders, files, or species"
+  },
+  "common": {
+    "export": "Export",
+    "expand": "Expand",
+    "collapse": "Collapse",
+    "settings": "Settings",
+    "close": "Close"
   },
   "status": {
-    "connecting": "Connecting to backend...",
-    "connected": "Backend connected",
-    "error": "Backend connection failed"
+    "connecting": "Connecting",
+    "connected": "Engine ready",
+    "error": "Backend error"
+  },
+  "start": {
+    "kicker": "Local bird-photo culling workstation",
+    "title": "Start from one folder,\nkeep the best frames",
+    "subtitle": "Choose a folder for local scanning, analysis, and culling",
+    "primaryAction": "Choose photo folder",
+    "secondaryAction": "Resume latest folder",
+    "recentFolders": "Recent folders",
+    "resumeTitle": "Resume right where you left off.",
+    "emptyRecentTitle": "Start with an import",
+    "emptyRecentLead": "No recent workspace yet",
+    "emptyRecentBody": "Choose a photo folder and recent workspaces will appear here.",
+    "emptyRecentBadge": "First run",
+    "entries": "items",
+    "systemStatus": "System status",
+    "localEndpoint": "Local endpoint",
+    "localOnly": "All inference stays on-device. Your photos never leave the machine.",
+    "localPromise": "Local by default",
+    "localPromiseBody": "Original folders stay read-only. Analysis results and thumbnails are stored centrally, and you export only when you are ready.",
+    "pipelineReadiness": "Pipeline readiness",
+    "pipelineState": "Pipeline state",
+    "monitor": "Local culling monitor",
+    "heroSignals": {
+      "local": "Local compute",
+      "workflow": "Folder-first",
+      "focus": "Bird-photo focus"
+    },
+    "status": {
+      "engine": "Engine",
+      "detector": "Detector",
+      "pose": "Pose",
+      "species": "Species",
+      "ready": "Ready",
+      "pending": "Pending",
+      "training": "Next in line"
+    }
+  },
+  "selection": {
+    "currentFolder": "Current folder",
+    "folderStatus": {
+      "idle": "Idle",
+      "scanning": "Scanning",
+      "hashing": "Hashing",
+      "analyzing_partial": "Analyzing",
+      "ready": "Ready to cull",
+      "updating": "Updating",
+      "path_missing": "Path missing",
+      "exporting": "Exporting",
+      "error": "Error"
+    },
+    "analysisStatus": {
+      "pending": "Pending",
+      "running": "Running",
+      "done": "Done",
+      "failed": "Failed"
+    },
+    "sidebar": {
+      "label": "Folder navigation",
+      "title": "Working set",
+      "inProgress": "In progress",
+      "recent": "Recent",
+      "pathMissing": "Missing path"
+    },
+    "folderHeader": {
+      "recursive": "Recursive scan enabled",
+      "lastScan": "Last scan",
+      "update": "Update folder",
+      "resume": "Resume analysis"
+    },
+    "report": {
+      "label": "Folder report",
+      "title": "Current folder overview",
+      "topFrames": "Top frames",
+      "userProgress": "Manual culling progress"
+    },
+    "metrics": {
+      "totalPhotos": "Total photos",
+      "birdPhotos": "Bird frames",
+      "selectPhotos": "Top selects",
+      "newSpeciesCount": "New species",
+      "selectedCount": "Selected",
+      "maybeCount": "Maybe",
+      "rejectedCount": "Rejected",
+      "speciesCount": "Species found",
+      "semanticScore": "Semantic",
+      "technicalScore": "Technical",
+      "poseScore": "Pose",
+      "birdCount": "Bird count",
+      "group": "Group"
+    },
+    "quickFilters": {
+      "all": "All",
+      "unreviewed": "To review",
+      "selected": "Selected",
+      "maybe": "Maybe",
+      "rejected": "Rejected",
+      "select": "Top select",
+      "new_species": "New species",
+      "bird": "Bird",
+      "no_bird": "No bird"
+    },
+    "sort": {
+      "score": "Score",
+      "shot_at": "Shot time",
+      "recent": "Recent",
+      "name": "Name"
+    },
+    "viewModes": {
+      "grouped": "Grouped",
+      "flat": "Flat",
+      "selected_only": "Selected only"
+    },
+    "filter": {
+      "advanced": "Advanced filters"
+    },
+    "group": {
+      "photos": "photos",
+      "bestScore": "Best",
+      "keepBest": "Keep best 1"
+    },
+    "grade": {
+      "reject": "Reject",
+      "record": "Record",
+      "usable": "Usable",
+      "select": "Select"
+    },
+    "decision": {
+      "unreviewed": "To review",
+      "selected": "Selected",
+      "maybe": "Maybe",
+      "rejected": "Rejected"
+    },
+    "poseTags": {
+      "eye_visible": "Eye visible",
+      "head_clean": "Head clean",
+      "wings_open": "Wings open",
+      "perched": "Perched",
+      "multi_bird": "Multi bird"
+    },
+    "problemTags": {
+      "no_bird": "No bird",
+      "subject_small": "Small subject",
+      "eye_soft": "Soft eye",
+      "head_occluded": "Head occluded",
+      "wing_cropped": "Wing cropped",
+      "low_species_confidence": "Low species confidence"
+    },
+    "sceneTags": {
+      "perched_portrait": "Perched portrait",
+      "flight_pass": "Flight pass",
+      "multiple_birds": "Multiple birds",
+      "record_shot": "Record shot"
+    },
+    "photo": {
+      "noBird": "No bird detected",
+      "birdsDetected": "birds",
+      "frameLabel": "Frame"
+    },
+    "actions": {
+      "select": "Select",
+      "maybe": "Maybe",
+      "reject": "Reject",
+      "compare": "Compare"
+    },
+    "inspector": {
+      "label": "Inspector",
+      "active": "Active photo",
+      "idle": "Quick context",
+      "score": "Final score",
+      "problemFocus": "Focus issues",
+      "cleanFrame": "Clean frame",
+      "clear": "Clear selection",
+      "idleTitle": "Pick a frame first",
+      "idleBody": "The inspector keeps score, pose, species, and problem tags one glance away so you can avoid opening the full review panel every time."
+    },
+    "review": {
+      "label": "Deep review",
+      "scoreBreakdown": "Score breakdown",
+      "species": "Species candidates",
+      "why": "Why this grade"
+    },
+    "reviewReasons": {
+      "no_bird": "No valid bird subject was detected in this frame, so it is better treated as a reject or a record-only frame.",
+      "new_species": "This frame carries a high-value new-species candidate and enough pose and clarity quality to deserve manual confirmation.",
+      "top_pick": "Subject pose and image quality are both stable, which puts this frame into the recommended keep set for the current group.",
+      "has_issues": "The frame is usable, but issue tags still affect confidence. Compare it against nearby frames before keeping it.",
+      "user_selected": "You already marked this frame as selected, so it is a strong export candidate pending a final pass.",
+      "candidate": "The model sees promise here, but it still needs a human pass before the final keep decision."
+    },
+    "compare": {
+      "label": "Compare mode",
+      "title": "Compare similar frames side by side",
+      "action": "Open compare",
+      "keepBest": "Keep best 1"
+    },
+    "empty": {
+      "title": "No folders ready yet",
+      "body": "Go back to Start, choose a photo folder, and the app will scan, analyze, and build the workspace for you.",
+      "action": "Back to Start"
+    }
+  },
+  "archive": {
+    "label": "Long-term trail",
+    "title": "Browse photos and species across folders",
+    "summary": {
+      "photos": "Total photos",
+      "species": "Total species",
+      "selected": "Selected",
+      "newSpecies": "New species"
+    },
+    "tabs": {
+      "photos": "Photos",
+      "species": "Species"
+    },
+    "detail": {
+      "label": "Bird log",
+      "title": "Current species detail",
+      "empty": "Choose a species"
+    },
+    "species": {
+      "photoCount": "Photo count",
+      "bestScore": "Best score",
+      "firstSeen": "First seen",
+      "lastSeen": "Last seen",
+      "distribution": "Distribution",
+      "distributionMap": "Species range and my sightings"
+    }
+  },
+  "export": {
+    "label": "Export",
+    "title": "Prepare output",
+    "confirm": "Start export",
+    "scope": {
+      "label": "Scope",
+      "selected": "Selected frames"
+    },
+    "structure": {
+      "label": "Structure",
+      "keep": "Keep original folder structure"
+    },
+    "bundle": {
+      "label": "Bundle",
+      "report": "Include report and CSV"
+    },
+    "summary": {
+      "label": "Export summary"
+    }
+  },
+  "background": {
+    "scan": "Scan",
+    "analysis": "Analysis",
+    "export": "Export"
   }
 }
