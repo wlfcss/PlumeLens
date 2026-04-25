@@ -37,15 +37,16 @@ extraResources:
       - "*.parquet"
       - "*.json"
 mac:
-  target: dmg
+  # target 用 dir：electron-builder 的 dmg-builder 在打包时**丢失 Electron Framework
+  # binary**（157MB 的核心库），导致从 dmg 装机后启动 dyld 报 Library missing。
+  # 我们在 afterAllArtifactBuild 里用系统 hdiutil 自己打 dmg（保留所有文件 + 签名）。
+  target: dir
   category: public.app-category.photography
-  # electron-builder 内置 ad-hoc (identity '-') 在 osx-sign 子依赖里有 bug，
-  # 构建过程会 RangeError: Invalid array length。改在打包后用 codesign 命令手动
-  # ad-hoc 签整个 .app（含 Frameworks/PyInstaller binaries），脚本：scripts/codesign-mac.sh
   hardenedRuntime: false
   gatekeeperAssess: false
   identity: null
 afterPack: scripts/codesign-mac.cjs
+afterAllArtifactBuild: scripts/build-dmg.cjs
 win:
   target: nsis
   icon: build/icon.ico
