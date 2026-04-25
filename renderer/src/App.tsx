@@ -29,7 +29,12 @@ import { useTranslation } from 'react-i18next'
 import { useAnalysisProgress, useStartBatch } from '@/hooks/use-analysis'
 import { useBackendHealth } from '@/hooks/use-backend'
 import { useBatchSetDecisions, useSetDecision } from '@/hooks/use-decisions'
-import { useImportLibrary, useLibraries, useLibraryDetail } from '@/hooks/use-library'
+import {
+  useAllLibraryDetails,
+  useImportLibrary,
+  useLibraries,
+  useLibraryDetail,
+} from '@/hooks/use-library'
 import { buildFragmentFromDetail } from '@/lib/backend-adapter'
 import type { AnalysisProgressEvent, DecisionValue } from '@/lib/api-client'
 
@@ -296,7 +301,63 @@ function photoReviewReason(photo: PhotoRecord): string {
 }
 
 function deriveSpeciesRecords(workspace: WorkspaceSnapshot): SpeciesRecord[] {
-  return workspace.species.toSorted((left, right) => right.bestScore - left.bestScore)
+  // 从真实分析结果聚合：扫所有 photos，按物种分组
+  const groups = new Map<
+    string,
+    {
+      photos: PhotoRecord[]
+      bestScore: number
+      firstSeenAt: string
+      lastSeenAt: string
+    }
+  >()
+  for (const photo of workspace.photos) {
+    const name = photo.speciesName
+    if (!name || photo.analysisStatus !== 'done') continue
+    const score = photo.finalScore ?? 0
+    const existing = groups.get(name)
+    if (existing) {
+      existing.photos.push(photo)
+      if (score > existing.bestScore) existing.bestScore = score
+      if (photo.shotAt < existing.firstSeenAt) existing.firstSeenAt = photo.shotAt
+      if (photo.shotAt > existing.lastSeenAt) existing.lastSeenAt = photo.shotAt
+    } else {
+      groups.set(name, {
+        photos: [photo],
+        bestScore: score,
+        firstSeenAt: photo.shotAt,
+        lastSeenAt: photo.shotAt,
+      })
+    }
+  }
+  // 渐变封面：用物种名 hash 给每个物种一个稳定色相
+  const hueOf = (s: string): number => {
+    let h = 0
+    for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0
+    return h % 360
+  }
+  const aggregated: SpeciesRecord[] = Array.from(groups.entries()).map(([name, g]) => {
+    const hue = hueOf(name)
+    const latinName = g.photos[0]?.speciesLatinName ?? ''
+    return {
+      id: `species-real-${name}`,
+      name,
+      latinName,
+      coverGradient: `linear-gradient(135deg, hsl(${hue}, 45%, 32%), hsl(${(hue + 40) % 360}, 38%, 16%))`,
+      photoCount: g.photos.length,
+      firstSeenAt: g.firstSeenAt,
+      lastSeenAt: g.lastSeenAt,
+      bestScore: g.bestScore,
+      newSightings: 0,
+      regions: [],
+      summary: `${g.photos.length} 张照片`,
+    }
+  })
+  // 真后端聚合优先；如果完全没有真数据（启动初期），fallback 到 mock seeds
+  if (aggregated.length === 0) {
+    return workspace.species.toSorted((left, right) => right.bestScore - left.bestScore)
+  }
+  return aggregated.toSorted((left, right) => right.bestScore - left.bestScore)
 }
 
 function folderHasActiveTasks(status: FolderStatus): boolean {
@@ -433,6 +494,11 @@ export default function App() {
   )
 
   const { data: realLibraries } = useLibraries()
+  const allLibraryIds = useMemo(
+    () => (realLibraries ?? []).map((l) => l.id),
+    [realLibraries],
+  )
+  const allDetails = useAllLibraryDetails(allLibraryIds)
   const { data: activeDetail } = useLibraryDetail(activeFolderId)
   const importLibrary = useImportLibrary()
   const startBatch = useStartBatch()
@@ -440,11 +506,14 @@ export default function App() {
   const setDecisionMutation = useSetDecision(activeFolderId)
   const batchSetDecisionsMutation = useBatchSetDecisions(activeFolderId)
 
-  // 后端 library 列表就绪时同步 folders 列表（顶层导航用）
+  // 后端 library 列表就绪时：用真 folders 替换 mock seeds，
+  // 同时**清空 mock photos/groups/species**（避免 archive 页 / 物种墙混入"池鹭/翠鸟"等假数据）。
+  // useLibraryDetail 后续会按需注入每个 folder 的真 photos。
   useEffect(() => {
-    if (!realLibraries || realLibraries.length === 0) return
+    if (!realLibraries) return
+    if (realLibraries.length === 0) return
+    const realFolderIds = new Set(realLibraries.map((l) => l.id))
     setWorkspace((current) => ({
-      ...current,
       folders: realLibraries.map((lib) => ({
         id: lib.id,
         displayName: lib.display_name,
@@ -458,11 +527,39 @@ export default function App() {
         lastScannedAt: lib.last_scanned_at ?? lib.last_opened_at,
         lastAnalyzedAt: lib.last_analyzed_at,
       })),
+      // 只保留真 folder 的 photos/groups（mock seeds 的 folderId 不在真集合里 → 被剔除）
+      photos: current.photos.filter((p) => realFolderIds.has(p.folderId)),
+      groups: current.groups.filter((g) => realFolderIds.has(g.folderId)),
+      // 物种列表清空 — deriveSpeciesRecords 会从真 photos 聚合
+      species: [],
     }))
   }, [realLibraries])
 
-  // 当前激活 library 的详情拿到后，把真照片注入 workspace.photos / groups
-  // （只替换该 folder 自己的照片，其他 folder 的状态保留）
+  // 所有 library 的详情就绪后，把真照片注入 workspace（archive 页跨 library 聚合需要）
+  useEffect(() => {
+    if (allDetails.length === 0) return
+    const fragments = allDetails.map(buildFragmentFromDetail)
+    const realFolderIdsInDetails = new Set(fragments.map((f) => f.folder.id))
+    setWorkspace((current) => ({
+      folders: current.folders.map((f) => {
+        const updated = fragments.find((fr) => fr.folder.id === f.id)
+        return updated ? updated.folder : f
+      }),
+      // 替换：仅保留 detail 没覆盖到的 folder 的旧 photos（理论上是空，因为 effect 会
+      // 在 useAllLibraryDetails 完成后跑），加上所有 detail 的真 photos
+      photos: [
+        ...current.photos.filter((p) => !realFolderIdsInDetails.has(p.folderId)),
+        ...fragments.flatMap((f) => f.photos),
+      ],
+      groups: [
+        ...current.groups.filter((g) => !realFolderIdsInDetails.has(g.folderId)),
+        ...fragments.flatMap((f) => f.groups),
+      ],
+      species: [],
+    }))
+  }, [allDetails])
+
+  // 单 library detail 就绪（active folder 切换时优先级更高，立即注入）
   useEffect(() => {
     if (!activeDetail) return
     const fragment = buildFragmentFromDetail(activeDetail)
@@ -471,7 +568,6 @@ export default function App() {
       folders: current.folders.map((f) =>
         f.id === fragment.folder.id ? fragment.folder : f,
       ),
-      // 移除该 folder 的旧 mock photos/groups，再插入真数据
       photos: [
         ...current.photos.filter((p) => p.folderId !== fragment.folder.id),
         ...fragment.photos,

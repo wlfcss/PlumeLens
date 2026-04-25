@@ -7,9 +7,14 @@
  * - useDeleteLibrary: 删除
  * - useBuildThumbnails: 构建缩略图
  */
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query'
 
-import { api, type ImportLibraryRequest, type LibrarySummary } from '@/lib/api-client'
+import {
+  api,
+  type ImportLibraryRequest,
+  type LibraryDetail,
+  type LibrarySummary,
+} from '@/lib/api-client'
 
 const LIBRARIES_KEY = ['libraries'] as const
 const LIBRARY_DETAIL_KEY = (id: string) => ['library', id] as const
@@ -29,6 +34,23 @@ export function useLibraryDetail(libraryId: string | null | undefined) {
     enabled: Boolean(libraryId),
     staleTime: 5_000,
   })
+}
+
+/**
+ * 拉取所有 library 的 detail（archive / 物种墙跨 library 聚合需要）。
+ * 单独 useLibraryDetail 只对 active folder 生效，archive 页要看到所有物种就得这个。
+ */
+export function useAllLibraryDetails(libraryIds: string[]): LibraryDetail[] {
+  const results = useQueries({
+    queries: libraryIds.map((id) => ({
+      queryKey: LIBRARY_DETAIL_KEY(id),
+      queryFn: () => api.libraryDetail(id),
+      staleTime: 5_000,
+    })),
+  })
+  return results
+    .map((r) => r.data)
+    .filter((d): d is LibraryDetail => d !== undefined)
 }
 
 export function useImportLibrary() {

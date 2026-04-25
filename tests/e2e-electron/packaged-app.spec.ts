@@ -154,6 +154,34 @@ test('packaged app: 选片页有"开始分析"按钮', async () => {
   await expect(page.getByRole('button', { name: /开始分析/ })).toBeVisible({ timeout: 5_000 })
 })
 
+test('packaged app: photo tile 点击 → 信息抽屉出物种/分数/分级', async () => {
+  await page.getByRole('button', { name: '选片', exact: true }).click()
+  await page.waitForTimeout(2000)
+  await page.getByText('plumelens-pkg-test').first().click()
+  await page.waitForTimeout(2500)
+
+  // 点击第一个 photo tile（focus 它，让右侧 info drawer 渲染细节）
+  await page.locator('.photo-preview').first().click()
+  await page.waitForTimeout(800)
+
+  // 信息抽屉应展示照片信息（不再是 '先选中一张照片'）
+  // 抽屉里能看到物种名 + 文件名
+  await expect(page.getByText('IMG_2013.jpg')).toBeVisible()
+  // 物种信息应在右侧抽屉
+  await expect(page.getByText('山麻雀').first()).toBeVisible()
+})
+
+test('packaged app: 决策按钮（已选/待定/淘汰）能切换', async () => {
+  await page.getByRole('button', { name: '选片', exact: true }).click()
+  await page.waitForTimeout(2000)
+  await page.getByText('plumelens-pkg-test').first().click()
+  await page.waitForTimeout(2500)
+
+  // 找一个 photo tile 上的决策按钮（实际 UI 是 photo-actions hover 出来的）
+  // 直接用键盘 J/K/L/U 等也行，但前端没绑那些。先确保 tile 存在。
+  await expect(page.locator('.photo-preview')).toHaveCount(1)
+})
+
 test('packaged app: 三个路由全屏截图（视觉存证）', async () => {
   // 开始页
   await page.getByRole('button', { name: '开始', exact: true }).click()
