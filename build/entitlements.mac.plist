@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTD/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- V8 JIT 需要 RWX 内存页（不开会 EXC_BREAKPOINT 在 v8::Isolate::Initialize）-->
+  <key>com.apple.security.cs.allow-jit</key>
+  <true/>
+  <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+  <true/>
+  <!-- 加载 PyInstaller 打包的 native dylib（onnxruntime / rawpy 等）-->
+  <key>com.apple.security.cs.disable-library-validation</key>
+  <true/>
+  <!-- ad-hoc 签名下 dyld 解析时需要禁用 cs validation -->
+  <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+  <true/>
+  <!-- 网络（engine bind 127.0.0.1 + Wikipedia 图片加载）-->
+  <key>com.apple.security.network.client</key>
+  <true/>
+  <key>com.apple.security.network.server</key>
+  <true/>
+  <!-- 用户照片目录读取（导入文件夹时 dialog.showOpenDialog 选择的路径）-->
+  <key>com.apple.security.files.user-selected.read-only</key>
+  <true/>
+  <key>com.apple.security.files.user-selected.read-write</key>
+  <true/>
+</dict>
+</plist>

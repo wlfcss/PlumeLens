@@ -5,7 +5,9 @@ directories:
   output: release
 files:
   - out/**/*
-  - "!node_modules"
+  # main 进程 externalizeDepsPlugin 把 dependencies (如 @electron-toolkit/utils) 留作
+  # runtime require → 必须把它们打进 app.asar/node_modules。renderer 已 bundle 不需要。
+  - "node_modules/@electron-toolkit/**"
 
 # Mac dmg 内部布局：
 #   PlumeLens.app/Contents/Resources/
@@ -37,10 +39,13 @@ extraResources:
 mac:
   target: dmg
   category: public.app-category.photography
-  # entitlements 走 build/ 下默认 (CI 后期补完)，未签名包以本地测试为目标
+  # electron-builder 内置 ad-hoc (identity '-') 在 osx-sign 子依赖里有 bug，
+  # 构建过程会 RangeError: Invalid array length。改在打包后用 codesign 命令手动
+  # ad-hoc 签整个 .app（含 Frameworks/PyInstaller binaries），脚本：scripts/codesign-mac.sh
   hardenedRuntime: false
   gatekeeperAssess: false
-  identity: null  # 跳过签名（dev 自验证用）
+  identity: null
+afterPack: scripts/codesign-mac.cjs
 win:
   target: nsis
   icon: build/icon.ico
