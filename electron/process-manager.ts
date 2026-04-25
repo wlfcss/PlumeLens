@@ -3,6 +3,15 @@ import { EventEmitter } from 'events'
 import { app } from 'electron'
 import { join } from 'path'
 
+/**
+ * 拉起并守护 Python engine 子进程。
+ *
+ * Dev：`uv run uvicorn engine.main:app --port 0`（uvicorn 直接打 stderr）
+ * Prod：PyInstaller frozen binary `plumelens-engine`（自己 stdout 打印 `PLUMELENS_PORT <n>`）
+ *
+ * 端口握手协议：engine 启动后会打印 `PLUMELENS_PORT <n>`（stdout），收到即可知道
+ * 实际监听端口；不依赖 uvicorn 的 banner 文本（更稳定，frozen 下 uvicorn 输出格式可能变）。
+ */
 export class ProcessManager extends EventEmitter {
   private process: ChildProcess | null = null
   private url: string | null = null
@@ -20,51 +29,71 @@ export class ProcessManager extends EventEmitter {
     let command: string
     let args: string[]
     let cwd: string
+    const env: NodeJS.ProcessEnv = {
+      ...process.env,
+      PYTHONUNBUFFERED: '1',
+      PLUMELENS_PORT: '0', // kernel 分配空闲端口
+    }
 
     if (isDev) {
       command = 'uv'
-      args = ['run', 'uvicorn', 'engine.main:app', '--host', '127.0.0.1', '--port', '0']
+      args = ['run', 'python', '-m', 'engine']
       cwd = join(__dirname, '../../')
     } else {
-      // TODO: packaged mode — use PyInstaller binary
-      command = join(process.resourcesPath, 'engine', 'plumelens-engine')
+      // PyInstaller frozen binary: Resources/plumelens-engine/plumelens-engine
+      command = join(process.resourcesPath, 'plumelens-engine', 'plumelens-engine')
       args = []
-      cwd = process.resourcesPath
+      cwd = join(process.resourcesPath, 'plumelens-engine')
+      // Production：模型文件由 electron-builder extraResources 放在 Resources/models/
+      env.PLUMELENS_MODELS_DIR = join(process.resourcesPath, 'models')
+      // 用户数据放 ~/Library/Application Support/PlumeLens/（Electron 默认 userData 目录）
+      env.PLUMELENS_DATA_DIR = app.getPath('userData')
     }
 
     this.process = spawn(command, args, {
       cwd,
-      env: { ...process.env, PYTHONUNBUFFERED: '1' },
+      env,
       stdio: ['pipe', 'pipe', 'pipe'],
     })
 
-    this.process.stdout?.on('data', (data: Buffer) => {
+    const handleChunk = (data: Buffer): void => {
       const text = data.toString()
-      // uvicorn prints: "Uvicorn running on http://127.0.0.1:XXXXX"
-      const match = text.match(/Uvicorn running on (http:\/\/127\.0\.0\.1:\d+)/)
-      if (match) {
-        this.url = match[1]
+      // 协议优先：engine 自己打印的 PLUMELENS_PORT <n>
+      const portMatch = text.match(/PLUMELENS_PORT (\d+)/)
+      if (portMatch && !this.url) {
+        const port = portMatch[1]
+        this.url = `http://127.0.0.1:${port}`
+        this.emit('ready', this.url)
+        this.startHealthCheck()
+        return
+      }
+      // Fallback：uvicorn 老 banner（兼容直接跑 uvicorn 的情况）
+      const uvicornMatch = text.match(/Uvicorn running on (http:\/\/127\.0\.0\.1:\d+)/)
+      if (uvicornMatch && !this.url) {
+        this.url = uvicornMatch[1]
         this.emit('ready', this.url)
         this.startHealthCheck()
       }
-    })
+    }
 
-    this.process.stderr?.on('data', (data: Buffer) => {
-      const text = data.toString()
-      // uvicorn also logs to stderr
-      const match = text.match(/Uvicorn running on (http:\/\/127\.0\.0\.1:\d+)/)
-      if (match) {
-        this.url = match[1]
-        this.emit('ready', this.url)
-        this.startHealthCheck()
-      }
-    })
+    this.process.stdout?.on('data', handleChunk)
+    this.process.stderr?.on('data', handleChunk)
 
     this.process.on('exit', (code) => {
       this.stopHealthCheck()
-      if (code !== 0 && code !== null) {
+      const wasReady = this.url !== null
+      this.url = null
+      if (code !== 0 && code !== null && wasReady) {
+        // 已就绪后崩溃 → 进入重启
         this.handleCrash()
+      } else if (code !== 0 && code !== null) {
+        // 启动期 fail（端口未广播） → 立即报错
+        this.emit('error', `Engine 启动失败 (exit=${code})`)
       }
+    })
+
+    this.process.on('error', (err) => {
+      this.emit('error', `Engine spawn 失败: ${err.message}`)
     })
   }
 

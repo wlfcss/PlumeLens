@@ -6,20 +6,41 @@ directories:
 files:
   - out/**/*
   - "!node_modules"
+
+# Mac dmg 内部布局：
+#   PlumeLens.app/Contents/Resources/
+#     ├── plumelens-engine/        ← PyInstaller 产物（含 binary + _internal/）
+#     │   ├── plumelens-engine
+#     │   └── _internal/
+#     └── models/                  ← ONNX 模型 + 配套 parquet/json
+#         ├── yolo26l-bird-det.onnx
+#         ├── bird_visibility.onnx
+#         ├── clipiqa_plus.onnx
+#         ├── hyperiqa.onnx
+#         ├── dinov3_backbone.onnx
+#         ├── species_ensemble.onnx
+#         ├── species_taxonomy.parquet
+#         ├── species_trained.json
+#         ├── species_wiki.parquet
+#         └── bird_visibility_config.json
 extraResources:
-  - from: engine
-    to: engine
+  - from: dist/plumelens-engine
+    to: plumelens-engine
     filter:
       - "**/*"
-      - "!__pycache__/**"
-      - "!.venv/**"
-      - "!*.pyc"
+  - from: engine/models
+    to: models
+    filter:
+      - "*.onnx"
+      - "*.parquet"
+      - "*.json"
 mac:
   target: dmg
   category: public.app-category.photography
-  icon: build/icon.icns
-  entitlements: build/entitlements.mac.plist
-  entitlementsInherit: build/entitlements.mac.plist
+  # entitlements 走 build/ 下默认 (CI 后期补完)，未签名包以本地测试为目标
+  hardenedRuntime: false
+  gatekeeperAssess: false
+  identity: null  # 跳过签名（dev 自验证用）
 win:
   target: nsis
   icon: build/icon.ico
