@@ -170,9 +170,19 @@ test.describe('Visual regression', () => {
     await page.goto('/')
     await page.getByRole('button', { name: '羽迹', exact: true }).click()
     await page.waitForTimeout(500)
+    // 物种详情面板会拉 Wikipedia 缩略图（image_url），网络慢时 500ms 等不到
+    // 等图片真正加载完，避免基线截屏与实际截屏相差一个 cover 图带来的 flakiness
+    await page.waitForFunction(
+      () => Array.from(document.images).every((img) => img.complete),
+      undefined,
+      { timeout: 5000 },
+    ).catch(() => {
+      // 网络不可达时不阻塞快照（snapshot 容忍小差异）
+    })
     await expect(page).toHaveScreenshot('archive-screen.png', {
       fullPage: false,
       animations: 'disabled',
+      maxDiffPixelRatio: 0.08, // 容忍 cover 图加载差异
     })
   })
 })

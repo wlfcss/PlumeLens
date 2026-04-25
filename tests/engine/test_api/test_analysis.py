@@ -148,6 +148,76 @@ class TestLifecycle:
         assert stats.get("cancelled", 0) + stats.get("completed", 0) == 2
 
 
+class TestAutoBackfill:
+    """回归测试：start_batch 必须在 enqueue 前同步补 SHA-256，
+    确保用户在 import 之后立刻触发分析也不会得到 enqueued=0。"""
+
+    async def test_batch_auto_backfills_missing_hashes(self, tmp_path: Path) -> None:
+        from engine.core.config import settings
+        from engine.core.database import Database
+        from engine.main import create_app
+
+        settings.data_dir = tmp_path
+        settings.models_dir = tmp_path / "unused"
+        app = create_app()
+        db = Database(tmp_path / "t.db")
+        await db.connect()
+
+        pipeline = MagicMock()
+        pipeline.is_ready = True
+        pipeline.quality_available = True
+        pipeline.pose_available = False
+        pipeline.species_available = False
+        pipeline.pipeline_version = "v1-test"
+        pipeline.model_status = {}
+        pipeline.model_providers = {}
+
+        async def fake_analyze(image_path: Path, photo_id: str = "") -> PipelineResult:
+            return _fake_result(photo_id)
+
+        pipeline.analyze = AsyncMock(side_effect=fake_analyze)
+        app.state.db = db
+        app.state.pipeline = pipeline
+
+        lib_root = tmp_path / "auto-backfill-lib"
+        _make_jpeg(lib_root / "a.jpg")
+        _make_jpeg(lib_root / "b.jpg")
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            r = await ac.post("/library/import", json={"root_path": str(lib_root)})
+            assert r.status_code == 201
+            lib_id = r.json()["id"]
+
+            # 不手动补 file_hash —— 我们要测试 start_batch 自己补
+            # 验证：导入后 photos 表里 file_hash 可能是 NULL（看 BackgroundTasks 是否抢先跑了）
+            # 不重要，重要的是 batch 一定能 enqueue 到 2 张
+
+            resp = await ac.post("/analysis/batch", json={"library_id": lib_id})
+            assert resp.status_code == 200
+            assert resp.json()["enqueued"] == 2
+
+            # 验证 file_hash 被同步补齐（且非 NULL）
+            async with db.conn.execute(
+                "SELECT COUNT(*) AS c FROM photos "
+                "WHERE library_id = ? AND file_hash IS NOT NULL",
+                (lib_id,),
+            ) as cur:
+                row = await cur.fetchone()
+            assert row is not None and int(row["c"]) == 2
+
+        # teardown 清理 worker
+        from engine.api.routes.analysis import _workers
+        for task in list(_workers.values()):
+            if not task.done():
+                try:
+                    await asyncio.wait_for(task, timeout=5.0)
+                except (TimeoutError, Exception):
+                    task.cancel()
+        _workers.clear()
+        await db.close()
+
+
 class TestPipelineGate:
     async def test_batch_requires_pipeline_ready(self, tmp_path: Path) -> None:
         from engine.core.config import settings

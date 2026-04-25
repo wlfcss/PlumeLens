@@ -32,6 +32,7 @@ from engine.services.queue import (
     resume_library,
     transition,
 )
+from engine.services.scanner import backfill_hashes
 
 logger = structlog.stdlib.get_logger()
 
@@ -108,9 +109,17 @@ async def _drain_queue(db: Database, pipeline, library_id: str, concurrency: int
 async def start_batch(
     request: Request, body: AnalysisBatchRequest,
 ) -> AnalysisBatchResponse:
-    """POST /analysis/batch — enqueue all photos in library + spawn worker."""
+    """POST /analysis/batch — enqueue all photos in library + spawn worker.
+
+    安全网：先同步补齐 SHA-256（如果 import 后台任务还没跑完），再入队。
+    enqueue_library 只会取 file_hash IS NOT NULL 的照片，所以这一步保证用户
+    手动触发分析时不会因哈希未完成而 enqueued=0。
+    """
     db = await _db(request)
     pipeline = await _pipeline(request)
+
+    # 同步补哈希（幂等，已有哈希的 photo 直接跳过；空集时秒级返回）
+    await backfill_hashes(db, body.library_id)
 
     # 如果 force_rerun，先把已有 active 的该 library 的结果 invalidate
     # （MVP 策略：仍然重新入队，analyze_photo 的 force_rerun 参数由每个 task 决定；

@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import structlog
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 
 from engine.api.schemas.library import (
     ImportLibraryRequest,
@@ -18,7 +18,7 @@ from engine.api.schemas.library import (
     PhotoRow,
 )
 from engine.core.database import Database
-from engine.services.scanner import scan_library
+from engine.services.scanner import backfill_hashes, scan_library
 from engine.services.thumbnail import generate_library_thumbnails
 
 logger = structlog.stdlib.get_logger()
@@ -96,9 +96,15 @@ async def list_libraries(request: Request) -> list[LibrarySummary]:
 
 @router.post("/import", response_model=LibrarySummary, status_code=201)
 async def import_library(
-    request: Request, body: ImportLibraryRequest,
+    request: Request,
+    body: ImportLibraryRequest,
+    background_tasks: BackgroundTasks,
 ) -> LibrarySummary:
-    """POST /library/import — register a folder and run phase-1 scan."""
+    """POST /library/import — register a folder and run phase-1 scan.
+
+    阶段 2（SHA-256 backfill）通过 BackgroundTasks 异步进行：
+    导入立刻返回，用户可浏览缩略图；哈希在后台补齐，分析任务依赖此哈希就绪。
+    """
     db = await _db(request)
     # 纯同步路径操作耗时可忽略，不值得额外 asyncio.to_thread 包装
     root = Path(body.root_path).expanduser().resolve()  # noqa: ASYNC240
@@ -151,6 +157,8 @@ async def import_library(
             root=root_str,
             added=report.added, unchanged=report.unchanged, updated=report.updated,
         )
+        # 阶段 2：后台补算 SHA-256，让分析能在不阻塞 import 响应的前提下运行
+        background_tasks.add_task(backfill_hashes, db, library_id)
     except Exception:
         await db.conn.execute(
             "UPDATE libraries SET status = ? WHERE id = ?",
