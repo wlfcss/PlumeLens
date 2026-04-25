@@ -35,24 +35,42 @@ let page: Page
 
 test.beforeAll(async () => {
   app = await _electron.launch({ executablePath: APP_PATH, timeout: 30_000 })
+  app.process().stdout?.on('data', (d) => console.log('[main stdout]', d.toString().trim()))
+  app.process().stderr?.on('data', (d) => console.log('[main stderr]', d.toString().trim()))
   page = await app.firstWindow({ timeout: 30_000 })
+  page.on('console', (msg) => {
+    const t = msg.text()
+    if (t.includes('plumelens') || t.includes('Refused') || t.includes('Failed')) {
+      console.log('[renderer]', msg.type(), t)
+    }
+  })
   await page.waitForLoadState('domcontentloaded')
 
   // 等 React 挂上
   await expect(page.getByText('鉴翎').first()).toBeVisible({ timeout: 30_000 })
 
   // 等 engine 子进程 ready + IPC 能拿到 URL
+  let backendUrl: string | null = null
   for (let i = 0; i < 60; i++) {
-    const url = await page.evaluate(async () => {
+    backendUrl = await page.evaluate(async () => {
       const w = window as unknown as {
         plumelens?: { getBackendUrl: () => Promise<string | null> }
       }
       return (await w.plumelens?.getBackendUrl()) ?? null
     })
-    if (url) return
+    if (backendUrl) break
     await new Promise((r) => setTimeout(r, 500))
   }
-  throw new Error('Engine URL never resolved within 30s')
+  if (!backendUrl) throw new Error('Engine URL never resolved within 30s')
+  console.log('[E2E] engine URL =', backendUrl)
+
+  // 强制对所有 library 重新生成缩略图（保证文件落在当前 engine 实例的 data_dir/cache）
+  const libs = await fetch(`${backendUrl}/library`).then((r) => r.json() as Promise<{ id: string }[]>)
+  for (const lib of libs) {
+    const r = await fetch(`${backendUrl}/library/${lib.id}/thumbnails`, { method: 'POST' })
+    const j = await r.json()
+    console.log(`[E2E] thumbnails(${lib.id}):`, JSON.stringify(j))
+  }
 })
 
 test.afterAll(async () => {
@@ -70,20 +88,61 @@ test('packaged app: 启动可见 + 后端连通 + libraries 列表来自真 API'
 
 test('packaged app: 已分析的 library 渲染真分析结果（select / 山麻雀）', async () => {
   await page.getByRole('button', { name: '选片', exact: true }).click()
-  // 等 useLibraries refetch + folders 注入 + folder rail 渲染
   await page.waitForTimeout(5_000)
 
-  // 之前通过 API 导入并分析过的 plumelens-pkg-test 应该出现在 folder rail
   const targetFolder = page.getByText('plumelens-pkg-test').first()
   await expect(targetFolder).toBeVisible({ timeout: 15_000 })
   await targetFolder.click()
 
-  // 等 useLibraryDetail 拉真 photos 注入 workspace
   await page.waitForTimeout(3_000)
 
-  // IMG_2013.jpg 已分析为 select / 山麻雀
   await expect(page.getByText('IMG_2013.jpg').first()).toBeVisible({ timeout: 10_000 })
   await expect(page.getByText('山麻雀').first()).toBeVisible({ timeout: 10_000 })
+
+  // 视觉断言：photo tile 必须真实加载缩略图，不能只显示渐变
+  // 通过 evaluate 检查 photo-preview 元素的 background-image 是否包含 plumelens:// URL
+  const tileBg = await page.evaluate(() => {
+    const el = document.querySelector('.photo-preview') as HTMLElement | null
+    return el ? getComputedStyle(el).backgroundImage : ''
+  })
+  console.log('[E2E] first tile background-image:', tileBg.slice(0, 200))
+  expect(tileBg).toContain('plumelens://thumb/')
+
+  // 缩略图实际能 load
+  const imgLoaded = await page.evaluate(async () => {
+    const tile = document.querySelector('.photo-preview') as HTMLElement | null
+    const bg = tile ? getComputedStyle(tile).backgroundImage : ''
+    const match = bg.match(/url\("(plumelens:\/\/[^"]+)"\)/)
+    const url = match ? match[1] : ''
+    if (!url) return { ok: false, w: 0, h: 0, err: 'no url in bg', url: '' }
+    // 1) 先 fetch 看 server 端
+    let fetchInfo = ''
+    try {
+      const r = await fetch(url)
+      fetchInfo = `fetch status=${r.status}`
+      if (!r.ok) return { ok: false, w: 0, h: 0, err: fetchInfo, url }
+    } catch (e) {
+      return { ok: false, w: 0, h: 0, err: `fetch threw: ${(e as Error).message}`, url }
+    }
+    // 2) 再 Image() 加载验证 decode
+    return await new Promise<{ ok: boolean; w: number; h: number; err: string; url: string }>(
+      (resolve) => {
+        const img = new Image()
+        img.onload = () =>
+          resolve({ ok: true, w: img.naturalWidth, h: img.naturalHeight, err: fetchInfo, url })
+        img.onerror = (ev) =>
+          resolve({ ok: false, w: 0, h: 0, err: `Image error: ${String(ev)}`, url })
+        img.src = url
+        setTimeout(() => resolve({ ok: false, w: 0, h: 0, err: 'timeout', url }), 5_000)
+      },
+    )
+  })
+  console.log('[E2E] thumbnail load result:', JSON.stringify(imgLoaded))
+  expect(imgLoaded.ok).toBe(true)
+  expect(imgLoaded.w).toBeGreaterThan(50)
+
+  // 全屏截图存证（CI 失败时方便审查）
+  await page.screenshot({ path: 'test-results/electron-selection-visual.png', fullPage: true })
 })
 
 test('packaged app: 选片页有"开始分析"按钮', async () => {
@@ -93,4 +152,31 @@ test('packaged app: 选片页有"开始分析"按钮', async () => {
     await folderButton.click()
   }
   await expect(page.getByRole('button', { name: /开始分析/ })).toBeVisible({ timeout: 5_000 })
+})
+
+test('packaged app: 三个路由全屏截图（视觉存证）', async () => {
+  // 开始页
+  await page.getByRole('button', { name: '开始', exact: true }).click()
+  await page.waitForTimeout(800)
+  await page.screenshot({ path: 'test-results/route-start.png', fullPage: false })
+
+  // 选片页 + 选 new library（23 张照片真分析数据）
+  await page.getByRole('button', { name: '选片', exact: true }).click()
+  await page.waitForTimeout(1500)
+  const newFolder = page.getByText('new', { exact: true }).first()
+  if (await newFolder.isVisible().catch(() => false)) {
+    await newFolder.click()
+    await page.waitForTimeout(3000)
+  }
+  await page.screenshot({ path: 'test-results/route-selection-new.png', fullPage: true })
+
+  // 选片页 + plumelens-pkg-test
+  await page.getByText('plumelens-pkg-test').first().click()
+  await page.waitForTimeout(2500)
+  await page.screenshot({ path: 'test-results/route-selection-pkg.png', fullPage: false })
+
+  // 羽迹页（物种墙）
+  await page.getByRole('button', { name: '羽迹', exact: true }).click()
+  await page.waitForTimeout(1500)
+  await page.screenshot({ path: 'test-results/route-archive.png', fullPage: false })
 })

@@ -1477,7 +1477,14 @@ function PhotoTile({
   t: ReturnType<typeof useTranslation>['t']
 }) {
   return (
-    <article className={cn('photo-tile', focused && 'photo-tile--focused')}>
+    <article
+      className={cn(
+        'photo-tile',
+        focused && 'photo-tile--focused',
+        (photo.analysisStatus === 'pending' || photo.analysisStatus === 'running') &&
+          'photo-tile--analyzing',
+      )}
+    >
       <button
         className="photo-preview"
         onClick={() => onFocusPhoto(photo.id)}
@@ -1486,12 +1493,32 @@ function PhotoTile({
         type="button"
       >
         <span className="photo-preview__top">
-          <StatusPill label={t(gradeLabelKey(photo.grade))} tone={gradeTone(photo.grade)} />
-          {photo.isNewSpecies ? <StatusPill label={t('selection.quickFilters.new_species')} tone="accent" /> : null}
+          {photo.analysisStatus === 'pending' || photo.analysisStatus === 'running' ? (
+            <StatusPill
+              label={photo.analysisStatus === 'pending' ? '等待分析' : '分析中'}
+              tone="muted"
+            />
+          ) : (
+            <StatusPill label={t(gradeLabelKey(photo.grade))} tone={gradeTone(photo.grade)} />
+          )}
+          {photo.isNewSpecies ? (
+            <StatusPill label={t('selection.quickFilters.new_species')} tone="accent" />
+          ) : null}
         </span>
         <span className="photo-preview__bottom">
           <span>
-            <strong>{photo.speciesName ?? t('selection.photo.noBird')}</strong>
+            <strong>
+              {photo.speciesName ??
+                (photo.analysisStatus === 'pending'
+                  ? '等待分析'
+                  : photo.analysisStatus === 'running'
+                    ? '分析中…'
+                    : photo.analysisStatus === 'failed'
+                      ? '分析失败'
+                      : photo.birdCount === 0
+                        ? t('selection.photo.noBird')
+                        : '未识别物种')}
+            </strong>
             <small>{photo.fileName}</small>
           </span>
           <b>{photo.finalScore !== null ? photo.finalScore.toFixed(2) : '--'}</b>

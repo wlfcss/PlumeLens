@@ -56,18 +56,23 @@ export class ProcessManager extends EventEmitter {
       stdio: ['pipe', 'pipe', 'pipe'],
     })
 
+    let pendingUrl: string | null = null
     const handleChunk = (data: Buffer): void => {
       const text = data.toString()
-      // 协议优先：engine 自己打印的 PLUMELENS_PORT <n>
+      // PLUMELENS_PORT N（uvicorn.run 之前 print）：先记下 URL，但还没 listen
       const portMatch = text.match(/PLUMELENS_PORT (\d+)/)
-      if (portMatch && !this.url) {
-        const port = portMatch[1]
-        this.url = `http://127.0.0.1:${port}`
+      if (portMatch && !pendingUrl) {
+        pendingUrl = `http://127.0.0.1:${portMatch[1]}`
+      }
+      // PLUMELENS_READY（lifespan startup 完成、uvicorn 真 listen 后 print）：才 emit ready
+      // 避免 IPC 早一步返回 URL → renderer 立即 fetch → ECONNREFUSED 失败
+      if (text.includes('PLUMELENS_READY') && pendingUrl && !this.url) {
+        this.url = pendingUrl
         this.emit('ready', this.url)
         this.startHealthCheck()
         return
       }
-      // Fallback：uvicorn 老 banner（兼容直接跑 uvicorn 的情况）
+      // Fallback：uvicorn 老 banner（同时兼具 listen 完成的语义）
       const uvicornMatch = text.match(/Uvicorn running on (http:\/\/127\.0\.0\.1:\d+)/)
       if (uvicornMatch && !this.url) {
         this.url = uvicornMatch[1]

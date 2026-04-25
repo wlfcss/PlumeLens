@@ -1246,13 +1246,47 @@ button:disabled {
   border-radius: var(--pl-radius-lg);
   background-color: var(--pl-bg-2);
   background-position: center;
-  background-size: cover;
+  background-size: cover, cover; /* url() 真缩略图 + 渐变 fallback */
+  background-repeat: no-repeat, no-repeat;
   text-align: left;
   transition:
     border-color var(--pl-motion-base) var(--pl-ease),
     box-shadow var(--pl-motion-base) var(--pl-ease),
     filter var(--pl-motion-base) var(--pl-ease),
     transform var(--pl-motion-base) var(--pl-ease);
+}
+
+/* 分析中状态：tile 上显示 shimmer 扫描线，给用户视觉提示模型在跑 */
+.photo-tile--analyzing .photo-preview {
+  filter: brightness(0.85);
+}
+.photo-tile--analyzing .photo-preview::before {
+  background:
+    linear-gradient(180deg, rgba(0, 0, 0, 0.18), rgba(0, 0, 0, 0.66)),
+    linear-gradient(
+      120deg,
+      transparent 0%,
+      transparent 35%,
+      rgba(255, 255, 255, 0.08) 50%,
+      transparent 65%,
+      transparent 100%
+    );
+  background-size:
+    100% 100%,
+    200% 100%;
+  animation: pl-tile-shimmer 1.6s ease-in-out infinite;
+}
+@keyframes pl-tile-shimmer {
+  from {
+    background-position:
+      0 0,
+      -100% 0;
+  }
+  to {
+    background-position:
+      0 0,
+      100% 0;
+  }
 }
 
 .photo-preview::before {

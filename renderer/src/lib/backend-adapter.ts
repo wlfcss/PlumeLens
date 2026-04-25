@@ -114,6 +114,22 @@ function deriveProblemTags(row: PhotoRow): ProblemTagId[] {
 }
 
 /**
+ * 缩略图 URL：
+ * - 后端 photo.thumb_grid 为 "grid/{photo_id}.jpg"（相对路径）
+ * - Electron main 注册了 plumelens://thumb/{relPath} 协议，映射到磁盘
+ * - 缩略图未生成时返回 null，由调用方 fallback 到渐变
+ */
+function thumbnailUrl(thumbRel: string | null, level: 'grid' | 'preview'): string | null {
+  // 后端目前 grid 和 preview 都按相对路径回传（grid/xxx.jpg 或 preview/xxx.jpg）
+  if (!thumbRel) return null
+  // 简单 sanitize：只允许 grid/preview 前缀
+  if (!thumbRel.startsWith('grid/') && !thumbRel.startsWith('preview/')) return null
+  // level 参数预留以便 caller 显式覆盖（preview 视图想强制要 1920px 版本时）
+  void level
+  return `plumelens://thumb/${thumbRel}`
+}
+
+/**
  * 渐变占位（缩略图未生成时）。
  * 用 photo_id 的 hash 决定色相，保证同一张照片每次渲染一致。
  */
@@ -124,6 +140,17 @@ function gradientPlaceholder(photoId: string): string {
   }
   const hue = h % 360
   return `linear-gradient(135deg, hsl(${hue}, 35%, 28%), hsl(${(hue + 40) % 360}, 30%, 14%))`
+}
+
+/**
+ * Photo tile 背景：优先真缩略图（CSS background-image url），fallback 到渐变。
+ */
+function buildPreviewBg(thumbRel: string | null, photoId: string): string {
+  const url = thumbnailUrl(thumbRel, 'grid')
+  if (url) {
+    return `url("${url}"), ${gradientPlaceholder(photoId)}`
+  }
+  return gradientPlaceholder(photoId)
 }
 
 export function buildPhotoRecordFromRow(
@@ -165,7 +192,7 @@ export function buildPhotoRecordFromRow(
     caption: isAnalyzed
       ? `${row.species ?? '未识别物种'} · ${grade} · 分数 ${(row.quality_score ?? 0).toFixed(2)}`
       : '等待分析',
-    previewGradient: gradientPlaceholder(row.id),
+    previewGradient: buildPreviewBg(row.thumb_grid, row.id),
     boxes: [], // 后端 PhotoRow 暂未返回 detections，待扩展
   }
 }

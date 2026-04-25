@@ -228,32 +228,49 @@ async def generate_library_thumbnails(
     Returns:
         {"built": N, "skipped": M, "failed": K}
     """
+    # 取所有照片（不止 thumb_grid IS NULL 的）：让 ensure_thumbnails_for_photo 内部
+    # 判断是否需要重建（DB 记录 path 但磁盘文件丢失时也得补）
     async with db.conn.execute(
-        "SELECT id FROM photos WHERE library_id = ? AND "
-        "(thumb_grid IS NULL OR thumb_preview IS NULL)",
+        "SELECT id, thumb_grid, thumb_preview FROM photos WHERE library_id = ?",
         (library_id,),
     ) as cur:
         rows = await cur.fetchall()
     photo_ids = [str(r["id"]) for r in rows]
 
     built = 0
+    skipped = 0
     failed = 0
     sem = asyncio.Semaphore(concurrency)
 
-    async def _one(pid: str) -> bool:
+    async def _one(pid: str) -> str:
+        """Returns 'built' / 'skipped' / 'failed'."""
         async with sem:
             try:
-                result = await ensure_thumbnails_for_photo(db, pid, cache_root)
-                return result is not None
+                # 先看磁盘上文件是否齐全；齐全则 skip 不重做
+                async with db.conn.execute(
+                    "SELECT thumb_grid, thumb_preview FROM photos WHERE id = ?",
+                    (pid,),
+                ) as cur2:
+                    row = await cur2.fetchone()
+                if row and row["thumb_grid"] and row["thumb_preview"]:
+                    grid_p = cache_root / str(row["thumb_grid"])
+                    preview_p = cache_root / str(row["thumb_preview"])
+                    if grid_p.exists() and preview_p.exists():
+                        return "skipped"
+                # 否则真生成（force=True 让 ensure 不再走它内部的存在判断，避免双重 check）
+                result = await ensure_thumbnails_for_photo(db, pid, cache_root, force=True)
+                return "built" if result is not None else "failed"
             except Exception as e:
                 logger.warning("Thumbnail failed", photo_id=pid, error=str(e))
-                return False
+                return "failed"
 
     outcomes = await asyncio.gather(*[_one(pid) for pid in photo_ids])
-    for ok in outcomes:
-        if ok:
+    for outcome in outcomes:
+        if outcome == "built":
             built += 1
+        elif outcome == "skipped":
+            skipped += 1
         else:
             failed += 1
 
-    return {"built": built, "skipped": 0, "failed": failed}
+    return {"built": built, "skipped": skipped, "failed": failed}

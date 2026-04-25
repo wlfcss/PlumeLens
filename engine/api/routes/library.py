@@ -17,6 +17,7 @@ from engine.api.schemas.library import (
     LibrarySummary,
     PhotoRow,
 )
+from engine.core.config import settings as app_settings
 from engine.core.database import Database
 from engine.services.scanner import backfill_hashes, scan_library
 from engine.services.thumbnail import generate_library_thumbnails
@@ -28,6 +29,13 @@ router = APIRouter(prefix="/library", tags=["library"])
 
 def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
+
+
+async def _backfill_then_thumbnails(db: Database, library_id: str) -> None:
+    """阶段 2 + 3：补 SHA-256 + 异步生成缩略图（让 UI 能看到真照片，不是渐变占位）。"""
+    await backfill_hashes(db, library_id)
+    cache_root = app_settings.data_dir / "cache" / "thumbnails"
+    await generate_library_thumbnails(db, library_id, cache_root)
 
 
 async def _db(request: Request) -> Database:
@@ -157,8 +165,8 @@ async def import_library(
             root=root_str,
             added=report.added, unchanged=report.unchanged, updated=report.updated,
         )
-        # 阶段 2：后台补算 SHA-256，让分析能在不阻塞 import 响应的前提下运行
-        background_tasks.add_task(backfill_hashes, db, library_id)
+        # 阶段 2/3：后台补 SHA-256 + 生成缩略图（不阻塞 import 响应）
+        background_tasks.add_task(_backfill_then_thumbnails, db, library_id)
     except Exception:
         await db.conn.execute(
             "UPDATE libraries SET status = ? WHERE id = ?",
