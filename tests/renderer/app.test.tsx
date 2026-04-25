@@ -14,6 +14,20 @@ beforeAll(() => {
     onBackendReady: () => {},
     onBackendError: () => {},
   }
+  // jsdom 不实现 EventSource；useAnalysisProgress 订阅 SSE 时会 ReferenceError
+  if (typeof (globalThis as Record<string, unknown>).EventSource === 'undefined') {
+    class StubEventSource {
+      onmessage: ((ev: MessageEvent) => void) | null = null
+      onerror: ((ev: Event) => void) | null = null
+      addEventListener(): void {
+        // no-op
+      }
+      close(): void {
+        // no-op
+      }
+    }
+    ;(globalThis as Record<string, unknown>).EventSource = StubEventSource
+  }
 })
 
 function renderWithProviders(ui: React.ReactElement) {

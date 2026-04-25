@@ -8,18 +8,26 @@
  * All requests carry `Content-Type: application/json` (FastAPI 0.132+ strict).
  */
 
-let _cachedBackendUrl: string | null = null
-
+/**
+ * Resolve the backend URL on every request.
+ *
+ * 注意：
+ * 1. 不缓存。Electron 启动早期 engine 还没 spawn 完，IPC 返回 null → fallback 到 8000。
+ *    一旦缓存就永远卡在 fallback。每次重新拉（IPC 异步开销 <1ms）。
+ * 2. 在 Electron 模式下，如果 IPC 返回 null（engine 没 ready），等 200ms 重试，最多 30 次。
+ *    避免 React Query 在 engine 启动期间因连不上 8000 而进入 isError 终态。
+ */
 async function getBackendUrl(): Promise<string> {
-  if (_cachedBackendUrl) return _cachedBackendUrl
   if (typeof window !== 'undefined' && window.plumelens) {
-    const url = await window.plumelens.getBackendUrl()
-    if (url) {
-      _cachedBackendUrl = url
-      return url
+    for (let i = 0; i < 30; i++) {
+      const url = await window.plumelens.getBackendUrl()
+      if (url) return url
+      await new Promise((resolve) => setTimeout(resolve, 200))
     }
+    // 30 次仍拿不到 → 让上层 fetch 报错触发 isError，UI 显示降级提示
+    throw new Error('Engine 后端启动超时（>6s 仍未广播端口）')
   }
-  // Dev / test fallback
+  // Dev / test fallback (Playwright vite-server 模式 / 单元测试)
   return 'http://127.0.0.1:8000'
 }
 
@@ -103,6 +111,7 @@ export interface PhotoRow {
   quality_score: number | null
   bird_count: number | null
   species: string | null
+  decision: string  // 'unreviewed' | 'selected' | 'maybe' | 'rejected' (默认 unreviewed)
 }
 
 export interface LibraryDetail {

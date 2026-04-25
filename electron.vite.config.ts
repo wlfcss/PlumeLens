@@ -21,6 +21,12 @@ export default defineConfig({
         input: {
           index: resolve(__dirname, 'electron/preload.ts'),
         },
+        // Electron sandbox=true 下 preload 必须是 CommonJS（ESM 不会执行，
+        // 导致 contextBridge.exposeInMainWorld 没运行 → window.plumelens 是 undefined）
+        output: {
+          format: 'cjs',
+          entryFileNames: '[name].cjs',
+        },
       },
     },
   },

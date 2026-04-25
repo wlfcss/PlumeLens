@@ -26,10 +26,14 @@ import {
 } from 'react'
 import { useTranslation } from 'react-i18next'
 
+import { useAnalysisProgress, useStartBatch } from '@/hooks/use-analysis'
 import { useBackendHealth } from '@/hooks/use-backend'
 import { useBatchSetDecisions, useSetDecision } from '@/hooks/use-decisions'
-import { useImportLibrary, useLibraries } from '@/hooks/use-library'
-import type { DecisionValue } from '@/lib/api-client'
+import { useImportLibrary, useLibraries, useLibraryDetail } from '@/hooks/use-library'
+import { buildFragmentFromDetail } from '@/lib/backend-adapter'
+import type { AnalysisProgressEvent, DecisionValue } from '@/lib/api-client'
+
+type AnalysisProgressEventLite = AnalysisProgressEvent
 import { getSpeciesWiki } from '@/lib/species-wiki'
 import type {
   AnalysisStatus,
@@ -429,12 +433,14 @@ export default function App() {
   )
 
   const { data: realLibraries } = useLibraries()
+  const { data: activeDetail } = useLibraryDetail(activeFolderId)
   const importLibrary = useImportLibrary()
+  const startBatch = useStartBatch()
+  const progressEvent = useAnalysisProgress(activeFolderId, Boolean(activeFolderId))
   const setDecisionMutation = useSetDecision(activeFolderId)
   const batchSetDecisionsMutation = useBatchSetDecisions(activeFolderId)
 
-  // 后端真数据就绪时，用真 library 列表替换 mock 的 folders（仅 folders 层，
-  // photos 等仍保留 mock 作为 UI 过渡，直到后端 analysis 结果字段齐全）
+  // 后端 library 列表就绪时同步 folders 列表（顶层导航用）
   useEffect(() => {
     if (!realLibraries || realLibraries.length === 0) return
     setWorkspace((current) => ({
@@ -455,26 +461,59 @@ export default function App() {
     }))
   }, [realLibraries])
 
+  // 当前激活 library 的详情拿到后，把真照片注入 workspace.photos / groups
+  // （只替换该 folder 自己的照片，其他 folder 的状态保留）
+  useEffect(() => {
+    if (!activeDetail) return
+    const fragment = buildFragmentFromDetail(activeDetail)
+    setWorkspace((current) => ({
+      ...current,
+      folders: current.folders.map((f) =>
+        f.id === fragment.folder.id ? fragment.folder : f,
+      ),
+      // 移除该 folder 的旧 mock photos/groups，再插入真数据
+      photos: [
+        ...current.photos.filter((p) => p.folderId !== fragment.folder.id),
+        ...fragment.photos,
+      ],
+      groups: [
+        ...current.groups.filter((g) => g.folderId !== fragment.folder.id),
+        ...fragment.groups,
+      ],
+    }))
+  }, [activeDetail])
+
   async function handleChooseFolder() {
     const path = await window.plumelens?.openFolder?.()
     if (!path) return
 
-    // 先乐观更新 UI（用 mock data generator）
-    const imported = createImportedFolder(path)
+    // 先切到 selection 路由，给用户即时视觉反馈
     startTransition(() => {
-      setWorkspace((current) => mergeWorkspace(current, imported))
       setRoute('selection')
-      setActiveFolderId(imported.folders[0]?.id ?? null)
       setActiveQuickFilter('all')
       setViewMode('grouped')
     })
 
-    // 同时触发真 API 导入（失败不影响 mock UI；成功后 useLibraries 会自动 refetch）
+    // 调用真后端 import；成功后用返回的 library_id 作为 activeFolderId
+    // → useLibraryDetail 自动拉详情 → useEffect 把真 photos 注入 workspace
     try {
-      await importLibrary.mutateAsync({ root_path: path })
+      const lib = await importLibrary.mutateAsync({ root_path: path })
+      setActiveFolderId(lib.id)
     } catch (err) {
-      // 后端不可用时保持 mock 体验，只记录不报错
       console.warn('Library import to backend failed:', err)
+      // 后端不可用时降级到 mock，避免空白屏
+      const imported = createImportedFolder(path)
+      setWorkspace((current) => mergeWorkspace(current, imported))
+      setActiveFolderId(imported.folders[0]?.id ?? null)
+    }
+  }
+
+  async function handleStartAnalysis() {
+    if (!activeFolderId) return
+    try {
+      await startBatch.mutateAsync({ libraryId: activeFolderId })
+    } catch (err) {
+      console.error('Failed to start batch analysis:', err)
     }
   }
 
@@ -580,6 +619,7 @@ export default function App() {
           activeFolderSummary={activeFolderSummary}
           activeQuickFilter={activeQuickFilter}
           activeSort={activeSort}
+          analysisStarting={startBatch.isPending}
           compareCount={comparePhotoIds.length}
           compareEnabled={comparePhotos.length >= 2}
           comparePhotoIds={comparePhotoIds}
@@ -594,7 +634,9 @@ export default function App() {
           onOpenReview={handleOpenReview}
           onSelectFolder={handleSelectFolder}
           onSetDecision={handleSetDecision}
+          onStartAnalysis={handleStartAnalysis}
           onToggleCompare={toggleComparePhotoId}
+          progressEvent={progressEvent}
           setActiveQuickFilter={setActiveQuickFilter}
           setActiveSort={setActiveSort}
           setFocusedPhotoId={setFocusedPhotoId}
@@ -933,6 +975,7 @@ function SelectionScreen({
   activeFolderSummary,
   activeQuickFilter,
   activeSort,
+  analysisStarting,
   compareCount,
   compareEnabled,
   comparePhotoIds,
@@ -947,7 +990,9 @@ function SelectionScreen({
   onOpenReview,
   onSelectFolder,
   onSetDecision,
+  onStartAnalysis,
   onToggleCompare,
+  progressEvent,
   setActiveQuickFilter,
   setActiveSort,
   setFocusedPhotoId,
@@ -961,6 +1006,7 @@ function SelectionScreen({
   activeFolderSummary: FolderSummary
   activeQuickFilter: QuickFilter
   activeSort: SortMode
+  analysisStarting: boolean
   compareCount: number
   compareEnabled: boolean
   comparePhotoIds: string[]
@@ -975,7 +1021,9 @@ function SelectionScreen({
   onOpenReview: (photoId: string) => void
   onSelectFolder: (folderId: string) => void
   onSetDecision: (photoId: string, decision: SelectionDecision) => void
+  onStartAnalysis: () => void
   onToggleCompare: (photoId: string) => void
+  progressEvent: AnalysisProgressEventLite | null
   setActiveQuickFilter: (filter: QuickFilter) => void
   setActiveSort: (sort: SortMode) => void
   setFocusedPhotoId: (photoId: string | null) => void
@@ -1011,7 +1059,14 @@ function SelectionScreen({
       />
 
       <section className="selection-main selection-scroll">
-        <FolderTopline activeFolder={activeFolder} onOpenExport={onOpenExport} t={t} />
+        <FolderTopline
+          activeFolder={activeFolder}
+          analysisStarting={analysisStarting}
+          onOpenExport={onOpenExport}
+          onStartAnalysis={onStartAnalysis}
+          progressEvent={progressEvent}
+          t={t}
+        />
         <MetricStrip photos={folderPhotos} summary={activeFolderSummary} t={t} />
         <SelectionControls
           activeQuickFilter={activeQuickFilter}
@@ -1137,13 +1192,31 @@ function FolderRail({
 
 function FolderTopline({
   activeFolder,
+  analysisStarting,
   onOpenExport,
+  onStartAnalysis,
+  progressEvent,
   t,
 }: {
   activeFolder: FolderRecord
+  analysisStarting: boolean
   onOpenExport: () => void
+  onStartAnalysis: () => void
+  progressEvent: AnalysisProgressEventLite | null
   t: ReturnType<typeof useTranslation>['t']
 }) {
+  // 是否正在跑：pending/processing 还有任务
+  const running = progressEvent
+    ? progressEvent.pending + progressEvent.processing > 0
+    : false
+  const hasProgress = progressEvent !== null && progressEvent.total > 0
+  const ratio = hasProgress
+    ? Math.min(1, progressEvent.completed / Math.max(progressEvent.total, 1))
+    : 0
+  const progressLabel = hasProgress
+    ? `${progressEvent.completed} / ${progressEvent.total}`
+    : null
+
   return (
     <header className="folder-topline">
       <div>
@@ -1156,7 +1229,33 @@ function FolderTopline({
           <StatusDot tone={statusTone(activeFolder.status)} />
           {t(statusLabelKey(activeFolder.status))}
         </span>
-        <button className="button-primary button-compact" onClick={onOpenExport} type="button">
+        {hasProgress ? (
+          <span
+            className="folder-status"
+            style={{ minWidth: 120, justifyContent: 'flex-end' }}
+            aria-label="analysis-progress"
+          >
+            <span className="text-[11px] text-white/60">
+              {running
+                ? `分析中 ${progressLabel}`
+                : `已分析 ${progressLabel}`}
+            </span>
+          </span>
+        ) : null}
+        <button
+          className="button-primary button-compact"
+          disabled={analysisStarting || running}
+          onClick={onStartAnalysis}
+          type="button"
+        >
+          <Sparkles className="h-4 w-4" />
+          {running
+            ? `分析中… ${Math.round(ratio * 100)}%`
+            : analysisStarting
+              ? '启动中…'
+              : '开始分析'}
+        </button>
+        <button className="button-ghost button-compact" onClick={onOpenExport} type="button">
           <Download className="h-4 w-4" />
           {t('common.export')}
         </button>

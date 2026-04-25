@@ -20,20 +20,42 @@ export interface BackendHealth {
   }
 }
 
-// Dev/test fallback. 在 Electron 打包环境里这个值会被 preload 覆盖；
-// 在 vite dev server（含 Playwright E2E）下作为直连本地后端的默认值。
+// Dev/test fallback：vite dev server 直连本地 8000；Electron 打包模式由 preload 提供动态端口
 const FALLBACK_BACKEND_URL = 'http://127.0.0.1:8000'
 
+// 启动初值：有 Electron preload 时给 null（等 IPC 提供真端口，避免立刻 fetch 8000 失败），
+// 否则用 fallback（vite dev / 单元测试不会无 query）
+const initialBackendUrl: string | null =
+  typeof window !== 'undefined' && window.plumelens ? null : FALLBACK_BACKEND_URL
+
 export function useBackendHealth() {
-  const [backendUrl, setBackendUrl] = useState<string | null>(FALLBACK_BACKEND_URL)
+  const [backendUrl, setBackendUrl] = useState<string | null>(initialBackendUrl)
 
   useEffect(() => {
     // In Electron, override with the dynamic port from the preload API
     if (typeof window !== 'undefined' && window.plumelens) {
-      window.plumelens.getBackendUrl().then((url) => {
-        if (url) setBackendUrl(url)
+      // 轮询 IPC：engine 启动初期可能返回 null，每 500ms 拉一次直到拿到 URL
+      const plumelens = window.plumelens
+      let cancelled = false
+      const poll = (): void => {
+        if (cancelled) return
+        plumelens.getBackendUrl().then((url) => {
+          if (cancelled) return
+          if (url) {
+            setBackendUrl(url)
+          } else {
+            setTimeout(poll, 500)
+          }
+        })
+      }
+      poll()
+      plumelens.onBackendReady((url) => {
+        cancelled = true
+        setBackendUrl(url)
       })
-      window.plumelens.onBackendReady((url) => setBackendUrl(url))
+      return () => {
+        cancelled = true
+      }
     }
   }, [])
 
