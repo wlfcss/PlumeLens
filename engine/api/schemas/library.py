@@ -48,6 +48,45 @@ class LibrarySummary(BaseModel):
     last_analyzed_at: str | None
 
 
+class BBox(BaseModel):
+    """Bounding box in original image coordinates."""
+
+    x1: float
+    y1: float
+    x2: float
+    y2: float
+    confidence: float
+
+
+class Keypoint(BaseModel):
+    """Pose keypoint (in original image space)."""
+
+    x: float
+    y: float
+    confidence: float
+
+
+class PoseDetail(BaseModel):
+    """5 pose keypoints + visibility booleans."""
+
+    bill: Keypoint
+    crown: Keypoint
+    nape: Keypoint
+    left_eye: Keypoint
+    right_eye: Keypoint
+    head_visible: bool
+    eye_visible: bool
+
+
+class BestDetection(BaseModel):
+    """Top bird in the photo: bbox + pose + species."""
+
+    bbox: BBox
+    pose: PoseDetail | None = None
+    quality: dict | None = None  # clipiqa/hyperiqa/combined
+    species_candidates: list[dict] = []
+
+
 class PhotoRow(BaseModel):
     """A single photo row (for library detail / list pages)."""
 
@@ -73,6 +112,10 @@ class PhotoRow(BaseModel):
     species: str | None = None
     # User layer：当前用户决定（默认 unreviewed）
     decision: str = "unreviewed"
+    # 完整 EXIF（whitelist 字段：相机/镜头/快门/光圈/ISO/焦距/...）
+    exif: dict | None = None
+    # 最佳鸟的检测细节（深度复核要画 bbox / 关键点）
+    best_detection: BestDetection | None = None
 
 
 class LibraryDetail(BaseModel):

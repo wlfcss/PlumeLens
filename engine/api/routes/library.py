@@ -202,6 +202,7 @@ async def library_detail(request: Request, library_id: str) -> LibraryDetail:
         "p.thumb_grid, p.thumb_preview, p.created_at, p.file_mtime, p.exif_json, "
         "p.scene_id, "
         "ar.pipeline_version, ar.grade, ar.quality_score, ar.bird_count, ar.species, "
+        "ar.result_json, "
         "pd.decision "
         "FROM photos p "
         "LEFT JOIN analysis_results ar ON ar.photo_id = p.id AND ar.is_active = 1 "
@@ -212,16 +213,25 @@ async def library_detail(request: Request, library_id: str) -> LibraryDetail:
     ) as cur:
         rows = await cur.fetchall()
 
+    import json as _json
+
+    def _parse_exif(raw: object) -> dict | None:
+        if not raw:
+            return None
+        try:
+            data = _json.loads(str(raw))
+            return data if isinstance(data, dict) else None
+        except Exception:
+            return None
+
     def _resolve_shot_at(row: object) -> str:
         """优先级：EXIF DateTimeOriginal > file_mtime > created_at."""
         try:
             exif = row["exif_json"]  # type: ignore[index]
             if exif:
-                import json
-                data = json.loads(str(exif))
+                data = _json.loads(str(exif))
                 dto = data.get("DateTimeOriginal")
                 if dto and isinstance(dto, str):
-                    # EXIF 格式 "2026:04:25 06:42:15" → ISO 8601
                     iso = dto.replace(":", "-", 2).replace(" ", "T")
                     return iso
         except Exception:
@@ -233,6 +243,51 @@ async def library_detail(request: Request, library_id: str) -> LibraryDetail:
         except Exception:
             pass
         return str(row["created_at"])  # type: ignore[index]
+
+    def _extract_best_detection(result_json: object) -> dict | None:
+        """从 analysis_results.result_json 提取 best 鸟的 bbox + pose + species。"""
+        if not result_json:
+            return None
+        try:
+            data = _json.loads(str(result_json))
+            best = data.get("best")
+            if not best:
+                return None
+            bbox_d = best.get("bbox") or {}
+            bbox = {
+                "x1": float(bbox_d.get("x1", 0)),
+                "y1": float(bbox_d.get("y1", 0)),
+                "x2": float(bbox_d.get("x2", 0)),
+                "y2": float(bbox_d.get("y2", 0)),
+                "confidence": float(bbox_d.get("confidence", 0)),
+            }
+            pose: dict | None = None
+            pose_d = best.get("pose")
+            if pose_d:
+                def _kp(name: str) -> dict | None:
+                    kp = pose_d.get(name)
+                    if not kp:
+                        return None
+                    return {
+                        "x": float(kp.get("x", 0)),
+                        "y": float(kp.get("y", 0)),
+                        "confidence": float(kp.get("confidence", 0)),
+                    }
+                kpts = {n: _kp(n) for n in ("bill", "crown", "nape", "left_eye", "right_eye")}
+                if all(kpts.values()):
+                    pose = {
+                        **kpts,
+                        "head_visible": bool(pose_d.get("head_visible", False)),
+                        "eye_visible": bool(pose_d.get("eye_visible", False)),
+                    }
+            return {
+                "bbox": bbox,
+                "pose": pose,
+                "quality": best.get("quality"),
+                "species_candidates": best.get("species_candidates", []),
+            }
+        except Exception:
+            return None
 
     photos = [
         PhotoRow(
@@ -263,6 +318,8 @@ async def library_detail(request: Request, library_id: str) -> LibraryDetail:
             ),
             species=(str(r["species"]) if r["species"] is not None else None),
             decision=(str(r["decision"]) if r["decision"] is not None else "unreviewed"),
+            exif=_parse_exif(r["exif_json"]),
+            best_detection=_extract_best_detection(r["result_json"]),
         )
         for r in rows
     ]

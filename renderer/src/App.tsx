@@ -1895,6 +1895,22 @@ function ReviewModal({
   t: ReturnType<typeof useTranslation>['t']
 }) {
   const { photo, group } = detail
+  const [showBbox, setShowBbox] = useState(true)
+  const [showPose, setShowPose] = useState(false)
+  // 对焦点 toggle 预留位（Canon AFInfo 解析 P2 阶段做）
+  const [showAfPoint] = useState(true)
+  void showAfPoint
+
+  // 计算图片实际渲染区域（letterbox 后），用于把原图坐标系的 bbox/pose 映射到 DOM 百分比
+  const imgW = photo.imageWidth ?? null
+  const imgH = photo.imageHeight ?? null
+  const aspect = imgW && imgH && imgW > 0 && imgH > 0 ? imgW / imgH : null
+
+  // bbox / pose 关键点已经在原图坐标系（pixels），渲染时转成百分比
+  const bbox = photo.bestBbox ?? null
+  const pose = photo.bestPose ?? null
+
+  const previewSrc = photo.thumbPreviewUrl ?? null
 
   return (
     <div className="overlay-backdrop">
@@ -1909,19 +1925,68 @@ function ReviewModal({
               <X className="h-4 w-4" />
             </IconButton>
           </div>
-          <div className="review-image" style={{ backgroundImage: photo.previewGradient }}>
-            {photo.boxes.map((box, index) => (
+
+          {/* 覆盖层 toggle 行 */}
+          <div className="review-toggles">
+            <label className="review-toggle">
+              <input
+                type="checkbox"
+                checked={showBbox}
+                onChange={(e) => setShowBbox(e.target.checked)}
+              />
+              <span>检测框</span>
+            </label>
+            <label className="review-toggle">
+              <input
+                type="checkbox"
+                checked={showPose}
+                onChange={(e) => setShowPose(e.target.checked)}
+              />
+              <span>姿态点</span>
+            </label>
+          </div>
+
+          {/* 图片 + 覆盖层（aspect-ratio 匹配原图，避免 bbox 错位） */}
+          <div
+            className="review-image"
+            style={{
+              backgroundImage: previewSrc
+                ? `url("${previewSrc}")`
+                : photo.previewGradient,
+              aspectRatio: aspect ? `${imgW} / ${imgH}` : '4 / 3',
+            }}
+          >
+            {showBbox && bbox && imgW && imgH ? (
               <span
                 className="detect-box"
-                key={`${photo.id}-box-${index + 1}`}
                 style={{
-                  left: `${box.x}%`,
-                  top: `${box.y}%`,
-                  width: `${box.w}%`,
-                  height: `${box.h}%`,
+                  left: `${(bbox.x1 / imgW) * 100}%`,
+                  top: `${(bbox.y1 / imgH) * 100}%`,
+                  width: `${((bbox.x2 - bbox.x1) / imgW) * 100}%`,
+                  height: `${((bbox.y2 - bbox.y1) / imgH) * 100}%`,
                 }}
               />
-            ))}
+            ) : null}
+            {showPose && pose && imgW && imgH
+              ? (['bill', 'crown', 'nape', 'left_eye', 'right_eye'] as const).map((key) => {
+                  const kp = pose[key]
+                  if (kp.confidence < 0.05) return null
+                  return (
+                    <span
+                      className={cn(
+                        'pose-point',
+                        (key === 'left_eye' || key === 'right_eye') && 'pose-point--eye',
+                      )}
+                      key={`${photo.id}-pose-${key}`}
+                      style={{
+                        left: `${(kp.x / imgW) * 100}%`,
+                        top: `${(kp.y / imgH) * 100}%`,
+                      }}
+                      title={`${key}  ${(kp.confidence * 100).toFixed(0)}%`}
+                    />
+                  )
+                })
+              : null}
           </div>
         </div>
 
@@ -1932,23 +1997,42 @@ function ReviewModal({
             <small>{photo.speciesName ?? t('selection.photo.noBird')}</small>
           </div>
           <div className="stat-stack">
-            <StatRow label={t('selection.metrics.semanticScore')} value={photo.semanticScore ? photo.semanticScore.toFixed(2) : '--'} />
-            <StatRow label={t('selection.metrics.technicalScore')} value={photo.technicalScore ? photo.technicalScore.toFixed(2) : '--'} />
-            <StatRow label={t('selection.metrics.poseScore')} value={photo.poseScore ? photo.poseScore.toFixed(2) : '--'} />
+            <StatRow
+              label={t('selection.metrics.semanticScore')}
+              value={photo.semanticScore !== null ? photo.semanticScore.toFixed(2) : '--'}
+            />
+            <StatRow
+              label={t('selection.metrics.technicalScore')}
+              value={photo.technicalScore !== null ? photo.technicalScore.toFixed(2) : '--'}
+            />
+            <StatRow
+              label="头部可见"
+              value={pose ? (pose.head_visible ? '是' : '否') : '--'}
+            />
+            <StatRow
+              label="眼睛可见"
+              value={pose ? (pose.eye_visible ? '是' : '否') : '--'}
+            />
             <StatRow label={t('selection.metrics.group')} value={group?.title ?? '--'} />
           </div>
-          <div>
-            <SectionLabel label={t('selection.review.species')} />
-            <div className="species-candidates">
-              {photo.speciesCandidates.map((candidate) => (
-                <StatRow
-                  key={`${photo.id}-${candidate.name}`}
-                  label={candidate.name}
-                  value={`${Math.round(candidate.confidence * 100)}%`}
-                />
-              ))}
+
+          {photo.speciesCandidates.length > 0 ? (
+            <div>
+              <SectionLabel label={t('selection.review.species')} />
+              <div className="species-candidates">
+                {photo.speciesCandidates.map((candidate) => (
+                  <StatRow
+                    key={`${photo.id}-${candidate.name}`}
+                    label={candidate.name}
+                    value={`${Math.round(candidate.confidence * 100)}%`}
+                  />
+                ))}
+              </div>
             </div>
-          </div>
+          ) : null}
+
+          <ExifPanel exif={photo.exif} />
+
           <div>
             <SectionLabel label={t('selection.review.why')} />
             <p className="review-reason">{t(photoReviewReason(photo))}</p>
@@ -1973,6 +2057,63 @@ function ReviewModal({
             </button>
           </div>
         </aside>
+      </div>
+    </div>
+  )
+}
+
+/** EXIF 信息面板（相机 / 镜头 / 曝光参数） */
+function ExifPanel({
+  exif,
+}: {
+  exif?: Record<string, string | number | null> | null
+}) {
+  if (!exif) return null
+
+  // 格式化辅助
+  const fmt = (key: string): string => {
+    const v = exif[key]
+    if (v === null || v === undefined || v === '') return '--'
+    return String(v)
+  }
+  const fmtShutter = (): string => {
+    const t = exif['ExposureTime']
+    if (typeof t !== 'number' || t <= 0) return '--'
+    if (t >= 1) return `${t.toFixed(1)} s`
+    return `1/${Math.round(1 / t)} s`
+  }
+  const fmtAperture = (): string => {
+    const f = exif['FNumber']
+    if (typeof f !== 'number' || f <= 0) return '--'
+    return `f/${f.toFixed(1)}`
+  }
+  const fmtFocal = (): string => {
+    const f = exif['FocalLength']
+    if (typeof f !== 'number' || f <= 0) return '--'
+    return `${Math.round(f)} mm`
+  }
+  const fmtIso = (): string => {
+    const v = exif['ISOSpeedRatings']
+    if (v === null || v === undefined) return '--'
+    if (typeof v === 'number') return `ISO ${v}`
+    return `ISO ${v}`
+  }
+
+  const camera = `${fmt('Make')} ${fmt('Model')}`.trim() || '--'
+  const lens = fmt('LensModel')
+  const dt = fmt('DateTimeOriginal') !== '--' ? fmt('DateTimeOriginal') : fmt('DateTime')
+
+  return (
+    <div>
+      <SectionLabel label="EXIF" />
+      <div className="stat-stack">
+        <StatRow label="相机" value={camera} />
+        <StatRow label="镜头" value={lens} />
+        <StatRow label="拍摄时间" value={dt} />
+        <StatRow label="快门" value={fmtShutter()} />
+        <StatRow label="光圈" value={fmtAperture()} />
+        <StatRow label="ISO" value={fmtIso()} />
+        <StatRow label="焦距" value={fmtFocal()} />
       </div>
     </div>
   )

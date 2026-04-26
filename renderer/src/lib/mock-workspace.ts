@@ -80,6 +80,21 @@ export interface PhotoRecord {
   caption: string
   previewGradient: string
   boxes: Array<{ x: number; y: number; w: number; h: number }>
+  // 深度复核字段（mock 不填，真后端在 backend-adapter 注入）
+  imageWidth?: number | null
+  imageHeight?: number | null
+  thumbPreviewUrl?: string | null
+  exif?: Record<string, string | number | null> | null
+  bestBbox?: { x1: number; y1: number; x2: number; y2: number; confidence: number } | null
+  bestPose?: {
+    bill: { x: number; y: number; confidence: number }
+    crown: { x: number; y: number; confidence: number }
+    nape: { x: number; y: number; confidence: number }
+    left_eye: { x: number; y: number; confidence: number }
+    right_eye: { x: number; y: number; confidence: number }
+    head_visible: boolean
+    eye_visible: boolean
+  } | null
 }
 
 export interface SpeciesRecord {

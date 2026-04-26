@@ -100,6 +100,43 @@ export interface LibrarySummary {
   last_analyzed_at: string | null
 }
 
+export interface BBox {
+  x1: number
+  y1: number
+  x2: number
+  y2: number
+  confidence: number
+}
+
+export interface Keypoint {
+  x: number
+  y: number
+  confidence: number
+}
+
+export interface PoseDetail {
+  bill: Keypoint
+  crown: Keypoint
+  nape: Keypoint
+  left_eye: Keypoint
+  right_eye: Keypoint
+  head_visible: boolean
+  eye_visible: boolean
+}
+
+export interface SpeciesCandidate {
+  canonical_sci?: string
+  canonical_zh?: string
+  confidence?: number
+}
+
+export interface BestDetection {
+  bbox: BBox
+  pose: PoseDetail | null
+  quality: { clipiqa: number; hyperiqa: number; combined: number } | null
+  species_candidates: SpeciesCandidate[]
+}
+
 export interface PhotoRow {
   id: string
   file_path: string
@@ -111,13 +148,15 @@ export interface PhotoRow {
   thumb_preview: string | null
   created_at: string
   shot_at: string  // ISO8601 拍摄时间（EXIF DateTimeOriginal 优先）
-  scene_id: number | null  // 场景分组 id（同 library 内部连续整数），null 表示尚未跑过
+  scene_id: number | null  // 场景分组 id
   pipeline_version: string | null
   grade: string | null
   quality_score: number | null
   bird_count: number | null
   species: string | null
-  decision: string  // 'unreviewed' | 'selected' | 'maybe' | 'rejected' (默认 unreviewed)
+  decision: string  // 'unreviewed' | 'selected' | 'maybe' | 'rejected'
+  exif: Record<string, string | number | null> | null  // EXIF whitelist 字段
+  best_detection: BestDetection | null  // 深度复核需要画 bbox / 关键点
 }
 
 export interface LibraryDetail {

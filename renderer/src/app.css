@@ -1717,9 +1717,80 @@ button:disabled {
 
 .detect-box {
   position: absolute;
-  border: 1px solid rgba(255, 255, 255, 0.75);
+  border: 1px solid rgba(255, 255, 255, 0.85);
   border-radius: var(--pl-radius-sm);
-  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.32);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.5);
+  pointer-events: none;
+}
+
+/* 姿态关键点：Nothing UI 风格 — 极简白点 + 暗色边 */
+.pose-point {
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  margin-left: -5px;
+  margin-top: -5px;
+  border: 1px solid rgba(0, 0, 0, 0.6);
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.92);
+  pointer-events: auto;
+  cursor: help;
+}
+
+.pose-point--eye {
+  background: rgba(110, 230, 178, 0.95); /* 眼睛点用绿色突出 */
+  border-color: rgba(0, 0, 0, 0.75);
+}
+
+/* 复核工具栏：toggle 行（Nothing UI 极简 checkbox） */
+.review-toggles {
+  display: flex;
+  gap: 16px;
+  margin-top: 18px;
+  padding: 0;
+}
+
+.review-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--pl-font-mono, 'Space Mono', monospace);
+  font-size: 11px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--pl-fg-1);
+  cursor: pointer;
+  user-select: none;
+}
+
+.review-toggle input[type='checkbox'] {
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  border: 1px solid var(--pl-border-1);
+  border-radius: 2px;
+  background: transparent;
+  cursor: pointer;
+  position: relative;
+  transition: border-color var(--pl-motion-base) var(--pl-ease);
+}
+
+.review-toggle input[type='checkbox']:checked {
+  background: var(--pl-fg-0);
+  border-color: var(--pl-fg-0);
+}
+
+.review-toggle input[type='checkbox']:checked::after {
+  content: '';
+  position: absolute;
+  inset: 2px;
+  background: var(--pl-bg-1);
+  clip-path: polygon(15% 50%, 38% 75%, 90% 20%, 80% 12%, 38% 60%, 22% 42%);
+}
+
+.review-toggle:hover {
+  color: var(--pl-fg-0);
 }
 
 .compare-panel {

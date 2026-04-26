@@ -101,20 +101,37 @@ def _probe_image_meta(path: Path) -> dict[str, Any]:
 
 
 def _extract_exif(img: Image.Image) -> dict[str, Any]:
-    """Extract whitelisted EXIF tags from a PIL image."""
+    """Extract whitelisted EXIF tags from a PIL image.
+
+    Camera-specific tags (ExposureTime/FNumber/ISO/LensModel/FocalLength) 在
+    ExifIFD（0x8769）子目录里，不在 IFD0。必须 merge 两个 IFD 才能取全。
+    """
     try:
         exif = img.getexif()
     except Exception:
         return {}
     if not exif:
         return {}
+
     tag_map = ExifTags.TAGS
     out: dict[str, Any] = {}
+
+    # IFD0：基础元数据（Make/Model/Orientation/DateTime/GPSInfo）
     for tag_id, value in exif.items():
         tag_name = tag_map.get(tag_id, str(tag_id))
-        if tag_name not in _EXIF_WHITELIST:
-            continue
-        out[tag_name] = _jsonify(value)
+        if tag_name in _EXIF_WHITELIST:
+            out[tag_name] = _jsonify(value)
+
+    # ExifIFD：相机参数（ExposureTime/FNumber/ISO/LensModel/FocalLength/...）
+    try:
+        exif_ifd = exif.get_ifd(ExifTags.IFD.Exif)
+        for tag_id, value in exif_ifd.items():
+            tag_name = tag_map.get(tag_id, str(tag_id))
+            if tag_name in _EXIF_WHITELIST:
+                out[tag_name] = _jsonify(value)
+    except Exception:
+        pass  # ExifIFD 不存在或解析失败 → 忽略，IFD0 数据已足够
+
     return out
 
 

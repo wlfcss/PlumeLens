@@ -284,8 +284,32 @@ export function buildPhotoRecordFromRow(
       ? `${row.species ?? '未识别物种'} · ${grade} · 分数 ${(row.quality_score ?? 0).toFixed(2)}`
       : '等待分析',
     previewGradient: buildPreviewBg(row.thumb_grid, row.id),
-    boxes: [], // 后端 PhotoRow 暂未返回 detections，待扩展
+    boxes: bboxToPercentBoxes(row),
+    imageWidth: row.width,
+    imageHeight: row.height,
+    thumbPreviewUrl: thumbnailUrl(row.thumb_preview, 'preview'),
+    exif: row.exif,
+    bestBbox: row.best_detection?.bbox ?? null,
+    bestPose: row.best_detection?.pose ?? null,
   }
+}
+
+/** 把 best_detection.bbox（原图坐标）转成相对百分比 bbox（review modal 渲染用）。 */
+function bboxToPercentBoxes(
+  row: PhotoRow,
+): Array<{ x: number; y: number; w: number; h: number }> {
+  const bbox = row.best_detection?.bbox
+  const W = row.width
+  const H = row.height
+  if (!bbox || !W || !H || W === 0 || H === 0) return []
+  return [
+    {
+      x: (bbox.x1 / W) * 100,
+      y: (bbox.y1 / H) * 100,
+      w: ((bbox.x2 - bbox.x1) / W) * 100,
+      h: ((bbox.y2 - bbox.y1) / H) * 100,
+    },
+  ]
 }
 
 // ---------- 整合：把单库 detail 转 photos/groups ----------
