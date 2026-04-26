@@ -10,6 +10,27 @@ interface DecisionRecord {
   decision: 'unreviewed' | 'selected' | 'maybe' | 'rejected'
 }
 
+const TEST_LIB = {
+  id: 'lib-test',
+  display_name: '测试库',
+  parent_path: '/tmp',
+  root_path: '/tmp/lib-test',
+  status: 'ready',
+  total_count: 4,
+  analyzed_count: 4,
+  recursive: true,
+  last_opened_at: '2026-04-23T07:00:00+00:00',
+  last_scanned_at: '2026-04-23T07:00:00+00:00',
+  last_analyzed_at: '2026-04-23T07:00:00+00:00',
+}
+
+const TEST_PHOTOS = [
+  { id: 'p1', file_name: 'IMG_0001.JPG', species: '须浮鸥', grade: 'select', score: 0.91 },
+  { id: 'p2', file_name: 'IMG_0002.JPG', species: '翠鸟', grade: 'usable', score: 0.72 },
+  { id: 'p3', file_name: 'IMG_0003.JPG', species: '池鹭', grade: 'record', score: 0.45 },
+  { id: 'p4', file_name: 'IMG_0004.JPG', species: '白鹭', grade: 'reject', score: 0.20 },
+]
+
 async function mockBackend(page: Page): Promise<void> {
   await page.route('**/health', (route: Route) =>
     route.fulfill({
@@ -29,13 +50,43 @@ async function mockBackend(page: Page): Promise<void> {
       }),
     }),
   )
-  await page.route('**/library', (route: Route) =>
+  await page.route('**/library', (route: Route) => {
+    if (route.request().method() === 'GET') {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify([TEST_LIB]),
+      })
+    } else {
+      route.fallback()
+    }
+  })
+  await page.route('**/library/lib-test', (route: Route) => {
+    const photos = TEST_PHOTOS.map((p, idx) => ({
+      id: p.id,
+      file_path: `/tmp/lib-test/${p.file_name}`,
+      file_name: p.file_name,
+      format: 'jpg',
+      width: 4000,
+      height: 3000,
+      thumb_grid: null,
+      thumb_preview: null,
+      created_at: `2026-04-23T07:0${idx}:00+00:00`,
+      shot_at: `2026-04-23T07:0${idx}:00+00:00`,
+      scene_id: idx,
+      pipeline_version: 'v1-mock',
+      grade: p.grade,
+      quality_score: p.score,
+      bird_count: 1,
+      species: p.species,
+      decision: 'unreviewed',
+    }))
     route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify([]),
-    }),
-  )
+      body: JSON.stringify({ library: TEST_LIB, photos }),
+    })
+  })
   // /decisions 端点：内存里记录被 PUT 的 decision
   const decisionStore: DecisionRecord[] = []
   await page.route('**/decisions/photo/**', async (route: Route) => {

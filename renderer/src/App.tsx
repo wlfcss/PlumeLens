@@ -56,7 +56,7 @@ import type {
   SpeciesRecord,
   WorkspaceSnapshot,
 } from '@/lib/mock-workspace'
-import { createImportedFolder, createInitialWorkspace } from '@/lib/mock-workspace'
+import { createImportedFolder } from '@/lib/mock-workspace'
 import { cn } from '@/lib/utils'
 import { useShallow, useUIStore, type QuickFilter, type ViewMode } from '@/stores/ui-store'
 
@@ -367,7 +367,14 @@ function folderHasActiveTasks(status: FolderStatus): boolean {
 export default function App() {
   const { t } = useTranslation()
   const { data: backendData, isReady, isError } = useBackendHealth()
-  const [workspace, setWorkspace] = useState<WorkspaceSnapshot>(() => createInitialWorkspace())
+  // 起手用空 workspace，避免 useLibraries 还没 fetch 完时闪现 mock 数据。
+  // useLibraries effect 拿到真数据后会注入；fetch 失败的 fallback 在 handleChooseFolder 里。
+  const [workspace, setWorkspace] = useState<WorkspaceSnapshot>(() => ({
+    folders: [],
+    groups: [],
+    photos: [],
+    species: [],
+  }))
 
   const {
     route,
@@ -510,8 +517,9 @@ export default function App() {
   // 同时**清空 mock photos/groups/species**（避免 archive 页 / 物种墙混入"池鹭/翠鸟"等假数据）。
   // useLibraryDetail 后续会按需注入每个 folder 的真 photos。
   useEffect(() => {
+    // 后端列表 fetch 完成（哪怕空数组）就用真数据替换。空数组也要清掉 mock seeds，
+    // 否则全新安装时"最近文件夹"会显示崇明东滩/南汇嘴这种假数据。
     if (!realLibraries) return
-    if (realLibraries.length === 0) return
     const realFolderIds = new Set(realLibraries.map((l) => l.id))
     setWorkspace((current) => ({
       folders: realLibraries.map((lib) => ({

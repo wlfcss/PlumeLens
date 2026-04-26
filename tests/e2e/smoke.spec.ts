@@ -23,7 +23,29 @@ interface MockState {
   }>
 }
 
-async function mockBackend(page: Page, state: MockState = { libraries: [] }): Promise<void> {
+// 默认 mock：1 个测试 library + 4 张 photos（让前端 selection / archive 有真数据可渲染）
+const DEFAULT_LIB = {
+  id: 'lib-test',
+  display_name: '测试库',
+  parent_path: '/tmp',
+  root_path: '/tmp/lib-test',
+  status: 'ready',
+  total_count: 4,
+  analyzed_count: 4,
+  recursive: true,
+  last_opened_at: '2026-04-23T07:00:00+00:00',
+  last_scanned_at: '2026-04-23T07:00:00+00:00',
+  last_analyzed_at: '2026-04-23T07:00:00+00:00',
+}
+
+const DEFAULT_PHOTOS = [
+  { id: 'p1', file_name: 'IMG_0001.JPG', species: '须浮鸥', latin: 'Chlidonias hybrida', grade: 'select', score: 0.91 },
+  { id: 'p2', file_name: 'IMG_0002.JPG', species: '翠鸟', latin: 'Alcedo atthis', grade: 'usable', score: 0.72 },
+  { id: 'p3', file_name: 'IMG_0003.JPG', species: '池鹭', latin: 'Ardeola bacchus', grade: 'record', score: 0.45 },
+  { id: 'p4', file_name: 'IMG_0004.JPG', species: '白鹭', latin: 'Egretta garzetta', grade: 'reject', score: 0.20 },
+]
+
+async function mockBackend(page: Page, state: MockState = { libraries: [DEFAULT_LIB] }): Promise<void> {
   await page.route('**/health', (route: Route) =>
     route.fulfill({
       status: 200,
@@ -50,11 +72,52 @@ async function mockBackend(page: Page, state: MockState = { libraries: [] }): Pr
     }),
   )
 
-  await page.route('**/library', (route: Route) =>
+  await page.route('**/library', (route: Route) => {
+    if (route.request().method() === 'GET') {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(state.libraries),
+      })
+    } else {
+      route.fallback()
+    }
+  })
+
+  // /library/{id} detail：包含 4 张测试 photos
+  await page.route('**/library/lib-test', (route: Route) => {
+    const photos = DEFAULT_PHOTOS.map((p, idx) => ({
+      id: p.id,
+      file_path: `/tmp/lib-test/${p.file_name}`,
+      file_name: p.file_name,
+      format: 'jpg',
+      width: 4000,
+      height: 3000,
+      thumb_grid: null,
+      thumb_preview: null,
+      created_at: `2026-04-23T07:0${idx}:00+00:00`,
+      shot_at: `2026-04-23T07:0${idx}:00+00:00`,
+      scene_id: idx,
+      pipeline_version: 'v1-mocktest',
+      grade: p.grade,
+      quality_score: p.score,
+      bird_count: 1,
+      species: p.species,
+      decision: 'unreviewed',
+    }))
     route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify(state.libraries),
+      body: JSON.stringify({ library: state.libraries[0] ?? DEFAULT_LIB, photos }),
+    })
+  })
+
+  // 其他路由（decisions、analysis 等）默认 200 空响应
+  await page.route('**/decisions/**', (route: Route) =>
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ decision: 'unreviewed' }),
     }),
   )
 }
