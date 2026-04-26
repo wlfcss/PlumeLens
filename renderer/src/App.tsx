@@ -21,6 +21,7 @@ import {
   useDeferredValue,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from 'react'
@@ -35,7 +36,7 @@ import {
   useLibraries,
   useLibraryDetail,
 } from '@/hooks/use-library'
-import { buildFragmentFromDetail } from '@/lib/backend-adapter'
+import { buildFragmentFromDetail, computeIqaCropBox } from '@/lib/backend-adapter'
 import type { AnalysisProgressEvent, DecisionValue } from '@/lib/api-client'
 
 type AnalysisProgressEventLite = AnalysisProgressEvent
@@ -1909,9 +1910,6 @@ function ReviewModal({
   const { photo, group } = detail
   const [showBbox, setShowBbox] = useState(true)
   const [showPose, setShowPose] = useState(false)
-  // 对焦点 toggle 预留位（Canon AFInfo 解析 P2 阶段做）
-  const [showAfPoint] = useState(true)
-  void showAfPoint
 
   // 计算图片实际渲染区域（letterbox 后），用于把原图坐标系的 bbox/pose 映射到 DOM 百分比
   const imgW = photo.imageWidth ?? null
@@ -1923,6 +1921,12 @@ function ReviewModal({
   const pose = photo.bestPose ?? null
 
   const previewSrc = photo.thumbPreviewUrl ?? null
+
+  // IQA 裁切框（与后端 expand_for_iqa 一致：2.5× + 比例约束 + cap + shift）
+  const iqaCrop = useMemo(() => {
+    if (!bbox || !imgW || !imgH) return null
+    return computeIqaCropBox(imgW, imgH, bbox)
+  }, [bbox, imgW, imgH])
 
   return (
     <div className="overlay-backdrop">
@@ -1958,86 +1962,83 @@ function ReviewModal({
             </label>
           </div>
 
-          {/* 图片 + 覆盖层（aspect-ratio 匹配原图，避免 bbox 错位） */}
-          <div
-            className="review-image"
-            style={{
-              backgroundImage: previewSrc
-                ? `url("${previewSrc}")`
-                : photo.previewGradient,
-              aspectRatio: aspect ? `${imgW} / ${imgH}` : '4 / 3',
-            }}
-          >
-            {showBbox && bbox && imgW && imgH ? (
-              <span
-                className="detect-box"
-                style={{
-                  left: `${(bbox.x1 / imgW) * 100}%`,
-                  top: `${(bbox.y1 / imgH) * 100}%`,
-                  width: `${((bbox.x2 - bbox.x1) / imgW) * 100}%`,
-                  height: `${((bbox.y2 - bbox.y1) / imgH) * 100}%`,
-                }}
-              />
-            ) : null}
-            {showPose && pose && imgW && imgH
-              ? (['bill', 'crown', 'nape', 'left_eye', 'right_eye'] as const).map((key) => {
-                  const kp = pose[key]
-                  if (kp.confidence < 0.05) return null
-                  return (
-                    <span
-                      className={cn(
-                        'pose-point',
-                        (key === 'left_eye' || key === 'right_eye') && 'pose-point--eye',
-                      )}
-                      key={`${photo.id}-pose-${key}`}
-                      style={{
-                        left: `${(kp.x / imgW) * 100}%`,
-                        top: `${(kp.y / imgH) * 100}%`,
-                      }}
-                      title={`${key}  ${(kp.confidence * 100).toFixed(0)}%`}
-                    />
-                  )
-                })
-              : null}
+          {/* 双图布局：左原图 (loupe) + 右 IQA 裁切 */}
+          <div className="review-stage__images">
+            <ReviewImageStage
+              label="原图"
+              hint="按住放大 · 拖动平移"
+              previewSrc={previewSrc}
+              fallbackGradient={photo.previewGradient}
+              aspect={aspect}
+              imgW={imgW}
+              imgH={imgH}
+              bbox={showBbox ? bbox : null}
+              pose={showPose ? pose : null}
+              photoId={photo.id}
+              loupeEnabled
+              cropRect={null}
+            />
+            <ReviewImageStage
+              label={`IQA 裁切 · 2.5×`}
+              hint={iqaCrop ? '画质评分依据' : '需先识别'}
+              previewSrc={previewSrc}
+              fallbackGradient={photo.previewGradient}
+              aspect={aspect}
+              imgW={imgW}
+              imgH={imgH}
+              bbox={showBbox ? bbox : null}
+              pose={showPose ? pose : null}
+              photoId={photo.id}
+              loupeEnabled={false}
+              cropRect={iqaCrop}
+            />
           </div>
         </div>
 
-        <aside className="review-detail selection-scroll">
-          <SectionLabel label={t('selection.review.scoreBreakdown')} />
-          <div className="score-block score-block--large">
-            <strong>{photo.finalScore !== null ? photo.finalScore.toFixed(2) : '--'}</strong>
-            <small>{photo.speciesName ?? t('selection.photo.noBird')}</small>
-          </div>
-          <div className="stat-stack">
-            <StatRow
-              label={t('selection.metrics.semanticScore')}
+        <aside className="review-detail review-detail--compact selection-scroll">
+          {/* 顶部：分数 + 物种 + 分级 */}
+          <ScoreHeader photo={photo} t={t} />
+
+          {/* 关键指标紧凑网格 */}
+          <div className="review-stats-grid">
+            <CompactStat
+              label="语义"
               value={photo.semanticScore !== null ? photo.semanticScore.toFixed(2) : '--'}
             />
-            <StatRow
-              label={t('selection.metrics.technicalScore')}
+            <CompactStat
+              label="技术"
               value={photo.technicalScore !== null ? photo.technicalScore.toFixed(2) : '--'}
             />
-            <StatRow
-              label="头部可见"
-              value={pose ? (pose.head_visible ? '是' : '否') : '--'}
+            <CompactStat
+              label="头"
+              value={pose ? (pose.head_visible ? '✓' : '✗') : '--'}
+              tone={pose ? (pose.head_visible ? 'ok' : 'warn') : 'muted'}
             />
-            <StatRow
-              label="眼睛可见"
-              value={pose ? (pose.eye_visible ? '是' : '否') : '--'}
+            <CompactStat
+              label="眼"
+              value={pose ? (pose.eye_visible ? '✓' : '✗') : '--'}
+              tone={pose ? (pose.eye_visible ? 'ok' : 'warn') : 'muted'}
             />
-            <StatRow label={t('selection.metrics.group')} value={group?.title ?? '--'} />
+            <CompactStat label="鸟数" value={String(photo.birdCount ?? 0)} />
+            <CompactStat
+              label="置信"
+              value={bbox ? `${Math.round((bbox.confidence ?? 0) * 100)}%` : '--'}
+            />
           </div>
+
+          <CompactKV label="场景" value={group?.title ?? '--'} />
 
           {photo.speciesCandidates.length > 0 ? (
             <div>
               <SectionLabel label={t('selection.review.species')} />
-              <div className="species-candidates">
-                {photo.speciesCandidates.map((candidate) => (
-                  <StatRow
-                    key={`${photo.id}-${candidate.name}`}
-                    label={candidate.name}
-                    value={`${Math.round(candidate.confidence * 100)}%`}
-                  />
+              <div className="species-candidates species-candidates--compact">
+                {photo.speciesCandidates.slice(0, 5).map((candidate) => (
+                  <div className="species-row" key={`${photo.id}-${candidate.name}`}>
+                    <span className="species-row__name">{candidate.name}</span>
+                    <span className="species-row__pct">
+                      {Math.round(candidate.confidence * 100)}%
+                    </span>
+                  </div>
                 ))}
               </div>
             </div>
@@ -2045,31 +2046,357 @@ function ReviewModal({
 
           <ExifPanel exif={photo.exif} />
 
-          <div>
-            <SectionLabel label={t('selection.review.why')} />
-            <p className="review-reason">{t(photoReviewReason(photo))}</p>
-          </div>
+          <p className="review-reason">{t(photoReviewReason(photo))}</p>
           <TagCluster photo={photo} t={t} />
-          <div className="inspector-actions">
-            <button className="button-primary" onClick={() => onSetDecision(photo.id, 'selected')} type="button">
+
+          <div className="inspector-actions inspector-actions--compact">
+            <button
+              className="button-primary"
+              onClick={() => onSetDecision(photo.id, 'selected')}
+              type="button"
+            >
               <Check className="h-4 w-4" />
               {t('selection.actions.select')}
             </button>
-            <button className="button-ghost" onClick={() => onSetDecision(photo.id, 'maybe')} type="button">
+            <button
+              className="button-ghost"
+              onClick={() => onSetDecision(photo.id, 'maybe')}
+              type="button"
+            >
               <Clock3 className="h-4 w-4" />
               {t('selection.actions.maybe')}
             </button>
-            <button className="button-danger" onClick={() => onSetDecision(photo.id, 'rejected')} type="button">
+            <button
+              className="button-danger"
+              onClick={() => onSetDecision(photo.id, 'rejected')}
+              type="button"
+            >
               <X className="h-4 w-4" />
               {t('selection.actions.reject')}
             </button>
-            <button className="button-ghost" onClick={() => onAddToCompare(photo.id)} type="button">
+            <button
+              className="button-ghost"
+              onClick={() => onAddToCompare(photo.id)}
+              type="button"
+            >
               <Waypoints className="h-4 w-4" />
               {t('selection.actions.compare')}
             </button>
           </div>
         </aside>
       </div>
+    </div>
+  )
+}
+
+/**
+ * 单独的图片舞台组件：
+ * - cropRect 为 null → 显示完整原图（支持 loupe 按住放大）
+ * - cropRect 给定 → 用 background-position/size 缩放出该区域（IQA 裁切预览，不做 loupe）
+ *
+ * Loupe 交互：
+ *   mousedown 切到放大模式 → 跟随鼠标平移
+ *   mouseup / mouseleave 还原
+ *   放大倍数 = 2.5×（与 IQA expand 一致，方便对比）
+ */
+function ReviewImageStage({
+  label,
+  hint,
+  previewSrc,
+  fallbackGradient,
+  aspect,
+  imgW,
+  imgH,
+  bbox,
+  pose,
+  photoId,
+  loupeEnabled,
+  cropRect,
+}: {
+  label: string
+  hint: string
+  previewSrc: string | null
+  fallbackGradient: string
+  aspect: number | null
+  imgW: number | null
+  imgH: number | null
+  bbox: { x1: number; y1: number; x2: number; y2: number } | null
+  pose: PhotoRecord['bestPose']
+  photoId: string
+  loupeEnabled: boolean
+  cropRect: { x1: number; y1: number; x2: number; y2: number } | null
+}) {
+  const containerRef = useRef<HTMLDivElement | null>(null)
+  const [loupeActive, setLoupeActive] = useState(false)
+  const [loupePos, setLoupePos] = useState<{ xPct: number; yPct: number }>({
+    xPct: 50,
+    yPct: 50,
+  })
+  const LOUPE_SCALE = 2.5
+
+  const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!loupeEnabled || !previewSrc) return
+    e.preventDefault()
+    const rect = e.currentTarget.getBoundingClientRect()
+    const xPct = ((e.clientX - rect.left) / rect.width) * 100
+    const yPct = ((e.clientY - rect.top) / rect.height) * 100
+    setLoupePos({ xPct, yPct })
+    setLoupeActive(true)
+    e.currentTarget.setPointerCapture(e.pointerId)
+  }
+  const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!loupeActive) return
+    const rect = e.currentTarget.getBoundingClientRect()
+    const xPct = ((e.clientX - rect.left) / rect.width) * 100
+    const yPct = ((e.clientY - rect.top) / rect.height) * 100
+    setLoupePos({
+      xPct: Math.max(0, Math.min(100, xPct)),
+      yPct: Math.max(0, Math.min(100, yPct)),
+    })
+  }
+  const handlePointerEnd = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!loupeActive) return
+    setLoupeActive(false)
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+      e.currentTarget.releasePointerCapture(e.pointerId)
+    }
+  }
+
+  // 算 background：cropRect 给定就放大显示该区域；否则按 contain（普通预览）或 loupe
+  const cropStyle = useMemo<React.CSSProperties>(() => {
+    if (!previewSrc) return {}
+    if (cropRect && imgW && imgH) {
+      // 显示 cropRect 内容：把原图缩放，使 cropRect 充满容器
+      const cw = cropRect.x2 - cropRect.x1
+      const ch = cropRect.y2 - cropRect.y1
+      if (cw <= 0 || ch <= 0) return {}
+      const sizeX = (imgW / cw) * 100
+      const sizeY = (imgH / ch) * 100
+      // background-position 百分比：(crop 中心 / (原图 - crop)) * 100
+      const posX = imgW > cw ? ((cropRect.x1 + cw / 2 - cw / 2) / (imgW - cw)) * 100 : 50
+      const posY = imgH > ch ? ((cropRect.y1 + ch / 2 - ch / 2) / (imgH - ch)) * 100 : 50
+      return {
+        backgroundImage: `url("${previewSrc}")`,
+        backgroundPosition: `${posX}% ${posY}%`,
+        backgroundSize: `${sizeX}% ${sizeY}%`,
+        backgroundRepeat: 'no-repeat',
+      }
+    }
+    if (loupeActive) {
+      return {
+        backgroundImage: `url("${previewSrc}")`,
+        backgroundPosition: `${loupePos.xPct}% ${loupePos.yPct}%`,
+        backgroundSize: `${LOUPE_SCALE * 100}% ${LOUPE_SCALE * 100}%`,
+        backgroundRepeat: 'no-repeat',
+      }
+    }
+    return {
+      backgroundImage: `url("${previewSrc}")`,
+      backgroundPosition: 'center',
+      backgroundSize: 'cover',
+      backgroundRepeat: 'no-repeat',
+    }
+  }, [previewSrc, cropRect, imgW, imgH, loupeActive, loupePos.xPct, loupePos.yPct])
+
+  // 计算覆盖层在该 stage 上的相对百分比
+  // - 完整图模式：直接 bbox/pose / 原图尺寸
+  // - 裁切模式：先转换到 cropRect 局部坐标，再 / cropRect 尺寸
+  const renderOverlays = (): ReactNode => {
+    if (!imgW || !imgH) return null
+    const toLocalRect = (
+      x1: number,
+      y1: number,
+      x2: number,
+      y2: number,
+    ): { left: number; top: number; width: number; height: number } | null => {
+      if (cropRect) {
+        const cw = cropRect.x2 - cropRect.x1
+        const ch = cropRect.y2 - cropRect.y1
+        if (cw <= 0 || ch <= 0) return null
+        const left = ((x1 - cropRect.x1) / cw) * 100
+        const top = ((y1 - cropRect.y1) / ch) * 100
+        const width = ((x2 - x1) / cw) * 100
+        const height = ((y2 - y1) / ch) * 100
+        // crop 之外的覆盖层不画
+        if (left + width < 0 || left > 100 || top + height < 0 || top > 100) return null
+        return { left, top, width, height }
+      }
+      return {
+        left: (x1 / imgW) * 100,
+        top: (y1 / imgH) * 100,
+        width: ((x2 - x1) / imgW) * 100,
+        height: ((y2 - y1) / imgH) * 100,
+      }
+    }
+    const toLocalPoint = (
+      x: number,
+      y: number,
+    ): { left: number; top: number } | null => {
+      if (cropRect) {
+        const cw = cropRect.x2 - cropRect.x1
+        const ch = cropRect.y2 - cropRect.y1
+        if (cw <= 0 || ch <= 0) return null
+        const left = ((x - cropRect.x1) / cw) * 100
+        const top = ((y - cropRect.y1) / ch) * 100
+        if (left < -2 || left > 102 || top < -2 || top > 102) return null
+        return { left, top }
+      }
+      return { left: (x / imgW) * 100, top: (y / imgH) * 100 }
+    }
+
+    const overlays: ReactNode[] = []
+    // bbox（黄色高亮，IQA 裁切图上更显眼）
+    if (bbox) {
+      const r = toLocalRect(bbox.x1, bbox.y1, bbox.x2, bbox.y2)
+      if (r) {
+        overlays.push(
+          <span
+            className={cn(
+              'detect-box',
+              cropRect && 'detect-box--accent',
+            )}
+            key="bbox"
+            style={{
+              left: `${r.left}%`,
+              top: `${r.top}%`,
+              width: `${r.width}%`,
+              height: `${r.height}%`,
+            }}
+          />,
+        )
+      }
+    }
+    // pose 关键点
+    if (pose) {
+      const keys = ['bill', 'crown', 'nape', 'left_eye', 'right_eye'] as const
+      for (const key of keys) {
+        const kp = pose[key]
+        if (kp.confidence < 0.05) continue
+        const p = toLocalPoint(kp.x, kp.y)
+        if (!p) continue
+        overlays.push(
+          <span
+            className={cn(
+              'pose-point',
+              (key === 'left_eye' || key === 'right_eye') && 'pose-point--eye',
+            )}
+            key={`pose-${key}`}
+            style={{ left: `${p.left}%`, top: `${p.top}%` }}
+            title={`${key}  ${(kp.confidence * 100).toFixed(0)}%`}
+          />,
+        )
+      }
+    }
+    return overlays
+  }
+
+  // 容器的 aspect-ratio：原图模式用原图比例；裁切模式用裁切框比例（避免黑边）
+  const stageAspect = useMemo<string | undefined>(() => {
+    if (cropRect) {
+      const cw = cropRect.x2 - cropRect.x1
+      const ch = cropRect.y2 - cropRect.y1
+      if (cw > 0 && ch > 0) return `${cw} / ${ch}`
+    }
+    if (aspect && imgW && imgH) return `${imgW} / ${imgH}`
+    return '4 / 3'
+  }, [cropRect, aspect, imgW, imgH])
+
+  return (
+    <div className="review-stage__pane">
+      <div className="review-stage__head">
+        <span className="review-stage__label">{label}</span>
+        <span className="review-stage__hint">{hint}</span>
+      </div>
+      <div
+        ref={containerRef}
+        className={cn(
+          'review-image',
+          loupeEnabled && previewSrc && 'review-image--loupe',
+          loupeActive && 'review-image--loupe-active',
+        )}
+        style={{
+          ...cropStyle,
+          aspectRatio: stageAspect,
+          ...(previewSrc ? {} : { backgroundImage: fallbackGradient }),
+        }}
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerEnd}
+        onPointerCancel={handlePointerEnd}
+        onLostPointerCapture={() => setLoupeActive(false)}
+        data-photo-id={photoId}
+      >
+        {!loupeActive ? renderOverlays() : null}
+      </div>
+    </div>
+  )
+}
+
+/** 顶部：大字号分数 + 分级胶囊 + 物种名（颜色按 grade 区分） */
+function ScoreHeader({
+  photo,
+  t,
+}: {
+  photo: PhotoRecord
+  t: ReturnType<typeof useTranslation>['t']
+}) {
+  void t
+  const score = photo.finalScore
+  return (
+    <div className={cn('score-header', `score-header--${photo.grade}`)}>
+      <div className="score-header__score">
+        <strong>{score !== null ? score.toFixed(2) : '--'}</strong>
+        <span className={cn('grade-pill', `grade-pill--${photo.grade}`)}>
+          {gradeLabel(photo.grade)}
+        </span>
+      </div>
+      <div className="score-header__species">
+        {photo.speciesName ?? '未识别物种'}
+        {photo.speciesLatinName ? (
+          <em>{photo.speciesLatinName}</em>
+        ) : null}
+      </div>
+    </div>
+  )
+}
+
+function gradeLabel(g: PhotoGrade): string {
+  switch (g) {
+    case 'select':
+      return '精选'
+    case 'usable':
+      return '可用'
+    case 'record':
+      return '记录'
+    case 'reject':
+      return '淘汰'
+  }
+}
+
+/** 紧凑指标格：1 行 label + value，颜色 tone */
+function CompactStat({
+  label,
+  value,
+  tone,
+}: {
+  label: string
+  value: string
+  tone?: 'ok' | 'warn' | 'muted'
+}) {
+  return (
+    <div className={cn('compact-stat', tone && `compact-stat--${tone}`)}>
+      <span className="compact-stat__label">{label}</span>
+      <span className="compact-stat__value">{value}</span>
+    </div>
+  )
+}
+
+/** 紧凑 key-value：单行，标签灰、值白 */
+function CompactKV({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="compact-kv">
+      <span className="compact-kv__label">{label}</span>
+      <span className="compact-kv__value">{value}</span>
     </div>
   )
 }
@@ -2116,16 +2443,32 @@ function ExifPanel({
   const dt = fmt('DateTimeOriginal') !== '--' ? fmt('DateTimeOriginal') : fmt('DateTime')
 
   return (
-    <div>
+    <div className="exif-panel">
       <SectionLabel label="EXIF" />
-      <div className="stat-stack">
-        <StatRow label="相机" value={camera} />
-        <StatRow label="镜头" value={lens} />
-        <StatRow label="拍摄时间" value={dt} />
-        <StatRow label="快门" value={fmtShutter()} />
-        <StatRow label="光圈" value={fmtAperture()} />
-        <StatRow label="ISO" value={fmtIso()} />
-        <StatRow label="焦距" value={fmtFocal()} />
+      {/* 曝光参数：4 列横排，重点突出 */}
+      <div className="exif-exposure">
+        <div className="exif-exposure__cell">
+          <span className="exif-exposure__label">快门</span>
+          <span className="exif-exposure__value">{fmtShutter()}</span>
+        </div>
+        <div className="exif-exposure__cell">
+          <span className="exif-exposure__label">光圈</span>
+          <span className="exif-exposure__value">{fmtAperture()}</span>
+        </div>
+        <div className="exif-exposure__cell">
+          <span className="exif-exposure__label">ISO</span>
+          <span className="exif-exposure__value">{fmtIso()}</span>
+        </div>
+        <div className="exif-exposure__cell">
+          <span className="exif-exposure__label">焦距</span>
+          <span className="exif-exposure__value">{fmtFocal()}</span>
+        </div>
+      </div>
+      {/* 机身/镜头/时间：紧凑单行 */}
+      <div className="exif-meta">
+        <CompactKV label="机身" value={camera} />
+        <CompactKV label="镜头" value={lens} />
+        <CompactKV label="时间" value={dt} />
       </div>
     </div>
   )

@@ -312,6 +312,63 @@ function bboxToPercentBoxes(
   ]
 }
 
+/**
+ * 复刻后端 `engine/pipeline/preprocess.py::expand_for_iqa` 的逻辑：
+ * 同比例放大 bbox（默认 2.5×）+ 纵横比限制 + cap 到原图 + shift 防越界。
+ * 用途：ReviewModal 右图 "IQA 裁切预览" 渲染。
+ */
+export function computeIqaCropBox(
+  imageW: number,
+  imageH: number,
+  bbox: { x1: number; y1: number; x2: number; y2: number },
+  expand = 2.5,
+  maxAspectRatio = 2.0,
+): { x1: number; y1: number; x2: number; y2: number } | null {
+  const bw = bbox.x2 - bbox.x1
+  const bh = bbox.y2 - bbox.y1
+  if (bw <= 0 || bh <= 0 || imageW <= 0 || imageH <= 0) return null
+
+  const cx = (bbox.x1 + bbox.x2) / 2
+  const cy = (bbox.y1 + bbox.y2) / 2
+
+  // 1) 同比例放大
+  let tw = bw * expand
+  let th = bh * expand
+
+  // 2) 纵横比限制
+  if (tw > th * maxAspectRatio) th = tw / maxAspectRatio
+  else if (th > tw * maxAspectRatio) tw = th / maxAspectRatio
+
+  // 3) cap 到原图
+  tw = Math.min(tw, imageW)
+  th = Math.min(th, imageH)
+
+  // 4) 中心对齐 + shift
+  let fx1 = cx - tw / 2
+  let fy1 = cy - th / 2
+  let fx2 = fx1 + tw
+  let fy2 = fy1 + th
+  if (fx1 < 0) {
+    fx2 -= fx1
+    fx1 = 0
+  }
+  if (fy1 < 0) {
+    fy2 -= fy1
+    fy1 = 0
+  }
+  if (fx2 > imageW) {
+    fx1 -= fx2 - imageW
+    fx2 = imageW
+  }
+  if (fy2 > imageH) {
+    fy1 -= fy2 - imageH
+    fy2 = imageH
+  }
+  fx1 = Math.max(0, fx1)
+  fy1 = Math.max(0, fy1)
+  return { x1: fx1, y1: fy1, x2: fx2, y2: fy2 }
+}
+
 // ---------- 整合：把单库 detail 转 photos/groups ----------
 
 export interface DetailFragment {

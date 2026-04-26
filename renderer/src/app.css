@@ -1677,9 +1677,9 @@ button:disabled {
 
 .review-panel {
   display: grid;
-  width: min(1180px, calc(100vw - 48px));
+  width: min(1440px, calc(100vw - 48px));
   max-height: calc(100vh - 72px);
-  grid-template-columns: minmax(0, 1fr) 330px;
+  grid-template-columns: minmax(0, 1fr) 360px;
 }
 
 .review-stage,
@@ -1717,10 +1717,16 @@ button:disabled {
 
 .detect-box {
   position: absolute;
-  border: 1px solid rgba(255, 255, 255, 0.85);
+  border: 1.5px solid rgba(255, 213, 66, 0.95); /* 默认改黄：原图上更显眼 */
   border-radius: var(--pl-radius-sm);
-  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.5);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.6), 0 0 8px rgba(255, 213, 66, 0.35);
   pointer-events: none;
+}
+
+/* 裁切图（IQA 预览）上的 bbox：放大后线更粗 + 更鲜艳 */
+.detect-box--accent {
+  border: 2px solid rgba(255, 200, 0, 1);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.7), 0 0 12px rgba(255, 200, 0, 0.55);
 }
 
 /* 姿态关键点：Nothing UI 风格 — 极简白点 + 暗色边 */
@@ -1791,6 +1797,327 @@ button:disabled {
 
 .review-toggle:hover {
   color: var(--pl-fg-0);
+}
+
+/* ============================================================
+   ReviewModal 双图布局：左原图 + 右 IQA 裁切预览
+   ============================================================ */
+.review-stage__images {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.review-stage__pane {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.review-stage__head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-family: var(--pl-font-mono, 'Space Mono', monospace);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.review-stage__label {
+  color: var(--pl-fg-0);
+  font-weight: 600;
+}
+
+.review-stage__hint {
+  color: var(--pl-fg-2, var(--pl-fg-1));
+  opacity: 0.65;
+}
+
+/* loupe（按住放大）交互态 */
+.review-image--loupe {
+  cursor: zoom-in;
+  user-select: none;
+  touch-action: none;
+}
+
+.review-image--loupe-active {
+  cursor: grabbing;
+  /* 关闭 transition，让平移即时跟随鼠标 */
+  transition: none !important;
+}
+
+/* ============================================================
+   ReviewModal 右侧紧凑 panel
+   ============================================================ */
+.review-detail--compact {
+  padding: 18px 20px;
+  gap: 14px;
+}
+
+/* 顶部分数 + 分级胶囊 + 物种 */
+.score-header {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 14px 16px;
+  border: 1px solid var(--pl-border-1);
+  border-radius: var(--pl-radius-md, 8px);
+  background: var(--pl-bg-2, rgba(255, 255, 255, 0.02));
+}
+
+.score-header__score {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.score-header__score strong {
+  font-family: 'Doto', var(--pl-font-display, 'Space Grotesk'), sans-serif;
+  font-size: 38px;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--pl-fg-0);
+  letter-spacing: -0.01em;
+}
+
+.score-header__species {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--pl-fg-1);
+}
+
+.score-header__species em {
+  font-style: italic;
+  font-size: 11px;
+  color: var(--pl-fg-2, var(--pl-fg-1));
+  opacity: 0.7;
+}
+
+/* grade-pill：四档分级胶囊 */
+.grade-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 10px;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  font-family: var(--pl-font-mono, 'Space Mono', monospace);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  font-weight: 600;
+}
+
+.grade-pill--select {
+  color: rgb(110, 230, 178); /* 绿 */
+  background: rgba(110, 230, 178, 0.08);
+}
+
+.grade-pill--usable {
+  color: rgb(120, 180, 255); /* 蓝 */
+  background: rgba(120, 180, 255, 0.08);
+}
+
+.grade-pill--record {
+  color: rgb(220, 200, 130); /* 黄 */
+  background: rgba(220, 200, 130, 0.08);
+}
+
+.grade-pill--reject {
+  color: rgb(220, 130, 130); /* 红 */
+  background: rgba(220, 130, 130, 0.08);
+}
+
+/* score-header 整体根据 grade 变色（左侧细条提示） */
+.score-header--select {
+  border-left: 3px solid rgb(110, 230, 178);
+}
+.score-header--usable {
+  border-left: 3px solid rgb(120, 180, 255);
+}
+.score-header--record {
+  border-left: 3px solid rgb(220, 200, 130);
+}
+.score-header--reject {
+  border-left: 3px solid rgb(220, 130, 130);
+}
+
+/* 关键指标紧凑网格：3 列 × 2 行 */
+.review-stats-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+}
+
+.compact-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  border: 1px solid var(--pl-border-0);
+  border-radius: var(--pl-radius-sm, 4px);
+  background: rgba(255, 255, 255, 0.015);
+}
+
+.compact-stat__label {
+  font-family: var(--pl-font-mono, 'Space Mono', monospace);
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--pl-fg-2, var(--pl-fg-1));
+  opacity: 0.65;
+}
+
+.compact-stat__value {
+  font-family: var(--pl-font-display, 'Space Grotesk'), sans-serif;
+  font-size: 15px;
+  font-weight: 500;
+  color: var(--pl-fg-0);
+  line-height: 1;
+}
+
+.compact-stat--ok .compact-stat__value {
+  color: rgb(110, 230, 178);
+}
+
+.compact-stat--warn .compact-stat__value {
+  color: rgb(220, 130, 130);
+}
+
+.compact-stat--muted .compact-stat__value {
+  color: var(--pl-fg-2, var(--pl-fg-1));
+  opacity: 0.5;
+}
+
+/* 单行 KV：左标签灰，右值白 */
+.compact-kv {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--pl-border-0);
+}
+
+.compact-kv:last-child {
+  border-bottom: none;
+}
+
+.compact-kv__label {
+  font-family: var(--pl-font-mono, 'Space Mono', monospace);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--pl-fg-2, var(--pl-fg-1));
+  opacity: 0.7;
+  flex-shrink: 0;
+}
+
+.compact-kv__value {
+  font-size: 12px;
+  color: var(--pl-fg-0);
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 物种候选：紧凑列表 */
+.species-candidates--compact {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.species-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  padding: 5px 8px;
+  border-radius: var(--pl-radius-sm, 4px);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.species-row__name {
+  font-size: 12px;
+  color: var(--pl-fg-0);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+
+.species-row__pct {
+  font-family: var(--pl-font-mono, 'Space Mono', monospace);
+  font-size: 11px;
+  font-weight: 600;
+  color: rgb(120, 180, 255);
+  margin-left: 8px;
+  flex-shrink: 0;
+}
+
+/* EXIF 紧凑版 */
+.exif-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.exif-exposure {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 6px;
+}
+
+.exif-exposure__cell {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 6px 4px;
+  border: 1px solid var(--pl-border-0);
+  border-radius: var(--pl-radius-sm, 4px);
+}
+
+.exif-exposure__label {
+  font-family: var(--pl-font-mono, 'Space Mono', monospace);
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--pl-fg-2, var(--pl-fg-1));
+  opacity: 0.6;
+}
+
+.exif-exposure__value {
+  font-family: var(--pl-font-mono, 'Space Mono', monospace);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--pl-fg-0);
+}
+
+.exif-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* 紧凑动作行 */
+.inspector-actions--compact {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.inspector-actions--compact > button {
+  font-size: 12px;
+  padding: 8px 10px;
 }
 
 .compare-panel {
