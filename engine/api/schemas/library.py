@@ -63,6 +63,8 @@ class PhotoRow(BaseModel):
     # 拍摄时间 ISO8601，优先级：EXIF DateTimeOriginal > file_mtime > created_at；
     # 用于前端按时间窗口分组（连拍/同场景照片聚合）
     shot_at: str
+    # 场景分组 id（同 library 内连续整数）；null 表示尚未跑过场景分组
+    scene_id: int | None = None
     # Analysis fields (nullable if analysis not yet run)
     pipeline_version: str | None = None
     grade: str | None = None

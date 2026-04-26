@@ -9,7 +9,7 @@ import structlog
 
 logger = structlog.stdlib.get_logger()
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # SQL 放在模块常量里便于审阅与测试
 _SCHEMA_STATEMENTS: tuple[str, ...] = (
@@ -48,6 +48,7 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
         exif_json TEXT,
         thumb_grid TEXT,
         thumb_preview TEXT,
+        scene_id INTEGER,                -- 场景分组 id（同 library 内部，从 0 起）
         created_at TEXT NOT NULL,
         library_id TEXT NOT NULL,
         FOREIGN KEY (library_id) REFERENCES libraries(id) ON DELETE CASCADE
@@ -191,11 +192,38 @@ class Database:
 
     async def _ensure_schema(self) -> None:
         assert self._conn is not None
+        # 记录之前的 user_version（迁移用）
+        async with self._conn.execute("PRAGMA user_version;") as cur:
+            row = await cur.fetchone()
+        prior_version = int(row[0]) if row else 0
+
         for stmt in _SCHEMA_STATEMENTS:
             await self._conn.execute(stmt)
-        # 记录 schema 版本（供未来迁移判断）
+
+        await self._migrate_from(prior_version)
+
+        # 记录 schema 版本
         await self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION};")
         await self._conn.commit()
+
+    async def _migrate_from(self, prior_version: int) -> None:
+        """对老库做增量列添加（CREATE TABLE IF NOT EXISTS 不会改已存在的表结构）。"""
+        assert self._conn is not None
+        if prior_version < 3:
+            # v3：photos 加 scene_id（之前 v1/v2 表没这列）
+            try:
+                await self._conn.execute(
+                    "ALTER TABLE photos ADD COLUMN scene_id INTEGER",
+                )
+                await logger.ainfo(
+                    "DB migrated",
+                    from_version=prior_version,
+                    added="photos.scene_id",
+                )
+            except Exception as e:
+                # 如果列已存在（重复迁移），SQLite 会抛 OperationalError；忽略
+                if "duplicate column" not in str(e).lower():
+                    raise
 
     async def get_schema_version(self) -> int:
         """Return the PRAGMA user_version as stored in this database."""

@@ -32,10 +32,18 @@ def _now_iso() -> str:
 
 
 async def _backfill_then_thumbnails(db: Database, library_id: str) -> None:
-    """阶段 2 + 3：补 SHA-256 + 异步生成缩略图（让 UI 能看到真照片，不是渐变占位）。"""
+    """阶段 2/3/4：补 SHA-256 + 生成缩略图 + 跑场景分组。"""
     await backfill_hashes(db, library_id)
     cache_root = app_settings.data_dir / "cache" / "thumbnails"
     await generate_library_thumbnails(db, library_id, cache_root)
+    # 缩略图就绪后才能跑场景相似度（用 preview 缩略图算 AKAZE/颜色）
+    from engine.services.scene_grouper import regroup_library
+    try:
+        await regroup_library(db, library_id, cache_root)
+    except Exception as e:
+        # cv2 未安装/library import 失败不影响其他流程
+        await logger.aexception("scene grouping failed", library_id=library_id)
+        _ = e
 
 
 async def _db(request: Request) -> Database:
@@ -192,6 +200,7 @@ async def library_detail(request: Request, library_id: str) -> LibraryDetail:
     async with db.conn.execute(
         "SELECT p.id, p.file_path, p.file_name, p.format, p.width, p.height, "
         "p.thumb_grid, p.thumb_preview, p.created_at, p.file_mtime, p.exif_json, "
+        "p.scene_id, "
         "ar.pipeline_version, ar.grade, ar.quality_score, ar.bird_count, ar.species, "
         "pd.decision "
         "FROM photos p "
@@ -239,6 +248,7 @@ async def library_detail(request: Request, library_id: str) -> LibraryDetail:
             ),
             created_at=str(r["created_at"]),
             shot_at=_resolve_shot_at(r),
+            scene_id=(int(r["scene_id"]) if r["scene_id"] is not None else None),
             pipeline_version=(
                 str(r["pipeline_version"])
                 if r["pipeline_version"] is not None
@@ -293,3 +303,20 @@ async def build_thumbnails(request: Request, library_id: str) -> dict:
 
     report = await generate_library_thumbnails(db, library_id, cache_root)
     return report
+
+
+@router.post("/{library_id}/scene-groups", status_code=200)
+async def regroup_scenes(request: Request, library_id: str) -> dict:
+    """POST /library/{id}/scene-groups — 重新计算 scene_id（AKAZE 特征 + 颜色直方图）。
+
+    用 preview 缩略图（1920px）做相似度，避免重新解码原 RAW。
+    """
+    db = await _db(request)
+    summary = await _fetch_library_summary(db, library_id)
+    if summary is None:
+        raise HTTPException(status_code=404, detail="Library not found")
+
+    cache_root = app_settings.data_dir / "cache" / "thumbnails"
+    from engine.services.scene_grouper import regroup_library
+
+    return await regroup_library(db, library_id, cache_root)

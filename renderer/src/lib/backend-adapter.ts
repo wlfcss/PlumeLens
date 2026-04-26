@@ -52,18 +52,12 @@ export function buildFolderRecord(summary: LibrarySummary): FolderRecord {
   }
 }
 
-// ---------- Group: 按时间窗口分组（连拍 / 同场景）----------
-
-/**
- * 时间窗口阈值：相邻两张拍摄时间差 ≤ 此值则属于同组。
- * 5 分钟覆盖：高速连拍组、同一只鸟前后短暂多帧、同一场景调整构图重新拍。
- * 大于此值视为新场景/新主体。
- */
-const GROUP_TIME_WINDOW_MS = 5 * 60 * 1000
+// ---------- Group: 用后端 scene_id（lingjian-v2 算法：AKAZE 特征 + 颜色直方图）----------
 
 interface GroupPlan {
   id: string
   folderId: string
+  sceneId: number
   startMs: number
   endMs: number
   photoIds: string[]
@@ -72,42 +66,49 @@ interface GroupPlan {
 }
 
 /**
- * 把 photos 按 shot_at 时间窗口聚类成 groups。
- * - photos 必须按 shot_at 升序传入（后端已 ORDER BY file_mtime ASC）
- * - 相邻 photo 时间差 ≤ GROUP_TIME_WINDOW_MS 则同组，否则开新组
- * - primarySpecies：组内出现次数最多的物种（tie 时取分数最高那张的物种）
+ * 按后端写入的 photo.scene_id 聚类。
  *
- * 后续可演进：用检测框 + 物种相似度判定"场景类似"（当前先靠时间近似）。
+ * 后端用 lingjian-v2 的算法：相邻 photo 用 AKAZE 特征匹配（≥0.05 相似 → 同场景），
+ * 特征不足时回退 HSV 颜色直方图（≥0.82 → 同场景）。详见
+ * engine/pipeline/scene_grouping.py。
+ *
+ * scene_id 为 null 的 photo（场景分组还没跑完）回退到按时间近似分（每张单独一组）。
+ * lifespan 启动 + import 完成会自动后台补 scene_id。
  */
 function planGroups(libraryId: string, photos: PhotoRow[]): GroupPlan[] {
-  const plans: GroupPlan[] = []
-  let current: GroupPlan | null = null
-  let groupSeq = 0
+  const map = new Map<string, GroupPlan>()
+  const order: string[] = []
 
   for (const photo of photos) {
     const ts = Date.parse(photo.shot_at)
     const safeTs = Number.isFinite(ts) ? ts : Date.parse(photo.created_at)
+    // 没分到场景的（后台分组未完成）每张单独一组，等下次 detail refetch 就修正
+    const sceneKey =
+      photo.scene_id !== null && photo.scene_id !== undefined
+        ? `${libraryId}-scene-${photo.scene_id}`
+        : `${libraryId}-orphan-${photo.id}`
 
-    if (!current || safeTs - current.endMs > GROUP_TIME_WINDOW_MS) {
-      groupSeq++
-      current = {
-        id: `group-${libraryId}-${groupSeq}`,
+    let plan = map.get(sceneKey)
+    if (!plan) {
+      plan = {
+        id: sceneKey,
         folderId: libraryId,
+        sceneId: photo.scene_id ?? -1,
         startMs: safeTs,
         endMs: safeTs,
-        photoIds: [photo.id],
+        photoIds: [],
         primarySpecies: null,
         isNewSpecies: false,
       }
-      plans.push(current)
-    } else {
-      current.endMs = safeTs
-      current.photoIds.push(photo.id)
+      map.set(sceneKey, plan)
+      order.push(sceneKey)
     }
+    plan.photoIds.push(photo.id)
+    if (safeTs < plan.startMs) plan.startMs = safeTs
+    if (safeTs > plan.endMs) plan.endMs = safeTs
   }
 
-  // 组内 primarySpecies + 是否含新增种 待 photo 转换后再算
-  return plans
+  return order.map((k) => map.get(k)!)
 }
 
 function summarizeGroupSpecies(
@@ -138,18 +139,26 @@ function summarizeGroupSpecies(
   return { primarySpecies: primary, isNewSpecies: isNew }
 }
 
-/** 格式化组标题：'06:42 起 · 8 张' */
+/** 格式化组标题：'场景 #N · HH:MM · 12 张'（场景分组完成时）/ '未分组单张' */
 function buildGroupTitle(group: GroupPlan): string {
   const start = new Date(group.startMs)
   const hh = String(start.getHours()).padStart(2, '0')
   const mm = String(start.getMinutes()).padStart(2, '0')
-  const span = group.endMs - group.startMs
   const photoCount = group.photoIds.length
-  if (span < 60 * 1000 || photoCount === 1) {
-    return `${hh}:${mm} · ${photoCount} 张`
+  const spanSec = Math.round((group.endMs - group.startMs) / 1000)
+
+  if (group.sceneId < 0) {
+    // scene_id 还没分配（后台未完成）
+    return `${hh}:${mm} · 待分组`
   }
-  const minutes = Math.round(span / 60000)
-  return `${hh}:${mm} 起 · ${photoCount} 张 · ${minutes} 分钟`
+  if (photoCount === 1) {
+    return `场景 #${group.sceneId + 1} · ${hh}:${mm}`
+  }
+  if (spanSec < 60) {
+    return `场景 #${group.sceneId + 1} · ${hh}:${mm} · ${photoCount} 张`
+  }
+  const minutes = Math.round(spanSec / 60)
+  return `场景 #${group.sceneId + 1} · ${hh}:${mm} · ${photoCount} 张 · ${minutes} 分钟`
 }
 
 // ---------- Photo ----------
@@ -251,7 +260,7 @@ export function buildPhotoRecordFromRow(
     folderId,
     groupId,
     fileName: row.file_name,
-    shotAt: row.created_at, // 后端尚未拆 EXIF DateTimeOriginal，先用 created_at
+    shotAt: row.shot_at,
     camera: cameraFallback,
     lens: lensFallback,
     speciesName: row.species,

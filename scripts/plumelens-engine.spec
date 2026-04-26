@@ -38,6 +38,8 @@ hidden_imports: list[str] = [
     "aiosqlite.context",
     "aiosqlite.core",
     "aiosqlite.cursor",
+    # OpenCV (cv2) 用于场景分组（AKAZE + 颜色直方图）
+    "cv2",
 ]
 
 # 原生库需要 PyInstaller 显式捕获（libonnxruntime.dylib, libraw.dylib 等）
@@ -46,6 +48,7 @@ binaries: list[tuple[str, str]] = [
     *collect_dynamic_libs("rawpy"),
     *collect_dynamic_libs("pyarrow"),
     *collect_dynamic_libs("numpy"),
+    *collect_dynamic_libs("cv2"),
 ]
 
 # Non-Python data files。注意 ONNX 模型不打包到 engine 内，由 electron-builder

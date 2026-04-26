@@ -106,7 +106,8 @@ export interface PhotoRow {
   thumb_grid: string | null
   thumb_preview: string | null
   created_at: string
-  shot_at: string  // ISO8601 拍摄时间（EXIF DateTimeOriginal 优先），用于时间窗口分组
+  shot_at: string  // ISO8601 拍摄时间（EXIF DateTimeOriginal 优先）
+  scene_id: number | null  // 场景分组 id（同 library 内部连续整数），null 表示尚未跑过
   pipeline_version: string | null
   grade: string | null
   quality_score: number | null

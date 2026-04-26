@@ -12,17 +12,14 @@ from engine.core.config import settings
 from engine.core.database import Database
 from engine.core.logging import setup_logging
 from engine.pipeline.manager import PipelineManager
+from engine.services.scene_grouper import regroup_library
 from engine.services.thumbnail import generate_library_thumbnails
 
 logger = structlog.stdlib.get_logger()
 
 
 async def _refresh_all_thumbnails(db: Database) -> None:
-    """启动后扫所有 library，补磁盘上丢失的缩略图。
-
-    场景：用户重装/迁移应用，db 里 thumb_grid 路径都在但磁盘 cache 文件丢了。
-    generate_library_thumbnails 内部会检查文件存在性，已存在的跳过，缺失的重建。
-    """
+    """启动后扫所有 library：补缩略图 + 补缺失的 scene_id。"""
     cache_root = settings.data_dir / "cache" / "thumbnails"
     try:
         async with db.conn.execute("SELECT id FROM libraries") as cur:
@@ -30,6 +27,7 @@ async def _refresh_all_thumbnails(db: Database) -> None:
         for row in rows:
             library_id = str(row["id"])
             try:
+                # Step 1: thumbnails (可能 rebuild 旧缺失文件)
                 report = await generate_library_thumbnails(db, library_id, cache_root)
                 if report.get("built", 0) > 0:
                     await logger.ainfo(
@@ -37,14 +35,34 @@ async def _refresh_all_thumbnails(db: Database) -> None:
                         library_id=library_id,
                         **report,
                     )
+                # Step 2: 检查 library 内是否有 photo 还没分配 scene_id（之前未跑过场景分组）
+                async with db.conn.execute(
+                    "SELECT COUNT(*) FROM photos WHERE library_id = ? AND scene_id IS NULL",
+                    (library_id,),
+                ) as cur2:
+                    missing_row = await cur2.fetchone()
+                missing = int(missing_row[0]) if missing_row else 0
+                if missing > 0:
+                    try:
+                        scene_report = await regroup_library(db, library_id, cache_root)
+                        await logger.ainfo(
+                            "Startup scene grouping ran",
+                            library_id=library_id,
+                            **scene_report,
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Startup scene grouping failed",
+                            library_id=library_id,
+                        )
             except Exception as e:
                 logger.warning(
-                    "Startup thumbnail refresh failed",
+                    "Startup library refresh failed",
                     library_id=library_id,
                     error=str(e),
                 )
     except Exception as e:
-        logger.warning("Startup thumbnail refresh aborted", error=str(e))
+        logger.warning("Startup library refresh aborted", error=str(e))
 
 
 @asynccontextmanager
@@ -77,10 +95,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
 
     # Shutdown
     refresh_task.cancel()
-    try:
+    import contextlib
+    with contextlib.suppress(asyncio.CancelledError, Exception):
         await refresh_task
-    except (asyncio.CancelledError, Exception):
-        pass
     app.state.pipeline.close()
     await app.state.db.close()
     await logger.ainfo("PlumeLens Engine shutting down")
