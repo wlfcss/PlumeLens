@@ -200,11 +200,23 @@ function filterPhotoByQuickFilter(photo: PhotoRecord, filter: QuickFilter): bool
   }
 }
 
+// 档位优先级：精选(3) > 可用(2) > 记录(1) > 淘汰(0)
+const GRADE_RANK: Record<PhotoGrade, number> = {
+  select: 3,
+  usable: 2,
+  record: 1,
+  reject: 0,
+}
+
 function sortPhotos(photos: PhotoRecord[], sortBy: SortMode): PhotoRecord[] {
   return photos.toSorted((left, right) => {
     if (sortBy === 'name') return left.fileName.localeCompare(right.fileName)
     if (sortBy === 'shot_at') return right.shotAt.localeCompare(left.shotAt)
     if (sortBy === 'recent') return right.id.localeCompare(left.id)
+    // 综合评分（默认）：先按档位降序（精选 → 可用 → 记录 → 淘汰），
+    // 同档内按 quality_score 降序
+    const gradeDiff = GRADE_RANK[right.grade] - GRADE_RANK[left.grade]
+    if (gradeDiff !== 0) return gradeDiff
     return (right.finalScore ?? -1) - (left.finalScore ?? -1)
   })
 }
