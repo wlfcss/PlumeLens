@@ -194,15 +194,15 @@ test('packaged app: 三个路由全屏截图（视觉存证）', async () => {
   await page.waitForTimeout(800)
   await page.screenshot({ path: 'test-results/route-start.png', fullPage: false })
 
-  // 选片页 + 选 new library（23 张照片真分析数据）
+  // 选片页 + 选 new1 library（783 张连拍真分析数据，便于看场景分组效果）
   await page.getByRole('button', { name: '选片', exact: true }).click()
   await page.waitForTimeout(1500)
-  const newFolder = page.getByText('new', { exact: true }).first()
-  if (await newFolder.isVisible().catch(() => false)) {
-    await newFolder.click()
-    await page.waitForTimeout(3000)
+  const new1Folder = page.getByText('new1', { exact: true }).first()
+  if (await new1Folder.isVisible().catch(() => false)) {
+    await new1Folder.click()
+    await page.waitForTimeout(4000)
   }
-  await page.screenshot({ path: 'test-results/route-selection-new.png', fullPage: true })
+  await page.screenshot({ path: 'test-results/route-selection-new1.png', fullPage: true })
 
   // 选片页 + plumelens-pkg-test
   await page.getByText('plumelens-pkg-test').first().click()

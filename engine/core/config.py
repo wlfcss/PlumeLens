@@ -38,7 +38,10 @@ class Settings(BaseSettings):
     hyperiqa_weight: float = 0.65
 
     # Pipeline — grading thresholds (reject_max, record_max, usable_max)
-    grade_thresholds: tuple[float, float, float] = (0.33, 0.43, 0.60)
+    # 参考 lingjian-v2 RATING_PROFILES 的 strict 档位（5 档映射到 4 档）：
+    #   five=0.90 → select；four=0.72 → usable；two=0.20 → record 上界
+    # 实测 IQA 分数集中在 0.7-0.9，0.90 阈值能把精选率压到 ~12-15%（合理摄影师选片比例）
+    grade_thresholds: tuple[float, float, float] = (0.20, 0.45, 0.85)
 
     # Pipeline — pose / visibility (bird_visibility v1.0)
     # box_threshold 作用于 crop 输入下取最高置信度检测，不作过滤
