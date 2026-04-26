@@ -18,13 +18,15 @@ class Settings(BaseSettings):
     models_dir: Path = Path(__file__).resolve().parent.parent / "models"
 
     # Pipeline — execution providers ("auto" / "coreml" / "cuda" / "cpu")
-    # onnxruntime 1.25 + macOS：bird_visibility/IQA 在 CoreML EP 上 100% 安全 + 加速 7-27×；
-    # YOLO 仍有 GatherElements op 偶发 bug（30 张里 1 张崩，~3%）→ 用 coreml 但
-    # PipelineManager 单图 try-except fallback CPU（避免崩溃整个分析）。
-    yolo_provider: str = "coreml"
+    # macOS onnxruntime 1.25 实测：
+    # - YOLO + CoreML：bbox 数值严重错（letterboxed 输出超过 1280 边界，clamp 到原图边缘
+    #   → 顶点检测框看似框选了"右下半张图"），rebust test 只测崩没测精度。强制 CPU。
+    # - bird_visibility/CLIPIQA/HyperIQA + CoreML：100% 安全 + 加速 7-27×（与 CPU diff <0.2px）
+    # - DINOv3 ViT-L + CoreML：算子覆盖度差，反而比 CPU 慢。强制 CPU。
+    yolo_provider: str = "cpu"
     iqa_provider: str = "coreml"
     pose_provider: str = "coreml"
-    species_provider: str = "cpu"  # DINOv3 ViT-L 在 CoreML EP 覆盖度差（~30%）
+    species_provider: str = "cpu"
 
     # Pipeline — detection (yolo26l-bird v1.0: imgsz=1280, conf=0.5 for photography)
     yolo_confidence: float = 0.5
