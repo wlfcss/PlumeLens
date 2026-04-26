@@ -191,17 +191,39 @@ async def library_detail(request: Request, library_id: str) -> LibraryDetail:
 
     async with db.conn.execute(
         "SELECT p.id, p.file_path, p.file_name, p.format, p.width, p.height, "
-        "p.thumb_grid, p.thumb_preview, p.created_at, "
+        "p.thumb_grid, p.thumb_preview, p.created_at, p.file_mtime, p.exif_json, "
         "ar.pipeline_version, ar.grade, ar.quality_score, ar.bird_count, ar.species, "
         "pd.decision "
         "FROM photos p "
         "LEFT JOIN analysis_results ar ON ar.photo_id = p.id AND ar.is_active = 1 "
         "LEFT JOIN photo_decisions pd ON pd.photo_id = p.id "
         "WHERE p.library_id = ? "
-        "ORDER BY p.created_at ASC",
+        "ORDER BY p.file_mtime ASC",
         (library_id,),
     ) as cur:
         rows = await cur.fetchall()
+
+    def _resolve_shot_at(row: object) -> str:
+        """优先级：EXIF DateTimeOriginal > file_mtime > created_at."""
+        try:
+            exif = row["exif_json"]  # type: ignore[index]
+            if exif:
+                import json
+                data = json.loads(str(exif))
+                dto = data.get("DateTimeOriginal")
+                if dto and isinstance(dto, str):
+                    # EXIF 格式 "2026:04:25 06:42:15" → ISO 8601
+                    iso = dto.replace(":", "-", 2).replace(" ", "T")
+                    return iso
+        except Exception:
+            pass
+        try:
+            mt = row["file_mtime"]  # type: ignore[index]
+            if mt:
+                return str(mt)
+        except Exception:
+            pass
+        return str(row["created_at"])  # type: ignore[index]
 
     photos = [
         PhotoRow(
@@ -216,6 +238,7 @@ async def library_detail(request: Request, library_id: str) -> LibraryDetail:
                 str(r["thumb_preview"]) if r["thumb_preview"] is not None else None
             ),
             created_at=str(r["created_at"]),
+            shot_at=_resolve_shot_at(r),
             pipeline_version=(
                 str(r["pipeline_version"])
                 if r["pipeline_version"] is not None

@@ -252,9 +252,21 @@ button:disabled {
   gap: 20px;
   min-height: 76px;
   border-bottom: 1px solid var(--pl-border-0);
-  padding: 14px 28px;
+  /* 左 padding 给 macOS hiddenInset 模式的红黄绿交通灯让出空间 (≈70px)，
+     避免 brand-mark 与系统按钮重叠 */
+  padding: 14px 28px 14px 88px;
   background: rgba(5, 5, 5, 0.88);
   backdrop-filter: blur(18px);
+  /* 让整个顶栏支持窗口拖拽（macOS 没有原生 title bar 时） */
+  -webkit-app-region: drag;
+}
+
+/* 顶栏内的可点击控件需要禁用 drag region 才能 hover/click */
+.command-bar button,
+.command-bar input,
+.command-bar a,
+.command-bar [role='button'] {
+  -webkit-app-region: no-drag;
 }
 
 .brand-mark {

@@ -700,8 +700,6 @@ export default function App() {
 
   return (
     <AppShell
-      backendConnected={isReady}
-      isError={isError}
       onNavigate={handleNavigate}
       onOpenExport={() => setExportOpen(true)}
       onSearchChange={setSearchQuery}
@@ -799,9 +797,7 @@ export default function App() {
 }
 
 function AppShell({
-  backendConnected,
   children,
-  isError,
   onNavigate,
   onOpenExport,
   onSearchChange,
@@ -809,9 +805,7 @@ function AppShell({
   searchQuery,
   t,
 }: {
-  backendConnected: boolean
   children: ReactNode
-  isError: boolean
   onNavigate: (route: AppRoute) => void
   onOpenExport: () => void
   onSearchChange: (value: string) => void
@@ -864,10 +858,7 @@ function AppShell({
           <IconButton label={t('common.settings')}>
             <Settings2 className="h-4 w-4" />
           </IconButton>
-          <span className="engine-pill">
-            <StatusDot tone={backendConnected ? 'success' : isError ? 'accent' : 'warning'} />
-            <span>{backendConnected ? t('status.connected') : isError ? t('status.error') : t('status.connecting')}</span>
-          </span>
+          {/* 引擎状态在左下角 status bar 已有完整展示，此处不重复 */}
         </div>
       </header>
 

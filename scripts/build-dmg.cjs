@@ -7,6 +7,7 @@
  */
 const { execFileSync } = require('child_process')
 const fs = require('fs')
+const os = require('os')
 const path = require('path')
 
 exports.default = async function (context) {
@@ -22,24 +23,35 @@ exports.default = async function (context) {
   const dmgPath = path.join(context.outDir, 'PlumeLens-0.1.0-arm64.dmg')
   if (fs.existsSync(dmgPath)) fs.rmSync(dmgPath)
 
-  // 用 hdiutil create -srcfolder：从 macDir 直接打 dmg，保留 framework binary
-  // -fs HFS+ 兼容老 macOS；-format UDZO 压缩 (~50% size)
-  console.log(`[build-dmg] hdiutil create → ${dmgPath}`)
-  execFileSync(
-    'hdiutil',
-    [
-      'create',
-      '-volname',
-      'PlumeLens 0.1.0-arm64',
-      '-srcfolder',
-      macDir,
-      '-ov',
-      '-format',
-      'UDZO',
-      dmgPath,
-    ],
-    { stdio: 'inherit' },
-  )
+  // 准备 staging 目录：含 .app（ditto 保留签名 + xattr）+ /Applications symlink
+  // 让用户挂 dmg 时看到熟悉的 "拖到 Applications" 安装提示
+  const stagingDir = fs.mkdtempSync(path.join(os.tmpdir(), 'plumelens-dmg-'))
+  console.log(`[build-dmg] staging in ${stagingDir}`)
+  try {
+    // 用 ditto 复制 .app（macOS 推荐，保留 ACL/xattr/签名 完整）
+    execFileSync('ditto', [appPath, path.join(stagingDir, appName)], { stdio: 'inherit' })
+    // /Applications 符号链接（dmg 安装界面右侧的 "拖到这里"）
+    fs.symlinkSync('/Applications', path.join(stagingDir, 'Applications'))
+
+    console.log(`[build-dmg] hdiutil create → ${dmgPath}`)
+    execFileSync(
+      'hdiutil',
+      [
+        'create',
+        '-volname',
+        'PlumeLens 0.1.0-arm64',
+        '-srcfolder',
+        stagingDir,
+        '-ov',
+        '-format',
+        'UDZO',
+        dmgPath,
+      ],
+      { stdio: 'inherit' },
+    )
+  } finally {
+    fs.rmSync(stagingDir, { recursive: true, force: true })
+  }
 
   // 验证 dmg 内 Framework binary 真的在
   console.log(`[build-dmg] verifying dmg contents...`)

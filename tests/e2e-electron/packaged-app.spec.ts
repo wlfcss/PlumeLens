@@ -64,12 +64,17 @@ test.beforeAll(async () => {
   if (!backendUrl) throw new Error('Engine URL never resolved within 30s')
   console.log('[E2E] engine URL =', backendUrl)
 
-  // 强制对所有 library 重新生成缩略图（保证文件落在当前 engine 实例的 data_dir/cache）
-  const libs = await fetch(`${backendUrl}/library`).then((r) => r.json() as Promise<{ id: string }[]>)
-  for (const lib of libs) {
-    const r = await fetch(`${backendUrl}/library/${lib.id}/thumbnails`, { method: 'POST' })
+  // 只确保 plumelens-pkg-test (1 张) 的缩略图就绪 —— 本 spec 只断言这个 library。
+  // engine lifespan 启动会后台扫所有 library 补缺，但大 library (n=783) 数十秒，
+  // beforeAll 不能等。
+  const libs = await fetch(`${backendUrl}/library`).then(
+    (r) => r.json() as Promise<{ id: string; display_name: string }[]>,
+  )
+  const target = libs.find((l) => l.display_name === 'plumelens-pkg-test')
+  if (target) {
+    const r = await fetch(`${backendUrl}/library/${target.id}/thumbnails`, { method: 'POST' })
     const j = await r.json()
-    console.log(`[E2E] thumbnails(${lib.id}):`, JSON.stringify(j))
+    console.log(`[E2E] thumbnails(${target.display_name}):`, JSON.stringify(j))
   }
 })
 
@@ -147,11 +152,12 @@ test('packaged app: 已分析的 library 渲染真分析结果（select / 山麻
 
 test('packaged app: 选片页有"开始分析"按钮', async () => {
   await page.getByRole('button', { name: '选片', exact: true }).click()
-  const folderButton = page.locator('[class*="folder-rail"]').locator('button').first()
-  if (await folderButton.isVisible().catch(() => false)) {
-    await folderButton.click()
+  // 直接点 plumelens-pkg-test（小 library，detail 拉取快）
+  const targetFolder = page.getByText('plumelens-pkg-test').first()
+  if (await targetFolder.isVisible().catch(() => false)) {
+    await targetFolder.click()
   }
-  await expect(page.getByRole('button', { name: /开始分析/ })).toBeVisible({ timeout: 5_000 })
+  await expect(page.getByRole('button', { name: /开始分析/ })).toBeVisible({ timeout: 10_000 })
 })
 
 test('packaged app: photo tile 点击 → 信息抽屉出物种/分数/分级', async () => {
