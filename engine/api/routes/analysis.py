@@ -17,6 +17,7 @@ from engine.api.schemas.analysis import (
     QueueStats,
     TaskRow,
 )
+from engine.core.config import settings
 from engine.core.database import Database
 from engine.services.analyzer import analyze_photo
 from engine.services.queue import (
@@ -38,10 +39,10 @@ logger = structlog.stdlib.get_logger()
 
 router = APIRouter(prefix="/analysis", tags=["analysis"])
 
-# 同时最多处理多少个 task。每个 task 内 ONNX 推理在 thread pool 释放 GIL，
-# 多 worker = 多张图并行推理。CoreML EP 多 session 在 ANE/GPU 上能共享资源。
-# SQLite WAL 模式允许并发读 + 单写，cache.store 写入有 busy_timeout 5s 兜底。
-DEFAULT_CONCURRENCY = 2
+# 并发数从 settings.analysis_concurrency 读取（默认 2，见 engine/core/config.py）。
+# 每个 task 内 ONNX 推理在 thread pool 释放 GIL，多 worker = 多张图并行推理。
+# CoreML EP 多 session 在 ANE/GPU 上能共享资源。SQLite WAL 模式允许并发读 + 单写，
+# cache.store 写入有 busy_timeout 5s 兜底。
 
 # SSE 进度推送轮询间隔（秒）
 SSE_INTERVAL = 1.0
@@ -130,7 +131,7 @@ async def start_batch(
     # Kick off drain worker（不阻塞返回）
     if body.library_id not in _workers or _workers[body.library_id].done():
         _workers[body.library_id] = asyncio.create_task(
-            _drain_queue(db, pipeline, body.library_id, DEFAULT_CONCURRENCY),
+            _drain_queue(db, pipeline, body.library_id, settings.analysis_concurrency),
         )
 
     stats = await get_stats(db, body.library_id)
@@ -154,7 +155,7 @@ async def resume(request: Request, library_id: str) -> QueueStats:
     # 重启 drain worker
     if library_id not in _workers or _workers[library_id].done():
         _workers[library_id] = asyncio.create_task(
-            _drain_queue(db, pipeline, library_id, DEFAULT_CONCURRENCY),
+            _drain_queue(db, pipeline, library_id, settings.analysis_concurrency),
         )
     return QueueStats(library_id=library_id, stats=await get_stats(db, library_id))
 

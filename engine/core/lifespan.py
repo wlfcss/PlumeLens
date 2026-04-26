@@ -34,7 +34,8 @@ async def _resume_pending_workers(app: FastAPI, db: Database) -> None:
         return
 
     # 延迟 import 避免循环依赖（analysis route 也 import services）
-    from engine.api.routes.analysis import DEFAULT_CONCURRENCY, _drain_queue, _workers
+    from engine.api.routes.analysis import _drain_queue, _workers
+    from engine.core.config import settings
 
     async with db.conn.execute(
         "SELECT library_id, COUNT(*) AS n FROM task_queue "
@@ -47,7 +48,7 @@ async def _resume_pending_workers(app: FastAPI, db: Database) -> None:
         if library_id in _workers and not _workers[library_id].done():
             continue  # 已有 worker 在跑
         _workers[library_id] = asyncio.create_task(
-            _drain_queue(db, pipeline, library_id, DEFAULT_CONCURRENCY),
+            _drain_queue(db, pipeline, library_id, settings.analysis_concurrency),
         )
         await logger.ainfo(
             "Resumed pending queue worker",

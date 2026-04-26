@@ -484,10 +484,17 @@ export default function App() {
       photos: filteredSelectionPhotos.filter((photo) => photo.groupId === group.id),
     }))
     .filter((entry) => entry.photos.length > 0)
-    .toSorted(
-      (left, right) =>
-        (right.photos[0]?.finalScore ?? -1) - (left.photos[0]?.finalScore ?? -1),
-    )
+    .toSorted((left, right) => {
+      // 组间排序与组内排序口径一致：先看"组的最佳档位"（精选 > 可用 > 记录 > 淘汰），
+      // 同档位再比"组的最佳分数"。group.photos[0] 因为已经经过 sortPhotos 档位优先排序，
+      // 所以就是组内最佳那张。
+      const lp = left.photos[0]
+      const rp = right.photos[0]
+      const lRank = lp ? GRADE_RANK[lp.grade] : -1
+      const rRank = rp ? GRADE_RANK[rp.grade] : -1
+      if (lRank !== rRank) return rRank - lRank
+      return (rp?.finalScore ?? -1) - (lp?.finalScore ?? -1)
+    })
 
   const flatSelectionPhotos =
     viewMode === 'flat' || viewMode === 'selected_only'
