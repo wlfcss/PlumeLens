@@ -128,13 +128,26 @@ export class ProcessManager extends EventEmitter {
   }
 
   private startHealthCheck(): void {
+    let consecutiveFailures = 0
     this.healthInterval = setInterval(async () => {
       if (!this.url) return
       try {
         const response = await fetch(`${this.url}/health`)
         if (!response.ok) throw new Error(`HTTP ${response.status}`)
-      } catch {
-        // Health check failed — backend may have crashed
+        consecutiveFailures = 0
+      } catch (e) {
+        consecutiveFailures += 1
+        process.stderr.write(
+          `[engine-health] failure ${consecutiveFailures}: ${(e as Error).message}\n`,
+        )
+        // 连续 3 次失败（30 秒）视为崩溃，触发重启
+        if (consecutiveFailures >= 3) {
+          consecutiveFailures = 0
+          this.stopHealthCheck()
+          this.url = null
+          this.emit('error', `Engine 连续 3 次健康检查失败，触发重启`)
+          this.handleCrash()
+        }
       }
     }, 10000)
   }

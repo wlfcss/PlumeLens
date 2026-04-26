@@ -76,27 +76,36 @@ export function useAnalysisProgress(
     let source: EventSource | null = null
     let cancelled = false
 
-    api.progressUrl(libraryId).then((url) => {
-      if (cancelled) return
-      source = new EventSource(url)
-      source.onmessage = (msg) => {
-        try {
-          setEvent(JSON.parse(msg.data))
-        } catch {
-          // ignore malformed frames
+    api.progressUrl(libraryId)
+      .then((url) => {
+        // race fix：cleanup 可能已跑（cancelled=true），别再创建 source
+        if (cancelled) return
+        source = new EventSource(url)
+        source.onmessage = (msg) => {
+          try {
+            setEvent(JSON.parse(msg.data))
+          } catch (e) {
+            // eslint-disable-next-line no-console
+            console.warn('SSE malformed frame:', e)
+          }
         }
-      }
-      source.addEventListener('done', () => {
-        source?.close()
+        source.addEventListener('done', () => {
+          source?.close()
+        })
+        source.onerror = (e) => {
+          // eslint-disable-next-line no-console
+          console.warn('SSE error (browser will reconnect):', e)
+        }
       })
-      source.onerror = () => {
-        // 让浏览器自动重连；出错不吞数据
-      }
-    })
+      .catch((e) => {
+        // eslint-disable-next-line no-console
+        console.warn('Failed to resolve SSE URL:', e)
+      })
 
     return () => {
       cancelled = true
       source?.close()
+      source = null
     }
   }, [libraryId, enabled])
 

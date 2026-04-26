@@ -543,7 +543,21 @@ export default function App() {
     }))
   }, [realLibraries])
 
-  // 所有 library 的详情就绪后，把真照片注入 workspace（archive 页跨 library 聚合需要）
+  // useAllLibraryDetails 每次 render 返回新数组引用，但内容大多数时候没变。
+  // 用稳定字符串 key 描述"内容是否真变化"，再用 useMemo 把派生 fragments 引用绑定到这个 key。
+  const allDetailsKey = useMemo(
+    () =>
+      allDetails
+        .map(
+          (d) =>
+            `${d.library.id}:${d.library.last_analyzed_at ?? ''}:${d.photos.length}:${d.library.analyzed_count}`,
+        )
+        .join('|'),
+    [allDetails],
+  )
+  // 所有 library 的详情就绪后，把真照片注入 workspace（archive 页跨 library 聚合需要）。
+  // useAllLibraryDetails 每次 render 返回新数组引用 → 用 allDetailsKey（稳定字符串）作为
+  // useEffect 唯一依赖，allDetails 通过闭包读最新值。避免引用变化触发死循环。
   useEffect(() => {
     if (allDetails.length === 0) return
     const fragments = allDetails.map(buildFragmentFromDetail)
@@ -553,8 +567,6 @@ export default function App() {
         const updated = fragments.find((fr) => fr.folder.id === f.id)
         return updated ? updated.folder : f
       }),
-      // 替换：仅保留 detail 没覆盖到的 folder 的旧 photos（理论上是空，因为 effect 会
-      // 在 useAllLibraryDetails 完成后跑），加上所有 detail 的真 photos
       photos: [
         ...current.photos.filter((p) => !realFolderIdsInDetails.has(p.folderId)),
         ...fragments.flatMap((f) => f.photos),
@@ -565,7 +577,7 @@ export default function App() {
       ],
       species: [],
     }))
-  }, [allDetails])
+  }, [allDetailsKey])
 
   // 单 library detail 就绪（active folder 切换时优先级更高，立即注入）
   useEffect(() => {

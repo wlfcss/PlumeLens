@@ -103,26 +103,38 @@ app.whenReady().then(async () => {
   process.stderr.write(`[main] userData=${app.getPath('userData')}\n`)
   process.stderr.write(`[main] thumbnailsRoot=${thumbnailsRoot}\n`)
   protocol.handle('plumelens', async (request) => {
-    process.stderr.write(`[plumelens] ${request.url}\n`)
     const url = new URL(request.url)
     if (url.host !== 'thumb') {
-      process.stderr.write(`[plumelens] bad host: ${url.host}\n`)
       return new Response('Bad host', { status: 400 })
     }
-    const rel = decodeURIComponent(url.pathname.replace(/^\/+/, ''))
-    if (rel.includes('..') || (!rel.startsWith('grid/') && !rel.startsWith('preview/'))) {
-      process.stderr.write(`[plumelens] forbidden: ${rel}\n`)
-      return new Response('Forbidden', { status: 403 })
+    // 双重解码后再检查（防 URL 双层编码绕过：%252e%252e → %2e%2e → ..）
+    let rel: string
+    try {
+      rel = decodeURIComponent(url.pathname.replace(/^\/+/, ''))
+      // 二次解码并验证不含上溯字符
+      const reDecoded = decodeURIComponent(rel)
+      if (reDecoded !== rel || reDecoded.includes('..')) {
+        return new Response('Forbidden (path traversal)', { status: 403 })
+      }
+    } catch {
+      return new Response('Bad URL', { status: 400 })
+    }
+    if (!rel.startsWith('grid/') && !rel.startsWith('preview/')) {
+      return new Response('Forbidden (bad prefix)', { status: 403 })
     }
     const filePath = join(thumbnailsRoot, rel)
-    const fileUrl = pathToFileURL(filePath).toString()
-    process.stderr.write(`[plumelens] resolved → ${filePath}\n`)
+    // path.resolve 后必须仍在 thumbnailsRoot 之内（防 symlink 跳出）
+    const { resolve, normalize } = await import('path')
+    const resolved = resolve(filePath)
+    const rootResolved = resolve(thumbnailsRoot)
+    if (!resolved.startsWith(rootResolved + '/') && resolved !== rootResolved) {
+      return new Response('Forbidden (escape)', { status: 403 })
+    }
+    void normalize  // unused
+    const fileUrl = pathToFileURL(resolved).toString()
     try {
-      const resp = await net.fetch(fileUrl)
-      process.stderr.write(`[plumelens] net.fetch status=${resp.status}\n`)
-      return resp
-    } catch (e) {
-      process.stderr.write(`[plumelens] error: ${(e as Error).message}\n`)
+      return await net.fetch(fileUrl)
+    } catch {
       return new Response('Not found', { status: 404 })
     }
   })

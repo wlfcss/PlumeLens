@@ -11,21 +11,25 @@
 /**
  * Resolve the backend URL on every request.
  *
- * 注意：
- * 1. 不缓存。Electron 启动早期 engine 还没 spawn 完，IPC 返回 null → fallback 到 8000。
- *    一旦缓存就永远卡在 fallback。每次重新拉（IPC 异步开销 <1ms）。
- * 2. 在 Electron 模式下，如果 IPC 返回 null（engine 没 ready），等 200ms 重试，最多 30 次。
- *    避免 React Query 在 engine 启动期间因连不上 8000 而进入 isError 终态。
+ * 不缓存：Electron 启动早期 engine 还没 spawn 完，IPC 返回 null。每次重新拉
+ * （IPC 异步开销 <1ms）。如果 engine 没 ready，无限轮询 200ms 间隔直到拿到 URL；
+ * 不抛错 — 抛了之后 useEffect 一次性 hook（如 useAnalysisProgress 的 EventSource）
+ * 拒绝重连，整个流死。
  */
 async function getBackendUrl(): Promise<string> {
   if (typeof window !== 'undefined' && window.plumelens) {
-    for (let i = 0; i < 30; i++) {
+    // 无限重试 200ms 间隔，每 5 秒打一次 console.warn 让用户知道进度
+    let attempts = 0
+    while (true) {
       const url = await window.plumelens.getBackendUrl()
       if (url) return url
+      attempts += 1
+      if (attempts % 25 === 0) {
+        // eslint-disable-next-line no-console
+        console.warn(`等待 engine 后端启动... ${(attempts * 200) / 1000}s`)
+      }
       await new Promise((resolve) => setTimeout(resolve, 200))
     }
-    // 30 次仍拿不到 → 让上层 fetch 报错触发 isError，UI 显示降级提示
-    throw new Error('Engine 后端启动超时（>6s 仍未广播端口）')
   }
   // Dev / test fallback (Playwright vite-server 模式 / 单元测试)
   return 'http://127.0.0.1:8000'
