@@ -403,10 +403,20 @@ class PipelineManager:
         """Synchronous pipeline execution (runs in thread pool)."""
         assert self._detector is not None
 
+        # 各阶段耗时（debug 用，info 级日志）
+        t_load_ms = 0.0
+        t_yolo_ms = 0.0
+        t_pose_ms = 0.0
+        t_iqa_ms = 0.0
+        t_species_ms = 0.0
+
+        _t = time.perf_counter()
         image = load_image(image_path)
+        t_load_ms = (time.perf_counter() - _t) * 1000
         img_h, img_w = image.shape[:2]
 
         # Step 1: YOLO detection on full image（CoreML EP 偶发 GatherElements 崩 → fallback CPU）
+        _t = time.perf_counter()
         try:
             boxes = self._detector.detect(
                 image, confidence_threshold=self._settings.yolo_confidence
@@ -423,6 +433,7 @@ class PipelineManager:
                 )
             else:
                 raise
+        t_yolo_ms = (time.perf_counter() - _t) * 1000
 
         detections: list[BirdAnalysis] = []
         padding = self._settings.crop_padding_ratio
@@ -460,6 +471,7 @@ class PipelineManager:
 
             # Step 3a: pose detection (crop-mode)
             pose_info = None
+            _t = time.perf_counter()
             if self._pose is not None:
                 try:
                     pose_info = self._pose.detect(
@@ -467,8 +479,10 @@ class PipelineManager:
                     )
                 except Exception:
                     logger.exception("Pose detection failed", photo_id=photo_id)
+            t_pose_ms += (time.perf_counter() - _t) * 1000
 
             # Step 3b: quality assessment (降级：IQA 模型缺失时用固定分数)
+            _t = time.perf_counter()
             if self._assessor is not None:
                 scores = self._assessor.assess(iqa_crop)
             else:
@@ -476,12 +490,14 @@ class PipelineManager:
                 from engine.pipeline.models import QualityScores
 
                 scores = QualityScores(clipiqa=0.5, hyperiqa=0.5, combined=0.5)
+            t_iqa_ms += (time.perf_counter() - _t) * 1000
             iqa_grade = grade(scores.combined, self._settings.grade_thresholds)
             # Step 3c: pose 降档（头不可见 -2 / 眼不可见 -1）
             bird_grade = apply_pose_penalty(iqa_grade, pose_info)
 
             # Step 4: species classification (gated)
             species_candidates: list[SpeciesCandidate] = []
+            _t = time.perf_counter()
             if self._should_run_species(pose_info, bird_grade):
                 assert self._species is not None
                 species_crop = self._prepare_species_crop(
@@ -493,6 +509,7 @@ class PipelineManager:
                     logger.exception(
                         "Species classification failed", photo_id=photo_id
                     )
+            t_species_ms += (time.perf_counter() - _t) * 1000
 
             species_name = (
                 species_candidates[0].canonical_zh
@@ -513,6 +530,18 @@ class PipelineManager:
             )
 
         best = max(detections, key=lambda d: d.quality.combined) if detections else None
+
+        # 每张耗时分解日志（可在 stderr 看到，便于性能调优）
+        logger.info(
+            "Pipeline timing",
+            photo_id=photo_id,
+            birds=len(boxes),
+            load_ms=round(t_load_ms, 1),
+            yolo_ms=round(t_yolo_ms, 1),
+            pose_ms=round(t_pose_ms, 1),
+            iqa_ms=round(t_iqa_ms, 1),
+            species_ms=round(t_species_ms, 1),
+        )
 
         return PipelineResult(
             photo_id=photo_id,

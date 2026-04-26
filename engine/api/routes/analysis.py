@@ -38,9 +38,10 @@ logger = structlog.stdlib.get_logger()
 
 router = APIRouter(prefix="/analysis", tags=["analysis"])
 
-# 同时最多处理多少个 task。SQLite 是单写，worker 并发超过 1 会在 DB 写入上竞争，
-# ONNX 推理已经靠 asyncio.to_thread 并行化，故这里用 1 即可，够简单够稳。
-DEFAULT_CONCURRENCY = 1
+# 同时最多处理多少个 task。每个 task 内 ONNX 推理在 thread pool 释放 GIL，
+# 多 worker = 多张图并行推理。CoreML EP 多 session 在 ANE/GPU 上能共享资源。
+# SQLite WAL 模式允许并发读 + 单写，cache.store 写入有 busy_timeout 5s 兜底。
+DEFAULT_CONCURRENCY = 2
 
 # SSE 进度推送轮询间隔（秒）
 SSE_INTERVAL = 1.0

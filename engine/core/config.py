@@ -75,6 +75,8 @@ class Settings(BaseSettings):
     preprocess_version: int = 2
 
     # Pipeline — concurrency
+    # 每个 task 内部 ONNX 推理会 to_thread 释放 GIL，多 worker 并发 = 多张图同时跑 ONNX。
+    # CoreML EP 多 session 共享 ANE/GPU 资源，并发 2 ≈ 1.5-1.8× 吞吐（不是线性）。
     analysis_concurrency: int = 2
 
 
