@@ -12,7 +12,7 @@ import structlog
 
 from engine.core.config import Settings
 from engine.pipeline.detector import BirdDetector
-from engine.pipeline.grader import grade
+from engine.pipeline.grader import apply_pose_penalty, grade
 from engine.pipeline.models import (
     BirdAnalysis,
     PipelineResult,
@@ -20,7 +20,7 @@ from engine.pipeline.models import (
     SpeciesCandidate,
 )
 from engine.pipeline.pose import PoseDetector
-from engine.pipeline.preprocess import crop_bbox, load_image
+from engine.pipeline.preprocess import crop_bbox, expand_for_iqa, load_image
 from engine.pipeline.quality import QualityAssessor
 from engine.pipeline.species import (
     SpeciesClassifier,
@@ -88,6 +88,9 @@ class PipelineManager:
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
         self._detector: BirdDetector | None = None
+        # YOLO CPU fallback：CoreML EP 偶发 GatherElements 越界（onnxruntime 1.25 残留 bug，
+        # ~3% 输入触发）。预先加载一份 CPU session，单图崩了 fallback 重跑。
+        self._detector_cpu_fallback: BirdDetector | None = None
         self._assessor: QualityAssessor | None = None
         self._pose: PoseDetector | None = None
         self._species: SpeciesClassifier | None = None
@@ -125,6 +128,19 @@ class PipelineManager:
                 checksums["yolo"] = _file_checksum(yolo_path)
             except Exception:
                 await logger.aexception("Failed to load YOLO detector")
+
+            # 如果主 session 是 CoreML，额外加载一份 CPU 备胎给 ~3% 崩溃图 fallback
+            if self._detector is not None and "coreml" in self._settings.yolo_provider.lower():
+                try:
+                    cpu_sess = ort.InferenceSession(
+                        str(yolo_path), providers=["CPUExecutionProvider"],
+                    )
+                    self._detector_cpu_fallback = BirdDetector(
+                        session=cpu_sess, input_size=self._settings.yolo_input_size,
+                    )
+                    await logger.ainfo("Loaded YOLO CPU fallback session")
+                except Exception:
+                    await logger.aexception("Failed to load YOLO CPU fallback")
         else:
             await logger.awarning("YOLO detector not found", path=str(yolo_path))
 
@@ -301,6 +317,11 @@ class PipelineManager:
         # Crop
         h.update(f"cr:{self._settings.crop_expand_ratio}".encode())
         h.update(f"cp:{self._settings.crop_padding_ratio}".encode())
+        # IQA-specific expand crop (separate from pose crop)
+        h.update(f"iqe:{self._settings.iqa_expand_ratio}".encode())
+        h.update(f"iqar:{self._settings.iqa_max_aspect_ratio}".encode())
+        # 算法版本：bump 每当评分/降档逻辑变（pose penalty / grading 形式）
+        h.update(b"alg:v2-pose-penalty")
         # Pose thresholds (5 项)
         h.update(f"pbt:{self._settings.pose_box_threshold}".encode())
         h.update(f"pet:{self._settings.pose_eye_threshold}".encode())
@@ -385,16 +406,29 @@ class PipelineManager:
         image = load_image(image_path)
         img_h, img_w = image.shape[:2]
 
-        # Step 1: YOLO detection on full image
-        boxes = self._detector.detect(
-            image, confidence_threshold=self._settings.yolo_confidence
-        )
+        # Step 1: YOLO detection on full image（CoreML EP 偶发 GatherElements 崩 → fallback CPU）
+        try:
+            boxes = self._detector.detect(
+                image, confidence_threshold=self._settings.yolo_confidence
+            )
+        except Exception as e:
+            if self._detector_cpu_fallback is not None:
+                logger.warning(
+                    "YOLO CoreML failed, falling back to CPU",
+                    photo_id=photo_id,
+                    error=str(e)[:120],
+                )
+                boxes = self._detector_cpu_fallback.detect(
+                    image, confidence_threshold=self._settings.yolo_confidence,
+                )
+            else:
+                raise
 
         detections: list[BirdAnalysis] = []
         padding = self._settings.crop_padding_ratio
 
         for box in boxes:
-            # Step 2: bbox crop with padding (for pose + IQA)
+            # Step 2a: pose 用紧裁切（bbox + 10% padding，定位精准）
             bw = box.x2 - box.x1
             bh = box.y2 - box.y1
             px = bw * padding
@@ -404,7 +438,7 @@ class PipelineManager:
             pad_x2 = min(float(img_w), box.x2 + px)
             pad_y2 = min(float(img_h), box.y2 + py)
 
-            crop = crop_bbox(
+            pose_crop = crop_bbox(
                 image,
                 x1=pad_x1,
                 y1=pad_y1,
@@ -413,25 +447,38 @@ class PipelineManager:
                 expand_ratio=self._settings.crop_expand_ratio,
             )
 
+            # Step 2b: IQA 用大裁切（bbox 放大 expand_ratio 倍，含背景构图）
+            iqa_crop = expand_for_iqa(
+                image,
+                x1=box.x1,
+                y1=box.y1,
+                x2=box.x2,
+                y2=box.y2,
+                expand=self._settings.iqa_expand_ratio,
+                max_aspect_ratio=self._settings.iqa_max_aspect_ratio,
+            )
+
             # Step 3a: pose detection (crop-mode)
             pose_info = None
             if self._pose is not None:
                 try:
                     pose_info = self._pose.detect(
-                        crop, crop_origin=(pad_x1, pad_y1)
+                        pose_crop, crop_origin=(pad_x1, pad_y1)
                     )
                 except Exception:
                     logger.exception("Pose detection failed", photo_id=photo_id)
 
             # Step 3b: quality assessment (降级：IQA 模型缺失时用固定分数)
             if self._assessor is not None:
-                scores = self._assessor.assess(crop)
+                scores = self._assessor.assess(iqa_crop)
             else:
                 # IQA 模型未加载 → 返回中性分数 0.5，grade 降级为 USABLE
                 from engine.pipeline.models import QualityScores
 
                 scores = QualityScores(clipiqa=0.5, hyperiqa=0.5, combined=0.5)
-            bird_grade = grade(scores.combined, self._settings.grade_thresholds)
+            iqa_grade = grade(scores.combined, self._settings.grade_thresholds)
+            # Step 3c: pose 降档（头不可见 -2 / 眼不可见 -1）
+            bird_grade = apply_pose_penalty(iqa_grade, pose_info)
 
             # Step 4: species classification (gated)
             species_candidates: list[SpeciesCandidate] = []

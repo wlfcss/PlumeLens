@@ -120,6 +120,87 @@ def resize_letterbox(
     return canvas, scale, (pad_top, pad_left)
 
 
+def expand_for_iqa(
+    image: NDArray[np.float32],
+    x1: float,
+    y1: float,
+    x2: float,
+    y2: float,
+    expand: float = 2.5,
+    max_aspect_ratio: float = 2.0,
+) -> NDArray[np.float32]:
+    """For IQA: 同比例放大 bbox，限制纵横比，保不出原图。
+
+    与 crop_bbox 的紧裁切不同，此函数让 IQA 模型看到"鸟 + 周边构图（背景虚化、
+    前景关系）"——这正是鸟摄美学评判的核心。
+
+    步骤：
+      1. 中心对齐 expand 倍放大
+      2. 纵横比超 max_aspect_ratio（长/短）→ 补足短边降比例
+      3. cap 到原图尺寸（防扩展后比原图大）
+      4. shift 让结果框完全留在原图内（中心尽量贴 bbox 原中心）
+
+    Args:
+        image: [H, W, 3] float32 0-1
+        x1,y1,x2,y2: bbox 坐标（原图空间）
+        expand: 放大倍数（默认 2.5，鸟占画面 ~1/2.5²=16% 面积时刚好满框）
+        max_aspect_ratio: 长边/短边上限（默认 2.0，超过则补短边）
+
+    Returns:
+        Cropped image region [crop_H, crop_W, 3]
+    """
+    h, w = image.shape[:2]
+    bw = x2 - x1
+    bh = y2 - y1
+    if bw <= 0 or bh <= 0:
+        return image[0:1, 0:1, :]
+
+    cx = (x1 + x2) / 2
+    cy = (y1 + y2) / 2
+
+    # 1) 同比例放大
+    tw = bw * expand
+    th = bh * expand
+
+    # 2) 纵横比限制：长边 / 短边 <= max_aspect_ratio
+    if tw > th * max_aspect_ratio:
+        th = tw / max_aspect_ratio
+    elif th > tw * max_aspect_ratio:
+        tw = th / max_aspect_ratio
+
+    # 3) cap 到原图尺寸（防扩展后比原图大）
+    tw = min(tw, float(w))
+    th = min(th, float(h))
+
+    # 4) 中心对齐目标框，超界 shift（中心尽量靠 bbox）
+    fx1 = cx - tw / 2
+    fy1 = cy - th / 2
+    fx2 = fx1 + tw
+    fy2 = fy1 + th
+    if fx1 < 0:
+        fx2 -= fx1
+        fx1 = 0.0
+    if fy1 < 0:
+        fy2 -= fy1
+        fy1 = 0.0
+    if fx2 > w:
+        fx1 -= fx2 - w
+        fx2 = float(w)
+    if fy2 > h:
+        fy1 -= fy2 - h
+        fy2 = float(h)
+    fx1 = max(0.0, fx1)
+    fy1 = max(0.0, fy1)
+
+    ix1 = int(fx1)
+    iy1 = int(fy1)
+    ix2 = int(fx2)
+    iy2 = int(fy2)
+    if ix2 <= ix1 or iy2 <= iy1:
+        return image[0:1, 0:1, :]
+    return image[iy1:iy2, ix1:ix2, :].copy()
+
+
 def crop_bbox(
     image: NDArray[np.float32],
     x1: float,

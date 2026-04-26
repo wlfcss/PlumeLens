@@ -18,12 +18,13 @@ class Settings(BaseSettings):
     models_dir: Path = Path(__file__).resolve().parent.parent / "models"
 
     # Pipeline — execution providers ("auto" / "coreml" / "cuda" / "cpu")
-    # YOLO CoreML EP 有 GatherElements op 的 Out-of-range 索引 bug（onnxruntime 1.24），
-    # 暂用 CPU 保稳；单张 1280 推理约 530ms on M5 Max CPU，可接受。
-    yolo_provider: str = "cpu"
-    iqa_provider: str = "cpu"
-    pose_provider: str = "cpu"
-    species_provider: str = "cpu"
+    # onnxruntime 1.25 + macOS：bird_visibility/IQA 在 CoreML EP 上 100% 安全 + 加速 7-27×；
+    # YOLO 仍有 GatherElements op 偶发 bug（30 张里 1 张崩，~3%）→ 用 coreml 但
+    # PipelineManager 单图 try-except fallback CPU（避免崩溃整个分析）。
+    yolo_provider: str = "coreml"
+    iqa_provider: str = "coreml"
+    pose_provider: str = "coreml"
+    species_provider: str = "cpu"  # DINOv3 ViT-L 在 CoreML EP 覆盖度差（~30%）
 
     # Pipeline — detection (yolo26l-bird v1.0: imgsz=1280, conf=0.5 for photography)
     yolo_confidence: float = 0.5
@@ -33,14 +34,23 @@ class Settings(BaseSettings):
     crop_expand_ratio: float = 1.0  # YOLO det bbox expand for IQA/pose input
     crop_padding_ratio: float = 0.10  # extra padding around bbox for downstream models
 
+    # IQA 专用裁切：bbox 同比例放大，让 IQA 看到"鸟 + 周边构图（背景虚化）"
+    # 之前用 crop_padding_ratio=0.10 紧裁切，IQA 看到的几乎只剩鸟特写 → HyperIQA
+    # 在精修鸟摄上饱和打高分（mean=0.895，33% 触顶 1.0）。改成大裁切让 IQA
+    # 评估完整构图（前景/背景/虚实/梯度），更符合鸟摄美学评判。
+    iqa_expand_ratio: float = 2.5
+    iqa_max_aspect_ratio: float = 2.0  # 长边/短边上限，超过则补短边降比例
+
     # Pipeline — IQA fusion weights
     clipiqa_weight: float = 0.35
     hyperiqa_weight: float = 0.65
 
     # Pipeline — grading thresholds (reject_max, record_max, usable_max)
-    # 参考 lingjian-v2 RATING_PROFILES 的 strict 档位（5 档映射到 4 档）：
-    #   five=0.90 → select；four=0.72 → usable；two=0.20 → record 上界
-    # 实测 IQA 分数集中在 0.7-0.9，0.90 阈值能把精选率压到 ~12-15%（合理摄影师选片比例）
+    # 实测调优（new1+new2 ~1800 张）：
+    #   - IQA 单独：精修连拍数据 select 80-90% 失真
+    #   - + expand_for_iqa(2.5×) 大裁切：select ~13-16%（看到完整构图）
+    #   - + apply_pose_penalty（头不见 -2 / 眼不见 -1）：select 8-14%，reject 5-18%
+    # 当前阈值 + pose 降档在两个数据集的 select 比例都落在 8-14% 摄影师选片合理区间。
     grade_thresholds: tuple[float, float, float] = (0.20, 0.45, 0.85)
 
     # Pipeline — pose / visibility (bird_visibility v1.0)
