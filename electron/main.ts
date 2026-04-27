@@ -154,12 +154,29 @@ app.whenReady().then(async () => {
 })
 
 app.on('window-all-closed', () => {
-  processManager?.stop()
+  // macOS：关闭窗口 != 退出应用（用户预期 dock 还在）。**不要** stop engine，
+  // 否则用户从 dock 重开窗口会拿到死后端。
+  // 非 macOS：关窗即退出应用，stop 由 before-quit 兜底。
   if (process.platform !== 'darwin') {
     app.quit()
   }
 })
 
 app.on('before-quit', () => {
+  // 真正退出（cmd-Q / 关闭整个应用）才杀 engine。
   processManager?.stop()
+})
+
+// 兜底：Node 进程意外退出（崩溃 / 被 kill）时也尝试杀 engine。
+// detached: true 的子进程不会随 Electron 死，必须显式 cleanup。
+process.on('exit', () => {
+  processManager?.stop()
+})
+process.on('SIGTERM', () => {
+  processManager?.stop()
+  app.quit()
+})
+process.on('SIGINT', () => {
+  processManager?.stop()
+  app.quit()
 })

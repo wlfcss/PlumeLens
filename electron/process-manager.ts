@@ -50,10 +50,14 @@ export class ProcessManager extends EventEmitter {
       env.PLUMELENS_DATA_DIR = app.getPath('userData')
     }
 
+    // detached: true + 后续按进程组 kill (-pid) → 杀掉整个 engine 子树（含 torch /
+    // transformers / pyarrow 内部 spawn 的 helper 进程）。否则 SIGTERM 只杀主进程，
+    // helper（如 multiprocessing resource_tracker）会成为孤儿继续吃 RAM。
     this.process = spawn(command, args, {
       cwd,
       env,
       stdio: ['pipe', 'pipe', 'pipe'],
+      detached: true,
     })
 
     let pendingUrl: string | null = null
@@ -104,19 +108,54 @@ export class ProcessManager extends EventEmitter {
 
   stop(): void {
     this.stopHealthCheck()
-    if (this.process && !this.process.killed) {
-      this.process.kill('SIGTERM')
-      setTimeout(() => {
-        if (this.process && !this.process.killed) {
-          this.process.kill('SIGKILL')
-        }
-      }, 5000)
-    }
-    this.process = null
+    this.killCurrentProcess('app shutdown')
     this.url = null
   }
 
+  /**
+   * 强杀当前 engine 子进程（如有），释放引用。
+   * 关键：在 handleCrash() 重启前必须调用，否则老进程会成为孤儿，
+   * 加载着 845MB 模型 + 持续累积 MPS 缓存吃内存（300GB 爆炸的根因之一）。
+   *
+   * 行为：
+   * - 已死（killed/exitCode 已设置）→ 跳过
+   * - 否则 SIGTERM；3s 后还活着 → SIGKILL（比之前的 5s 短，避免重启拖延）
+   */
+  private killCurrentProcess(reason: string): void {
+    const proc = this.process
+    if (!proc) return
+    this.process = null  // 先解引用，防止 'exit' handler 触发 handleCrash
+    if (proc.killed || proc.exitCode !== null) return
+
+    const pid = proc.pid
+    process.stderr.write(`[engine-pm] kill engine pgid=${pid} reason=${reason}\n`)
+    // 关键：kill 进程组而不是单一 PID（pid + detached:true → engine 是 process group leader）
+    // 负数 PID 给 process.kill 表示"信号发到整个进程组"，一举杀掉 helper / spawned children。
+    try {
+      if (pid !== undefined) process.kill(-pid, 'SIGTERM')
+    } catch {
+      // 兜底：直接信号主 PID
+      try { proc.kill('SIGTERM') } catch { /* ignore */ }
+    }
+    setTimeout(() => {
+      if (!proc.killed && proc.exitCode === null) {
+        process.stderr.write(
+          `[engine-pm] engine pgid=${pid} did not exit in 3s, SIGKILL\n`,
+        )
+        try {
+          if (pid !== undefined) process.kill(-pid, 'SIGKILL')
+        } catch {
+          try { proc.kill('SIGKILL') } catch { /* ignore */ }
+        }
+      }
+    }, 3000)
+  }
+
   private handleCrash(): void {
+    // ⚠ 关键修复：重启前必须先杀老进程。原代码直接 setTimeout(start) 会让
+    // this.process 被新 spawn 覆盖，老进程成为孤儿继续吃 RAM。
+    this.killCurrentProcess('crash/health-failure restart')
+
     const delays = [2000, 5000, 10000]
     if (this.restartCount < this.maxRestarts) {
       const delay = delays[this.restartCount] ?? 10000
@@ -129,25 +168,36 @@ export class ProcessManager extends EventEmitter {
 
   private startHealthCheck(): void {
     let consecutiveFailures = 0
+    // 重要：阈值提到 6 次 + 单次 timeout 8s。原 3 次会在 species v3 第一次冷启
+    // 推理（~1.5s）撞上时误判为崩溃，触发"假性重启"反复 spawn → 内存爆炸。
+    // 6 次失败 = 60s 持续无响应，才是真崩溃。
+    const FAIL_THRESHOLD = 6
+    const FETCH_TIMEOUT_MS = 8000
     this.healthInterval = setInterval(async () => {
       if (!this.url) return
+      const ctrl = new AbortController()
+      const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS)
       try {
-        const response = await fetch(`${this.url}/health`)
+        const response = await fetch(`${this.url}/health`, { signal: ctrl.signal })
         if (!response.ok) throw new Error(`HTTP ${response.status}`)
         consecutiveFailures = 0
       } catch (e) {
         consecutiveFailures += 1
         process.stderr.write(
-          `[engine-health] failure ${consecutiveFailures}: ${(e as Error).message}\n`,
+          `[engine-health] failure ${consecutiveFailures}/${FAIL_THRESHOLD}: ${(e as Error).message}\n`,
         )
-        // 连续 3 次失败（30 秒）视为崩溃，触发重启
-        if (consecutiveFailures >= 3) {
+        if (consecutiveFailures >= FAIL_THRESHOLD) {
           consecutiveFailures = 0
           this.stopHealthCheck()
           this.url = null
-          this.emit('error', `Engine 连续 3 次健康检查失败，触发重启`)
+          this.emit(
+            'error',
+            `Engine 连续 ${FAIL_THRESHOLD} 次健康检查失败，触发重启`,
+          )
           this.handleCrash()
         }
+      } finally {
+        clearTimeout(timer)
       }
     }, 10000)
   }

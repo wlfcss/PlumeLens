@@ -361,23 +361,43 @@ class SpeciesClassifier:
 
         Returns:
             Top-K SpeciesCandidate (confidence 降序)。低于 min_confidence 过滤。
+
+        ⚠ MPS 内存管理：
+        Apple Silicon 上 MPS 用统一内存（= 系统 RAM）。PyTorch MPS allocator 会
+        cache 已分配的临时张量供下次复用，**永不主动释放**。连续推理上千张照片
+        且不调 empty_cache → 缓存可累积到几 GB（甚至一直涨到 swap 爆炸）。
+        本函数每次调用结束都同步 + 清缓存，强制 RAM 归还系统。代价是每次推理
+        多 ~5-10ms（同步），但能避免内存无界增长。
         """
-        # 1) preprocess to (1, 3, 480, 480)
-        x = preprocess_for_dinov3(crop, self.image_size)
-        x = x.to(self.device).to(self._dtype)
+        try:
+            # 1) preprocess to (1, 3, 480, 480)
+            x = preprocess_for_dinov3(crop, self.image_size)
+            x = x.to(self.device).to(self._dtype)
 
-        # 2) backbone → (1, 2048) feature; cast to fp32 before head
-        feat = self._feature(x).float()
+            # 2) backbone → (1, 2048) feature; cast to fp32 before head
+            feat = self._feature(x).float()
 
-        # 3) 8 head ensemble — softmax per head, average
-        probs_sum: torch.Tensor | None = None
-        for h in self._heads:
-            logits = h(feat)
-            p = F.softmax(logits, dim=1)
-            probs_sum = p if probs_sum is None else probs_sum + p
-        assert probs_sum is not None
-        probs_t = probs_sum / float(len(self._heads))
-        probs: NDArray[np.float32] = probs_t[0].cpu().numpy()  # (num_classes,)
+            # 3) 8 head ensemble — softmax per head, average
+            probs_sum: torch.Tensor | None = None
+            for h in self._heads:
+                logits = h(feat)
+                p = F.softmax(logits, dim=1)
+                probs_sum = p if probs_sum is None else probs_sum + p
+            assert probs_sum is not None
+            probs_t = probs_sum / float(len(self._heads))
+            probs: NDArray[np.float32] = probs_t[0].cpu().numpy()  # (num_classes,)
+
+            # 释放中间 tensor 引用，让 Python GC 标记可回收（MPS 在 empty_cache 时
+            # 才真正释放底层 buffer；这里删引用是必要前提）
+            del x, feat, probs_sum, probs_t
+        finally:
+            # 强制 MPS / CUDA 释放 cache（用 finally 兜底异常路径也清）
+            if self.device == "mps":
+                torch.mps.synchronize()
+                torch.mps.empty_cache()
+            elif self.device == "cuda":
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
 
         # 4) zero out ghost classes
         probs[~self._trained_mask] = 0.0
