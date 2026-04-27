@@ -1,6 +1,7 @@
 """FastAPI application lifespan management."""
 
 import asyncio
+import os
 import sys
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
@@ -123,10 +124,64 @@ async def _refresh_all_thumbnails(db: Database) -> None:
         logger.warning("Startup library refresh aborted", error=str(e))
 
 
+def _kill_orphan_engines(my_pid: int) -> int:
+    """启动时杀掉除自己外的所有 plumelens-engine 进程。
+
+    场景：
+    - v0.1.0 时代 process-manager bug 留下了孤儿 engine（kill 不干净 + freeze_support
+      之前 spawn 的 helper 进程）
+    - 用户从 Activity Monitor 直接强杀 Electron，子进程 detached 后变孤儿
+    - dmg 升级时老进程没被 SIGTERM 干掉
+
+    旧 engine 进程占着 ~/.plumelens 数据库 + 监听其他端口 + 吃 RAM。新启动一份没
+    冲突（uvicorn 用 port 0 自分配），但用户机器上累积多个进程吃几 GB RAM。
+
+    Returns: 杀掉的进程数。
+    """
+    import signal
+    import subprocess
+
+    try:
+        # 找所有 plumelens-engine 进程（注意：argv[0] 在 frozen binary 是
+        # /.../plumelens-engine/plumelens-engine 路径）
+        result = subprocess.run(
+            ["pgrep", "-f", "plumelens-engine"],
+            capture_output=True, text=True, timeout=2,
+        )
+        if result.returncode != 0:
+            return 0
+        pids = [
+            int(p) for p in result.stdout.strip().split()
+            if p.strip().isdigit() and int(p) != my_pid
+        ]
+        killed = 0
+        for pid in pids:
+            try:
+                # 先温和 SIGTERM；这里不等，启动流程不该被孤儿阻塞
+                os.kill(pid, signal.SIGTERM)
+                killed += 1
+            except ProcessLookupError:
+                pass  # 已退出
+            except PermissionError:
+                pass  # 不是同一用户的进程
+        return killed
+    except Exception:
+        return 0
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     # Startup
     setup_logging(log_level=settings.log_level)
+
+    # 启动预清理：杀掉所有除自己外的 plumelens-engine 孤儿进程，避免它们
+    # 继续吃 RAM / 持有 db lock / 抢 MPS 资源。
+    orphans_killed = _kill_orphan_engines(my_pid=os.getpid())
+    if orphans_killed > 0:
+        await logger.awarning(
+            "Killed orphan plumelens-engine processes at startup",
+            count=orphans_killed,
+        )
 
     # Ensure data directory exists
     settings.data_dir.mkdir(parents=True, exist_ok=True)

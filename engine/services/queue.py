@@ -101,35 +101,58 @@ async def enqueue_photos(
     photo_ids: list[str],
     *,
     priority: int = 0,
+    current_pipeline_version: str | None = None,
 ) -> int:
     """Enqueue analysis tasks for the given photo_ids.
 
-    跳过已经有 pending/processing 任务的 photo（避免重复入队）。
+    幂等性保证（去重维度）：
+    1. 跳过已有 pending/processing/paused 任务的 photo（避免分析中再点击）
+    2. 若给定 current_pipeline_version：跳过已经在该 version 完成分析（active）
+       的 photo（避免重复点击「开始分析」累积 task_queue）
+
+    没传 current_pipeline_version 时只做规则 1（兼容）。
+
     Returns: 实际新入队的任务数。
     """
     if not photo_ids:
         return 0
 
     conn = db.conn
-    # 查出这些 photo 当前已有 active 任务（非终止态）的集合
     placeholders = ",".join("?" * len(photo_ids))
+
+    # 规则 1：active task_queue 状态去重
     active_states = (
         TaskStatus.PENDING.value,
         TaskStatus.PROCESSING.value,
         TaskStatus.PAUSED.value,
     )
     active_placeholders = ",".join("?" * len(active_states))
-    query = (
+    query_active = (
         f"SELECT photo_id FROM task_queue "
         f"WHERE photo_id IN ({placeholders}) AND status IN ({active_placeholders})"
     )
-    async with conn.execute(query, (*photo_ids, *active_states)) as cur:
-        existing = {str(r["photo_id"]) async for r in cur}
+    async with conn.execute(query_active, (*photo_ids, *active_states)) as cur:
+        skip_active = {str(r["photo_id"]) async for r in cur}
 
+    # 规则 2：当前 pipeline_version 已分析过的 photo（active=1）
+    skip_done: set[str] = set()
+    if current_pipeline_version:
+        query_done = (
+            f"SELECT photo_id FROM analysis_results "
+            f"WHERE photo_id IN ({placeholders}) "
+            f"  AND pipeline_version = ? "
+            f"  AND is_active = 1"
+        )
+        async with conn.execute(
+            query_done, (*photo_ids, current_pipeline_version),
+        ) as cur:
+            skip_done = {str(r["photo_id"]) async for r in cur}
+
+    skip = skip_active | skip_done
     inserted = 0
     now = _now_iso()
     for pid in photo_ids:
-        if pid in existing:
+        if pid in skip:
             continue
         await conn.execute(
             "INSERT INTO task_queue (id, photo_id, library_id, status, priority, "
@@ -143,17 +166,25 @@ async def enqueue_photos(
         "Enqueued analysis tasks",
         library_id=library_id,
         requested=len(photo_ids),
+        skipped_active=len(skip_active),
+        skipped_done=len(skip_done),
         inserted=inserted,
     )
     return inserted
 
 
 async def enqueue_library(
-    db: Database, library_id: str, *, priority: int = 0,
+    db: Database,
+    library_id: str,
+    *,
+    priority: int = 0,
+    current_pipeline_version: str | None = None,
 ) -> int:
     """Enqueue all photos in a library that have file_hash (阶段 2 已完成).
 
     只对已补齐 SHA-256 的 photo 入队，避免把"还没准备好"的 photo 提前分析。
+    传 current_pipeline_version 让 enqueue_photos 跳过已分析的，避免重复点击
+    「开始分析」累积 task_queue（之前 bug：3173 个 task / 783 个 photo = 4× 膨胀）。
     """
     async with db.conn.execute(
         "SELECT id FROM photos WHERE library_id = ? AND file_hash IS NOT NULL",
@@ -161,7 +192,11 @@ async def enqueue_library(
     ) as cur:
         rows = await cur.fetchall()
     photo_ids = [str(r["id"]) for r in rows]
-    return await enqueue_photos(db, library_id, photo_ids, priority=priority)
+    return await enqueue_photos(
+        db, library_id, photo_ids,
+        priority=priority,
+        current_pipeline_version=current_pipeline_version,
+    )
 
 
 # ---------------------------------------------------------------------------

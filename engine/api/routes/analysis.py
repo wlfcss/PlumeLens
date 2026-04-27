@@ -136,10 +136,14 @@ async def start_batch(
     # 同步补哈希（幂等，已有哈希的 photo 直接跳过；空集时秒级返回）
     await backfill_hashes(db, body.library_id)
 
-    # 如果 force_rerun，先把已有 active 的该 library 的结果 invalidate
-    # （MVP 策略：仍然重新入队，analyze_photo 的 force_rerun 参数由每个 task 决定；
-    # 为简化，这里让每次 batch 入队时用 pipeline_version + cache 行为自然处理）
-    inserted = await enqueue_library(db, body.library_id)
+    # 传 pipeline_version 进 enqueue → 当前版本已分析过的 photo 跳过（去重）。
+    # 之前 bug：用户多次点开始分析（或 lifespan resume + 手动点）会让同一 photo
+    # 累积多个 task_queue 行 → 783 张照片产生 3173 个 task = 4× 膨胀。
+    # 现在按 (file_hash, pipeline_version) 单一来源去重。
+    inserted = await enqueue_library(
+        db, body.library_id,
+        current_pipeline_version=pipeline.pipeline_version,
+    )
 
     # Kick off drain worker（不阻塞返回）
     if body.library_id not in _workers or _workers[body.library_id].done():
