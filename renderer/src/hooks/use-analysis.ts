@@ -64,10 +64,14 @@ export function useQueueStats(libraryId: string | null | undefined, enabled = tr
 /**
  * Subscribe to the SSE progress stream for a library. Returns the latest event.
  * Automatically reconnects on open errors; closes when disabled or unmounted.
+ *
+ * `restartKey` 是一个外部触发器：每次它变化都强制重建 SSE 连接。用法：
+ * useStartBatch.onSuccess 后 bump 这个 key，能在 idle SSE 已死的场景下恢复推送。
  */
 export function useAnalysisProgress(
   libraryId: string | null | undefined,
   enabled = true,
+  restartKey: number = 0,
 ): AnalysisProgressEvent | null {
   const [event, setEvent] = useState<AnalysisProgressEvent | null>(null)
 
@@ -89,9 +93,9 @@ export function useAnalysisProgress(
             console.warn('SSE malformed frame:', e)
           }
         }
-        source.addEventListener('done', () => {
-          source?.close()
-        })
+        // 注：v0.2.0 起后端不再主动 emit `done`（idle 时也保持流，让用户随时
+        // 点「开始分析」能立即看到 pending 变化）。这里保留 listener 是
+        // 兼容旧后端 / 防御性写法 — 收到 done 不再 close source。
         source.onerror = (e) => {
           // eslint-disable-next-line no-console
           console.warn('SSE error (browser will reconnect):', e)
@@ -107,7 +111,7 @@ export function useAnalysisProgress(
       source?.close()
       source = null
     }
-  }, [libraryId, enabled])
+  }, [libraryId, enabled, restartKey])
 
   return event
 }

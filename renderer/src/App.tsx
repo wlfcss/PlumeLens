@@ -529,7 +529,15 @@ export default function App() {
   const { data: activeDetail } = useLibraryDetail(activeFolderId)
   const importLibrary = useImportLibrary()
   const startBatch = useStartBatch()
-  const progressEvent = useAnalysisProgress(activeFolderId, Boolean(activeFolderId))
+  // SSE 重连 key：startBatch 成功后 bump，强制 useAnalysisProgress 重建连接。
+  // 应对 SSE idle close（v0.1.0 后端 bug）/ 网络抖动 / 老连接卡住等场景，
+  // 确保用户点「开始分析」后立刻能看到 pending 数变化。
+  const [sseRestartKey, setSseRestartKey] = useState(0)
+  const progressEvent = useAnalysisProgress(
+    activeFolderId,
+    Boolean(activeFolderId),
+    sseRestartKey,
+  )
   const setDecisionMutation = useSetDecision(activeFolderId)
   const batchSetDecisionsMutation = useBatchSetDecisions(activeFolderId)
 
@@ -648,6 +656,8 @@ export default function App() {
     if (!activeFolderId) return
     try {
       await startBatch.mutateAsync({ libraryId: activeFolderId })
+      // bump key 让 useAnalysisProgress 重建 SSE 连接（如果上一个 idle 死了）
+      setSseRestartKey((k) => k + 1)
     } catch (err) {
       console.error('Failed to start batch analysis:', err)
     }

@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 
 import structlog
 from fastapi import APIRouter, HTTPException, Request
@@ -222,6 +221,12 @@ async def _progress_stream(db: Database, library_id: str):
     """Generator yielding SSE `data: ...` lines.
 
     推送策略：每 SSE_INTERVAL 秒一次状态快照；两次相邻状态相同时不重发（节省流量）。
+    **不会主动关闭** — 长连接保持到客户端断开。这样用户在 idle 状态下点击「开始
+    分析」后，新生成的 pending tasks 立即能被同一个 SSE 流推送出去。
+
+    历史 bug：之前发完 `event: done` 就 return，导致前端 EventSource 关闭；
+    用户点击「开始分析」后 task 入队但前端永远看不到（SSE 已死），button 卡在
+    "开始分析"。
     """
     last_payload: str | None = None
     try:
@@ -247,10 +252,8 @@ async def _progress_stream(db: Database, library_id: str):
             if payload != last_payload:
                 yield f"data: {payload}\n\n"
                 last_payload = payload
-            # 若没有在流转的任务，额外发一次"done"后退出
-            if processing == 0 and pending == 0:
-                yield f"event: done\ndata: {json.dumps({'library_id': library_id})}\n\n"
-                return
+            # idle 状态（pending=0 且 processing=0）也保持流，不再主动 done。
+            # 用户随时可能点「开始分析」让 pending 变非 0；这条流要能马上推。
             await asyncio.sleep(SSE_INTERVAL)
     except asyncio.CancelledError:
         # 客户端断开，正常退出
