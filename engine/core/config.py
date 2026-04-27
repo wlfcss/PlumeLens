@@ -69,8 +69,10 @@ class Settings(BaseSettings):
     species_min_confidence: float = 0.01  # 过滤 1018 训练种之外的噪声命中
     species_crop_margin: float = 0.15  # 方形 bbox 扩展比例（见 MODEL_DELIVERY §6.3）
     species_crop_min_side_frac: float = 0.30  # 方形最小边长占原图短边的比例
-    # 只对 head+eye 可见且综合分达到该分级（或更高）的鸟触发物种分类
-    species_min_grade: str = "usable"  # "reject" / "record" / "usable" / "select"
+    # 只对 head+eye 可见的鸟触发物种分类。grade 门已去掉（"reject" 即所有
+    # 等级都跑），让低分但鸟头/眼清晰的照片也能拿到物种名 — 用户明确选择最宽松。
+    # 代价：每张多 30-80% 物种推理时间；DINOv3 ~150ms/张。
+    species_min_grade: str = "reject"  # "reject" / "record" / "usable" / "select"
 
     # Pipeline — preprocess code version (bump manually when resize/normalize/color changes)
     # v2: letterbox fill 0.5 → 114/255 (YOLO standard, matches training)
