@@ -38,20 +38,57 @@ _GRADE_ORDER: dict[str, int] = {
 }
 
 
-def resolve_providers(requested: str) -> list[str]:
-    """Map config string to onnxruntime execution provider list."""
+# CoreML EP 默认计算单元配置：CPUAndGPU（关 ANE）。
+#
+# 实测（2026-04-27 5Y3A7448.JPG 8K Canon）：
+#   - 默认 ALL（含 ANE）：bbox 错位 700+ px（letterbox x1=-80 越界），87 ms
+#   - **CPUAndGPU（Metal GPU + CPU 兜底，关 ANE）**：与 CPU EP bbox 完全一致到
+#     0.1 px，112 ms（vs CPU 395 ms，3.5× 加速）
+#   - CPUOnly：行为同 CPU EP 但更慢
+#
+# 根因：YOLO26 NMS-free head 的 advanced indexing 算子（GatherElements 等）在
+# Apple Neural Engine 上有精度 bug；Metal GPU 实现是对的。
+# 适用 YOLO；其他几个模型（pose/IQA）走 ANE 没问题，无需此选项。
+_COREML_DEFAULT_COMPUTE_UNITS_YOLO: str = "CPUAndGPU"
+
+
+def resolve_providers(
+    requested: str,
+    *,
+    coreml_compute_units: str | None = None,
+) -> list:
+    """Map config string to onnxruntime execution provider list.
+
+    Args:
+        requested: "cpu" / "coreml" / "cuda" / "auto"
+        coreml_compute_units: CoreML EP 的 MLComputeUnits 选项（可选）。
+            None → 不指定（CoreML 默认 'ALL'）
+            'CPUAndGPU' → 关 ANE，只走 Metal GPU + CPU。**YOLO 必须用这个**
+            'CPUOnly' / 'CPUAndNeuralEngine' / 'ALL' 也支持
+            如果设置了，对应的 CoreML provider 会以 (name, options) 元组形式注入。
+
+    Returns:
+        list — 可能含 str（普通 EP 名）或 tuple[str, dict]（带选项的 EP）。
+        ort.InferenceSession 接收这种混合格式。
+    """
     import platform
+
+    coreml_entry: str | tuple[str, dict[str, str]]
+    if coreml_compute_units:
+        coreml_entry = ("CoreMLExecutionProvider", {"MLComputeUnits": coreml_compute_units})
+    else:
+        coreml_entry = "CoreMLExecutionProvider"
 
     if requested == "cpu":
         return ["CPUExecutionProvider"]
     if requested == "coreml":
-        return ["CoreMLExecutionProvider", "CPUExecutionProvider"]
+        return [coreml_entry, "CPUExecutionProvider"]
     if requested == "cuda":
         return ["CUDAExecutionProvider", "CPUExecutionProvider"]
 
     if requested == "auto":
         if platform.system() == "Darwin" and platform.machine() == "arm64":
-            return ["CoreMLExecutionProvider", "CPUExecutionProvider"]
+            return [coreml_entry, "CPUExecutionProvider"]
         try:
             import onnxruntime as ort
 
@@ -114,7 +151,13 @@ class PipelineManager:
         # ---- YOLO detector ----
         yolo_path = models_dir / "yolo26l-bird-det.onnx"
         if yolo_path.exists():
-            providers = resolve_providers(self._settings.yolo_provider)
+            # YOLO 必须给 CoreML EP 传 MLComputeUnits=CPUAndGPU 关 ANE，
+            # 否则 advanced indexing 在 ANE 上精度 bug 会出 letterbox 越界 bbox。
+            # 只对 yolo 一个模型这样设置；pose/IQA 用 ANE 没问题。
+            providers = resolve_providers(
+                self._settings.yolo_provider,
+                coreml_compute_units=_COREML_DEFAULT_COMPUTE_UNITS_YOLO,
+            )
             await logger.ainfo("Loading YOLO detector", path=str(yolo_path))
             try:
                 sess = ort.InferenceSession(str(yolo_path), providers=providers)

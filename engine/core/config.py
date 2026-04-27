@@ -18,15 +18,16 @@ class Settings(BaseSettings):
     models_dir: Path = Path(__file__).resolve().parent.parent / "models"
 
     # Pipeline — execution providers ("auto" / "coreml" / "cuda" / "cpu")
-    # macOS onnxruntime 1.25 实测：
-    # - YOLO + CoreML：**强制 CPU**。即使预处理对齐 MODEL_CARD 参考（preprocess v4 cv2+round），
-    #   CoreML EP 在某些 8K Canon 照片上仍会输出 bbox 越界（letterbox x1=-80 之类，
-    #   反算回原图 ~700px 错位，**远超 MODEL_CARD §5.5.9 标的 250px 上限**）。这是
-    #   CoreML EP 对 YOLO26 NMS-free head advanced indexing 算子的实现差异（Ultralytics
-    #   社区已知，无 workaround）。CPU EP 单图 ~620ms 可接受，正确性优先。
-    # - bird_visibility/CLIPIQA/HyperIQA + CoreML：100% 安全 + 加速 7-27×（与 CPU diff <0.2px）
+    # macOS onnxruntime 1.25 实测（2026-04-27 更新）：
+    # - YOLO + CoreML(CPUAndGPU)：**正确 + 3.5× 加速**。
+    #   关键发现：bbox 越界的根因是 ANE（Apple Neural Engine）对 advanced indexing
+    #   的精度实现有 bug，不是整个 CoreML EP 的问题。`MLComputeUnits='CPUAndGPU'`
+    #   关 ANE 只走 Metal GPU + CPU 兜底，bbox 与 CPU EP 一致到 0.1px，速度 ~112ms
+    #   （vs CPU EP ~395ms）。manager.py::resolve_providers 会自动给 YOLO 注入
+    #   该选项，pose/IQA 不需要（用 ANE 没问题）。
+    # - bird_visibility/CLIPIQA/HyperIQA + CoreML(default)：100% 安全 + 加速 7-27×
     # - DINOv3 species v3：转 torch + MPS bf16，不再走 ONNX 路线
-    yolo_provider: str = "cpu"
+    yolo_provider: str = "coreml"
     iqa_provider: str = "coreml"
     pose_provider: str = "coreml"
     # species v3 用 torch + transformers，"auto" 在 Mac 走 MPS bf16，
