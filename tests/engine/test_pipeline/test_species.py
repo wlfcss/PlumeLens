@@ -1,73 +1,48 @@
-"""Tests for SpeciesClassifier and helpers (mocked ONNX sessions + in-memory taxonomy)."""
+"""Tests for v3 species classifier helpers + taxonomy.
 
-from unittest.mock import MagicMock
+注意：v3 切到 torch + transformers 后，完整的 SpeciesClassifier 加载需要真实
+backbone safetensors + 8 head .pt（>800MB），不在 unit test 跑。这里只测：
+- expand_bbox_to_square：纯几何，无依赖
+- preprocess_for_dinov3：torch tensor 输出
+- SpeciesTaxonomy：基于动态写入的 parquet 文件
+- HeadOnlyClassifier.from_ckpt：基于 in-memory 构造的 state_dict
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
 
 import numpy as np
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
+import torch
 from engine.pipeline.species import (
+    DEFAULT_IMAGE_SIZE,
     DEFAULT_MIN_CONFIDENCE,
     IMAGENET_MEAN,
     IMAGENET_STD,
-    SCALES,
-    SpeciesClassifier,
+    HeadOnlyClassifier,
     SpeciesTaxonomy,
     expand_bbox_to_square,
     preprocess_for_dinov3,
 )
 
 
-class _FakeTaxonomy(SpeciesTaxonomy):
-    """Bypass parquet read; inject rows directly for tests."""
-
-    def __init__(self, rows: list[dict]) -> None:  # type: ignore[no-untyped-def]
-        rows_sorted = sorted(rows, key=lambda r: r["canonical_sci"])
-        self._rows = rows_sorted
-        self._sci_to_row = {r["canonical_sci"]: r for r in rows_sorted}
-
-
-def _make_backbone_session(feature: np.ndarray) -> MagicMock:
-    sess = MagicMock()
-    inp = MagicMock()
-    inp.name = "pixel_values"
-    out = MagicMock()
-    out.name = "features"
-    sess.get_inputs.return_value = [inp]
-    sess.get_outputs.return_value = [out]
-    sess.run.return_value = [feature]  # feature already shape (1, 2048)
-    return sess
-
-
-def _make_ensemble_session(
-    probs: np.ndarray,
-    input_names: tuple[str, ...] = ("feat_512", "feat_640"),
-) -> MagicMock:
-    sess = MagicMock()
-    ins = []
-    for n in input_names:
-        i = MagicMock()
-        i.name = n
-        ins.append(i)
-    out = MagicMock()
-    out.name = "species_probs"
-    sess.get_inputs.return_value = ins
-    sess.get_outputs.return_value = [out]
-    sess.run.return_value = [probs[np.newaxis, ...]]  # wrap to (1, N)
-    return sess
-
-
+# ============================================================
+# expand_bbox_to_square
+# ============================================================
 class TestExpandBboxToSquare:
     def test_center_bbox_small_enforces_min_side(self) -> None:
-        # 很小的 bbox，应该被 min_side_frac=0.30 拉大
         left, top, right, bottom = expand_bbox_to_square(
             0.5, 0.5, 0.05, 0.05, 1000, 1000,
         )
         side_w = right - left
         side_h = bottom - top
-        assert side_w == side_h  # 方形
-        assert side_w >= 300  # min 30% of 1000
+        assert side_w == side_h
+        assert side_w >= 300
 
     def test_bbox_near_edge_gets_clamped(self) -> None:
-        # bbox 靠近右下边缘，crop 应该不会越界
         left, top, right, bottom = expand_bbox_to_square(
             0.95, 0.95, 0.1, 0.1, 1000, 1000,
         )
@@ -82,177 +57,130 @@ class TestExpandBboxToSquare:
             assert isinstance(v, int)
 
 
+# ============================================================
+# preprocess_for_dinov3 — 输出 torch tensor
+# ============================================================
 class TestPreprocessForDinov3:
     def test_output_shape_and_dtype(self) -> None:
         img = np.random.rand(300, 400, 3).astype(np.float32)
-        x = preprocess_for_dinov3(img, 512)
-        assert x.shape == (1, 3, 512, 512)
-        assert x.dtype == np.float32
+        x = preprocess_for_dinov3(img, DEFAULT_IMAGE_SIZE)
+        assert isinstance(x, torch.Tensor)
+        assert tuple(x.shape) == (1, 3, DEFAULT_IMAGE_SIZE, DEFAULT_IMAGE_SIZE)
+        assert x.dtype == torch.float32
 
     def test_imagenet_normalization_applied(self) -> None:
-        # 全 1 的输入归一化后应该约等于 (1 - mean) / std
         img = np.ones((300, 400, 3), dtype=np.float32)
-        x = preprocess_for_dinov3(img, 512)
-        # 检查 R 通道均值（每通道 normalize 不同）
-        r_channel_mean = x[0, 0].mean()
+        x = preprocess_for_dinov3(img, 480)
+        r_channel_mean = float(x[0, 0].mean())
         expected = (1.0 - IMAGENET_MEAN[0]) / IMAGENET_STD[0]
         assert r_channel_mean == pytest.approx(expected, abs=0.02)
 
-    def test_scales_constant_stable(self) -> None:
-        assert SCALES == (512, 640)
+    def test_default_size_is_480(self) -> None:
+        assert DEFAULT_IMAGE_SIZE == 480
 
 
-class TestSpeciesTaxonomyFake:
-    def test_sci_at_is_sorted(self) -> None:
-        rows = [
-            {"canonical_sci": "Zosterops simplex", "canonical_zh": "暗绿绣眼鸟"},
-            {"canonical_sci": "Alcedo atthis", "canonical_zh": "翠鸟"},
-            {"canonical_sci": "Passer cinnamomeus", "canonical_zh": "山麻雀"},
-        ]
-        tax = _FakeTaxonomy(rows)
-        # 字典序：Alcedo < Passer < Zosterops
-        assert tax.sci_at(0) == "Alcedo atthis"
-        assert tax.sci_at(1) == "Passer cinnamomeus"
-        assert tax.sci_at(2) == "Zosterops simplex"
-
-    def test_lookup(self) -> None:
-        tax = _FakeTaxonomy([{"canonical_sci": "X", "iucn": "LC"}])
-        assert tax.lookup("X") == {"canonical_sci": "X", "iucn": "LC"}
-        assert tax.lookup("missing") is None
-
-
-class TestSpeciesClassifier:
-    def _build(self, probs: np.ndarray, num_species: int, top_k: int = 5) -> SpeciesClassifier:
-        rows = [
-            {
-                "canonical_sci": f"Species_{i:04d}",
-                "canonical_zh": f"物种{i}",
-                "canonical_en": None,
-                "family_sci": None,
-                "family_zh": None,
-                "order_sci": None,
-                "iucn": "LC",
-                "protect_level": None,
-            }
-            for i in range(num_species)
-        ]
-        tax = _FakeTaxonomy(rows)
-        feat = np.random.randn(1, 2048).astype(np.float32)
-        return SpeciesClassifier(
-            backbone_session=_make_backbone_session(feat),
-            ensemble_session=_make_ensemble_session(probs),
-            taxonomy=tax,
-            top_k=top_k,
-            min_confidence=DEFAULT_MIN_CONFIDENCE,
+# ============================================================
+# HeadOnlyClassifier — from_ckpt 推断结构 + load
+# ============================================================
+class TestHeadOnlyClassifier:
+    def _make_synthetic_ckpt(self, tmp_path: Path) -> Path:
+        """造一个 head ckpt，模拟 v3 LayerNorm + MLP-2048 + species/order/family/genus。"""
+        feature_dim = 2048
+        num_species = 1535
+        num_orders = 31
+        num_families = 124
+        num_genera = 521
+        mlp_hidden = 2048
+        h = HeadOnlyClassifier(
+            feature_dim=feature_dim,
+            num_species=num_species,
+            head_type="mlp",
+            mlp_hidden=mlp_hidden,
+            num_orders=num_orders,
+            num_families=num_families,
+            num_genera=num_genera,
         )
+        ckpt = {"model_state": h.state_dict(), "epoch": 1, "args": {}, "metrics": {}}
+        ck_path = tmp_path / "fake_head.pt"
+        torch.save(ckpt, str(ck_path))
+        return ck_path
 
-    def test_returns_top_k_candidates_sorted(self) -> None:
-        # 制作 1516 维概率，让 index 500 最高
-        probs = np.full(1516, 0.0001, dtype=np.float32)
-        probs[500] = 0.5
-        probs[300] = 0.2
-        probs[100] = 0.1
-        classifier = self._build(probs, num_species=1516, top_k=5)
+    def test_from_ckpt_loads_correct_shape(self, tmp_path: Path) -> None:
+        ck = self._make_synthetic_ckpt(tmp_path)
+        head = HeadOnlyClassifier.from_ckpt(ck)
+        assert head.species_head.weight.shape == (1535, 2048)
+        assert head.head_type == "mlp"
+        assert head.order_head is not None
 
-        img = np.random.rand(300, 300, 3).astype(np.float32)
-        results = classifier.classify(img)
-
-        # 低于 min_confidence=0.01 的会被过滤；剩 3 个
-        assert len(results) == 3
-        # 排序：confidence 降序
-        assert results[0].confidence > results[1].confidence > results[2].confidence
-        assert results[0].confidence == pytest.approx(0.5)
-
-    def test_all_candidates_filtered_when_below_threshold(self) -> None:
-        # 所有都低于 min_confidence
-        probs = np.full(1516, 0.0001, dtype=np.float32)
-        classifier = self._build(probs, num_species=1516)
-
-        img = np.random.rand(200, 200, 3).astype(np.float32)
-        results = classifier.classify(img)
-        assert results == []
-
-    def test_metadata_passthrough(self) -> None:
-        probs = np.zeros(10, dtype=np.float32)
-        probs[3] = 0.9
-        classifier = self._build(probs, num_species=10)
-
-        img = np.random.rand(100, 100, 3).astype(np.float32)
-        results = classifier.classify(img)
-        assert len(results) == 1
-        # Species_0003 对应 index 3（字典序）
-        assert results[0].canonical_sci == "Species_0003"
-        assert results[0].canonical_zh == "物种3"
-        assert results[0].iucn == "LC"
-
-    def test_respects_ensemble_input_name_order(self) -> None:
-        # 如果 ONNX 导出时把 feat_640 排在前面，classify 应该仍能正确调用
-        probs = np.zeros(10, dtype=np.float32)
-        probs[0] = 1.0
-        ens_sess = _make_ensemble_session(probs, input_names=("feat_640", "feat_512"))
-        classifier = SpeciesClassifier(
-            backbone_session=_make_backbone_session(
-                np.random.randn(1, 2048).astype(np.float32)
-            ),
-            ensemble_session=ens_sess,
-            taxonomy=_FakeTaxonomy([
-                {"canonical_sci": f"S_{i}"} for i in range(10)
-            ]),
-        )
-        img = np.random.rand(200, 200, 3).astype(np.float32)
-        results = classifier.classify(img)
-        # 主要验证 feed dict 构造不报错
-        assert len(results) == 1
+    def test_forward_returns_species_logits(self, tmp_path: Path) -> None:
+        ck = self._make_synthetic_ckpt(tmp_path)
+        head = HeadOnlyClassifier.from_ckpt(ck)
+        feat = torch.randn(2, 2048)
+        out = head(feat)
+        assert tuple(out.shape) == (2, 1535)
 
 
-class TestTrainedFilter:
-    """验证 trained_sci mask 能把未训练类从 top-K 结果中彻底剔除。"""
+# ============================================================
+# SpeciesTaxonomy — 真实读 parquet（in tmp_path）
+# ============================================================
+class TestSpeciesTaxonomy:
+    def _write_taxonomy(self, deploy_dir: Path, num_classes: int = 5) -> None:
+        """写两个 parquet：canonical_extended + species_list_1301（trained mask）。"""
+        canonical = pa.table({
+            "canonical_sci": [f"Species_{i:03d}" for i in range(num_classes)],
+            "canonical_zh": [f"物种{i}" for i in range(num_classes)],
+            "canonical_en": [f"sp_{i}" for i in range(num_classes)],
+            "order_sci": ["ORDER_X"] * num_classes,
+            "family_sci": ["FAMILY_X"] * num_classes,
+            "family_zh": ["科X"] * num_classes,
+            "iucn": ["LC"] * num_classes,
+            "protect_level": [None] * num_classes,
+            "note": [None] * num_classes,
+        })
+        pq.write_table(canonical, str(deploy_dir / "canonical_extended.parquet"))
 
-    def test_untrained_classes_zeroed_out(self) -> None:
-        # 10 个槽位，假设只有偶数 index 训练过
-        num = 10
-        probs = np.zeros(num, dtype=np.float32)
-        # 给未训练的 index 3 设最高概率，模拟"未训练类偶然 fire"
-        probs[3] = 0.9
-        # 训练过的 index 2 设次高
-        probs[2] = 0.5
+        # 只有 even-index 的类有训练（model_output_id = 0, 2, 4, ...）
+        # 注意：model_output_id 必须基于"按字典序排序后的 index"
+        # Species_000 < Species_001 < ... ASCII 排序后，index 即名称中的数字
+        trained_indices = [i for i in range(num_classes) if i % 2 == 0]
+        trained = pa.table({
+            "model_output_id": trained_indices,
+            "canonical_sci": [f"Species_{i:03d}" for i in trained_indices],
+        })
+        pq.write_table(trained, str(deploy_dir / "species_list_1301.parquet"))
 
-        rows = [{"canonical_sci": f"S_{i}"} for i in range(num)]
-        tax = _FakeTaxonomy(rows)
-        trained = {f"S_{i}" for i in range(num) if i % 2 == 0}  # 偶数
+    def test_loads_canonical_and_trained_mask(self, tmp_path: Path) -> None:
+        self._write_taxonomy(tmp_path, num_classes=5)
+        tax = SpeciesTaxonomy(tmp_path)
+        assert len(tax) == 5
+        # 字典序：Species_000 → idx 0
+        assert tax.sci_at(0) == "Species_000"
+        assert tax.sci_at(4) == "Species_004"
+        # trained mask: 偶数 index 为 True
+        assert tax.trained_mask.tolist() == [True, False, True, False, True]
 
-        feat = np.random.randn(1, 2048).astype(np.float32)
-        classifier = SpeciesClassifier(
-            backbone_session=_make_backbone_session(feat),
-            ensemble_session=_make_ensemble_session(probs),
-            taxonomy=tax,
-            top_k=5,
-            min_confidence=0.0,  # 不因低置信度过滤，专测 trained mask
-            trained_sci=trained,
-        )
-        img = np.random.rand(100, 100, 3).astype(np.float32)
-        results = classifier.classify(img)
+    def test_lookup_returns_metadata(self, tmp_path: Path) -> None:
+        self._write_taxonomy(tmp_path, num_classes=3)
+        tax = SpeciesTaxonomy(tmp_path)
+        meta = tax.lookup("Species_001")
+        assert meta is not None
+        assert meta["canonical_zh"] == "物种1"
+        assert meta["iucn"] == "LC"
 
-        # 未训练的 index 3 ("S_3") 应该不出现；top-1 应是 index 2
-        sci_set = {c.canonical_sci for c in results}
-        assert "S_3" not in sci_set
-        assert results[0].canonical_sci == "S_2"
+    def test_lookup_missing_returns_none(self, tmp_path: Path) -> None:
+        self._write_taxonomy(tmp_path, num_classes=3)
+        tax = SpeciesTaxonomy(tmp_path)
+        assert tax.lookup("MissingSpecies") is None
 
-    def test_no_mask_preserves_all_classes(self) -> None:
-        """trained_sci=None 时行为不变（向后兼容）。"""
-        num = 5
-        probs = np.zeros(num, dtype=np.float32)
-        probs[2] = 0.8
 
-        rows = [{"canonical_sci": f"X_{i}"} for i in range(num)]
-        tax = _FakeTaxonomy(rows)
-        feat = np.random.randn(1, 2048).astype(np.float32)
-        classifier = SpeciesClassifier(
-            backbone_session=_make_backbone_session(feat),
-            ensemble_session=_make_ensemble_session(probs),
-            taxonomy=tax,
-            min_confidence=0.0,
-        )
-        img = np.random.rand(50, 50, 3).astype(np.float32)
-        results = classifier.classify(img)
-        assert results[0].canonical_sci == "X_2"
+# ============================================================
+# 健全性：constants 没飘
+# ============================================================
+def test_imagenet_constants_unchanged() -> None:
+    assert IMAGENET_MEAN == (0.485, 0.456, 0.406)
+    assert IMAGENET_STD == (0.229, 0.224, 0.225)
+
+
+def test_default_min_confidence_low_enough_to_pass_train_predictions() -> None:
+    # 0.01 既能挡 ghost class 偶然命中，又不会过滤训练良好的预测
+    assert DEFAULT_MIN_CONFIDENCE == 0.01

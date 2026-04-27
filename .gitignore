@@ -53,12 +53,18 @@ tests/e2e/smoke.spec.ts-snapshots/*-diff.png
 *.zip
 
 # 大 ONNX 模型 (超 GitHub 100 MB 单文件上限，避开 LFS 开销)：
-# DINOv3 backbone (1.2 GB) — scripts/export_dinov3_backbone.py
+# DINOv3 backbone (1.2 GB) — 已弃用 ONNX 路线，由 v3 torch 取代
 # CLIPIQA+ (293 MB) / HyperIQA (104 MB) — scripts/export_iqa_onnx.py
 # 分发时由 electron-builder extraResources 打包进安装包
 engine/models/dinov3_backbone.onnx
+engine/models/species_ensemble.onnx
+engine/models/species_taxonomy.parquet
+engine/models/species_trained.json
 engine/models/clipiqa_plus.onnx
 engine/models/hyperiqa.onnx
+# DINOv3 species v3（torch + transformers）— 845MB 总，由 dino 训练 → copy
+engine/models/species/backbone/model.safetensors
+engine/models/species/heads/*.pt
 # PyTorch weights cache (used only by the export script)
 engine/models/.cache/
 .ruff_cache/

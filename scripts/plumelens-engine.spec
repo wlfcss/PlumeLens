@@ -40,20 +40,43 @@ hidden_imports: list[str] = [
     "aiosqlite.cursor",
     # OpenCV (cv2) 用于场景分组（AKAZE + 颜色直方图）
     "cv2",
+    # ---- DINOv3 species v3：torch + transformers + safetensors ----
+    # transformers 通过 from_pretrained 动态 import 模型类
+    *collect_submodules("transformers.models.dinov3_vit"),
+    "transformers.models.auto",
+    "transformers.models.auto.modeling_auto",
+    "transformers.models.auto.configuration_auto",
+    # torch 各 backend 在运行时按设备 import
+    "torch._C",
+    "torch.nn.functional",
+    "torch.backends.mps",
+    "torch.backends.cudnn",
+    # safetensors 读取
+    "safetensors",
+    "safetensors.torch",
+    # torchvision v2 transforms 按需 import 子模块
+    *collect_submodules("torchvision.transforms.v2"),
 ]
 
-# 原生库需要 PyInstaller 显式捕获（libonnxruntime.dylib, libraw.dylib 等）
+# 原生库需要 PyInstaller 显式捕获（libonnxruntime.dylib, libraw.dylib, libtorch_*.dylib 等）
 binaries: list[tuple[str, str]] = [
     *collect_dynamic_libs("onnxruntime"),
     *collect_dynamic_libs("rawpy"),
     *collect_dynamic_libs("pyarrow"),
     *collect_dynamic_libs("numpy"),
     *collect_dynamic_libs("cv2"),
+    *collect_dynamic_libs("torch"),
+    *collect_dynamic_libs("torchvision"),
 ]
 
-# Non-Python data files。注意 ONNX 模型不打包到 engine 内，由 electron-builder
+# Non-Python data files。模型权重不打包到 engine 内（容易 700+MB），由 electron-builder
 # extraResources 放到 app bundle 的 Resources/ 下，引擎启动时从 env 读路径。
-datas: list[tuple[str, str]] = []
+# 但 transformers 内置的 model registry / tokenizer config 需要 collect_data_files 兜底。
+from PyInstaller.utils.hooks import collect_data_files
+datas: list[tuple[str, str]] = [
+    *collect_data_files("transformers"),
+    *collect_data_files("torch", includes=["**/*.json", "**/*.txt"]),
+]
 
 a = Analysis(
     [str(ENGINE_ROOT / "__main__.py")],
@@ -65,11 +88,11 @@ a = Analysis(
     hooksconfig={},
     runtime_hooks=[],
     excludes=[
-        # 以下模块过大且不需要（本地推理不用 torch）
-        "torch",
-        "torchvision",
-        "transformers",
+        # tensorflow 不用（transformers 兼容多 backend，但我们只需 torch path）
         "tensorflow",
+        "tensorflow_addons",
+        "jax",
+        "flax",
         # 测试/开发依赖
         "pytest",
         "pyright",

@@ -26,7 +26,9 @@ class Settings(BaseSettings):
     yolo_provider: str = "cpu"
     iqa_provider: str = "coreml"
     pose_provider: str = "coreml"
-    species_provider: str = "cpu"
+    # species v3 用 torch + transformers，"auto" 在 Mac 走 MPS bf16，
+    # NVIDIA 走 CUDA bf16，否则 CPU fp32（CPU ~500ms，MPS/CUDA ~60ms）
+    species_provider: str = "auto"
 
     # Pipeline — detection (yolo26l-bird v1.0: imgsz=1280, conf=0.5 for photography)
     yolo_confidence: float = 0.5
@@ -76,7 +78,9 @@ class Settings(BaseSettings):
 
     # Pipeline — preprocess code version (bump manually when resize/normalize/color changes)
     # v2: letterbox fill 0.5 → 114/255 (YOLO standard, matches training)
-    preprocess_version: int = 2
+    # v3: species 切换到 torch v3 单尺度 480×480（之前是 ONNX 双尺度 512+640）+
+    #     1535 类（之前 1516）+ trained_mask 重新生成
+    preprocess_version: int = 3
 
     # Pipeline — concurrency
     # 每个 task 内部 ONNX 推理会 to_thread 释放 GIL，多 worker 并发 = 多张图同时跑 ONNX。

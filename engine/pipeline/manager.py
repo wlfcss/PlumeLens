@@ -24,7 +24,6 @@ from engine.pipeline.preprocess import crop_bbox, expand_for_iqa, load_image
 from engine.pipeline.quality import QualityAssessor
 from engine.pipeline.species import (
     SpeciesClassifier,
-    SpeciesTaxonomy,
     expand_bbox_to_square,
 )
 
@@ -217,76 +216,64 @@ class PipelineManager:
                 hyperiqa_weight=self._settings.hyperiqa_weight,
             )
 
-        # ---- DINOv3 species classifier (optional, backbone 1.2GB 可能缺失) ----
-        backbone_path = models_dir / "dinov3_backbone.onnx"
-        ensemble_path = models_dir / "species_ensemble.onnx"
-        taxonomy_path = models_dir / "species_taxonomy.parquet"
+        # ---- DINOv3 species classifier v3 (torch + transformers, 845 MB) ----
+        # 旧路径（dinov3_backbone.onnx + species_ensemble.onnx）已弃用，转 ONNX
+        # 路线已验证不可行（RoPE fp16 NaN + CoreML EP ViT 覆盖差，准确率显著下降）。
+        species_dir = models_dir / "species"
+        species_backbone_safetensors = species_dir / "backbone" / "model.safetensors"
+        species_canonical = species_dir / "canonical_extended.parquet"
+        species_trained = species_dir / "species_list_1301.parquet"
+        species_heads_dir = species_dir / "heads"
         if (
-            backbone_path.exists()
-            and ensemble_path.exists()
-            and taxonomy_path.exists()
+            species_backbone_safetensors.exists()
+            and species_canonical.exists()
+            and species_trained.exists()
+            and species_heads_dir.exists()
         ):
-            providers = resolve_providers(self._settings.species_provider)
-            await logger.ainfo(
-                "Loading DINOv3 species classifier",
-                backbone=str(backbone_path),
-                ensemble=str(ensemble_path),
-            )
+            await logger.ainfo("Loading DINOv3 species v3", deploy_dir=str(species_dir))
             try:
-                bb_sess = ort.InferenceSession(
-                    str(backbone_path), providers=providers
-                )
-                en_sess = ort.InferenceSession(
-                    str(ensemble_path), providers=providers
-                )
-                taxonomy = SpeciesTaxonomy(taxonomy_path)
-
-                # 载入 trained species 名单（只有 1018 种有训练，其余 498 个槽位
-                # 权重是初始化状态；推理时把未训练类概率清零避免误报）
-                trained_sci: set[str] | None = None
-                trained_path = models_dir / "species_trained.json"
-                if trained_path.exists():
-                    import json
-
-                    trained_sci = set(
-                        json.loads(trained_path.read_text(encoding="utf-8"))
-                        .get("trained", [])
-                    )
-                    await logger.ainfo(
-                        "Loaded trained species list",
-                        count=len(trained_sci),
-                    )
-
                 self._species = SpeciesClassifier(
-                    backbone_session=bb_sess,
-                    ensemble_session=en_sess,
-                    taxonomy=taxonomy,
+                    deploy_dir=species_dir,
+                    device=self._settings.species_provider,  # "auto"/"cpu"/"mps"/"cuda"
                     top_k=self._settings.species_top_k,
                     min_confidence=self._settings.species_min_confidence,
-                    trained_sci=trained_sci,
                 )
-                self._model_status["dinov3_backbone"] = True
-                self._model_status["species_ensemble"] = True
-                active_bb = bb_sess.get_providers()
-                active_en = en_sess.get_providers()
-                self._model_providers["dinov3_backbone"] = (
-                    active_bb[0] if active_bb else "unknown"
+                self._model_status["dinov3_species_v3"] = True
+                self._model_providers["dinov3_species_v3"] = (
+                    f"torch:{self._species.device}:{self._species._dtype}"
                 )
-                self._model_providers["species_ensemble"] = (
-                    active_en[0] if active_en else "unknown"
+                # Checksum：用 backbone safetensors + 任一 head ckpt 代表 deploy 包
+                checksums["dinov3_species_v3_backbone"] = _file_checksum(
+                    species_backbone_safetensors
                 )
-                checksums["dinov3_backbone"] = _file_checksum(backbone_path)
-                checksums["species_ensemble"] = _file_checksum(ensemble_path)
+                # 8 head ckpt 全部 hash 进去（同一个训练 deploy 也应同时 bump）
+                for ck in sorted(species_heads_dir.glob("*.pt")):
+                    checksums[f"head_{ck.stem}"] = _file_checksum(ck)
+                # taxonomy + trained list 也进 checksum（变了 → 版本变）
+                checksums["species_canonical"] = _file_checksum(species_canonical)
+                checksums["species_trained"] = _file_checksum(species_trained)
+                await logger.ainfo(
+                    "Species classifier ready",
+                    num_classes=self._species.num_classes,
+                    num_heads=self._species.num_heads,
+                    device=self._species.device,
+                )
             except Exception:
-                await logger.aexception("Failed to load species classifier")
+                await logger.aexception("Failed to load species classifier v3")
         else:
             missing = [
-                p.name
-                for p in (backbone_path, ensemble_path, taxonomy_path)
+                str(p.relative_to(models_dir))
+                for p in (
+                    species_backbone_safetensors,
+                    species_canonical,
+                    species_trained,
+                    species_heads_dir,
+                )
                 if not p.exists()
             ]
             await logger.awarning(
-                "Species classifier disabled (files missing)", missing=missing
+                "Species classifier v3 disabled (files missing)",
+                missing=missing,
             )
 
         self._pipeline_version = self._compute_version(checksums)
@@ -321,7 +308,8 @@ class PipelineManager:
         h.update(f"iqe:{self._settings.iqa_expand_ratio}".encode())
         h.update(f"iqar:{self._settings.iqa_max_aspect_ratio}".encode())
         # 算法版本：bump 每当评分/降档逻辑变（pose penalty / grading 形式）
-        h.update(b"alg:v2-pose-penalty")
+        # v3：species 切换到 torch v3（480 单尺度 + 8 head + 1535 类）
+        h.update(b"alg:v3-species-torch")
         # Pose thresholds (5 项)
         h.update(f"pbt:{self._settings.pose_box_threshold}".encode())
         h.update(f"pet:{self._settings.pose_eye_threshold}".encode())
