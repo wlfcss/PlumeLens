@@ -23,9 +23,13 @@ class Settings(BaseSettings):
     #   关键发现：bbox 越界的根因是 ANE（Apple Neural Engine）对 advanced indexing
     #   的精度实现有 bug，不是整个 CoreML EP 的问题。`MLComputeUnits='CPUAndGPU'`
     #   关 ANE 只走 Metal GPU + CPU 兜底，bbox 与 CPU EP 一致到 0.1px，速度 ~112ms
-    #   （vs CPU EP ~395ms）。manager.py::resolve_providers 会自动给 YOLO 注入
-    #   该选项，pose/IQA 不需要（用 ANE 没问题）。
-    # - bird_visibility/CLIPIQA/HyperIQA + CoreML(default)：100% 安全 + 加速 7-27×
+    #   （vs CPU EP ~395ms）。manager.py::resolve_providers 自动给 YOLO 注入。
+    # - pose（YOLO26l-pose）+ CoreML(CPUAndGPU)：**安全 + 2.8× 加速**。
+    #   同 YOLO 同架构家族同 ANE 风险（官方 INTEGRATION_GUIDE §14.2 实测 worst
+    #   KP drift 8.13 px）。也强制 CPUAndGPU。速度 ~38 ms（vs ANE 默认 20ms 慢
+    #   18ms，vs ONNX CPU 108ms 还快 2.8×）。manager.py 同样自动注入。
+    # - CLIPIQA/HyperIQA + CoreML(default)：CLIP/HyperNet 架构，无 advanced
+    #   indexing，ANE 安全（diff < 0.2px），加速 7-27×。
     # - DINOv3 species v3：转 torch + MPS bf16，不再走 ONNX 路线
     yolo_provider: str = "coreml"
     iqa_provider: str = "coreml"

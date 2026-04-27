@@ -40,16 +40,24 @@ _GRADE_ORDER: dict[str, int] = {
 
 # CoreML EP 默认计算单元配置：CPUAndGPU（关 ANE）。
 #
-# 实测（2026-04-27 5Y3A7448.JPG 8K Canon）：
+# 实测（2026-04-27）：
+#   YOLO26-bird 5Y3A7448.JPG 8K Canon：
 #   - 默认 ALL（含 ANE）：bbox 错位 700+ px（letterbox x1=-80 越界），87 ms
 #   - **CPUAndGPU（Metal GPU + CPU 兜底，关 ANE）**：与 CPU EP bbox 完全一致到
 #     0.1 px，112 ms（vs CPU 395 ms，3.5× 加速）
-#   - CPUOnly：行为同 CPU EP 但更慢
 #
 # 根因：YOLO26 NMS-free head 的 advanced indexing 算子（GatherElements 等）在
 # Apple Neural Engine 上有精度 bug；Metal GPU 实现是对的。
-# 适用 YOLO；其他几个模型（pose/IQA）走 ANE 没问题，无需此选项。
-_COREML_DEFAULT_COMPUTE_UNITS_YOLO: str = "CPUAndGPU"
+#
+# pose（bird_visibility）也是 YOLO26 架构（YOLO26l-pose），同样的 head 实现，
+# 同样的 ANE 风险（官方 INTEGRATION_GUIDE §14.2 实测 worst Box IoU 0.495 +
+# KP drift 8.13 px P95）。虽然 PlumeLens crop 场景下大多数图 ANE 表现还行
+# （我实测 5Y3A7448 crop KP drift < 0.6 px），但为绕开边角 case 风险，pose 也
+# 强制 CPUAndGPU。代价：单图 +18 ms（20→38 ms）；收益：永远不踩 ANE 精度坑。
+#
+# IQA（CLIPIQA+ / HyperIQA）是不同架构（CLIP / HyperNet），无 advanced indexing，
+# ANE 安全（实测与 CPU diff < 0.2 px），不需要此选项。
+_COREML_NO_ANE: str = "CPUAndGPU"
 
 
 def resolve_providers(
@@ -156,7 +164,7 @@ class PipelineManager:
             # 只对 yolo 一个模型这样设置；pose/IQA 用 ANE 没问题。
             providers = resolve_providers(
                 self._settings.yolo_provider,
-                coreml_compute_units=_COREML_DEFAULT_COMPUTE_UNITS_YOLO,
+                coreml_compute_units=_COREML_NO_ANE,
             )
             await logger.ainfo("Loading YOLO detector", path=str(yolo_path))
             try:
@@ -187,9 +195,15 @@ class PipelineManager:
             await logger.awarning("YOLO detector not found", path=str(yolo_path))
 
         # ---- bird_visibility (pose) ----
+        # YOLO26l-pose 与 YOLO 同架构家族（NMS-free + advanced indexing head），
+        # 同样在 ANE 上有精度风险（官方 INTEGRATION_GUIDE §14.2 实测 worst KP
+        # drift 8.13 px）。强制 CPUAndGPU 关 ANE，与 YOLO 一致。
         pose_path = models_dir / "bird_visibility.onnx"
         if pose_path.exists():
-            providers = resolve_providers(self._settings.pose_provider)
+            providers = resolve_providers(
+                self._settings.pose_provider,
+                coreml_compute_units=_COREML_NO_ANE,
+            )
             await logger.ainfo("Loading pose detector", path=str(pose_path))
             try:
                 sess = ort.InferenceSession(str(pose_path), providers=providers)
