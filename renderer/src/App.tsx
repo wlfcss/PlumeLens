@@ -1915,17 +1915,21 @@ function ReviewModal({
   t: ReturnType<typeof useTranslation>['t']
 }) {
   const { photo, group } = detail
+  // toggle 仅作用于裁切图（原图永远纯净，让用户看构图）
   const [showBbox, setShowBbox] = useState(true)
   const [showPose, setShowPose] = useState(false)
+  const [showAfPoint, setShowAfPoint] = useState(true)
 
-  // 计算图片实际渲染区域（letterbox 后），用于把原图坐标系的 bbox/pose 映射到 DOM 百分比
   const imgW = photo.imageWidth ?? null
   const imgH = photo.imageHeight ?? null
   const aspect = imgW && imgH && imgW > 0 && imgH > 0 ? imgW / imgH : null
+  // 横版（含正方形）→ 上下布局；竖版 → 左右布局
+  const isLandscape = aspect === null ? true : aspect >= 1.0
 
-  // bbox / pose 关键点已经在原图坐标系（pixels），渲染时转成百分比
   const bbox = photo.bestBbox ?? null
   const pose = photo.bestPose ?? null
+  // AF 对焦点：来自 EXIF MakerNote（Canon AFInfo 解析），暂未接入则为 null
+  const afPoint = photo.bestAfPoint ?? null
 
   const previewSrc = photo.thumbPreviewUrl ?? null
 
@@ -1949,7 +1953,7 @@ function ReviewModal({
             </IconButton>
           </div>
 
-          {/* 覆盖层 toggle 行 */}
+          {/* 覆盖层 toggle 行（只控制裁切图） */}
           <div className="review-toggles">
             <label className="review-toggle">
               <input
@@ -1967,10 +1971,26 @@ function ReviewModal({
               />
               <span>姿态点</span>
             </label>
+            <label className="review-toggle">
+              <input
+                type="checkbox"
+                checked={showAfPoint}
+                onChange={(e) => setShowAfPoint(e.target.checked)}
+                disabled={afPoint === null}
+              />
+              <span>对焦点{afPoint === null ? ' · 未识别' : ''}</span>
+            </label>
           </div>
 
-          {/* 双图布局：左原图 (loupe) + 右 IQA 裁切 */}
-          <div className="review-stage__images">
+          {/* 双图布局：横版 → 上下；竖版 → 左右 */}
+          <div
+            className={cn(
+              'review-stage__images',
+              isLandscape
+                ? 'review-stage__images--vertical'
+                : 'review-stage__images--horizontal',
+            )}
+          >
             <ReviewImageStage
               label="原图"
               hint="按住放大 · 拖动平移"
@@ -1979,8 +1999,9 @@ function ReviewModal({
               aspect={aspect}
               imgW={imgW}
               imgH={imgH}
-              bbox={showBbox ? bbox : null}
-              pose={showPose ? pose : null}
+              bbox={null}
+              pose={null}
+              afPoint={null}
               photoId={photo.id}
               loupeEnabled
               cropRect={null}
@@ -1995,6 +2016,7 @@ function ReviewModal({
               imgH={imgH}
               bbox={showBbox ? bbox : null}
               pose={showPose ? pose : null}
+              afPoint={showAfPoint ? afPoint : null}
               photoId={photo.id}
               loupeEnabled={false}
               cropRect={iqaCrop}
@@ -2116,6 +2138,7 @@ function ReviewImageStage({
   imgH,
   bbox,
   pose,
+  afPoint,
   photoId,
   loupeEnabled,
   cropRect,
@@ -2129,6 +2152,7 @@ function ReviewImageStage({
   imgH: number | null
   bbox: { x1: number; y1: number; x2: number; y2: number } | null
   pose: PhotoRecord['bestPose']
+  afPoint: { x: number; y: number } | null
   photoId: string
   loupeEnabled: boolean
   cropRect: { x1: number; y1: number; x2: number; y2: number } | null
@@ -2294,6 +2318,20 @@ function ReviewImageStage({
         )
       }
     }
+    // AF 对焦点（Canon AFInfo MakerNote）：方框 + 中心十字（DSLR 风格）
+    if (afPoint) {
+      const p = toLocalPoint(afPoint.x, afPoint.y)
+      if (p) {
+        overlays.push(
+          <span
+            className="af-point"
+            key="af-point"
+            style={{ left: `${p.left}%`, top: `${p.top}%` }}
+            title="对焦点"
+          />,
+        )
+      }
+    }
     return overlays
   }
 
@@ -2445,7 +2483,22 @@ function ExifPanel({
     return `ISO ${v}`
   }
 
-  const camera = `${fmt('Make')} ${fmt('Model')}`.trim() || '--'
+  // Canon 等品牌的 Model 字段已经包含厂商名（"Canon EOS R5m2"），
+  // 直接拼 "Make Model" 会出现 "Canon Canon EOS R5m2" 这种重复。
+  // 检测：Model 是否以 Make 开头（不区分大小写）→ 是则只用 Model。
+  const camera = (() => {
+    const make = fmt('Make')
+    const model = fmt('Model')
+    const safeMake = make === '--' ? '' : make
+    const safeModel = model === '--' ? '' : model
+    if (!safeMake && !safeModel) return '--'
+    if (!safeMake) return safeModel
+    if (!safeModel) return safeMake
+    if (safeModel.toLowerCase().startsWith(safeMake.toLowerCase())) {
+      return safeModel
+    }
+    return `${safeMake} ${safeModel}`
+  })()
   const lens = fmt('LensModel')
   const dt = fmt('DateTimeOriginal') !== '--' ? fmt('DateTimeOriginal') : fmt('DateTime')
 

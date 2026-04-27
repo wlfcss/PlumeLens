@@ -291,7 +291,25 @@ export function buildPhotoRecordFromRow(
     exif: row.exif,
     bestBbox: row.best_detection?.bbox ?? null,
     bestPose: row.best_detection?.pose ?? null,
+    bestAfPoint: extractAfPoint(row.exif),
   }
+}
+
+/**
+ * 从 EXIF 字段里读取 af_point（后端 scanner.py::_parse_canon_afinfo2 已注入）。
+ * 没有就返回 null（不是 Canon 机身或 MakerNote 无 AFInfo2 都会落到这里）。
+ */
+function extractAfPoint(
+  exif: Record<string, string | number | null> | null | undefined,
+): { x: number; y: number } | null {
+  if (!exif) return null
+  // af_point 是后端注入的 dict，但我们的类型签名（Record<string, string | number | null>）
+  // 不容许嵌套 dict —— 实际后端会以 JSON dict 形式塞进来，运行时强转读取。
+  const af = (exif as unknown as { af_point?: { x: number; y: number } }).af_point
+  if (af && typeof af.x === 'number' && typeof af.y === 'number') {
+    return { x: af.x, y: af.y }
+  }
+  return null
 }
 
 /** 把 best_detection.bbox（原图坐标）转成相对百分比 bbox（review modal 渲染用）。 */

@@ -58,8 +58,11 @@ async def _resume_pending_workers(app: FastAPI, db: Database) -> None:
 
 
 async def _refresh_all_thumbnails(db: Database) -> None:
-    """启动后扫所有 library：补缩略图 + 补缺失的 scene_id。"""
+    """启动后扫所有 library：补缩略图 + 补 scene_id + 补缺失 EXIF（曝光参数）。"""
     cache_root = settings.data_dir / "cache" / "thumbnails"
+    # 延迟 import 避免循环依赖
+    from engine.services.scanner import refresh_library_exif
+
     try:
         async with db.conn.execute("SELECT id FROM libraries") as cur:
             rows = await cur.fetchall()
@@ -94,6 +97,22 @@ async def _refresh_all_thumbnails(db: Database) -> None:
                             "Startup scene grouping failed",
                             library_id=library_id,
                         )
+                # Step 3: 补缺失/旧 EXIF（5deab5f 之前老扫描遗漏的 ExifIFD 字段，
+                # 比如 ExposureTime/FNumber/ISO/FocalLength/LensModel）。
+                # 函数内会判断是否 incomplete，齐了就 skip 不重抽。
+                try:
+                    exif_report = await refresh_library_exif(db, library_id)
+                    if exif_report.get("refreshed", 0) > 0:
+                        await logger.ainfo(
+                            "Startup EXIF refresh ran",
+                            library_id=library_id,
+                            **exif_report,
+                        )
+                except Exception:
+                    logger.exception(
+                        "Startup EXIF refresh failed",
+                        library_id=library_id,
+                    )
             except Exception as e:
                 logger.warning(
                     "Startup library refresh failed",

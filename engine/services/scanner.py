@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import uuid
@@ -72,9 +73,39 @@ def _probe_image_meta(path: Path) -> dict[str, Any]:
     if suffix in IMAGE_EXTENSIONS:
         try:
             with Image.open(path) as img:
-                meta["width"] = img.width
-                meta["height"] = img.height
+                # width/height 必须是"应用 EXIF Orientation 之后"的值（人眼看到的方向）。
+                # 这样和 thumbnail（exif_transpose 过）+ inference（exif_transpose 过）
+                # 保持一致；否则 bbox/姿态点 / af_point 在前端会偏移。
+                orientation = (img.getexif() or {}).get(0x0112, 1)
+                if orientation in (5, 6, 7, 8):
+                    # 5/6/7/8 = 90°/270° 旋转 → 宽高对调
+                    meta["width"] = img.height
+                    meta["height"] = img.width
+                else:
+                    meta["width"] = img.width
+                    meta["height"] = img.height
                 exif_dict = _extract_exif(img)
+                # 解析 Canon AFInfo MakerNote → 注入到 exif_json 的 af_point 字段
+                # （前端从这里读取并渲染对焦点）
+                # MakerNote 是通用 EXIF tag，但 0x0026 标签格式是 Canon 特有的；
+                # 必须先检查 Make 是 Canon 才解析，否则其他品牌（Nikon/Sony）会错解。
+                try:
+                    make = str(exif_dict.get("Make", "")).lower()
+                    if "canon" in make:
+                        raw_exif = img.getexif()
+                        mn = raw_exif.get(0x927C)  # MakerNote tag
+                        if (
+                            isinstance(mn, bytes)
+                            and meta.get("width")
+                            and meta.get("height")
+                        ):
+                            af = _parse_canon_afinfo2(
+                                mn, int(meta["width"]), int(meta["height"]),
+                            )
+                            if af is not None:
+                                exif_dict["af_point"] = af
+                except Exception:
+                    pass
                 if exif_dict:
                     meta["exif_json"] = json.dumps(exif_dict, ensure_ascii=False)
         except Exception as e:
@@ -135,6 +166,127 @@ def _extract_exif(img: Image.Image) -> dict[str, Any]:
     return out
 
 
+def _parse_canon_afinfo2(
+    makernote_bytes: bytes,
+    image_width: int,
+    image_height: int,
+) -> dict[str, float] | None:
+    """Parse Canon AFInfo2 (MakerNote tag 0x0026), return AF point in image coords.
+
+    Canon EOS R-series 把对焦点信息存在 MakerNote IFD 的 0x0026 (AFInfo2) 标签里。
+    格式（all little-endian uint16/int16）：
+        uint16  AFInfoSize
+        uint16  AFAreaMode
+        uint16  NumAFPoints       (总点数，通常 153/191/1053…)
+        uint16  ValidAFPoints     (本次拍摄实际用了多少)
+        uint16  AFImageWidth      (AF 坐标系的宽，用于换算到 image space)
+        uint16  AFImageHeight
+        int16[N] AFAreaWidths
+        int16[N] AFAreaHeights
+        int16[N] AFAreaXPositions  (signed，相对于图像中心)
+        int16[N] AFAreaYPositions  (signed)
+        uint16[(N+15)/16] AFPointsInFocus    (bitmask)
+        uint16[(N+15)/16] AFPointsSelected   (bitmask)
+
+    取 in-focus 点的几何中心，转换到原图像素坐标。
+
+    Returns:
+        {"x": float, "y": float} in image pixels, or None if parse fails.
+    """
+    import struct
+
+    if not makernote_bytes or len(makernote_bytes) < 8:
+        return None
+
+    try:
+        # MakerNote 是 TIFF IFD 格式：开头 2 字节 = 条目数
+        num_entries = struct.unpack_from("<H", makernote_bytes, 0)[0]
+        if num_entries > 1000:  # sanity cap
+            return None
+
+        afinfo2_offset: int | None = None
+        afinfo2_count: int | None = None
+        for i in range(num_entries):
+            entry_off = 2 + i * 12
+            if entry_off + 12 > len(makernote_bytes):
+                return None
+            tag, _type, count = struct.unpack_from("<HHI", makernote_bytes, entry_off)
+            if tag == 0x0026:  # AFInfo2
+                # value_or_offset 是 4 字节 — uint16 数组（type=3）超过 2 个就在 offset 处
+                value_or_offset = struct.unpack_from(
+                    "<I", makernote_bytes, entry_off + 8,
+                )[0]
+                afinfo2_offset = value_or_offset
+                afinfo2_count = count
+                break
+
+        if afinfo2_offset is None or afinfo2_count is None:
+            return None
+
+        end_byte = afinfo2_offset + afinfo2_count * 2
+        if end_byte > len(makernote_bytes):
+            return None
+        data = makernote_bytes[afinfo2_offset:end_byte]
+
+        # 头部 6 个 uint16
+        if len(data) < 12:
+            return None
+        _af_info_size, _af_area_mode, num_points, _valid_points, af_w, af_h = (
+            struct.unpack_from("<6H", data, 0)
+        )
+        if num_points == 0 or num_points > 4096 or af_w == 0 or af_h == 0:
+            return None
+
+        # 计算各数组所在偏移
+        cur = 12
+        cur += num_points * 2  # widths
+        cur += num_points * 2  # heights
+        if cur + num_points * 2 > len(data):
+            return None
+        x_positions = struct.unpack_from(f"<{num_points}h", data, cur)
+        cur += num_points * 2
+        y_positions = struct.unpack_from(f"<{num_points}h", data, cur)
+        cur += num_points * 2
+
+        bitmask_words = (num_points + 15) // 16
+        if cur + bitmask_words * 2 > len(data):
+            return None
+        in_focus_bits = struct.unpack_from(f"<{bitmask_words}H", data, cur)
+        cur += bitmask_words * 2
+
+        # 找 in-focus 的点
+        focused: list[int] = []
+        for i in range(num_points):
+            if (in_focus_bits[i // 16] >> (i % 16)) & 1:
+                focused.append(i)
+
+        # 没有 in-focus 就退到 AFPointsSelected
+        if not focused and cur + bitmask_words * 2 <= len(data):
+            selected_bits = struct.unpack_from(f"<{bitmask_words}H", data, cur)
+            for i in range(num_points):
+                if (selected_bits[i // 16] >> (i % 16)) & 1:
+                    focused.append(i)
+
+        if not focused:
+            return None
+
+        avg_af_x = sum(x_positions[i] for i in focused) / len(focused)
+        avg_af_y = sum(y_positions[i] for i in focused) / len(focused)
+
+        # AF 坐标 (0,0) = 图像中心；x_positions/y_positions 是 signed center-relative
+        # 映射到 image space：image_x = (af_x + af_w/2) * image_w / af_w
+        image_x = (avg_af_x + af_w / 2.0) * image_width / af_w
+        image_y = (avg_af_y + af_h / 2.0) * image_height / af_h
+
+        # cap 到合理范围
+        if not (0 <= image_x <= image_width and 0 <= image_y <= image_height):
+            return None
+
+        return {"x": float(image_x), "y": float(image_y)}
+    except Exception:
+        return None
+
+
 def _jsonify(value: Any) -> Any:
     """Convert EXIF value to a JSON-serializable form."""
     if isinstance(value, bytes):
@@ -158,6 +310,73 @@ def _jsonify(value: Any) -> Any:
     if isinstance(value, dict):
         return {str(k): _jsonify(v) for k, v in value.items()}
     return str(value)
+
+
+async def refresh_library_exif(
+    db: Database,
+    library_id: str,
+) -> dict[str, int]:
+    """重新抽取 library 内"EXIF 不完整"的照片的 EXIF。
+
+    判定"不完整"：exif_json IS NULL，或解析后既没 FNumber 也没 ExposureTime
+    （这两个 ExifIFD 字段是 5deab5f 之前老扫描遗漏的标志）。
+
+    用于：升级到 5deab5f 之后，DB 里残留的旧 exif_json 缺曝光参数 — 启动后台
+    自动重抽，不要求用户手动操作。
+
+    Returns:
+        {"refreshed": N, "skipped": M, "failed": K}
+    """
+    # 1) 先查全库照片
+    async with db.conn.execute(
+        "SELECT id, file_path, exif_json FROM photos WHERE library_id = ?",
+        (library_id,),
+    ) as cur:
+        rows = await cur.fetchall()
+
+    refreshed = 0
+    skipped = 0
+    failed = 0
+
+    def _is_incomplete(raw: Any) -> bool:
+        if raw is None:
+            return True
+        try:
+            d = json.loads(str(raw))
+        except Exception:
+            return True
+        if not isinstance(d, dict):
+            return True
+        # 关键字段任一缺失即判定为不完整（用 OR：缺 FNumber **或** 缺 ExposureTime）
+        return "FNumber" not in d or "ExposureTime" not in d
+
+    for row in rows:
+        photo_id = str(row["id"])
+        file_path = Path(str(row["file_path"]))
+        if not _is_incomplete(row["exif_json"]):
+            skipped += 1
+            continue
+        if not file_path.exists():  # noqa: ASYNC240
+            # 文件丢了，跳过（path_missing 状态会由别处提示）
+            failed += 1
+            continue
+        try:
+            meta = await asyncio.to_thread(_probe_image_meta, file_path)
+            new_exif = meta.get("exif_json")
+            if new_exif is None:
+                failed += 1
+                continue
+            await db.conn.execute(
+                "UPDATE photos SET exif_json = ? WHERE id = ?",
+                (new_exif, photo_id),
+            )
+            await db.conn.commit()
+            refreshed += 1
+        except Exception as e:
+            logger.warning("EXIF refresh failed", photo_id=photo_id, error=str(e))
+            failed += 1
+
+    return {"refreshed": refreshed, "skipped": skipped, "failed": failed}
 
 
 def _light_fingerprint(path: Path) -> tuple[int, str]:

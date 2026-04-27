@@ -1731,23 +1731,68 @@ button:disabled {
   box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.7), 0 0 12px rgba(255, 200, 0, 0.55);
 }
 
-/* 姿态关键点：Nothing UI 风格 — 极简白点 + 暗色边 */
+/* 姿态关键点：Nothing UI 风格 — 统一极简白点（不做颜色语义区分，
+   减少视觉噪音 + 减少遮挡）。鼠标 hover 看标签知道是哪个关键点。
+   尺寸 5px：足够看清位置但不挡鸟体细节。 */
 .pose-point {
   position: absolute;
-  width: 10px;
-  height: 10px;
-  margin-left: -5px;
-  margin-top: -5px;
-  border: 1px solid rgba(0, 0, 0, 0.6);
+  width: 5px;
+  height: 5px;
+  margin-left: -2.5px;
+  margin-top: -2.5px;
   border-radius: 50%;
-  background: rgba(255, 255, 255, 0.92);
+  background: rgba(255, 255, 255, 0.95);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.7); /* 暗描边保证亮背景上仍可见 */
   pointer-events: auto;
   cursor: help;
 }
 
+/* 已弃用：不再用颜色区分眼/喙/冠，统一白点。保留 class 不报错。 */
 .pose-point--eye {
-  background: rgba(110, 230, 178, 0.95); /* 眼睛点用绿色突出 */
-  border-color: rgba(0, 0, 0, 0.75);
+  /* 与 .pose-point 完全一致 */
+}
+
+/* AF 对焦点：Nothing UI 风格 — 绿色细方框 + 中心十字（DSLR 取景器风格）。
+   位置在原图坐标系，由 ReviewImageStage 通过 toLocalPoint 转换。
+   绿色（rgb(74, 222, 128)）符合 Nothing UI 的功能性绿色（success/active 提示色）。 */
+.af-point {
+  position: absolute;
+  width: 28px;
+  height: 28px;
+  margin-left: -14px;
+  margin-top: -14px;
+  border: 1.5px solid rgba(74, 222, 128, 0.95);
+  border-radius: 2px;
+  background: transparent;
+  pointer-events: auto;
+  cursor: help;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.5), 0 0 8px rgba(74, 222, 128, 0.35);
+}
+
+/* 中心十字 */
+.af-point::before,
+.af-point::after {
+  content: '';
+  position: absolute;
+  background: rgba(74, 222, 128, 0.95);
+}
+
+.af-point::before {
+  /* 横线 */
+  left: 50%;
+  top: 50%;
+  width: 8px;
+  height: 1px;
+  margin-left: -4px;
+}
+
+.af-point::after {
+  /* 竖线 */
+  left: 50%;
+  top: 50%;
+  width: 1px;
+  height: 8px;
+  margin-top: -4px;
 }
 
 /* 复核工具栏：toggle 行（Nothing UI 极简 checkbox） */
@@ -1802,13 +1847,35 @@ button:disabled {
 }
 
 /* ============================================================
-   ReviewModal 双图布局：左原图 + 右 IQA 裁切预览
+   ReviewModal 双图布局：自适应方向
+   - 横版照片（aspect >= 1）：上下排（review-stage__images--vertical）
+   - 竖版照片（aspect < 1）：左右排（review-stage__images--horizontal）
+   两种排法都让单图的占用空间最大化（避免横片左右排时高度被压扁）
    ============================================================ */
 .review-stage__images {
   display: grid;
-  grid-template-columns: 1fr 1fr;
   gap: 12px;
   margin-top: 16px;
+  /* 给 vertical 模式占满剩余 stage 高度的能力；horizontal 模式不受影响 */
+  flex: 1;
+  min-height: 0;
+}
+
+.review-stage__images--horizontal {
+  grid-template-columns: 1fr 1fr;
+}
+
+.review-stage__images--vertical {
+  /* auto auto：每行按内容（aspect-ratio）自然撑高；总高超 stage 时
+     stage 的 overflow-y: auto 接管滚动。这样横版双图各自保留正确比例，
+     不会被压扁，需要时滚动查看 */
+  grid-template-rows: auto auto;
+}
+
+/* stage 切到 flex column 让图区可用 flex:1 撑高 */
+.review-stage {
+  display: flex;
+  flex-direction: column;
 }
 
 .review-stage__pane {

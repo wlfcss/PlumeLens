@@ -59,8 +59,16 @@ def load_image(path: Path) -> NDArray[np.float32]:
 
 
 def _load_pillow(path: Path) -> NDArray[np.float32]:
-    """Load standard image via Pillow."""
+    """Load standard image via Pillow，应用 EXIF Orientation。
+
+    必须 exif_transpose：缩略图（thumbnail._load_source_image）和扫描时存的 width/height
+    都是按"拍出来人眼看到的方向"处理。如果这里不转，inference 在原始像素方向跑，
+    YOLO/pose 输出的坐标就和前端展示的旋转后的图对不上 → bbox/姿态点偏移。
+    """
+    from PIL import ImageOps
+
     with Image.open(path) as img:
+        img = ImageOps.exif_transpose(img) or img
         img = img.convert("RGB")
         arr: NDArray[np.float32] = np.asarray(img, dtype=np.float32) / 255.0
     return arr

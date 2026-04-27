@@ -95,6 +95,8 @@ export interface PhotoRecord {
     head_visible: boolean
     eye_visible: boolean
   } | null
+  // 对焦点（原图坐标系，Canon AFInfo MakerNote 解析得到）
+  bestAfPoint?: { x: number; y: number } | null
 }
 
 export interface SpeciesRecord {
