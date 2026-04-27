@@ -20,7 +20,11 @@ exports.default = async function (context) {
     console.log(`[build-dmg] no app at ${appPath}, skip`)
     return []
   }
-  const dmgPath = path.join(context.outDir, 'PlumeLens-0.1.0-arm64.dmg')
+  // 版本号从 package.json 读，保持与项目元数据同步（之前 0.1.0 硬编码导致升 0.2 漏改）
+  const pkgVersion = JSON.parse(
+    fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'),
+  ).version
+  const dmgPath = path.join(context.outDir, `PlumeLens-${pkgVersion}-arm64.dmg`)
   if (fs.existsSync(dmgPath)) fs.rmSync(dmgPath)
 
   // 准备 staging 目录：含 .app（ditto 保留签名 + xattr）+ /Applications symlink
@@ -39,7 +43,7 @@ exports.default = async function (context) {
       [
         'create',
         '-volname',
-        'PlumeLens 0.1.0-arm64',
+        `PlumeLens ${pkgVersion}-arm64`,
         '-srcfolder',
         stagingDir,
         '-ov',

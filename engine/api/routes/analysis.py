@@ -90,7 +90,20 @@ async def _run_one_task(db: Database, pipeline, library_id: str) -> bool:
         try:
             await mark_failed_with_retry(db, task.id, str(e))
         except Exception:
-            logger.exception("mark_failed_with_retry failed")
+            # mark_failed_with_retry 自身异常（如 DB 写入失败）→ task 卡在 PROCESSING
+            # 永远出不来。直接 transition 到 CANCELLED（PROCESSING 合法转移之一）作为
+            # 最后兜底，避免阻塞队列 + 让 lifespan recover_on_startup 能重置它。
+            logger.exception(
+                "mark_failed_with_retry failed — falling back to CANCELLED",
+                task_id=task.id, photo_id=task.photo_id,
+            )
+            try:
+                await transition(db, task.id, TaskStatus.CANCELLED)
+            except Exception:
+                logger.exception(
+                    "CRITICAL: cannot mark task CANCELLED either, task is stuck",
+                    task_id=task.id,
+                )
         return True
 
 

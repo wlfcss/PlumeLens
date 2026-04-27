@@ -386,6 +386,9 @@ class PipelineManager:
         h.update(f"ort:{ort.__version__}".encode())
         ep_str = ",".join(sorted(self._model_providers.values()))
         h.update(f"ep:{ep_str}".encode())
+        # CoreML EP compute_units（"CPUAndGPU" 关 ANE）— 改这个会改推理结果
+        # （ANE bug 路径 vs Metal GPU 路径），必须进 hash 让 cache 失效。
+        h.update(f"cml_no_ane:{_COREML_NO_ANE}".encode())
         return f"v1-{h.hexdigest()[:8]}"
 
     def close(self) -> None:

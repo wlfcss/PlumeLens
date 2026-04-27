@@ -76,6 +76,9 @@ export class ProcessManager extends EventEmitter {
       // 避免 IPC 早一步返回 URL → renderer 立即 fetch → ECONNREFUSED 失败
       if (text.includes('PLUMELENS_READY') && pendingUrl && !this.url) {
         this.url = pendingUrl
+        // 启动成功 → 重置 restartCount。否则应用长时间运行后才崩溃，
+        // restartCount 已经爆 maxRestarts，不会再重启（恢复能力降为 0）。
+        this.restartCount = 0
         this.emit('ready', this.url)
         this.startHealthCheck()
         return
@@ -84,6 +87,7 @@ export class ProcessManager extends EventEmitter {
       const uvicornMatch = text.match(/Uvicorn running on (http:\/\/127\.0\.0\.1:\d+)/)
       if (uvicornMatch && !this.url) {
         this.url = uvicornMatch[1]
+        this.restartCount = 0
         this.emit('ready', this.url)
         this.startHealthCheck()
       }

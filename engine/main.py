@@ -13,7 +13,7 @@ from engine.core.lifespan import lifespan
 def create_app() -> FastAPI:
     application = FastAPI(
         title="PlumeLens Engine",
-        version="0.1.0",
+        version="0.2.0",
         lifespan=lifespan,
     )
     # dev 环境允许 electron-vite 的渲染进程（http://localhost:5173）跨源请求。

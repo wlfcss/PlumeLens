@@ -75,9 +75,26 @@ def _load_pillow(path: Path) -> NDArray[np.float32]:
 
 
 def _load_raw(path: Path) -> NDArray[np.float32]:
-    """Load RAW image via rawpy."""
+    """Load RAW image via rawpy，应用 EXIF Orientation。
+
+    rawpy.postprocess 输出的是相机 sensor 像素方向（未旋转），但 PlumeLens
+    其他链路（缩略图 / scanner 存的 width/height / pose 推理）都按"显示方向"处理。
+    必须在这里也旋转，否则 RAW 拍摄的纵向片（orientation=6/8）会出现 bbox/姿态点
+    在前端偏移到错误位置（用户截图的 5deab5f → e052266 那个 bug 在 RAW 上仍然存在）。
+    """
     import rawpy
 
+    # 1) 先读 EXIF Orientation（PIL 能读 RAW 的 EXIF 段，哪怕不能解码像素）
+    orientation = 1
+    try:
+        with Image.open(path) as exif_probe:
+            exif = exif_probe.getexif()
+            if exif:
+                orientation = int(exif.get(0x0112, 1))  # 0x0112 = Orientation tag
+    except Exception:
+        pass  # 读不到就当 normal（=1）
+
+    # 2) rawpy 解码为 sensor 方向
     with rawpy.imread(str(path)) as raw:
         rgb = raw.postprocess(
             use_camera_wb=True,
@@ -85,6 +102,24 @@ def _load_raw(path: Path) -> NDArray[np.float32]:
             no_auto_bright=True,
         )
     arr: NDArray[np.float32] = rgb.astype(np.float32) / 255.0
+
+    # 3) 按 EXIF Orientation 应用旋转/翻转，与 PIL.ImageOps.exif_transpose 对齐
+    # EXIF Orientation 编码：1=normal, 2=mirror_h, 3=180°, 4=mirror_v,
+    # 5=mirror_h+90°CW, 6=90°CW, 7=mirror_h+90°CCW, 8=90°CCW
+    if orientation == 2:
+        arr = np.fliplr(arr).copy()
+    elif orientation == 3:
+        arr = np.rot90(arr, k=2).copy()
+    elif orientation == 4:
+        arr = np.flipud(arr).copy()
+    elif orientation == 5:
+        arr = np.rot90(np.fliplr(arr), k=-1).copy()
+    elif orientation == 6:
+        arr = np.rot90(arr, k=-1).copy()
+    elif orientation == 7:
+        arr = np.rot90(np.fliplr(arr), k=1).copy()
+    elif orientation == 8:
+        arr = np.rot90(arr, k=1).copy()
     return arr
 
 
@@ -131,8 +166,11 @@ def resize_letterbox(
     # resize（cv2.resize 原生支持 float32），避免 float32→uint8→float32 的双向
     # 量化损失（每次 round-trip 引入 ±1/255 ≈ 0.004 噪声，对 CoreML EP 精度敏感）。
     # cv2.resize 接收 (W, H) 顺序，注意不是 (H, W)。
-    resized: NDArray[np.float32] = cv2.resize(
-        image, (new_w, new_h), interpolation=cv2.INTER_LINEAR
+    # cv2.resize 类型签名是 MatLike（dtype 不严格），但实际 float32 输入 → float32
+    # 输出。np.asarray 包一层让 pyright 类型收紧到 NDArray[float32]。
+    resized: NDArray[np.float32] = np.asarray(
+        cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_LINEAR),
+        dtype=np.float32,
     )
 
     # 114/255 灰度填充

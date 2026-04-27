@@ -89,6 +89,11 @@ def _probe_image_meta(path: Path) -> dict[str, Any]:
                 # （前端从这里读取并渲染对焦点）
                 # MakerNote 是通用 EXIF tag，但 0x0026 标签格式是 Canon 特有的；
                 # 必须先检查 Make 是 Canon 才解析，否则其他品牌（Nikon/Sony）会错解。
+                #
+                # ⚠ 坐标系：Canon AFInfo 用相机 sensor 帧坐标（0,0=sensor 中心，
+                # 与 EXIF Orientation 无关）。但 PlumeLens 其他链路用 post-rotation
+                # 显示坐标。所以必须传 sensor 维度（pre-rotation 的原始 width/height）
+                # 给 _parse_canon_afinfo2，再按 orientation 把结果转换到显示坐标系。
                 try:
                     make = str(exif_dict.get("Make", "")).lower()
                     if "canon" in make:
@@ -99,10 +104,21 @@ def _probe_image_meta(path: Path) -> dict[str, Any]:
                             and meta.get("width")
                             and meta.get("height")
                         ):
+                            # sensor 维度（与 PIL.Image.open(path).width/height 一致 —
+                            # 即 pre-rotation 维度。orientation ∈ {5,6,7,8} 时和
+                            # meta['width']/['height'] 不同；否则一致。
+                            sensor_w = img.width
+                            sensor_h = img.height
                             af = _parse_canon_afinfo2(
-                                mn, int(meta["width"]), int(meta["height"]),
+                                mn, int(sensor_w), int(sensor_h),
                             )
                             if af is not None:
+                                # 把 sensor 坐标系的 af_point 转到 post-rotation
+                                # 显示坐标系（与 bbox/keypoints 一致）
+                                af = _rotate_af_point_to_display(
+                                    af["x"], af["y"], sensor_w, sensor_h,
+                                    int(orientation),
+                                )
                                 exif_dict["af_point"] = af
                 except Exception:
                     pass
@@ -164,6 +180,66 @@ def _extract_exif(img: Image.Image) -> dict[str, Any]:
         pass  # ExifIFD 不存在或解析失败 → 忽略，IFD0 数据已足够
 
     return out
+
+
+def _rotate_af_point_to_display(
+    x: float,
+    y: float,
+    sensor_w: int,
+    sensor_h: int,
+    orientation: int,
+) -> dict[str, float]:
+    """把 sensor 坐标系的 (x, y) 按 EXIF Orientation 转换到 post-rotation 显示坐标系。
+
+    必须与 PIL.ImageOps.exif_transpose / preprocess._load_pillow / _load_raw 的
+    旋转逻辑一致（同向旋转 + 同向翻转）。
+
+    EXIF Orientation 定义（行业标准）：
+      1 = normal
+      2 = mirror horizontal
+      3 = rotate 180°
+      4 = mirror vertical
+      5 = mirror horizontal + rotate 90° CW
+      6 = rotate 90° CW
+      7 = mirror horizontal + rotate 90° CCW (=270° CW)
+      8 = rotate 90° CCW
+
+    Args:
+        x, y: AF 点在 sensor 坐标系的像素坐标（0,0 = sensor 左上）
+        sensor_w, sensor_h: sensor 帧的宽高（pre-rotation）
+        orientation: EXIF Orientation 值（1-8）
+
+    Returns:
+        {"x": float, "y": float} 在 post-rotation 显示坐标系的像素坐标
+    """
+    # 公式参考：PIL.ImageOps.exif_transpose 对应的 PIL.Image.Transpose 操作。
+    # 摄影场景下相机几乎只产生 1/3/6/8（landscape / 倒置 / portrait CCW / portrait CW），
+    # 5/7 极罕见但仍要正确。
+    if orientation == 1:
+        # normal
+        return {"x": x, "y": y}
+    if orientation == 2:
+        # FLIP_LEFT_RIGHT: (x, y) → (W - x, y)
+        return {"x": float(sensor_w) - x, "y": y}
+    if orientation == 3:
+        # ROTATE_180: (x, y) → (W - x, H - y)
+        return {"x": float(sensor_w) - x, "y": float(sensor_h) - y}
+    if orientation == 4:
+        # FLIP_TOP_BOTTOM: (x, y) → (x, H - y)
+        return {"x": x, "y": float(sensor_h) - y}
+    if orientation == 5:
+        # TRANSPOSE: (x, y) → (y, x)
+        return {"x": y, "y": x}
+    if orientation == 6:
+        # ROTATE_270 (= 90° CW): (x, y) → (H - y, x); display 宽高 = (H, W)
+        return {"x": float(sensor_h) - y, "y": x}
+    if orientation == 7:
+        # TRANSVERSE: (x, y) → (H - y, W - x)
+        return {"x": float(sensor_h) - y, "y": float(sensor_w) - x}
+    if orientation == 8:
+        # ROTATE_90 (= 90° CCW): (x, y) → (y, W - x); display 宽高 = (H, W)
+        return {"x": y, "y": float(sensor_w) - x}
+    return {"x": x, "y": y}  # unknown orientation, leave unchanged
 
 
 def _parse_canon_afinfo2(
