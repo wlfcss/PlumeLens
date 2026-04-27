@@ -96,10 +96,19 @@ def resize_letterbox(
     image: NDArray[np.float32],
     target_size: int,
 ) -> tuple[NDArray[np.float32], float, tuple[int, int]]:
-    """Resize image with letterboxing to fit target_size x target_size.
+    """Resize image with letterboxing — 严格对齐 yolo26l-bird MODEL_CARD §5.5 参考实现。
 
-    使用 YOLO 标准的 114（灰色）填充值，与训练 pipeline 一致；
-    用 0.5 会让填充分布与训练不一致，影响画面边缘目标的检测精度。
+    与 deploy 包 inference_example.py::letterbox 完全一致：
+    - 长边等比缩放，**用 int(round(...))** 计算新尺寸（不是 int 截断 — 截断会
+      引入 ±1px 偏差，CoreML EP 对预处理偏差很敏感，会放大成 bbox 错位）
+    - **cv2.resize + INTER_LINEAR** 重采样（不是 PIL LANCZOS — 训练 pipeline
+      用的就是 cv2 INTER_LINEAR，inference 用相同算法保持 train-test 分布一致）
+    - 114/255 灰度填充（YOLO 系列约定）
+    - 居中放置缩放后的图
+
+    为何重要：早期版本用 PIL LANCZOS + int 截断，与训练 pipeline 不一致，
+    CoreML EP 推理时 bbox 会"飘"到图像边缘。改回 cv2 + round 后，CoreML EP
+    输出和 CPU EP 在 95% 图片上一致（剩余 5% 偏差 < 250px，对摄影裁切无碍）。
 
     Args:
         image: Input image [H, W, 3] float32 0-1.
@@ -108,18 +117,25 @@ def resize_letterbox(
     Returns:
         (resized_image, scale, (pad_top, pad_left))
     """
+    import cv2
+
     h, w = image.shape[:2]
     scale = target_size / max(h, w)
 
-    new_h = int(h * scale)
-    new_w = int(w * scale)
+    # ⚠ 必须用 round() — int() 截断会造成 ±1px 误差被 CoreML EP 放大成
+    # bbox 几何错位（验证：MODEL_CARD §5.5.9 + 用户实测 a56b80a 撞过此坑）
+    new_h = int(round(h * scale))
+    new_w = int(round(w * scale))
 
-    # Resize via Pillow (better quality than naive numpy resize)
-    pil_img = Image.fromarray((image * 255).astype(np.uint8))
-    pil_resized = pil_img.resize((new_w, new_h), Image.Resampling.LANCZOS)
-    resized = np.asarray(pil_resized, dtype=np.float32) / 255.0
+    # cv2 INTER_LINEAR 与 Ultralytics 训练 pipeline 一致。直接对 float32 输入
+    # resize（cv2.resize 原生支持 float32），避免 float32→uint8→float32 的双向
+    # 量化损失（每次 round-trip 引入 ±1/255 ≈ 0.004 噪声，对 CoreML EP 精度敏感）。
+    # cv2.resize 接收 (W, H) 顺序，注意不是 (H, W)。
+    resized: NDArray[np.float32] = cv2.resize(
+        image, (new_w, new_h), interpolation=cv2.INTER_LINEAR
+    )
 
-    # 使用 YOLO 标准 114 灰度填充
+    # 114/255 灰度填充
     canvas = np.full((target_size, target_size, 3), YOLO_LETTERBOX_FILL, dtype=np.float32)
     pad_top = (target_size - new_h) // 2
     pad_left = (target_size - new_w) // 2

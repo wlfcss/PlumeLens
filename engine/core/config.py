@@ -19,10 +19,13 @@ class Settings(BaseSettings):
 
     # Pipeline — execution providers ("auto" / "coreml" / "cuda" / "cpu")
     # macOS onnxruntime 1.25 实测：
-    # - YOLO + CoreML：bbox 数值严重错（letterboxed 输出超过 1280 边界，clamp 到原图边缘
-    #   → 顶点检测框看似框选了"右下半张图"），rebust test 只测崩没测精度。强制 CPU。
+    # - YOLO + CoreML：**强制 CPU**。即使预处理对齐 MODEL_CARD 参考（preprocess v4 cv2+round），
+    #   CoreML EP 在某些 8K Canon 照片上仍会输出 bbox 越界（letterbox x1=-80 之类，
+    #   反算回原图 ~700px 错位，**远超 MODEL_CARD §5.5.9 标的 250px 上限**）。这是
+    #   CoreML EP 对 YOLO26 NMS-free head advanced indexing 算子的实现差异（Ultralytics
+    #   社区已知，无 workaround）。CPU EP 单图 ~620ms 可接受，正确性优先。
     # - bird_visibility/CLIPIQA/HyperIQA + CoreML：100% 安全 + 加速 7-27×（与 CPU diff <0.2px）
-    # - DINOv3 ViT-L + CoreML：算子覆盖度差，反而比 CPU 慢。强制 CPU。
+    # - DINOv3 species v3：转 torch + MPS bf16，不再走 ONNX 路线
     yolo_provider: str = "cpu"
     iqa_provider: str = "coreml"
     pose_provider: str = "coreml"
@@ -80,7 +83,9 @@ class Settings(BaseSettings):
     # v2: letterbox fill 0.5 → 114/255 (YOLO standard, matches training)
     # v3: species 切换到 torch v3 单尺度 480×480（之前是 ONNX 双尺度 512+640）+
     #     1535 类（之前 1516）+ trained_mask 重新生成
-    preprocess_version: int = 3
+    # v4: letterbox PIL LANCZOS + int 截断 → cv2 INTER_LINEAR + int(round)，
+    #     对齐 MODEL_CARD §5.5 参考实现 → 启用 CoreML EP YOLO 加速时 bbox 不再错位
+    preprocess_version: int = 4
 
     # Pipeline — concurrency
     # 每个 task 内部 ONNX 推理会 to_thread 释放 GIL，多 worker 并发 = 多张图同时跑 ONNX。

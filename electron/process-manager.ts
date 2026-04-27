@@ -18,6 +18,10 @@ export class ProcessManager extends EventEmitter {
   private restartCount = 0
   private readonly maxRestarts = 3
   private healthInterval: ReturnType<typeof setInterval> | null = null
+  private restartTimer: ReturnType<typeof setTimeout> | null = null
+  // 关停标志：stop() 设为 true，handleCrash 与 setTimeout 都会检查，
+  // 防止应用关闭中残留的 setTimeout 触发 spawn 出孤儿 engine。
+  private stopped = false
 
   getUrl(): string | null {
     return this.url
@@ -107,7 +111,12 @@ export class ProcessManager extends EventEmitter {
   }
 
   stop(): void {
+    this.stopped = true
     this.stopHealthCheck()
+    if (this.restartTimer) {
+      clearTimeout(this.restartTimer)
+      this.restartTimer = null
+    }
     this.killCurrentProcess('app shutdown')
     this.url = null
   }
@@ -152,6 +161,9 @@ export class ProcessManager extends EventEmitter {
   }
 
   private handleCrash(): void {
+    // 已经 stop 了就不再重启，避免应用关闭过程中残留 timer fire 出孤儿
+    if (this.stopped) return
+
     // ⚠ 关键修复：重启前必须先杀老进程。原代码直接 setTimeout(start) 会让
     // this.process 被新 spawn 覆盖，老进程成为孤儿继续吃 RAM。
     this.killCurrentProcess('crash/health-failure restart')
@@ -160,7 +172,12 @@ export class ProcessManager extends EventEmitter {
     if (this.restartCount < this.maxRestarts) {
       const delay = delays[this.restartCount] ?? 10000
       this.restartCount++
-      setTimeout(() => this.start(), delay)
+      // 记录 timer，stop() 能取消；timer 触发时再次检查 stopped 防竞态
+      this.restartTimer = setTimeout(() => {
+        this.restartTimer = null
+        if (this.stopped) return
+        void this.start()
+      }, delay)
     } else {
       this.emit('error', 'Python 后端多次崩溃，请检查诊断页面')
     }

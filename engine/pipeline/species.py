@@ -369,13 +369,20 @@ class SpeciesClassifier:
         本函数每次调用结束都同步 + 清缓存，强制 RAM 归还系统。代价是每次推理
         多 ~5-10ms（同步），但能避免内存无界增长。
         """
+        # 把所有中间 tensor 装一个本地 dict，方便 finally 统一删（异常路径也能跑）。
+        # 之前直接 `del x, feat, probs_sum, probs_t` 在异常路径会 NameError 掩盖
+        # 真实推理异常（OOM 等），导致用户看到的 traceback 不是根因。
+        tensors: dict[str, object] = {}
+        probs: NDArray[np.float32] | None = None
         try:
             # 1) preprocess to (1, 3, 480, 480)
             x = preprocess_for_dinov3(crop, self.image_size)
             x = x.to(self.device).to(self._dtype)
+            tensors["x"] = x
 
             # 2) backbone → (1, 2048) feature; cast to fp32 before head
             feat = self._feature(x).float()
+            tensors["feat"] = feat
 
             # 3) 8 head ensemble — softmax per head, average
             probs_sum: torch.Tensor | None = None
@@ -384,20 +391,23 @@ class SpeciesClassifier:
                 p = F.softmax(logits, dim=1)
                 probs_sum = p if probs_sum is None else probs_sum + p
             assert probs_sum is not None
+            tensors["probs_sum"] = probs_sum
             probs_t = probs_sum / float(len(self._heads))
-            probs: NDArray[np.float32] = probs_t[0].cpu().numpy()  # (num_classes,)
-
-            # 释放中间 tensor 引用，让 Python GC 标记可回收（MPS 在 empty_cache 时
-            # 才真正释放底层 buffer；这里删引用是必要前提）
-            del x, feat, probs_sum, probs_t
+            tensors["probs_t"] = probs_t
+            # cpu().numpy() 会数据拷贝出来，之后清 MPS 缓存就安全
+            probs = probs_t[0].cpu().numpy()  # (num_classes,)
         finally:
-            # 强制 MPS / CUDA 释放 cache（用 finally 兜底异常路径也清）
+            # 删本地 tensor 引用 → Python 标记可回收 → empty_cache 才能真释放 MPS buffer
+            tensors.clear()
             if self.device == "mps":
                 torch.mps.synchronize()
                 torch.mps.empty_cache()
             elif self.device == "cuda":
                 torch.cuda.synchronize()
                 torch.cuda.empty_cache()
+
+        if probs is None:
+            return []  # 不可达（try 内若异常 finally 后会 raise，到不了这），保险
 
         # 4) zero out ghost classes
         probs[~self._trained_mask] = 0.0
