@@ -403,17 +403,38 @@ Overlay 分工：
 - 人工标注仍高于识别修正。
 - 识别修正不改变质量分档。
 
-当前仍需重点排查：
+### 11.1 "识别修正" 标签的真实触发条件（重要，避免误读）
 
-- 用户在 `new1` 场景中仍观察到组内修正似乎未完全生效。
-- 需要从后端写库、API detail、前端 adapter、UI 展示四层逐项验证。
+`_apply_group_species_consensus()` (`engine/api/routes/library.py`) 在每次 library_detail 请求时按 read-time 计算共识，并对达成共识的组内每张照片应用以下分支：
+
+| 照片状态 | `species_source` 终值 | 用户看到的来源徽标 |
+|---|---|---|
+| 多鸟图 / 无 best_detection / 已人工标注 | 不动（`manual` 或 `model`） | 按原值 |
+| 模型 top-1 == 共识 winner | 不动（`model`） | **`自动识别`** |
+| 模型 top-1 != winner，且模型置信度 > `GROUP_SPECIES_MAX_CONFLICT_TOP1_CONF` | `conflict` | `存疑` |
+| 模型 top-1 != winner，且模型置信度不高 | `group_consensus` | **`识别修正`** ✓ |
+
+也就是说 `识别修正` 徽标只在 **共识真的覆盖了模型答案** 时才显示。模型本来就答对的照片即使在共识群组里，也仍然显示 `自动识别`，这是设计意图。共识群组成员资格本身不直接显示在 UI 上，但 `group_species_*` 字段会随每张照片一起返回（schema 见 `engine/api/schemas/library.py`）。
+
+共识达成需要同时满足（常量见 `engine/api/routes/library.py:117-122`）：
+
+- 组内总照片数 ≥ 3（line 228 硬阈值）
+- 贡献票权的有效证据数 ≥ 3（`GROUP_SPECIES_MIN_EVIDENCE`，多鸟图 / 无候选 / 权重为 0 的照片不计入）
+- 时间跨度 ≤ 300 秒（`GROUP_SPECIES_MAX_SPAN_SECONDS = 5 * 60`）
+- winner 票权占总票权 ≥ 0.62（`GROUP_SPECIES_MIN_WINNER_SHARE`）
+- winner 与第二名差距 ≥ 0.20（`GROUP_SPECIES_MIN_MARGIN`）
+- winner 在 top-1 直接得票数中支持率 ≥ 0.60（`GROUP_SPECIES_MIN_SUPPORT_RATIO`）
+- 标记为 `conflict` 的阈值：原模型 top-1 置信度 > 0.70（`GROUP_SPECIES_MAX_CONFLICT_TOP1_CONF`）
+
+`new1` 场景中若用户报告"识别修正未生效"，先按上表对照单张照片的状态：很可能是 (a) 该组未达成共识阈值，或 (b) 模型 top-1 已经和共识一致（属于正确行为，不出现徽标）。
 
 排查入口：
 
 - `engine/pipeline/scene_grouping.py`
 - `engine/services/scene_grouper.py`
+- `engine/api/routes/library.py`（`_apply_group_species_consensus`）
 - `renderer/src/lib/backend-adapter.ts`
-- `renderer/src/App.tsx`
+- `renderer/src/App.tsx`（`effectiveSpeciesName` / `speciesSourceKind`）
 
 ---
 
