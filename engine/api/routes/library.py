@@ -691,13 +691,18 @@ async def library_detail(request: Request, library_id: str) -> LibraryDetail:
         )
         effective_species_latin = best.species_latin if best else model_species_latin
         manual_species = bool(best.manual_species) if best else False
-        species_source = (
-            "manual"
-            if manual_species
-            else "model"
-            if effective_species
-            else "none"
-        )
+        # head 可见才把模型识别记作 'model'（可信展示 + 进羽迹）；
+        # head 不可见 / pose 缺失 → 'model_unconfirmed'，UI 显示"不全 · 待审"
+        # 标签，用户在深度复核确认后才升级为 'manual'。group consensus 应用
+        # 阶段（_apply_group_species_consensus）会进一步把 unconfirmed 覆盖
+        # 为 'group_consensus'，因为组内其他 head 可见的鸟用票权"代审"了。
+        head_confirmed = best is not None and best.pose is not None and best.pose.head_visible
+        if manual_species:
+            species_source = "manual"
+        elif effective_species:
+            species_source = "model" if head_confirmed else "model_unconfirmed"
+        else:
+            species_source = "none"
         photos.append(
             PhotoRow(
                 id=str(r["id"]),

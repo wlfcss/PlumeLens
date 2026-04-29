@@ -16,6 +16,25 @@ def _make_jpeg(path: Path, size: tuple[int, int] = (100, 80)) -> None:
     Image.new("RGB", size, (120, 140, 160)).save(path, "JPEG")
 
 
+def _make_pose(head_visible: bool, eye_visible: bool | None = None) -> dict:
+    """构造完整的 pose payload（PoseDetail schema 要求 5 个 keypoint 必填）。
+    单独的 head_visible / eye_visible flag 是早期 fixture 的 shortcut，缺
+    keypoint 会让 PoseDetail.model_validate 失败 → best.pose 落 None → 新规则下
+    被判为 model_unconfirmed。这里补全 keypoint 让 pose 真正可解析。"""
+    if eye_visible is None:
+        eye_visible = head_visible
+    kp = {"x": 10.0, "y": 10.0, "confidence": 0.9}
+    return {
+        "bill": kp,
+        "crown": kp,
+        "nape": kp,
+        "left_eye": kp,
+        "right_eye": kp,
+        "head_visible": head_visible,
+        "eye_visible": eye_visible,
+    }
+
+
 @pytest.fixture
 async def real_client(tmp_path: Path):
     """Spin up a real FastAPI app with real DB (no ONNX models loaded)."""
@@ -245,7 +264,7 @@ class TestListAndDetail:
                 "bbox": {"x1": 1, "y1": 2, "x2": 30, "y2": 40, "confidence": 0.9},
                 "quality": {"clipiqa": 0.7, "hyperiqa": 0.8, "combined": 0.76},
                 "grade": "select",
-                "pose": {"head_visible": True, "eye_visible": True},
+                "pose": _make_pose(head_visible=True),
                 "species": species,
                 "species_candidates": candidates,
             }
@@ -310,6 +329,100 @@ class TestListAndDetail:
         assert corrected["group_species_evidence"] == 4
         assert corrected["species_conflict"] is False
         assert by_name["a.jpg"]["species_source"] == "model"
+
+    async def test_species_source_marks_head_invisible_as_model_unconfirmed(
+        self,
+        real_client,
+    ) -> None:
+        """放宽规则：head 可见 → model；head 不可见 / pose 缺失 → model_unconfirmed；
+        manual_species 始终覆盖（优先级最高）。"""
+        client, tmp = real_client
+        lib_root = tmp / "lib_unconfirmed"
+        for name in ("head_ok.jpg", "head_hidden.jpg", "no_pose.jpg", "manual.jpg"):
+            _make_jpeg(lib_root / name)
+        await client.post("/library/import", json={"root_path": str(lib_root)})
+
+        libs = (await client.get("/library")).json()
+        lib_id = libs[0]["id"]
+        photos = sorted(
+            (await client.get(f"/library/{lib_id}")).json()["photos"],
+            key=lambda p: p["file_name"],
+        )
+
+        def make_result(photo_id: str, pose: dict | None) -> str:
+            detection = {
+                "bbox": {"x1": 1, "y1": 2, "x2": 30, "y2": 40, "confidence": 0.9},
+                "quality": {"clipiqa": 0.7, "hyperiqa": 0.8, "combined": 0.76},
+                "grade": "select",
+                "pose": pose,
+                "species": "白鹭",
+                "species_candidates": [
+                    {
+                        "canonical_sci": "Egretta garzetta",
+                        "canonical_zh": "白鹭",
+                        "confidence": 0.85,
+                    }
+                ],
+            }
+            return json.dumps(
+                {
+                    "photo_id": photo_id,
+                    "pipeline_version": "test-v1",
+                    "bird_count": 1,
+                    "duration_ms": 12,
+                    "best": detection,
+                    "detections": [detection],
+                }
+            )
+
+        # 全可见 / head 不可见 / pose 缺失 三种 fixture
+        cases = [
+            ("head_ok.jpg", _make_pose(head_visible=True)),
+            ("head_hidden.jpg", _make_pose(head_visible=False)),
+            ("no_pose.jpg", None),
+            ("manual.jpg", _make_pose(head_visible=False)),
+        ]
+        async with aiosqlite.connect(tmp / "test.db") as conn:
+            for file_name, pose in cases:
+                photo = next(p for p in photos if p["file_name"] == file_name)
+                await conn.execute(
+                    "INSERT INTO analysis_results (id, photo_id, pipeline_version, "
+                    "quality_score, grade, bird_count, species, result_json, created_at, "
+                    "is_active) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)",
+                    (
+                        f"ar-{file_name}",
+                        photo["id"],
+                        "test-v1",
+                        0.76,
+                        "select",
+                        1,
+                        "白鹭",
+                        make_result(photo["id"], pose),
+                        "2026-04-23T07:00:00+00:00",
+                    ),
+                )
+            await conn.commit()
+
+        # manual.jpg 走人工标注，覆盖 unconfirmed
+        manual_photo = next(p for p in photos if p["file_name"] == "manual.jpg")
+        override = await client.put(
+            f"/decisions/photo/{manual_photo['id']}/species/0",
+            json={
+                "canonical_sci": "Egretta garzetta",
+                "canonical_zh": "白鹭",
+                "canonical_en": "Little Egret",
+            },
+        )
+        assert override.status_code == 200
+
+        detail = (await client.get(f"/library/{lib_id}")).json()
+        by_name = {p["file_name"]: p for p in detail["photos"]}
+
+        assert by_name["head_ok.jpg"]["species_source"] == "model"
+        assert by_name["head_hidden.jpg"]["species_source"] == "model_unconfirmed"
+        assert by_name["no_pose.jpg"]["species_source"] == "model_unconfirmed"
+        # 人工标注始终覆盖（最高优先级）
+        assert by_name["manual.jpg"]["species_source"] == "manual"
 
 
 class TestDelete:

@@ -620,21 +620,21 @@ class PipelineManager:
 
     def _should_run_species(
         self,
-        pose_info,  # PoseInfo | None
+        pose_info,  # PoseInfo | None  — 已不参与判定，保留参数避免破坏调用点签名
         bird_grade: QualityGrade,
     ) -> bool:
         """Decide whether to run species classifier on this bird.
 
-        Criteria:
+        Criteria（放宽后）:
         - species model loaded
-        - pose module available & head + eye both visible
         - grade ≥ species_min_grade
+
+        head/eye visibility 不再是 gate — head 不可见时仍跑识别。结果在
+        read-time 由 library.py 的 species_source 计算逻辑标记为
+        'model_unconfirmed'，需用户在详情页确认才进羽迹统计（HANDOVER §11.2）。
         """
+        del pose_info  # 显式标记 unused，对应 docstring 的"不参与判定"
         if self._species is None:
-            return False
-        if pose_info is None:
-            return False
-        if not (pose_info.head_visible and pose_info.eye_visible):
             return False
         min_grade_rank = _GRADE_ORDER.get(self._settings.species_min_grade, 0)
         current_rank = _GRADE_ORDER[bird_grade.value]

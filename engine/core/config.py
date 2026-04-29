@@ -79,8 +79,9 @@ class Settings(BaseSettings):
     species_min_confidence: float = 0.01  # 过滤 1301 训练种之外的噪声命中
     species_crop_margin: float = 0.15  # 方形 bbox 扩展比例（见 MODEL_DELIVERY §6.3）
     species_crop_min_side_frac: float = 0.30  # 方形最小边长占原图短边的比例
-    # 只对 head+eye 可见的鸟触发物种分类。grade 门已去掉（"reject" 即所有
-    # 等级都跑），让低分但鸟头/眼清晰的照片也能拿到物种名 — 用户明确选择最宽松。
+    # head/eye visibility 不再是触发 gate（v5 放宽）— 所有 grade 通过 species_min_grade
+    # 的鸟都跑识别；head 不可见时由 read-time 标记为 species_source='model_unconfirmed'，
+    # UI 显示"不全 · 待审"标签，用户确认后才进羽迹（HANDOVER §11.2）。
     # 代价：每张多 30-80% 物种推理时间；DINOv3 ~150ms/张。
     species_min_grade: str = "reject"  # "reject" / "record" / "usable" / "select"
 
@@ -90,7 +91,9 @@ class Settings(BaseSettings):
     #     1535 类（之前 1516）+ trained_mask 重新生成
     # v4: letterbox PIL LANCZOS + int 截断 → cv2 INTER_LINEAR + int(round)，
     #     对齐 MODEL_CARD §5.5 参考实现 → 启用 CoreML EP YOLO 加速时 bbox 不再错位
-    preprocess_version: int = 4
+    # v5: species 触发条件放宽 — 不再要求 head+eye visible，head 不可见也跑识别，
+    #     read-time 把这类结果标记为 species_source='model_unconfirmed'
+    preprocess_version: int = 5
 
     # Pipeline — concurrency
     # 每个 task 内部 ONNX 推理会 to_thread 释放 GIL，多 worker 并发 = 多张图同时跑 ONNX。

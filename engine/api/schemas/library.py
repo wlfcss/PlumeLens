@@ -129,7 +129,10 @@ class PhotoRow(BaseModel):
     manual_species: bool = False
     # Effective species display source. Raw model output is preserved below so
     # group consensus can stabilize the UI without destroying auditability.
-    species_source: str = "none"  # none / model / manual / group_consensus / conflict
+    # none / model / model_unconfirmed / manual / group_consensus / conflict
+    # model_unconfirmed: head 不可见但模型给了识别 → UI 显示"不全 · 待审"，
+    # 用户在深度复核确认后升级为 manual；group consensus 可覆盖为 group_consensus。
+    species_source: str = "none"
     model_species: str | None = None
     model_species_latin: str | None = None
     group_species: str | None = None
