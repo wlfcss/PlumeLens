@@ -61,6 +61,9 @@ export class ProcessManager extends EventEmitter {
       cwd = join(process.resourcesPath, 'plumelens-engine')
       // Production：模型文件由 electron-builder extraResources 放在 Resources/models/
       env.PLUMELENS_MODELS_DIR = join(process.resourcesPath, 'models')
+      // Strict 模式：缺 IQA 模型直接启动失败，不允许伪造 0.5 中性分。
+      // 不在这里设 dev 也跑不起来（开发期还没下载所有模型时方便迭代）。
+      env.PLUMELENS_REQUIRE_IQA = '1'
     }
 
     // detached: true + 后续按进程组 kill (-pid) → 杀掉整个 engine 子树（含 torch /

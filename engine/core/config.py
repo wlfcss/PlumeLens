@@ -97,5 +97,13 @@ class Settings(BaseSettings):
     # CoreML EP 多 session 共享 ANE/GPU 资源，并发 2 ≈ 1.5-1.8× 吞吐（不是线性）。
     analysis_concurrency: int = 2
 
+    # Pipeline — strict 模式：IQA 模型缺失/加载失败时拒绝启动。
+    # 默认 False 给开发期友好（模型还没下载也能跑出 detection-only 结果）；
+    # packaged 应用由 process-manager 注入 PLUMELENS_REQUIRE_IQA=1，
+    # 防止用户拿到伪造的中性 0.5 分（grade 全部被打成 USABLE）。
+    # IQA 是当前唯一的 "silent fallback"：YOLO/species 缺失会有明显症状，
+    # 但 IQA 缺失会让所有照片打成可用，用户感知不到模型已经丢了。
+    require_iqa: bool = False
+
 
 settings = Settings()

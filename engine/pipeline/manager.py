@@ -268,6 +268,21 @@ class PipelineManager:
                 hyperiqa_weight=self._settings.hyperiqa_weight,
             )
 
+        # Strict 模式：IQA 缺失则启动失败，避免用户拿到伪造 0.5 分 / grade=USABLE。
+        # 仅 packaged 应用启用（process-manager 注入 PLUMELENS_REQUIRE_IQA=1）。
+        if self._assessor is None and self._settings.require_iqa:
+            await logger.aerror(
+                "IQA assessor not loaded under strict mode — refusing to start",
+                clipiqa_path=str(clipiqa_path),
+                hyperiqa_path=str(hyperiqa_path),
+                clipiqa_loaded=clipiqa_session is not None,
+                hyperiqa_loaded=hyperiqa_session is not None,
+            )
+            raise RuntimeError(
+                "IQA models required but not loaded "
+                "(set PLUMELENS_REQUIRE_IQA=0 only for dev without models)."
+            )
+
         # ---- DINOv3 species classifier v3 (torch + transformers, 845 MB) ----
         # 旧路径（dinov3_backbone.onnx + species_ensemble.onnx）已弃用；纯 ONNX
         # species 路线已验证不可行（RoPE fp16 NaN + CoreML EP ViT 覆盖差，准确率显著下降）。
