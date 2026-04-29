@@ -296,6 +296,42 @@ describe('App', () => {
     expect(egretta?.photoCount).toBe(1)
   })
 
+  it('excludes model_unconfirmed species from archive collection until user confirms', () => {
+    // 不变量：head 不可见时 species_source='model_unconfirmed'，
+    // 该照片即使是精选档也不应让该物种"已点亮"。用户在深度复核确认后
+    // 升级为 'manual' 才应入羽迹。
+    const unconfirmedPhoto = {
+      id: 'photo-unconfirmed',
+      folderId: 'folder-1',
+      groupId: 'group-1',
+      fileName: '5Y3A0011.JPG',
+      shotAt: '2026-03-21T15:59:00Z',
+      speciesName: '白鹭',
+      speciesLatinName: 'Egretta garzetta',
+      speciesSource: 'model_unconfirmed',
+      modelSpeciesName: '白鹭',
+      modelSpeciesLatinName: 'Egretta garzetta',
+      birdCount: 1,
+      analysisStatus: 'done',
+      grade: 'select',
+      decision: null,
+      finalScore: 0.78,
+    } as PhotoRecord
+    const workspace = {
+      folders: [],
+      groups: [],
+      photos: [unconfirmedPhoto],
+      species: [],
+    } as WorkspaceSnapshot
+
+    const entries = getArchiveSpeciesEntries(unconfirmedPhoto)
+    const records = deriveSpeciesRecords(workspace)
+    const egretta = records.find((species) => species.latinName === 'Egretta garzetta')
+
+    expect(entries).toEqual([])
+    expect(egretta?.collected).toBe(false)
+  })
+
   it('uses recognition correction before raw model species in archive records', () => {
     const consensusPhoto = {
       id: 'photo-consensus',

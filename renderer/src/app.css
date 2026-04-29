@@ -3828,6 +3828,26 @@ button:disabled {
   opacity: 0.38;
 }
 
+/* "确认当前识别" — head 不可见但模型给了识别时出现，把 model 升级为 manual */
+.species-editor__confirm {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid color-mix(in srgb, var(--pl-warning) 50%, transparent);
+  background: color-mix(in srgb, var(--pl-warning) 12%, transparent);
+  border-radius: 4px;
+  padding: 4px 10px;
+  color: var(--pl-warning);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  align-self: start;
+}
+
+.species-editor__confirm:hover {
+  background: color-mix(in srgb, var(--pl-warning) 22%, transparent);
+}
+
 /* EXIF 紧凑版 */
 .exif-panel {
   display: flex;

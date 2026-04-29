@@ -335,6 +335,10 @@ export function getArchiveSpeciesEntries(photo: PhotoRecord): ArchiveSpeciesEntr
       latinName: photo.speciesLatinName,
       englishName: photo.speciesEnglishName,
     })
+  } else if (photo.speciesSource === 'model_unconfirmed') {
+    // head 不可见 → 模型识别"待审"。不进羽迹 — 用户在深度复核确认后会
+    // 升级 species_source 为 'manual' 再入。多鸟图中部分人工标注的 detection
+    // 已经走 manualEntries 分支，不会被这里"否决"掉。
   } else if (photo.speciesSource === 'group_consensus') {
     rawEntries.push({
       name: photo.groupSpeciesName ?? photo.speciesName,
@@ -424,13 +428,17 @@ function categoryTone(category: PhotoCategory): Tone {
 export function speciesSourceTone(photo: PhotoRecord): Tone {
   if (photo.speciesSource === 'group_consensus') return 'success'
   if (photo.speciesConflict || photo.speciesSource === 'conflict') return 'warning'
+  if (photo.speciesSource === 'model_unconfirmed') return 'warning'
   if (photo.speciesSource === 'manual' || photo.manualSpecies) return 'accent'
   return 'muted'
 }
 
-export function speciesSourceKind(photo: PhotoRecord): 'conflict' | 'correction' | 'manual' | null {
+export function speciesSourceKind(
+  photo: PhotoRecord,
+): 'conflict' | 'correction' | 'manual' | 'unconfirmed' | null {
   if (photo.speciesSource === 'group_consensus') return 'correction'
   if (photo.speciesConflict || photo.speciesSource === 'conflict') return 'conflict'
+  if (photo.speciesSource === 'model_unconfirmed') return 'unconfirmed'
   if (photo.speciesSource === 'manual' || photo.manualSpecies) return 'manual'
   return null
 }
@@ -444,6 +452,9 @@ export function speciesSourceBadge(
   }
   if (photo.speciesConflict || photo.speciesSource === 'conflict') {
     return t('selection.speciesSource.conflict')
+  }
+  if (photo.speciesSource === 'model_unconfirmed') {
+    return t('selection.speciesSource.unconfirmed')
   }
   if (photo.speciesSource === 'manual' || photo.manualSpecies) {
     return t('selection.speciesSource.manual')
@@ -489,6 +500,9 @@ export function speciesSourceDetail(
   }
   if (photo.speciesConflict || photo.speciesSource === 'conflict') {
     return t('selection.speciesSource.conflictDetail')
+  }
+  if (photo.speciesSource === 'model_unconfirmed') {
+    return t('selection.speciesSource.unconfirmedDetail')
   }
   if (photo.speciesSource === 'manual' || photo.manualSpecies) {
     return t('selection.speciesSource.manualDetail')

@@ -173,7 +173,9 @@
       "manual": "人工鸟种",
       "manualDetail": "人工鸟种覆盖",
       "conflict": "组内分歧",
-      "conflictDetail": "组内分歧，保留单张高置信结果"
+      "conflictDetail": "组内分歧，保留单张高置信结果",
+      "unconfirmed": "不全 · 待审",
+      "unconfirmedDetail": "鸟头不可见，识别置信度受限，需在深度复核确认后才进羽迹"
     },
     "poseTags": {
       "eye_visible": "见眼",
@@ -255,6 +257,8 @@
       "auto": "可识别",
       "bird": "鸟",
       "clear": "清除人工鸟种",
+      "confirmModel": "确认当前识别",
+      "confirmModelHint": "确认后该照片即按此鸟种计入羽迹",
       "manual": "人工",
       "manualOnly": "手动",
       "noLatin": "无拉丁名",

@@ -203,7 +203,13 @@ export interface PhotoRow {
   species: string | null
   species_latin: string | null
   manual_species: boolean
-  species_source?: 'none' | 'model' | 'manual' | 'group_consensus' | 'conflict'
+  species_source?:
+    | 'none'
+    | 'model'
+    | 'model_unconfirmed'
+    | 'manual'
+    | 'group_consensus'
+    | 'conflict'
   model_species?: string | null
   model_species_latin?: string | null
   group_species?: string | null

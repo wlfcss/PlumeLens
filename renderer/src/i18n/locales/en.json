@@ -173,7 +173,9 @@
       "manual": "Manual species",
       "manualDetail": "Manual species override",
       "conflict": "Group conflict",
-      "conflictDetail": "Group conflict; keeping the high-confidence single-frame result"
+      "conflictDetail": "Group conflict; keeping the high-confidence single-frame result",
+      "unconfirmed": "Partial · Pending review",
+      "unconfirmedDetail": "Bird head not visible; model confidence is limited until you confirm in the deep review"
     },
     "poseTags": {
       "eye_visible": "Eye visible",
@@ -255,6 +257,8 @@
       "auto": "Auto",
       "bird": "Bird",
       "clear": "Clear manual species",
+      "confirmModel": "Confirm current identification",
+      "confirmModelHint": "Once confirmed, this photo counts toward archive collection under this species",
       "manual": "Manual",
       "manualOnly": "Manual",
       "noLatin": "No scientific name",

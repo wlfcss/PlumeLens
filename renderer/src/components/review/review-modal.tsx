@@ -518,6 +518,26 @@ function SpeciesOverrideEditor({
         <small>{activeBird.speciesLatinName ?? t('selection.speciesEditor.noLatin')}</small>
       </div>
 
+      {photo.speciesSource === 'model_unconfirmed' &&
+      !activeBird.manualSpecies &&
+      activeBird.speciesLatinName ? (
+        <button
+          className="species-editor__confirm"
+          onClick={() =>
+            onSetSpeciesOverride(photo.id, activeBird.index, {
+              canonical_sci: activeBird.speciesLatinName!,
+              canonical_zh: activeBird.speciesName ?? null,
+              canonical_en: activeBird.speciesEnglishName ?? null,
+            })
+          }
+          title={t('selection.speciesEditor.confirmModelHint')}
+          type="button"
+        >
+          <Check className="h-3.5 w-3.5" />
+          {t('selection.speciesEditor.confirmModel')}
+        </button>
+      ) : null}
+
       <div className="species-editor__search">
         <Search className="h-3.5 w-3.5" />
         <input
