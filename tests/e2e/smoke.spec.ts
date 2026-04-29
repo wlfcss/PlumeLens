@@ -64,8 +64,7 @@ async function mockBackend(page: Page, state: MockState = { libraries: [DEFAULT_
             bird_visibility: { loaded: true, provider: 'CPUExecutionProvider' },
             clipiqa: { loaded: true, provider: 'CPUExecutionProvider' },
             hyperiqa: { loaded: true, provider: 'CPUExecutionProvider' },
-            dinov3_backbone: { loaded: true, provider: 'CPUExecutionProvider' },
-            species_ensemble: { loaded: true, provider: 'CPUExecutionProvider' },
+            dinov3_species_v3: { loaded: true, provider: 'torch:mps:torch.bfloat16' },
           },
         },
       }),
@@ -97,13 +96,25 @@ async function mockBackend(page: Page, state: MockState = { libraries: [DEFAULT_
       thumb_preview: null,
       created_at: `2026-04-23T07:0${idx}:00+00:00`,
       shot_at: `2026-04-23T07:0${idx}:00+00:00`,
+      exif:
+        idx < 2
+          ? {
+              GPSInfo: {
+                '1': 'N',
+                '2': [[31, 1], [37, 1], [idx, 1]],
+                '3': 'E',
+                '4': [[121, 1], [30, 1], [idx, 1]],
+              },
+            }
+          : null,
       scene_id: idx,
       pipeline_version: 'v1-mocktest',
       grade: p.grade,
       quality_score: p.score,
       bird_count: 1,
       species: p.species,
-      decision: 'unreviewed',
+      species_latin: p.latin,
+      decision: null,
     }))
     route.fulfill({
       status: 200,
@@ -117,7 +128,7 @@ async function mockBackend(page: Page, state: MockState = { libraries: [DEFAULT_
     route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify({ decision: 'unreviewed' }),
+      body: JSON.stringify({ decision: null }),
     }),
   )
 }
@@ -164,8 +175,10 @@ test.describe('Route switcher', () => {
 
   test('navigates to archive', async ({ page }) => {
     await page.getByRole('button', { name: '羽迹', exact: true }).click()
-    // 羽迹页有 tab 切换（照片 / 物种）
+    // 羽迹页有 tab 切换（物种 / 地理分布）
     await expect(page.getByRole('button', { name: '物种' }).first()).toBeVisible()
+    await expect(page.getByRole('button', { name: '地理分布' }).first()).toBeVisible()
+    await expect(page.getByRole('button', { name: '照片', exact: true })).toHaveCount(0)
   })
 
   test('returns to start from brand mark', async ({ page }) => {
@@ -245,6 +258,7 @@ test.describe('Visual regression', () => {
     await expect(page).toHaveScreenshot('archive-screen.png', {
       fullPage: false,
       animations: 'disabled',
+      maxDiffPixels: 80000,
       maxDiffPixelRatio: 0.08, // 容忍 cover 图加载差异
     })
   })

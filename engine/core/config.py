@@ -13,6 +13,9 @@ class Settings(BaseSettings):
     port: int = 0
     log_level: str = "INFO"
     data_dir: Path = Path.home() / ".plumelens"
+    # Optional local API bearer token. Electron sets this per process launch; when unset
+    # (pytest / standalone development), auth is disabled for convenience.
+    api_token: str | None = None
 
     # Pipeline — model files
     models_dir: Path = Path(__file__).resolve().parent.parent / "models"
@@ -46,10 +49,9 @@ class Settings(BaseSettings):
     crop_expand_ratio: float = 1.0  # YOLO det bbox expand for IQA/pose input
     crop_padding_ratio: float = 0.10  # extra padding around bbox for downstream models
 
-    # IQA 专用裁切：bbox 同比例放大，让 IQA 看到"鸟 + 周边构图（背景虚化）"
-    # 之前用 crop_padding_ratio=0.10 紧裁切，IQA 看到的几乎只剩鸟特写 → HyperIQA
-    # 在精修鸟摄上饱和打高分（mean=0.895，33% 触顶 1.0）。改成大裁切让 IQA
-    # 评估完整构图（前景/背景/虚实/梯度），更符合鸟摄美学评判。
+    # CLIPIQA 专用语义裁切：bbox 同比例放大，让 CLIPIQA 看到"鸟 + 周边构图
+    # （背景虚化）"。HyperIQA 不用这张大裁切，而是使用 bbox + padding 的紧主体
+    # 技术裁切，避免背景/留白稀释主体锐度判断。
     iqa_expand_ratio: float = 2.5
     iqa_max_aspect_ratio: float = 2.0  # 长边/短边上限，超过则补短边降比例
 
@@ -58,14 +60,12 @@ class Settings(BaseSettings):
     hyperiqa_weight: float = 0.65
 
     # Pipeline — grading thresholds (reject_max, record_max, usable_max)
-    # 实测调优（new1+new2 ~1800 张）：
-    #   - IQA 单独：精修连拍数据 select 80-90% 失真
-    #   - + expand_for_iqa(2.5×) 大裁切：select ~13-16%（看到完整构图）
-    #   - + apply_pose_penalty（头不见 -2 / 眼不见 -1）：select 8-14%，reject 5-18%
-    # 当前阈值 + pose 降档在两个数据集的 select 比例都落在 8-14% 摄影师选片合理区间。
-    grade_thresholds: tuple[float, float, float] = (0.20, 0.45, 0.85)
+    # 2026-04-27 三组实拍校准（new / new1 / new2）后采用较严格口径：
+    #   reject < 45.0, record 45.0-59.9, usable 60.0-74.9, select >= 75.0。
+    # 注意：实际最终档位还会经过 pose penalty（头不可见 -2 档，眼不可见 -1 档）。
+    grade_thresholds: tuple[float, float, float] = (0.45, 0.60, 0.75)
 
-    # Pipeline — pose / visibility (bird_visibility v1.0)
+    # Pipeline — pose / visibility (bird_visibility v1.1)
     # box_threshold 作用于 crop 输入下取最高置信度检测，不作过滤
     pose_input_size: int = 640
     pose_box_threshold: float = 0.05
@@ -74,9 +74,9 @@ class Settings(BaseSettings):
     pose_head_eye_threshold: float = 0.10
     pose_expanded_margin: float = 0.15
 
-    # Pipeline — species classification (DINOv3 ViT-L + 7-head ensemble)
+    # Pipeline — species classification (DINOv3 ViT-L + 8-head ensemble)
     species_top_k: int = 5
-    species_min_confidence: float = 0.01  # 过滤 1018 训练种之外的噪声命中
+    species_min_confidence: float = 0.01  # 过滤 1301 训练种之外的噪声命中
     species_crop_margin: float = 0.15  # 方形 bbox 扩展比例（见 MODEL_DELIVERY §6.3）
     species_crop_min_side_frac: float = 0.30  # 方形最小边长占原图短边的比例
     # 只对 head+eye 可见的鸟触发物种分类。grade 门已去掉（"reject" 即所有

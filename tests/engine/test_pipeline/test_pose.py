@@ -65,9 +65,12 @@ class TestPoseDetectorParsing:
         raw[0] = _make_raw_row((100, 100, 540, 540), 0.9, kpts)
         sess = _make_mock_session(raw)
         detector = PoseDetector(
-            sess, input_size=640,
-            box_threshold=0.05, eye_threshold=0.45,
-            head_threshold=0.35, head_eye_threshold=0.10,
+            sess,
+            input_size=640,
+            box_threshold=0.05,
+            eye_threshold=0.45,
+            head_threshold=0.35,
+            head_eye_threshold=0.10,
         )
         img = np.random.rand(640, 640, 3).astype(np.float32)
 
@@ -99,7 +102,8 @@ class TestVisibilityRules:
 
     @staticmethod
     def _detect_with_kpts(
-        kpt_confs: dict[str, float], kpt_xy: tuple[float, float] = (320, 320),
+        kpt_confs: dict[str, float],
+        kpt_xy: tuple[float, float] = (320, 320),
     ) -> PoseInfo | None:
         raw = np.zeros((300, 21), dtype=np.float32)
         # bbox inside letterbox center, keypoints use per-part conf
@@ -107,8 +111,11 @@ class TestVisibilityRules:
         raw[0] = _make_raw_row((100, 100, 540, 540), 0.9, row_kpts)
         sess = _make_mock_session(raw)
         detector = PoseDetector(
-            sess, input_size=640,
-            eye_threshold=0.45, head_threshold=0.35, head_eye_threshold=0.10,
+            sess,
+            input_size=640,
+            eye_threshold=0.45,
+            head_threshold=0.35,
+            head_eye_threshold=0.10,
             expanded_box_margin=0.15,
         )
         img = np.random.rand(640, 640, 3).astype(np.float32)
@@ -116,10 +123,15 @@ class TestVisibilityRules:
 
     def test_eye_visible_requires_high_eye_conf(self) -> None:
         # 所有 head parts 高；双眼 conf 都低 → eye_visible=False
-        res = self._detect_with_kpts({
-            "bill": 0.9, "crown": 0.9, "nape": 0.9,
-            "left_eye": 0.3, "right_eye": 0.3,
-        })
+        res = self._detect_with_kpts(
+            {
+                "bill": 0.9,
+                "crown": 0.9,
+                "nape": 0.9,
+                "left_eye": 0.3,
+                "right_eye": 0.3,
+            }
+        )
         assert res is not None
         assert res.eye_visible is False
         # head 仍应 visible（3 个 head parts 满足）
@@ -127,28 +139,43 @@ class TestVisibilityRules:
 
     def test_head_visible_with_two_head_parts(self) -> None:
         # 2 个 head parts + 双眼低 → head_visible=True (rule A)
-        res = self._detect_with_kpts({
-            "bill": 0.9, "crown": 0.9, "nape": 0.1,
-            "left_eye": 0.05, "right_eye": 0.05,
-        })
+        res = self._detect_with_kpts(
+            {
+                "bill": 0.9,
+                "crown": 0.9,
+                "nape": 0.1,
+                "left_eye": 0.05,
+                "right_eye": 0.05,
+            }
+        )
         assert res is not None
         assert res.head_visible is True
 
     def test_head_visible_with_one_head_and_one_eye(self) -> None:
         # 1 个 head part + 1 个 eye 满足 head_eye_threshold → True (rule B)
-        res = self._detect_with_kpts({
-            "bill": 0.9, "crown": 0.1, "nape": 0.1,
-            "left_eye": 0.15, "right_eye": 0.05,
-        })
+        res = self._detect_with_kpts(
+            {
+                "bill": 0.9,
+                "crown": 0.1,
+                "nape": 0.1,
+                "left_eye": 0.15,
+                "right_eye": 0.05,
+            }
+        )
         assert res is not None
         assert res.head_visible is True
 
     def test_head_not_visible_with_only_one_head_part(self) -> None:
         # 1 个 head part + 双眼都低于 head_eye_threshold → False
-        res = self._detect_with_kpts({
-            "bill": 0.9, "crown": 0.1, "nape": 0.1,
-            "left_eye": 0.05, "right_eye": 0.05,
-        })
+        res = self._detect_with_kpts(
+            {
+                "bill": 0.9,
+                "crown": 0.1,
+                "nape": 0.1,
+                "left_eye": 0.05,
+                "right_eye": 0.05,
+            }
+        )
         assert res is not None
         assert res.head_visible is False
 
@@ -158,8 +185,11 @@ class TestVisibilityRules:
         # 把所有关键点放到 (700, 700)，应该被判为 out of box
         res = self._detect_with_kpts(
             {
-                "bill": 0.9, "crown": 0.9, "nape": 0.9,
-                "left_eye": 0.9, "right_eye": 0.9,
+                "bill": 0.9,
+                "crown": 0.9,
+                "nape": 0.9,
+                "left_eye": 0.9,
+                "right_eye": 0.9,
             },
             kpt_xy=(700, 700),
         )

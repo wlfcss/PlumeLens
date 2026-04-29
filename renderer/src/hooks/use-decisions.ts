@@ -1,11 +1,11 @@
 /**
- * Decision mutation hooks — user layer (unreviewed/selected/maybe/rejected).
+ * Decision mutation hooks — manual grade overrides (select/usable/record/reject).
  *
- * 这些与模型 grade 是两套独立数据，后端持久化在 photo_decisions 表。
+ * 无人工覆盖时 decision=null，界面使用系统自动 grade。
  */
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 
-import { api, type DecisionValue } from '@/lib/api-client'
+import { api, type DecisionValue, type SpeciesOverrideValue } from '@/lib/api-client'
 
 /** Set one photo's decision. Optimistically invalidates library detail. */
 export function useSetDecision(libraryId: string | null | undefined) {
@@ -32,6 +32,27 @@ export function useBatchSetDecisions(libraryId: string | null | undefined) {
       if (libraryId) {
         qc.invalidateQueries({ queryKey: ['library', libraryId] })
         qc.invalidateQueries({ queryKey: ['decisions', libraryId] })
+      }
+    },
+  })
+}
+
+/** Set or clear one detected bird's manual species override. */
+export function useSetSpeciesOverride(libraryId: string | null | undefined) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({
+      birdIndex,
+      photoId,
+      species,
+    }: {
+      birdIndex: number
+      photoId: string
+      species: SpeciesOverrideValue | null
+    }) => api.setSpeciesOverride(photoId, birdIndex, species),
+    onSuccess: () => {
+      if (libraryId) {
+        qc.invalidateQueries({ queryKey: ['library', libraryId] })
       }
     },
   })

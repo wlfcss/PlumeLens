@@ -34,11 +34,19 @@ class TestBirdAnalysisDefaults:
     def test_with_pose(self) -> None:
         kp = Keypoint(x=50.0, y=80.0, confidence=0.9)
         pose = PoseInfo(
-            bill=kp, crown=kp, nape=kp, left_eye=kp, right_eye=kp,
-            head_visible=True, eye_visible=True,
+            bill=kp,
+            crown=kp,
+            nape=kp,
+            left_eye=kp,
+            right_eye=kp,
+            head_visible=True,
+            eye_visible=True,
         )
         ba = BirdAnalysis(
-            bbox=_make_bbox(), quality=_make_scores(), grade=QualityGrade.SELECT, pose=pose,
+            bbox=_make_bbox(),
+            quality=_make_scores(),
+            grade=QualityGrade.SELECT,
+            pose=pose,
         )
         assert ba.pose is not None
         assert ba.pose.head_visible is True
@@ -52,8 +60,11 @@ class TestBirdAnalysisDefaults:
             confidence=0.88,
         )
         ba = BirdAnalysis(
-            bbox=_make_bbox(), quality=_make_scores(), grade=QualityGrade.SELECT,
-            species_candidates=[sc], species="Passer cinnamomeus",
+            bbox=_make_bbox(),
+            quality=_make_scores(),
+            grade=QualityGrade.SELECT,
+            species_candidates=[sc],
+            species="Passer cinnamomeus",
         )
         assert len(ba.species_candidates) == 1
         assert ba.species_candidates[0].canonical_zh == "山麻雀"
@@ -91,8 +102,12 @@ class TestPoseInfoRequiresAllKeypoints:
         kp = Keypoint(x=0.0, y=0.0, confidence=0.5)
         with pytest.raises(ValidationError):
             PoseInfo(
-                bill=kp, crown=kp, nape=kp, left_eye=kp,  # 缺 right_eye
-                head_visible=True, eye_visible=True,
+                bill=kp,
+                crown=kp,
+                nape=kp,
+                left_eye=kp,  # 缺 right_eye
+                head_visible=True,
+                eye_visible=True,
             )  # type: ignore[call-arg]
 
 
@@ -101,8 +116,12 @@ class TestPipelineResult:
 
     def test_empty_detections(self) -> None:
         res = PipelineResult(
-            photo_id="abc", detections=[], best=None, bird_count=0,
-            pipeline_version="v1-deadbeef", duration_ms=123.0,
+            photo_id="abc",
+            detections=[],
+            best=None,
+            bird_count=0,
+            pipeline_version="v1-deadbeef",
+            duration_ms=123.0,
         )
         assert res.best is None
         assert res.bird_count == 0

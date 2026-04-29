@@ -35,7 +35,12 @@ from engine.pipeline.species import (
 class TestExpandBboxToSquare:
     def test_center_bbox_small_enforces_min_side(self) -> None:
         left, top, right, bottom = expand_bbox_to_square(
-            0.5, 0.5, 0.05, 0.05, 1000, 1000,
+            0.5,
+            0.5,
+            0.05,
+            0.05,
+            1000,
+            1000,
         )
         side_w = right - left
         side_h = bottom - top
@@ -44,7 +49,12 @@ class TestExpandBboxToSquare:
 
     def test_bbox_near_edge_gets_clamped(self) -> None:
         left, top, right, bottom = expand_bbox_to_square(
-            0.95, 0.95, 0.1, 0.1, 1000, 1000,
+            0.95,
+            0.95,
+            0.1,
+            0.1,
+            1000,
+            1000,
         )
         assert right <= 1000
         assert bottom <= 1000
@@ -126,27 +136,31 @@ class TestHeadOnlyClassifier:
 class TestSpeciesTaxonomy:
     def _write_taxonomy(self, deploy_dir: Path, num_classes: int = 5) -> None:
         """写两个 parquet：canonical_extended + species_list_1301（trained mask）。"""
-        canonical = pa.table({
-            "canonical_sci": [f"Species_{i:03d}" for i in range(num_classes)],
-            "canonical_zh": [f"物种{i}" for i in range(num_classes)],
-            "canonical_en": [f"sp_{i}" for i in range(num_classes)],
-            "order_sci": ["ORDER_X"] * num_classes,
-            "family_sci": ["FAMILY_X"] * num_classes,
-            "family_zh": ["科X"] * num_classes,
-            "iucn": ["LC"] * num_classes,
-            "protect_level": [None] * num_classes,
-            "note": [None] * num_classes,
-        })
+        canonical = pa.table(
+            {
+                "canonical_sci": [f"Species_{i:03d}" for i in range(num_classes)],
+                "canonical_zh": [f"物种{i}" for i in range(num_classes)],
+                "canonical_en": [f"sp_{i}" for i in range(num_classes)],
+                "order_sci": ["ORDER_X"] * num_classes,
+                "family_sci": ["FAMILY_X"] * num_classes,
+                "family_zh": ["科X"] * num_classes,
+                "iucn": ["LC"] * num_classes,
+                "protect_level": [None] * num_classes,
+                "note": [None] * num_classes,
+            }
+        )
         pq.write_table(canonical, str(deploy_dir / "canonical_extended.parquet"))
 
         # 只有 even-index 的类有训练（model_output_id = 0, 2, 4, ...）
         # 注意：model_output_id 必须基于"按字典序排序后的 index"
         # Species_000 < Species_001 < ... ASCII 排序后，index 即名称中的数字
         trained_indices = [i for i in range(num_classes) if i % 2 == 0]
-        trained = pa.table({
-            "model_output_id": trained_indices,
-            "canonical_sci": [f"Species_{i:03d}" for i in trained_indices],
-        })
+        trained = pa.table(
+            {
+                "model_output_id": trained_indices,
+                "canonical_sci": [f"Species_{i:03d}" for i in trained_indices],
+            }
+        )
         pq.write_table(trained, str(deploy_dir / "species_list_1301.parquet"))
 
     def test_loads_canonical_and_trained_mask(self, tmp_path: Path) -> None:

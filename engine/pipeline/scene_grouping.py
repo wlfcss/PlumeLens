@@ -19,6 +19,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, cast
 
 import cv2  # type: ignore[import]
 import numpy as np
@@ -37,6 +38,7 @@ COLOR_SIMILARITY_THRESHOLD = 0.82
 @dataclass
 class SimilarityResult:
     """两张图的相似度结果。"""
+
     feature_similarity: float = -1.0
     feature_confidence: float = -1.0
     color_similarity: float = -1.0
@@ -46,7 +48,8 @@ class SimilarityResult:
 
 
 def load_image_for_similarity(
-    path: Path, max_dim: int = DEFAULT_MAX_DIM,
+    path: Path,
+    max_dim: int = DEFAULT_MAX_DIM,
 ) -> NDArray[np.uint8] | None:
     """读取图片并缩到 max_dim 长边，BGR (cv2 默认）。
 
@@ -54,7 +57,7 @@ def load_image_for_similarity(
     已生成的 preview 缩略图（1920px JPEG）—— cv2.imread 能直接处理。
     """
     try:
-        img = cv2.imread(str(path), cv2.IMREAD_COLOR)
+        img = cast(NDArray[np.uint8] | None, cv2.imread(str(path), cv2.IMREAD_COLOR))
         if img is None:
             return None
         return _resize(img, max_dim)
@@ -76,15 +79,13 @@ def compute_similarity(
         gray1 = cv2.cvtColor(img1, cv2.COLOR_BGR2GRAY) if img1.ndim == 3 else img1
         gray2 = cv2.cvtColor(img2, cv2.COLOR_BGR2GRAY) if img2.ndim == 3 else img2
 
-        akaze = cv2.AKAZE_create()
+        akaze = cast(Any, cv2).AKAZE_create()
         kp1, des1 = akaze.detectAndCompute(gray1, None)
         kp2, des2 = akaze.detectAndCompute(gray2, None)
         kp1, des1 = _limit_keypoints(kp1, des1, max_keypoints)
         kp2, des2 = _limit_keypoints(kp2, des2, max_keypoints)
 
-        feature_conf = (
-            min(len(kp1), len(kp2)) / max_keypoints if kp1 and kp2 else 0.0
-        )
+        feature_conf = min(len(kp1), len(kp2)) / max_keypoints if kp1 and kp2 else 0.0
 
         # 特征不足 → 颜色相似度
         if feature_conf < FEATURE_CONFIDENCE_MIN or des1 is None or des2 is None:
@@ -132,8 +133,13 @@ def _resize(img: NDArray[np.uint8], max_dim: int) -> NDArray[np.uint8]:
     h, w = img.shape[:2]
     scale = max_dim / max(h, w)
     if scale < 1.0:
-        return cv2.resize(
-            img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA,
+        return cast(
+            NDArray[np.uint8],
+            cv2.resize(
+                img,
+                (int(w * scale), int(h * scale)),
+                interpolation=cv2.INTER_AREA,
+            ),
         )
     return img
 
@@ -155,7 +161,8 @@ def _clamp(v: float, lo: float, hi: float) -> float:
 
 
 def _color_similarity(
-    img1: NDArray[np.uint8], img2: NDArray[np.uint8],
+    img1: NDArray[np.uint8],
+    img2: NDArray[np.uint8],
 ) -> tuple[float, float]:
     """HSV 直方图 (0.75) + LAB 均值 (0.25) 的颜色相似度。"""
     target_w = 320

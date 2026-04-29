@@ -27,10 +27,10 @@ class QualityScores(BaseModel):
 class QualityGrade(StrEnum):
     """4-tier quality grading."""
 
-    REJECT = "reject"  # < 0.33
-    RECORD = "record"  # 0.33 - 0.43
-    USABLE = "usable"  # 0.43 - 0.60
-    SELECT = "select"  # >= 0.60
+    REJECT = "reject"  # < 0.45
+    RECORD = "record"  # 0.45 - 0.60
+    USABLE = "usable"  # 0.60 - 0.75
+    SELECT = "select"  # >= 0.75
 
 
 class Keypoint(BaseModel):
@@ -44,7 +44,7 @@ class Keypoint(BaseModel):
 class PoseInfo(BaseModel):
     """Head/eye keypoints and derived visibility judgments.
 
-    来源：bird_visibility v1.0（YOLO26l-pose 微调）
+    来源：bird_visibility v1.1（YOLO26l-pose 微调）
 
     关键点顺序固定为 `bill, crown, nape, left_eye, right_eye`。
     `flip_idx=[0,1,2,4,3]` 表示水平翻转时左右眼互换。
@@ -63,7 +63,7 @@ class SpeciesCandidate(BaseModel):
     """One entry in the Top-K species classification result.
 
     `confidence` 来自 ensemble softmax 平均后的概率。物种元数据查自
-    `species_taxonomy.parquet`。
+    `species/canonical_extended.parquet`。
     """
 
     canonical_sci: str  # 拉丁学名（唯一 ID）

@@ -14,22 +14,17 @@ from engine.pipeline.models import QualityScores
 # Type alias for ONNX InferenceSession (avoid import at module level for testability)
 OrtSession: TypeAlias = object  # onnxruntime.InferenceSession
 
-# 两个 IQA 模型都基于 ImageNet 预训练（CLIP ViT / ResNet50），需一致的归一化
-IMAGENET_MEAN: tuple[float, float, float] = (0.485, 0.456, 0.406)
-IMAGENET_STD: tuple[float, float, float] = (0.229, 0.224, 0.225)
-
-# pyiqa 的 HyperIQA.forward_patch 假设 224×224 单裁切；CLIPIQA+ 内部也按 224 处理
+# pyiqa 的 CLIPIQA+/HyperIQA ONNX 图内部已经做各自的 normalization
+# （CLIPIQA+ 用 CLIP mean/std，HyperIQA 用 ImageNet mean/std）。
+# 这里仅负责把任意 crop 变成 raw RGB 0-1 的 224×224 tensor。
 IQA_INPUT_SIZE = 224
 
 
 def _preprocess_for_iqa(crop: NDArray[np.float32]) -> NDArray[np.float32]:
-    """Resize to 224×224 + ImageNet normalize + CHW + batch → [1, 3, 224, 224]."""
+    """Resize to 224×224 raw RGB 0-1 + CHW + batch → [1, 3, 224, 224]."""
     pil = Image.fromarray((crop * 255).astype(np.uint8))
     pil = pil.resize((IQA_INPUT_SIZE, IQA_INPUT_SIZE), Image.Resampling.BICUBIC)
     arr = np.asarray(pil, dtype=np.float32) / 255.0
-    mean = np.asarray(IMAGENET_MEAN, dtype=np.float32).reshape(1, 1, 3)
-    std = np.asarray(IMAGENET_STD, dtype=np.float32).reshape(1, 1, 3)
-    arr = (arr - mean) / std
     chw = np.ascontiguousarray(arr.transpose(2, 0, 1))
     return chw[np.newaxis, ...]
 
@@ -37,8 +32,12 @@ def _preprocess_for_iqa(crop: NDArray[np.float32]) -> NDArray[np.float32]:
 class QualityAssessor:
     """Wraps CLIPIQA+ and HyperIQA ONNX models for image quality assessment.
 
-    Both models: float32 [1, 3, 224, 224] ImageNet-normalized → [1, 1] score 0-1.
-    Input crops are auto-resized + normalized inside this class.
+    Both models: float32 [1, 3, 224, 224] raw RGB 0-1 → [1, 1] score 0-1.
+    Input crops are auto-resized in this class. ImageNet normalization lives inside
+    the exported PyIQA ONNX graphs, so callers must not normalize before inference.
+
+    CLIPIQA+ is fed a larger semantic/composition crop; HyperIQA is fed a tighter
+    technical crop around the bird subject.
     """
 
     def __init__(
@@ -59,28 +58,37 @@ class QualityAssessor:
         self._hyper_in: str = hyperiqa_session.get_inputs()[0].name  # type: ignore[union-attr]
         self._hyper_out: str = hyperiqa_session.get_outputs()[0].name  # type: ignore[union-attr]
 
-    def assess(self, crop: NDArray[np.float32]) -> QualityScores:
-        """Assess quality of a bird crop using both IQA models.
+    def assess(
+        self,
+        semantic_crop: NDArray[np.float32],
+        technical_crop: NDArray[np.float32] | None = None,
+    ) -> QualityScores:
+        """Assess quality using separate semantic and technical crops.
 
         Args:
-            crop: Bird crop [H, W, 3] float32 0-1 (raw RGB pixels).
+            semantic_crop: Larger crop [H, W, 3] for CLIPIQA+.
+            technical_crop: Tighter subject crop [H, W, 3] for HyperIQA.
+                When omitted, falls back to semantic_crop for backward compatibility.
 
         Returns:
             QualityScores with individual and combined scores.
         """
-        input_tensor = _preprocess_for_iqa(crop)  # [1, 3, 224, 224] normalized
+        semantic_tensor = _preprocess_for_iqa(semantic_crop)
+        technical_tensor = _preprocess_for_iqa(
+            technical_crop if technical_crop is not None else semantic_crop
+        )
 
-        # CLIPIQA+: output [1, 1]
+        # CLIPIQA+: semantic / composition quality, output [1, 1]
         clip_out = self._clipiqa.run(  # type: ignore[union-attr]
             [self._clip_out],
-            {self._clip_in: input_tensor},
+            {self._clip_in: semantic_tensor},
         )
         clip_score = float(clip_out[0].flat[0])
 
-        # HyperIQA: output [1, 1]（forward_patch 最后 squeeze(-1) 后的形状）
+        # HyperIQA: technical subject quality, output [1, 1]
         hyper_out = self._hyperiqa.run(  # type: ignore[union-attr]
             [self._hyper_out],
-            {self._hyper_in: input_tensor},
+            {self._hyper_in: technical_tensor},
         )
         hyper_score = float(hyper_out[0].flat[0])
 

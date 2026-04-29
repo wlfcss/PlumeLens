@@ -81,7 +81,8 @@ async def regroup_library(
     for row in rows:
         photo_id = str(row["id"])
         cur_path = _resolve_preview_path(
-            str(row["thumb_preview"]) if row["thumb_preview"] else None, cache_root,
+            str(row["thumb_preview"]) if row["thumb_preview"] else None,
+            cache_root,
         )
 
         if prev_path is None or cur_path is None:

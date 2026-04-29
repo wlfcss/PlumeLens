@@ -5,9 +5,9 @@ directories:
   output: release
 files:
   - out/**/*
-  # main 进程 externalizeDepsPlugin 把 dependencies (如 @electron-toolkit/utils) 留作
-  # runtime require → 必须把它们打进 app.asar/node_modules。renderer 已 bundle 不需要。
-  - "node_modules/@electron-toolkit/**"
+  - "!out/**/*.tsbuildinfo"
+  - "!out/**/*.map"
+  # renderer 与 main/preload 均已 bundle；交付包不带开发期 node_modules。
 
 # Mac dmg 内部布局：
 #   PlumeLens.app/Contents/Resources/
@@ -55,6 +55,7 @@ mac:
   hardenedRuntime: false
   gatekeeperAssess: false
   identity: null
+beforePack: scripts/build-engine.cjs
 afterPack: scripts/codesign-mac.cjs
 afterAllArtifactBuild: scripts/build-dmg.cjs
 win:

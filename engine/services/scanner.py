@@ -98,28 +98,35 @@ def _probe_image_meta(path: Path) -> dict[str, Any]:
                     make = str(exif_dict.get("Make", "")).lower()
                     if "canon" in make:
                         raw_exif = img.getexif()
-                        mn = raw_exif.get(0x927C)  # MakerNote tag
-                        if (
-                            isinstance(mn, bytes)
-                            and meta.get("width")
-                            and meta.get("height")
-                        ):
+                        # MakerNote 位于 ExifIFD，不在 IFD0；Pillow 的顶层
+                        # getexif().get(0x927C) 对 Canon R 系列 JPEG 会拿不到。
+                        exif_ifd = raw_exif.get_ifd(ExifTags.IFD.Exif)
+                        mn = exif_ifd.get(0x927C)  # MakerNote tag
+                        if isinstance(mn, bytes) and meta.get("width") and meta.get("height"):
+                            maker_note_tiff_offset = _find_jpeg_makernote_tiff_offset(path, mn)
                             # sensor 维度（与 PIL.Image.open(path).width/height 一致 —
                             # 即 pre-rotation 维度。orientation ∈ {5,6,7,8} 时和
                             # meta['width']/['height'] 不同；否则一致。
                             sensor_w = img.width
                             sensor_h = img.height
                             af = _parse_canon_afinfo2(
-                                mn, int(sensor_w), int(sensor_h),
+                                mn,
+                                int(sensor_w),
+                                int(sensor_h),
+                                maker_note_tiff_offset,
                             )
                             if af is not None:
-                                # 把 sensor 坐标系的 af_point 转到 post-rotation
-                                # 显示坐标系（与 bbox/keypoints 一致）
-                                af = _rotate_af_point_to_display(
-                                    af["x"], af["y"], sensor_w, sensor_h,
+                                # 把 sensor 坐标系 AF 结构转换到 post-rotation 显示坐标系
+                                # （与 bbox/keypoints 一致）。保留 af_point 兼容旧前端；
+                                # 新前端使用 af_area，避免把区域 AF 错画成单个点。
+                                af = _rotate_af_area_to_display(
+                                    af,
+                                    sensor_w,
+                                    sensor_h,
                                     int(orientation),
                                 )
-                                exif_dict["af_point"] = af
+                                exif_dict["af_area"] = af
+                                exif_dict["af_point"] = af["center"]
                 except Exception:
                     pass
                 if exif_dict:
@@ -163,10 +170,11 @@ def _extract_exif(img: Image.Image) -> dict[str, Any]:
     tag_map = ExifTags.TAGS
     out: dict[str, Any] = {}
 
-    # IFD0：基础元数据（Make/Model/Orientation/DateTime/GPSInfo）
+    # IFD0：基础元数据（Make/Model/Orientation/DateTime）
     for tag_id, value in exif.items():
         tag_name = tag_map.get(tag_id, str(tag_id))
-        if tag_name in _EXIF_WHITELIST:
+        # GPSInfo 在 IFD0 里通常只是一个 offset，真正内容必须用 GPS IFD 展开。
+        if tag_name in _EXIF_WHITELIST and tag_name != "GPSInfo":
             out[tag_name] = _jsonify(value)
 
     # ExifIFD：相机参数（ExposureTime/FNumber/ISO/LensModel/FocalLength/...）
@@ -178,6 +186,21 @@ def _extract_exif(img: Image.Image) -> dict[str, Any]:
                 out[tag_name] = _jsonify(value)
     except Exception:
         pass  # ExifIFD 不存在或解析失败 → 忽略，IFD0 数据已足够
+
+    # GPS IFD：Pillow 的 IFD0 GPSInfo 常是偏移量，不主动 get_ifd 会导致真实照片
+    # 只有一个数字 offset，前端地图自然解析不到经纬度。
+    try:
+        gps_ifd = exif.get_ifd(ExifTags.IFD.GPSInfo)
+        gps: dict[str, Any] = {}
+        for tag_id, value in gps_ifd.items():
+            tag_name = ExifTags.GPSTAGS.get(tag_id, str(tag_id))
+            gps[tag_name] = _jsonify(value)
+            # 同时保留数字 tag 字符串，兼容部分旧前端/测试数据路径。
+            gps[str(tag_id)] = _jsonify(value)
+        if gps:
+            out["GPSInfo"] = gps
+    except Exception:
+        pass
 
     return out
 
@@ -242,12 +265,139 @@ def _rotate_af_point_to_display(
     return {"x": x, "y": y}  # unknown orientation, leave unchanged
 
 
+def _rotate_af_rect_to_display(
+    rect: dict[str, float],
+    sensor_w: int,
+    sensor_h: int,
+    orientation: int,
+) -> dict[str, float]:
+    """Rotate a sensor-coordinate AF rectangle into display coordinates."""
+    corners = [
+        _rotate_af_point_to_display(rect["x1"], rect["y1"], sensor_w, sensor_h, orientation),
+        _rotate_af_point_to_display(rect["x2"], rect["y1"], sensor_w, sensor_h, orientation),
+        _rotate_af_point_to_display(rect["x2"], rect["y2"], sensor_w, sensor_h, orientation),
+        _rotate_af_point_to_display(rect["x1"], rect["y2"], sensor_w, sensor_h, orientation),
+    ]
+    xs = [point["x"] for point in corners]
+    ys = [point["y"] for point in corners]
+    return {"x1": min(xs), "y1": min(ys), "x2": max(xs), "y2": max(ys)}
+
+
+def _rotate_af_area_to_display(
+    area: dict[str, Any],
+    sensor_w: int,
+    sensor_h: int,
+    orientation: int,
+) -> dict[str, Any]:
+    """Rotate structured Canon AF area metadata into display coordinates."""
+
+    def rotate_point(point: dict[str, Any]) -> dict[str, Any]:
+        rotated = _rotate_af_point_to_display(
+            float(point["x"]),
+            float(point["y"]),
+            sensor_w,
+            sensor_h,
+            orientation,
+        )
+        result = {**point, **rotated}
+        bounds = point.get("bounds")
+        if isinstance(bounds, dict):
+            result["bounds"] = _rotate_af_rect_to_display(bounds, sensor_w, sensor_h, orientation)
+        return result
+
+    result = {**area}
+    result["center"] = _rotate_af_point_to_display(
+        float(area["center"]["x"]),
+        float(area["center"]["y"]),
+        sensor_w,
+        sensor_h,
+        orientation,
+    )
+    if isinstance(area.get("bounds"), dict):
+        result["bounds"] = _rotate_af_rect_to_display(
+            area["bounds"],
+            sensor_w,
+            sensor_h,
+            orientation,
+        )
+    result["points"] = [rotate_point(point) for point in area.get("points", [])]
+    result["focused_points"] = [rotate_point(point) for point in area.get("focused_points", [])]
+    result["selected_points"] = [rotate_point(point) for point in area.get("selected_points", [])]
+    return result
+
+
+def _find_jpeg_makernote_tiff_offset(path: Path, makernote_bytes: bytes) -> int | None:
+    """Find MakerNote's offset relative to the EXIF TIFF header in a JPEG.
+
+    Canon MakerNote IFD entry value offsets are TIFF-relative. Pillow returns
+    only the MakerNote byte payload, so we need this base offset to slice
+    nested entries such as AFInfo2 correctly.
+    """
+    if path.suffix.lower() not in {".jpg", ".jpeg"} or len(makernote_bytes) < 16:
+        return None
+
+    try:
+        with path.open("rb") as f:
+            if f.read(2) != b"\xff\xd8":
+                return None
+            while True:
+                prefix = f.read(1)
+                if not prefix:
+                    return None
+                if prefix != b"\xff":
+                    continue
+
+                marker = f.read(1)
+                while marker == b"\xff":
+                    marker = f.read(1)
+                if not marker:
+                    return None
+                marker_code = marker[0]
+
+                # SOS/EOI: compressed image data starts, EXIF segments are over.
+                if marker_code in {0xDA, 0xD9}:
+                    return None
+                # Standalone markers have no segment length.
+                if marker_code == 0x01 or 0xD0 <= marker_code <= 0xD7:
+                    continue
+
+                length_bytes = f.read(2)
+                if len(length_bytes) != 2:
+                    return None
+                segment_len = int.from_bytes(length_bytes, "big")
+                payload_len = segment_len - 2
+                if payload_len <= 0:
+                    return None
+
+                if marker_code != 0xE1:
+                    f.seek(payload_len, 1)
+                    continue
+
+                payload = f.read(payload_len)
+                exif_header = payload.find(b"Exif\x00\x00")
+                if exif_header < 0:
+                    continue
+                tiff_start = exif_header + len(b"Exif\x00\x00")
+
+                maker_start = payload.find(makernote_bytes, tiff_start)
+                if maker_start < 0:
+                    # A small fallback for files where Pillow normalizes trailing bytes.
+                    prefix_len = min(256, len(makernote_bytes))
+                    maker_start = payload.find(makernote_bytes[:prefix_len], tiff_start)
+                if maker_start < 0:
+                    return None
+                return maker_start - tiff_start
+    except Exception:
+        return None
+
+
 def _parse_canon_afinfo2(
     makernote_bytes: bytes,
     image_width: int,
     image_height: int,
-) -> dict[str, float] | None:
-    """Parse Canon AFInfo2 (MakerNote tag 0x0026), return AF point in image coords.
+    makernote_tiff_offset: int | None = None,
+) -> dict[str, Any] | None:
+    """Parse Canon AFInfo2 (MakerNote tag 0x0026), return AF area in image coords.
 
     Canon EOS R-series 把对焦点信息存在 MakerNote IFD 的 0x0026 (AFInfo2) 标签里。
     格式（all little-endian uint16/int16）：
@@ -264,10 +414,12 @@ def _parse_canon_afinfo2(
         uint16[(N+15)/16] AFPointsInFocus    (bitmask)
         uint16[(N+15)/16] AFPointsSelected   (bitmask)
 
-    取 in-focus 点的几何中心，转换到原图像素坐标。
+    返回结构化 AF 信息：selected AF area、in-focus AF points、区域 bounds 和中心点。
+    这样前端可以按 Canon 官方 AF area 语义区分单点、扩展区域和 Zone/Whole area，
+    而不是把所有对焦模式错误压成一个几何中心。
 
     Returns:
-        {"x": float, "y": float} in image pixels, or None if parse fails.
+        AF area dict in image pixels, or None if parse fails.
     """
     import struct
 
@@ -290,7 +442,9 @@ def _parse_canon_afinfo2(
             if tag == 0x0026:  # AFInfo2
                 # value_or_offset 是 4 字节 — uint16 数组（type=3）超过 2 个就在 offset 处
                 value_or_offset = struct.unpack_from(
-                    "<I", makernote_bytes, entry_off + 8,
+                    "<I",
+                    makernote_bytes,
+                    entry_off + 8,
                 )[0]
                 afinfo2_offset = value_or_offset
                 afinfo2_count = count
@@ -299,24 +453,57 @@ def _parse_canon_afinfo2(
         if afinfo2_offset is None or afinfo2_count is None:
             return None
 
-        end_byte = afinfo2_offset + afinfo2_count * 2
-        if end_byte > len(makernote_bytes):
-            return None
-        data = makernote_bytes[afinfo2_offset:end_byte]
+        candidate_offsets: list[int] = []
+        if makernote_tiff_offset is not None:
+            candidate_offsets.append(afinfo2_offset - makernote_tiff_offset)
+        candidate_offsets.append(afinfo2_offset)
 
+        for rel_offset in dict.fromkeys(candidate_offsets):
+            if rel_offset < 0:
+                continue
+            end_byte = rel_offset + afinfo2_count * 2
+            if end_byte > len(makernote_bytes):
+                continue
+            parsed = _parse_canon_afinfo2_data(
+                makernote_bytes[rel_offset:end_byte],
+                image_width,
+                image_height,
+            )
+            if parsed is not None:
+                return parsed
+        return None
+    except Exception:
+        return None
+
+
+def _parse_canon_afinfo2_data(
+    data: bytes,
+    image_width: int,
+    image_height: int,
+) -> dict[str, Any] | None:
+    """Parse the Canon AFInfo2 value payload after its IFD offset is resolved."""
+    import struct
+
+    try:
         # 头部 6 个 uint16
         if len(data) < 12:
             return None
-        _af_info_size, _af_area_mode, num_points, _valid_points, af_w, af_h = (
-            struct.unpack_from("<6H", data, 0)
+        _af_info_size, af_area_mode, num_points, _valid_points, af_w, af_h = struct.unpack_from(
+            "<6H", data, 0
         )
         if num_points == 0 or num_points > 4096 or af_w == 0 or af_h == 0:
             return None
 
         # 计算各数组所在偏移
         cur = 12
-        cur += num_points * 2  # widths
-        cur += num_points * 2  # heights
+        if cur + num_points * 2 > len(data):
+            return None
+        area_widths = struct.unpack_from(f"<{num_points}h", data, cur)
+        cur += num_points * 2
+        if cur + num_points * 2 > len(data):
+            return None
+        area_heights = struct.unpack_from(f"<{num_points}h", data, cur)
+        cur += num_points * 2
         if cur + num_points * 2 > len(data):
             return None
         x_positions = struct.unpack_from(f"<{num_points}h", data, cur)
@@ -330,35 +517,101 @@ def _parse_canon_afinfo2(
         in_focus_bits = struct.unpack_from(f"<{bitmask_words}H", data, cur)
         cur += bitmask_words * 2
 
-        # 找 in-focus 的点
-        focused: list[int] = []
-        for i in range(num_points):
-            if (in_focus_bits[i // 16] >> (i % 16)) & 1:
-                focused.append(i)
+        def bit_indices(bits: tuple[int, ...]) -> list[int]:
+            indices: list[int] = []
+            for index in range(num_points):
+                if (bits[index // 16] >> (index % 16)) & 1:
+                    indices.append(index)
+            return indices
 
-        # 没有 in-focus 就退到 AFPointsSelected
-        if not focused and cur + bitmask_words * 2 <= len(data):
+        focused = bit_indices(in_focus_bits)
+        selected: list[int] = []
+        if cur + bitmask_words * 2 <= len(data):
             selected_bits = struct.unpack_from(f"<{bitmask_words}H", data, cur)
-            for i in range(num_points):
-                if (selected_bits[i // 16] >> (i % 16)) & 1:
-                    focused.append(i)
+            selected = bit_indices(selected_bits)
 
-        if not focused:
+        active = sorted(set(focused or selected))
+        if not active:
             return None
 
-        avg_af_x = sum(x_positions[i] for i in focused) / len(focused)
-        avg_af_y = sum(y_positions[i] for i in focused) / len(focused)
+        scale_x = image_width / af_w
+        scale_y = image_height / af_h
 
-        # AF 坐标 (0,0) = 图像中心；x_positions/y_positions 是 signed center-relative
-        # 映射到 image space：image_x = (af_x + af_w/2) * image_w / af_w
-        image_x = (avg_af_x + af_w / 2.0) * image_width / af_w
-        image_y = (avg_af_y + af_h / 2.0) * image_height / af_h
+        def point_payload(index: int) -> dict[str, Any]:
+            image_x = (x_positions[index] + af_w / 2.0) * scale_x
+            image_y = (y_positions[index] + af_h / 2.0) * scale_y
+            point_w = abs(area_widths[index]) * scale_x
+            point_h = abs(area_heights[index]) * scale_y
+            bounds = {
+                "x1": max(0.0, image_x - point_w / 2.0),
+                "y1": max(0.0, image_y - point_h / 2.0),
+                "x2": min(float(image_width), image_x + point_w / 2.0),
+                "y2": min(float(image_height), image_y + point_h / 2.0),
+            }
+            return {
+                "index": index,
+                "x": float(image_x),
+                "y": float(image_y),
+                "width": float(point_w),
+                "height": float(point_h),
+                "bounds": bounds,
+                "in_focus": index in focused,
+                "selected": index in selected,
+            }
 
-        # cap 到合理范围
-        if not (0 <= image_x <= image_width and 0 <= image_y <= image_height):
+        def build_points(indices: list[int], cap: int = 96) -> list[dict[str, Any]]:
+            return [point_payload(index) for index in indices[:cap]]
+
+        def bounds_for(indices: list[int]) -> dict[str, float] | None:
+            if not indices:
+                return None
+            points = [point_payload(index) for index in indices]
+            return {
+                "x1": min(point["bounds"]["x1"] for point in points),
+                "y1": min(point["bounds"]["y1"] for point in points),
+                "x2": max(point["bounds"]["x2"] for point in points),
+                "y2": max(point["bounds"]["y2"] for point in points),
+            }
+
+        bounds = bounds_for(selected) or bounds_for(focused)
+        if bounds is None:
             return None
 
-        return {"x": float(image_x), "y": float(image_y)}
+        center = {
+            "x": (bounds["x1"] + bounds["x2"]) / 2.0,
+            "y": (bounds["y1"] + bounds["y2"]) / 2.0,
+        }
+
+        if not (0 <= center["x"] <= image_width and 0 <= center["y"] <= image_height):
+            return None
+
+        selected_count = len(selected)
+        focused_count = len(focused)
+        bounds_w = bounds["x2"] - bounds["x1"]
+        bounds_h = bounds["y2"] - bounds["y1"]
+        if selected_count <= 1 and focused_count <= 1:
+            kind = "point"
+        elif max(selected_count, focused_count) <= 9 and bounds_w < image_width * 0.35:
+            kind = "expanded"
+        elif bounds_w >= image_width * 0.75 and bounds_h >= image_height * 0.75:
+            kind = "whole_area"
+        else:
+            kind = "zone"
+
+        return {
+            "provider": "canon_afinfo2",
+            "mode": int(af_area_mode),
+            "kind": kind,
+            "source": "in_focus" if focused else "selected",
+            "center": center,
+            "bounds": bounds,
+            "points": build_points(active),
+            "focused_points": build_points(focused),
+            "selected_points": build_points(selected),
+            "focused_count": focused_count,
+            "selected_count": selected_count,
+            "point_count": len(active),
+        }
     except Exception:
         return None
 
@@ -391,11 +644,13 @@ def _jsonify(value: Any) -> Any:
 async def refresh_library_exif(
     db: Database,
     library_id: str,
+    batch_size: int = 50,
 ) -> dict[str, int]:
     """重新抽取 library 内"EXIF 不完整"的照片的 EXIF。
 
     判定"不完整"：exif_json IS NULL，或解析后既没 FNumber 也没 ExposureTime
-    （这两个 ExifIFD 字段是 5deab5f 之前老扫描遗漏的标志）。
+    （这两个 ExifIFD 字段是 5deab5f 之前老扫描遗漏的标志），或 Canon
+    照片还没有结构化 af_area（旧版本只保存 af_point，无法区分单点/区域 AF）。
 
     用于：升级到 5deab5f 之后，DB 里残留的旧 exif_json 缺曝光参数 — 启动后台
     自动重抽，不要求用户手动操作。
@@ -403,13 +658,6 @@ async def refresh_library_exif(
     Returns:
         {"refreshed": N, "skipped": M, "failed": K}
     """
-    # 1) 先查全库照片
-    async with db.conn.execute(
-        "SELECT id, file_path, exif_json FROM photos WHERE library_id = ?",
-        (library_id,),
-    ) as cur:
-        rows = await cur.fetchall()
-
     refreshed = 0
     skipped = 0
     failed = 0
@@ -424,33 +672,53 @@ async def refresh_library_exif(
         if not isinstance(d, dict):
             return True
         # 关键字段任一缺失即判定为不完整（用 OR：缺 FNumber **或** 缺 ExposureTime）
-        return "FNumber" not in d or "ExposureTime" not in d
+        if "FNumber" not in d or "ExposureTime" not in d:
+            return True
+        make = str(d.get("Make", "")).lower()
+        return "canon" in make and not isinstance(d.get("af_area"), dict)
 
-    for row in rows:
-        photo_id = str(row["id"])
-        file_path = Path(str(row["file_path"]))
-        if not _is_incomplete(row["exif_json"]):
-            skipped += 1
-            continue
-        if not file_path.exists():  # noqa: ASYNC240
-            # 文件丢了，跳过（path_missing 状态会由别处提示）
-            failed += 1
-            continue
-        try:
-            meta = await asyncio.to_thread(_probe_image_meta, file_path)
-            new_exif = meta.get("exif_json")
-            if new_exif is None:
+    last_rowid = 0
+    while True:
+        async with db.conn.execute(
+            "SELECT rowid AS scan_rowid, id, file_path, exif_json "
+            "FROM photos WHERE library_id = ? AND rowid > ? "
+            "ORDER BY rowid LIMIT ?",
+            (library_id, last_rowid, batch_size),
+        ) as cur:
+            rows = await cur.fetchall()
+        if not rows:
+            break
+
+        batch_refreshed = 0
+        for row in rows:
+            last_rowid = int(row["scan_rowid"])
+            photo_id = str(row["id"])
+            file_path = Path(str(row["file_path"]))
+            if not _is_incomplete(row["exif_json"]):
+                skipped += 1
+                continue
+            if not file_path.exists():  # noqa: ASYNC240
+                # 文件丢了，跳过（path_missing 状态会由别处提示）
                 failed += 1
                 continue
-            await db.conn.execute(
-                "UPDATE photos SET exif_json = ? WHERE id = ?",
-                (new_exif, photo_id),
-            )
+            try:
+                meta = await asyncio.to_thread(_probe_image_meta, file_path)
+                new_exif = meta.get("exif_json")
+                if new_exif is None:
+                    failed += 1
+                    continue
+                await db.conn.execute(
+                    "UPDATE photos SET exif_json = ? WHERE id = ?",
+                    (new_exif, photo_id),
+                )
+                refreshed += 1
+                batch_refreshed += 1
+            except Exception as e:
+                logger.warning("EXIF refresh failed", photo_id=photo_id, error=str(e))
+                failed += 1
+
+        if batch_refreshed > 0:
             await db.conn.commit()
-            refreshed += 1
-        except Exception as e:
-            logger.warning("EXIF refresh failed", photo_id=photo_id, error=str(e))
-            failed += 1
 
     return {"refreshed": refreshed, "skipped": skipped, "failed": failed}
 
@@ -527,7 +795,9 @@ async def scan_library(
     ) as cur:
         async for row in cur:
             existing[str(row["file_path"])] = (
-                str(row["id"]), int(row["file_size"]), str(row["file_mtime"]),
+                str(row["id"]),
+                int(row["file_size"]),
+                str(row["file_mtime"]),
             )
 
     files = _walk_supported_files(root, recursive=recursive)
@@ -553,11 +823,17 @@ async def scan_library(
                     "created_at, library_id) "
                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
-                        photo_id, path_key, path.name, size, mtime,
+                        photo_id,
+                        path_key,
+                        path.name,
+                        size,
+                        mtime,
                         _file_format(path),
-                        meta.get("width"), meta.get("height"),
+                        meta.get("width"),
+                        meta.get("height"),
                         meta.get("exif_json"),
-                        now, library_id,
+                        now,
+                        library_id,
                     ),
                 )
                 report.added += 1
@@ -574,8 +850,14 @@ async def scan_library(
                     "UPDATE photos SET file_size = ?, file_mtime = ?, "
                     "file_hash = NULL, width = ?, height = ?, "
                     "exif_json = ? WHERE file_path = ?",
-                    (size, mtime, meta.get("width"), meta.get("height"),
-                     meta.get("exif_json"), path_key),
+                    (
+                        size,
+                        mtime,
+                        meta.get("width"),
+                        meta.get("height"),
+                        meta.get("exif_json"),
+                        path_key,
+                    ),
                 )
                 report.updated += 1
             except Exception as e:
@@ -640,12 +922,16 @@ async def backfill_hashes(db: Database, library_id: str, batch_size: int = 50) -
                 continue
             except Exception as e:
                 logger.warning(
-                    "Hash failed", photo_id=photo_id, path=str(file_path), error=str(e),
+                    "Hash failed",
+                    photo_id=photo_id,
+                    path=str(file_path),
+                    error=str(e),
                 )
                 skipped_ids.add(photo_id)
                 continue
             await conn.execute(
-                "UPDATE photos SET file_hash = ? WHERE id = ?", (sha, photo_id),
+                "UPDATE photos SET file_hash = ? WHERE id = ?",
+                (sha, photo_id),
             )
             total += 1
 

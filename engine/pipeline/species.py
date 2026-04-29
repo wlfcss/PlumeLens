@@ -162,9 +162,7 @@ class HeadOnlyClassifier(nn.Module):
         return self.species_head(feat)
 
     @classmethod
-    def from_ckpt(
-        cls, ckpt_path: str | Path, map_location: str = "cpu"
-    ) -> HeadOnlyClassifier:
+    def from_ckpt(cls, ckpt_path: str | Path, map_location: str = "cpu") -> HeadOnlyClassifier:
         """从 v3 head .pt 推断结构 + load 权重。"""
         ckpt = torch.load(str(ckpt_path), map_location=map_location, weights_only=False)
         sd = ckpt["model_state"]
@@ -177,9 +175,7 @@ class HeadOnlyClassifier(nn.Module):
             feature_dim = sd["species_head.weight"].shape[1]
         num_species = sd["species_head.weight"].shape[0]
         num_orders = sd["order_head.weight"].shape[0] if "order_head.weight" in sd else None
-        num_families = (
-            sd["family_head.weight"].shape[0] if "family_head.weight" in sd else None
-        )
+        num_families = sd["family_head.weight"].shape[0] if "family_head.weight" in sd else None
         num_genera = sd["genus_head.weight"].shape[0] if "genus_head.weight" in sd else None
         model = cls(
             feature_dim=feature_dim,
@@ -332,10 +328,7 @@ class SpeciesClassifier:
         for h in self._heads:
             head_n = h.species_head.weight.shape[0]
             if head_n != len(self._taxonomy):
-                msg = (
-                    f"Head num_species={head_n} != taxonomy "
-                    f"num_classes={len(self._taxonomy)}"
-                )
+                msg = f"Head num_species={head_n} != taxonomy num_classes={len(self._taxonomy)}"
                 raise ValueError(msg)
 
     @staticmethod

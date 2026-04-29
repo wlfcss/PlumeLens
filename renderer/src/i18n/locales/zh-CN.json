@@ -89,7 +89,12 @@
       "recursive": "递归扫描已开启",
       "lastScan": "最近扫描",
       "update": "更新文件夹",
-      "resume": "继续分析"
+      "resume": "继续分析",
+      "startAnalysis": "开始分析",
+      "starting": "启动中…",
+      "analyzingProgress": "分析中 {{progress}}",
+      "analyzedProgress": "已分析 {{progress}}",
+      "analyzingPercent": "分析中… {{percent}}%"
     },
     "report": {
       "label": "文件夹报告",
@@ -101,24 +106,28 @@
       "totalPhotos": "总照片数",
       "birdPhotos": "有鸟照片",
       "selectPhotos": "精选",
+      "usablePhotos": "可用",
+      "recordPhotos": "记录",
       "newSpeciesCount": "新增种",
-      "selectedCount": "已选",
-      "maybeCount": "待定",
-      "rejectedCount": "淘汰",
+      "selectCount": "精选",
+      "usableCount": "可用",
+      "rejectCount": "淘汰",
       "speciesCount": "识别物种数",
       "semanticScore": "语义质量",
       "technicalScore": "技术质量",
       "poseScore": "姿态表现",
       "birdCount": "鸟数量",
-      "group": "所在组"
+      "group": "所在组",
+      "head": "头",
+      "eye": "眼",
+      "confidence": "置信",
+      "scene": "场景"
     },
     "quickFilters": {
-      "all": "全部",
-      "unreviewed": "待看",
-      "selected": "已选",
-      "maybe": "待定",
-      "rejected": "淘汰",
       "select": "精选",
+      "usable": "可用",
+      "record": "记录",
+      "reject": "淘汰",
       "new_species": "新增种",
       "bird": "有鸟",
       "no_bird": "无鸟"
@@ -126,13 +135,11 @@
     "sort": {
       "score": "综合评分",
       "shot_at": "拍摄时间",
-      "recent": "最近操作",
       "name": "文件名"
     },
     "viewModes": {
       "grouped": "组视图",
-      "flat": "平铺",
-      "selected_only": "仅已选"
+      "flat": "平铺"
     },
     "filter": {
       "advanced": "进阶筛选"
@@ -149,10 +156,24 @@
       "select": "精选"
     },
     "decision": {
-      "unreviewed": "待看",
-      "selected": "已选",
-      "maybe": "待定",
-      "rejected": "淘汰"
+      "select": "精选",
+      "usable": "可用",
+      "record": "记录",
+      "reject": "淘汰"
+    },
+    "gradeSource": {
+      "system": "系统",
+      "manual": "人工"
+    },
+    "speciesSource": {
+      "inline": "（{{source}}）",
+      "groupConsensus": "识别修正",
+      "groupConsensusDetail": "识别修正 {{support}}",
+      "groupConsensusWithRaw": "识别修正 {{support}} · 原识别：{{species}}",
+      "manual": "人工鸟种",
+      "manualDetail": "人工鸟种覆盖",
+      "conflict": "组内分歧",
+      "conflictDetail": "组内分歧，保留单张高置信结果"
     },
     "poseTags": {
       "eye_visible": "见眼",
@@ -177,12 +198,14 @@
     },
     "photo": {
       "noBird": "未检测到鸟",
+      "unidentified": "未识别物种",
       "birdsDetected": "只鸟",
       "frameLabel": "帧"
     },
     "actions": {
-      "select": "选中",
-      "maybe": "待定",
+      "select": "精选",
+      "usable": "可用",
+      "record": "记录",
       "reject": "淘汰",
       "compare": "加入对比"
     },
@@ -201,21 +224,55 @@
       "label": "深度复核",
       "scoreBreakdown": "评分拆解",
       "species": "物种候选",
-      "why": "为什么是这个评级"
+      "why": "为什么是这个评级",
+      "previous": "上一张",
+      "next": "下一张",
+      "original": "原图",
+      "originalHint": "按住放大 · 拖动平移",
+      "iqaCrop": "IQA 裁切 · 2.5×",
+      "cropHint": "画质评分依据",
+      "cropNeedsSubject": "需先识别",
+      "toggleBbox": "检测框",
+      "togglePose": "姿态点",
+      "toggleAfPoint": "对焦区域/合焦点",
+      "afPointUnknown": " · 未识别",
+      "filmstripLabel": "复核照片缩略图",
+      "shortcutsLabel": "复核快捷键",
+      "shortcuts": {
+        "grade": "评级",
+        "nav": "切换/关闭"
+      }
     },
     "reviewReasons": {
       "no_bird": "当前帧没有检测到有效鸟主体，更适合直接淘汰或保留为空片记录",
       "new_species": "识别到了高价值的新增种候选，姿态和清晰度也足以支撑进一步复核",
       "top_pick": "主体姿态和质量都很稳，已经进入当前组的推荐保留序列",
       "has_issues": "主体可用，但仍存在会影响最终判断的问题标签，建议与同组照片一起比较",
-      "user_selected": "这张已经被你标记为已选，适合作为导出候选进一步确认",
+      "manualOverride": "这张已经被你人工评估，当前展示以人工档位为准",
       "candidate": "模型给出了积极信号，但还需要人工再看一轮以决定是否保留"
+    },
+    "speciesEditor": {
+      "auto": "可识别",
+      "bird": "鸟",
+      "clear": "清除人工鸟种",
+      "manual": "人工",
+      "manualOnly": "手动",
+      "noLatin": "无拉丁名",
+      "search": "搜索中文名、英文名或拉丁名"
     },
     "compare": {
       "label": "对比模式",
       "title": "相似照片并排对比",
       "action": "进入对比",
       "keepBest": "保留最佳 1 张"
+    },
+    "exif": {
+      "shutter": "快门",
+      "aperture": "光圈",
+      "focalLength": "焦距",
+      "camera": "机身",
+      "lens": "镜头",
+      "time": "时间"
     },
     "empty": {
       "title": "还没有可处理的文件夹",
@@ -225,29 +282,77 @@
   },
   "archive": {
     "label": "长期沉淀",
-    "title": "跨文件夹回看照片与物种记录",
+    "title": "点亮你的鸟种图鉴与拍摄地图",
     "summary": {
-      "photos": "照片总数",
-      "species": "物种总数",
-      "selected": "已选照片",
-      "newSpecies": "新增种"
+      "collected": "已点亮",
+      "species": "图鉴总数",
+      "protected": "保护物种"
     },
     "tabs": {
-      "photos": "照片",
-      "species": "物种"
+      "species": "物种",
+      "map": "地理分布"
     },
     "detail": {
       "label": "鸟志",
       "title": "当前物种详情",
-      "empty": "选择一个物种"
+      "empty": "选择一个物种",
+      "noChineseExtract": "暂无中文物种介绍。",
+      "source": "中文维基百科 →"
+    },
+    "collection": {
+      "collected": "已点亮",
+      "locked": "未点亮",
+      "photoCount": "{{count}} 张",
+      "modelExtraBadge": "国外观赏种",
+      "unknownFamily": "未归科",
+      "empty": "没有符合当前筛选的物种",
+      "filters": {
+        "all": "全部",
+        "collected": "已点亮",
+        "locked": "未点亮"
+      },
+      "groups": {
+        "protected1": "国家一级保护",
+        "protected2": "国家二级保护",
+        "threatened": "受胁或近危",
+        "regular": "常规物种",
+        "modelExtra": "国外观赏种"
+      }
+    },
+    "map": {
+      "label": "地理分布",
+      "title": "中国拍摄分布",
+      "locatedSpecies": "{{count}} 种已定位",
+      "detailLabel": "对应照片",
+      "empty": "还没有可定位的鸟种照片",
+      "unlocated": "{{count}} 张鸟片缺少 GPS 坐标，未在地图中展示",
+      "allLocated": "当前鸟片均有 GPS 坐标并已放入地图",
+      "regions": {
+        "northeast": "东北",
+        "north": "华北",
+        "east": "华东",
+        "central": "华中",
+        "south": "华南",
+        "southwest": "西南",
+        "northwest": "西北",
+        "qinghaiTibet": "青藏"
+      }
     },
     "species": {
       "photoCount": "照片数",
       "bestScore": "最佳分",
       "firstSeen": "首次拍到",
       "lastSeen": "最近拍到",
+      "rarity": "等级",
       "distribution": "地理分布",
-      "distributionMap": "物种分布与我的拍摄足迹"
+      "distributionMap": "物种分布与我的拍摄足迹",
+      "openPhotos": "浏览 {{species}} 的 {{count}} 张照片"
+    },
+    "photos": {
+      "label": "我的照片",
+      "count": "{{count}} 张照片",
+      "openReview": "进入复核",
+      "empty": "还没有拍到这个物种的照片"
     }
   },
   "export": {
@@ -256,7 +361,13 @@
     "confirm": "开始导出",
     "scope": {
       "label": "导出范围",
-      "selected": "已选照片"
+      "reviewed": "精选、可用、记录",
+      "manual": "手动范围"
+    },
+    "scoreRange": {
+      "label": "分数区间",
+      "min": "最低",
+      "max": "最高"
     },
     "structure": {
       "label": "目录结构",
@@ -267,7 +378,8 @@
       "report": "包含报告与清单"
     },
     "summary": {
-      "label": "导出摘要"
+      "label": "导出摘要",
+      "count": "当前范围将导出 {{count}} 张"
     }
   },
   "background": {

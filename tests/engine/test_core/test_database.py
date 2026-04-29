@@ -53,7 +53,12 @@ class TestSchema:
     async def test_all_expected_tables_created(self, db: Database) -> None:
         tables = await db.list_tables()
         assert set(tables) >= {
-            "libraries", "photos", "analysis_results", "task_queue",
+            "libraries",
+            "photos",
+            "analysis_results",
+            "photo_decisions",
+            "photo_species_overrides",
+            "task_queue",
         }
 
     async def test_pragmas_applied(self, db: Database) -> None:
@@ -85,13 +90,23 @@ class TestConstraints:
         )
 
     async def _insert_photo(
-        self, db: Database, photo_id: str = "p1", lib_id: str = "lib-1",
+        self,
+        db: Database,
+        photo_id: str = "p1",
+        lib_id: str = "lib-1",
     ) -> None:
         await db.conn.execute(
             "INSERT INTO photos (id, file_path, file_name, file_size, file_mtime, "
             "created_at, library_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (photo_id, f"/photos/{photo_id}.jpg", f"{photo_id}.jpg", 1000,
-             "2026-04-24", "2026-04-24", lib_id),
+            (
+                photo_id,
+                f"/photos/{photo_id}.jpg",
+                f"{photo_id}.jpg",
+                1000,
+                "2026-04-24",
+                "2026-04-24",
+                lib_id,
+            ),
         )
 
     async def test_partial_unique_active_result(self, db: Database) -> None:
@@ -117,7 +132,8 @@ class TestConstraints:
             await db.conn.commit()
 
     async def test_partial_unique_allows_one_active_one_inactive(
-        self, db: Database,
+        self,
+        db: Database,
     ) -> None:
         """is_active=0 的记录不受部分唯一索引限制（历史版本可保留）。"""
         await self._insert_library(db)
@@ -153,8 +169,7 @@ class TestConstraints:
             await db.conn.execute(
                 "INSERT INTO photos (id, file_path, file_name, file_size, "
                 "file_mtime, created_at, library_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                ("p2", "/photos/p1.jpg", "p1.jpg", 2000,
-                 "2026-04-25", "2026-04-25", "lib-1"),
+                ("p2", "/photos/p1.jpg", "p1.jpg", 2000, "2026-04-25", "2026-04-25", "lib-1"),
             )
             await db.conn.commit()
 
@@ -164,13 +179,21 @@ class TestConstraints:
             await db.conn.execute(
                 "INSERT INTO photos (id, file_path, file_name, file_size, "
                 "file_mtime, created_at, library_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                ("p_orphan", "/x/y.jpg", "y.jpg", 100, "2026-04-24",
-                 "2026-04-24", "nonexistent-library"),
+                (
+                    "p_orphan",
+                    "/x/y.jpg",
+                    "y.jpg",
+                    100,
+                    "2026-04-24",
+                    "2026-04-24",
+                    "nonexistent-library",
+                ),
             )
             await db.conn.commit()
 
     async def test_cascade_delete_removes_photos_and_results(
-        self, db: Database,
+        self,
+        db: Database,
     ) -> None:
         await self._insert_library(db)
         await self._insert_photo(db, photo_id="p1")

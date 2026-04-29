@@ -33,7 +33,7 @@ async def test_health_includes_pipeline_status(client: AsyncClient) -> None:
 
 
 @pytest.mark.asyncio
-async def test_health_lists_all_six_models(client: AsyncClient) -> None:
+async def test_health_lists_current_model_slots(client: AsyncClient) -> None:
     response = await client.get("/health")
     data = response.json()
     models = data["pipeline"]["models"]
@@ -42,6 +42,5 @@ async def test_health_lists_all_six_models(client: AsyncClient) -> None:
         "bird_visibility",
         "clipiqa",
         "hyperiqa",
-        "dinov3_backbone",
-        "species_ensemble",
+        "dinov3_species_v3",
     }

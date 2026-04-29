@@ -77,16 +77,10 @@ def _row_to_task(row) -> Task:
         status=TaskStatus(str(row["status"])),
         priority=int(row["priority"]),
         attempts=int(row["attempts"]),
-        error_message=(
-            str(row["error_message"]) if row["error_message"] is not None else None
-        ),
+        error_message=(str(row["error_message"]) if row["error_message"] is not None else None),
         created_at=str(row["created_at"]),
-        started_at=(
-            str(row["started_at"]) if row["started_at"] is not None else None
-        ),
-        completed_at=(
-            str(row["completed_at"]) if row["completed_at"] is not None else None
-        ),
+        started_at=(str(row["started_at"]) if row["started_at"] is not None else None),
+        completed_at=(str(row["completed_at"]) if row["completed_at"] is not None else None),
     )
 
 
@@ -102,12 +96,13 @@ async def enqueue_photos(
     *,
     priority: int = 0,
     current_pipeline_version: str | None = None,
+    force_rerun: bool = False,
 ) -> int:
     """Enqueue analysis tasks for the given photo_ids.
 
     幂等性保证（去重维度）：
     1. 跳过已有 pending/processing/paused 任务的 photo（避免分析中再点击）
-    2. 若给定 current_pipeline_version：跳过已经在该 version 完成分析（active）
+    2. 若给定 current_pipeline_version 且 force_rerun=False：跳过已经在该 version 完成分析（active）
        的 photo（避免重复点击「开始分析」累积 task_queue）
 
     没传 current_pipeline_version 时只做规则 1（兼容）。
@@ -136,7 +131,7 @@ async def enqueue_photos(
 
     # 规则 2：当前 pipeline_version 已分析过的 photo（active=1）
     skip_done: set[str] = set()
-    if current_pipeline_version:
+    if current_pipeline_version and not force_rerun:
         query_done = (
             f"SELECT photo_id FROM analysis_results "
             f"WHERE photo_id IN ({placeholders}) "
@@ -144,7 +139,8 @@ async def enqueue_photos(
             f"  AND is_active = 1"
         )
         async with conn.execute(
-            query_done, (*photo_ids, current_pipeline_version),
+            query_done,
+            (*photo_ids, current_pipeline_version),
         ) as cur:
             skip_done = {str(r["photo_id"]) async for r in cur}
 
@@ -157,8 +153,7 @@ async def enqueue_photos(
         await conn.execute(
             "INSERT INTO task_queue (id, photo_id, library_id, status, priority, "
             "attempts, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)",
-            (str(uuid.uuid4()), pid, library_id, TaskStatus.PENDING.value,
-             priority, now),
+            (str(uuid.uuid4()), pid, library_id, TaskStatus.PENDING.value, priority, now),
         )
         inserted += 1
     await conn.commit()
@@ -168,6 +163,7 @@ async def enqueue_photos(
         requested=len(photo_ids),
         skipped_active=len(skip_active),
         skipped_done=len(skip_done),
+        force_rerun=force_rerun,
         inserted=inserted,
     )
     return inserted
@@ -179,6 +175,7 @@ async def enqueue_library(
     *,
     priority: int = 0,
     current_pipeline_version: str | None = None,
+    force_rerun: bool = False,
 ) -> int:
     """Enqueue all photos in a library that have file_hash (阶段 2 已完成).
 
@@ -193,9 +190,12 @@ async def enqueue_library(
         rows = await cur.fetchall()
     photo_ids = [str(r["id"]) for r in rows]
     return await enqueue_photos(
-        db, library_id, photo_ids,
+        db,
+        library_id,
+        photo_ids,
         priority=priority,
         current_pipeline_version=current_pipeline_version,
+        force_rerun=force_rerun,
     )
 
 
@@ -222,8 +222,7 @@ async def list_tasks(
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     params.append(limit)
     async with db.conn.execute(
-        f"SELECT * FROM task_queue {where} "
-        f"ORDER BY priority DESC, created_at ASC LIMIT ?",
+        f"SELECT * FROM task_queue {where} ORDER BY priority DESC, created_at ASC LIMIT ?",
         params,
     ) as cur:
         rows = await cur.fetchall()
@@ -236,10 +235,7 @@ async def get_stats(db: Database, library_id: str | None = None) -> dict[str, in
         query = "SELECT status, COUNT(*) AS c FROM task_queue GROUP BY status"
         params: tuple = ()
     else:
-        query = (
-            "SELECT status, COUNT(*) AS c FROM task_queue WHERE library_id = ? "
-            "GROUP BY status"
-        )
+        query = "SELECT status, COUNT(*) AS c FROM task_queue WHERE library_id = ? GROUP BY status"
         params = (library_id,)
     stats = {status.value: 0 for status in TaskStatus}
     async with db.conn.execute(query, params) as cur:
@@ -248,9 +244,30 @@ async def get_stats(db: Database, library_id: str | None = None) -> dict[str, in
     return stats
 
 
+async def clear_terminal_tasks(db: Database, library_id: str) -> int:
+    """Remove old terminal queue rows before a new analysis run starts.
+
+    `task_queue` is the live progress ledger, not an audit log. Keeping completed
+    rows from a previous run makes SSE totals grow across reruns (for example
+    783 completed + 783 pending = 1566 total). Analysis history is preserved in
+    `analysis_results`; stale terminal queue rows can be dropped safely.
+    """
+    conn = db.conn
+    async with conn.execute(
+        "DELETE FROM task_queue "
+        "WHERE library_id = ? AND status IN ('completed', 'dead', 'cancelled') "
+        "RETURNING id",
+        (library_id,),
+    ) as cur:
+        rows = list(await cur.fetchall())
+    await conn.commit()
+    return len(rows)
+
+
 async def get_task(db: Database, task_id: str) -> Task | None:
     async with db.conn.execute(
-        "SELECT * FROM task_queue WHERE id = ?", (task_id,),
+        "SELECT * FROM task_queue WHERE id = ?",
+        (task_id,),
     ) as cur:
         row = await cur.fetchone()
     return _row_to_task(row) if row else None
@@ -376,7 +393,9 @@ async def transition(
 
 
 async def mark_failed_with_retry(
-    db: Database, task_id: str, error: str,
+    db: Database,
+    task_id: str,
+    error: str,
 ) -> Task:
     """Shorthand: mark FAILED, then auto-requeue to PENDING or DEAD.
 

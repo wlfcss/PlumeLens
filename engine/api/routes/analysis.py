@@ -18,11 +18,13 @@ from engine.api.schemas.analysis import (
 )
 from engine.core.config import settings
 from engine.core.database import Database
+from engine.pipeline.manager import PipelineManager
 from engine.services.analyzer import analyze_photo
 from engine.services.queue import (
     IllegalTransitionError,
     TaskStatus,
     cancel_library,
+    clear_terminal_tasks,
     enqueue_library,
     get_stats,
     list_tasks,
@@ -47,7 +49,57 @@ router = APIRouter(prefix="/analysis", tags=["analysis"])
 SSE_INTERVAL = 1.0
 
 # 单个 library 的 worker 状态（并发分析 + 取消标志）
-_workers: dict[str, asyncio.Task] = {}
+_workers: dict[str, asyncio.Task[None]] = {}
+
+
+def _has_active_tasks(stats: dict[str, int]) -> bool:
+    return (
+        stats.get(TaskStatus.PENDING.value, 0)
+        + stats.get(TaskStatus.PROCESSING.value, 0)
+        + stats.get(TaskStatus.PAUSED.value, 0)
+    ) > 0
+
+
+async def _mark_library_analyzing(db: Database, library_id: str) -> None:
+    """Keep library summary/status in sync with the live analysis queue."""
+    await db.conn.execute(
+        "UPDATE libraries SET status = ? "
+        "WHERE id = ? AND status NOT IN ('path_missing', 'error')",
+        ("analyzing_partial", library_id),
+    )
+    await db.conn.commit()
+
+
+async def _mark_library_analysis_idle(db: Database, library_id: str) -> None:
+    """Mark analysis as no longer active once no pending/processing/paused tasks remain."""
+    stats = await get_stats(db, library_id)
+    if _has_active_tasks(stats):
+        return
+
+    finished = (
+        stats.get(TaskStatus.COMPLETED.value, 0)
+        + stats.get(TaskStatus.DEAD.value, 0)
+        + stats.get(TaskStatus.CANCELLED.value, 0)
+    )
+    if finished > 0:
+        await db.conn.execute(
+            "UPDATE libraries SET status = ?, last_analyzed_at = ? "
+            "WHERE id = ? AND status NOT IN ('path_missing', 'error')",
+            ("ready", _now_iso(), library_id),
+        )
+    else:
+        await db.conn.execute(
+            "UPDATE libraries SET status = ? "
+            "WHERE id = ? AND status NOT IN ('path_missing', 'error')",
+            ("ready", library_id),
+        )
+    await db.conn.commit()
+
+
+def _now_iso() -> str:
+    from datetime import UTC, datetime
+
+    return datetime.now(UTC).isoformat()
 
 
 async def _db(request: Request) -> Database:
@@ -57,7 +109,7 @@ async def _db(request: Request) -> Database:
     return db
 
 
-async def _pipeline(request: Request):
+async def _pipeline(request: Request) -> PipelineManager:
     pipeline = getattr(request.app.state, "pipeline", None)
     if pipeline is None:
         raise HTTPException(status_code=503, detail="Pipeline not initialized")
@@ -69,13 +121,19 @@ async def _pipeline(request: Request):
     return pipeline
 
 
-async def _run_one_task(db: Database, pipeline, library_id: str) -> bool:
+async def _run_one_task(
+    db: Database,
+    pipeline: PipelineManager,
+    library_id: str,
+    *,
+    force_rerun: bool = False,
+) -> bool:
     """Pick one task and run it. Returns True if a task was processed, False if queue empty."""
     task = await pick_next(db, library_id=library_id)
     if task is None:
         return False
     try:
-        await analyze_photo(db, pipeline, task.photo_id)
+        await analyze_photo(db, pipeline, task.photo_id, force_rerun=force_rerun)
         await transition(db, task.id, TaskStatus.COMPLETED)
         return True
     except IllegalTransitionError:
@@ -84,7 +142,9 @@ async def _run_one_task(db: Database, pipeline, library_id: str) -> bool:
     except Exception as e:
         logger.warning(
             "Task failed",
-            task_id=task.id, photo_id=task.photo_id, error=str(e),
+            task_id=task.id,
+            photo_id=task.photo_id,
+            error=str(e),
         )
         try:
             await mark_failed_with_retry(db, task.id, str(e))
@@ -94,7 +154,8 @@ async def _run_one_task(db: Database, pipeline, library_id: str) -> bool:
             # 最后兜底，避免阻塞队列 + 让 lifespan recover_on_startup 能重置它。
             logger.exception(
                 "mark_failed_with_retry failed — falling back to CANCELLED",
-                task_id=task.id, photo_id=task.photo_id,
+                task_id=task.id,
+                photo_id=task.photo_id,
             )
             try:
                 await transition(db, task.id, TaskStatus.CANCELLED)
@@ -106,22 +167,54 @@ async def _run_one_task(db: Database, pipeline, library_id: str) -> bool:
         return True
 
 
-async def _drain_queue(db: Database, pipeline, library_id: str, concurrency: int) -> None:
+async def _drain_queue(
+    db: Database,
+    pipeline: PipelineManager,
+    library_id: str,
+    concurrency: int,
+    *,
+    force_rerun: bool = False,
+) -> None:
     """Run pending tasks for `library_id` until none remain.
 
     Each worker coroutine loops picking next task until pick_next returns None.
     """
+
     async def worker() -> None:
         while True:
-            did_work = await _run_one_task(db, pipeline, library_id)
+            did_work = await _run_one_task(db, pipeline, library_id, force_rerun=force_rerun)
             if not did_work:
                 return
-    await asyncio.gather(*[worker() for _ in range(concurrency)])
+
+    try:
+        await asyncio.gather(*[worker() for _ in range(concurrency)])
+    finally:
+        await _mark_library_analysis_idle(db, library_id)
+
+
+def start_library_worker(
+    db: Database,
+    pipeline: PipelineManager,
+    library_id: str,
+    concurrency: int,
+    *,
+    force_rerun: bool = False,
+) -> None:
+    """Start or reuse the in-memory worker that drains one library queue."""
+    existing = _workers.get(library_id)
+    if existing is not None:
+        if not existing.done():
+            return
+        _workers.pop(library_id, None)
+    _workers[library_id] = asyncio.create_task(
+        _drain_queue(db, pipeline, library_id, concurrency, force_rerun=force_rerun),
+    )
 
 
 @router.post("/batch", response_model=AnalysisBatchResponse)
 async def start_batch(
-    request: Request, body: AnalysisBatchRequest,
+    request: Request,
+    body: AnalysisBatchRequest,
 ) -> AnalysisBatchResponse:
     """POST /analysis/batch — enqueue all photos in library + spawn worker.
 
@@ -135,24 +228,70 @@ async def start_batch(
     # 同步补哈希（幂等，已有哈希的 photo 直接跳过；空集时秒级返回）
     await backfill_hashes(db, body.library_id)
 
+    # 新一轮开始前清掉上轮终态队列，避免进度 total 被历史 completed/dead/cancelled
+    # 累加污染。若已有 active task，则保留当前 live ledger，继续复用 worker。
+    existing_stats = await get_stats(db, body.library_id)
+    existing_worker = _workers.get(body.library_id)
+    if existing_worker is not None and existing_worker.done():
+        _workers.pop(body.library_id, None)
+    elif existing_worker is not None and not _has_active_tasks(existing_stats):
+        try:
+            await asyncio.wait_for(asyncio.shield(existing_worker), timeout=2.0)
+        except TimeoutError:
+            logger.warning(
+                "Cancelling idle analysis worker before starting a new batch",
+                library_id=body.library_id,
+            )
+            existing_worker.cancel()
+            await asyncio.gather(existing_worker, return_exceptions=True)
+        except Exception as e:
+            logger.warning(
+                "Previous analysis worker finished with error before new batch",
+                library_id=body.library_id,
+                error=str(e),
+            )
+        finally:
+            _workers.pop(body.library_id, None)
+
+    if body.force_rerun and _has_active_tasks(existing_stats):
+        raise HTTPException(
+            status_code=409,
+            detail="Cannot force rerun while this library already has active analysis tasks",
+        )
+    if not _has_active_tasks(existing_stats):
+        await clear_terminal_tasks(db, body.library_id)
+
     # 传 pipeline_version 进 enqueue → 当前版本已分析过的 photo 跳过（去重）。
     # 之前 bug：用户多次点开始分析（或 lifespan resume + 手动点）会让同一 photo
     # 累积多个 task_queue 行 → 783 张照片产生 3173 个 task = 4× 膨胀。
     # 现在按 (file_hash, pipeline_version) 单一来源去重。
     inserted = await enqueue_library(
-        db, body.library_id,
+        db,
+        body.library_id,
         current_pipeline_version=pipeline.pipeline_version,
+        force_rerun=body.force_rerun,
     )
 
+    stats = await get_stats(db, body.library_id)
+    if _has_active_tasks(stats):
+        await _mark_library_analyzing(db, body.library_id)
+    else:
+        await _mark_library_analysis_idle(db, body.library_id)
+
     # Kick off drain worker（不阻塞返回）
-    if body.library_id not in _workers or _workers[body.library_id].done():
-        _workers[body.library_id] = asyncio.create_task(
-            _drain_queue(db, pipeline, body.library_id, settings.analysis_concurrency),
-        )
+    start_library_worker(
+        db,
+        pipeline,
+        body.library_id,
+        settings.analysis_concurrency,
+        force_rerun=body.force_rerun,
+    )
 
     stats = await get_stats(db, body.library_id)
     return AnalysisBatchResponse(
-        library_id=body.library_id, enqueued=inserted, stats=stats,
+        library_id=body.library_id,
+        enqueued=inserted,
+        stats=stats,
     )
 
 
@@ -160,6 +299,7 @@ async def start_batch(
 async def pause(request: Request, library_id: str) -> QueueStats:
     db = await _db(request)
     await pause_library(db, library_id)
+    await _mark_library_analyzing(db, library_id)
     return QueueStats(library_id=library_id, stats=await get_stats(db, library_id))
 
 
@@ -168,11 +308,9 @@ async def resume(request: Request, library_id: str) -> QueueStats:
     db = await _db(request)
     pipeline = await _pipeline(request)
     await resume_library(db, library_id)
+    await _mark_library_analyzing(db, library_id)
     # 重启 drain worker
-    if library_id not in _workers or _workers[library_id].done():
-        _workers[library_id] = asyncio.create_task(
-            _drain_queue(db, pipeline, library_id, settings.analysis_concurrency),
-        )
+    start_library_worker(db, pipeline, library_id, settings.analysis_concurrency)
     return QueueStats(library_id=library_id, stats=await get_stats(db, library_id))
 
 
@@ -180,6 +318,7 @@ async def resume(request: Request, library_id: str) -> QueueStats:
 async def cancel(request: Request, library_id: str) -> QueueStats:
     db = await _db(request)
     await cancel_library(db, library_id)
+    await _mark_library_analysis_idle(db, library_id)
     return QueueStats(library_id=library_id, stats=await get_stats(db, library_id))
 
 

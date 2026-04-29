@@ -89,7 +89,12 @@
       "recursive": "Recursive scan enabled",
       "lastScan": "Last scan",
       "update": "Update folder",
-      "resume": "Resume analysis"
+      "resume": "Resume analysis",
+      "startAnalysis": "Start analysis",
+      "starting": "Starting…",
+      "analyzingProgress": "Analyzing {{progress}}",
+      "analyzedProgress": "Analyzed {{progress}}",
+      "analyzingPercent": "Analyzing… {{percent}}%"
     },
     "report": {
       "label": "Folder report",
@@ -101,24 +106,28 @@
       "totalPhotos": "Total photos",
       "birdPhotos": "Bird frames",
       "selectPhotos": "Top selects",
+      "usablePhotos": "Usable",
+      "recordPhotos": "Record",
       "newSpeciesCount": "New species",
-      "selectedCount": "Selected",
-      "maybeCount": "Maybe",
-      "rejectedCount": "Rejected",
+      "selectCount": "Select",
+      "usableCount": "Usable",
+      "rejectCount": "Rejected",
       "speciesCount": "Species found",
       "semanticScore": "Semantic",
       "technicalScore": "Technical",
       "poseScore": "Pose",
       "birdCount": "Bird count",
-      "group": "Group"
+      "group": "Group",
+      "head": "Head",
+      "eye": "Eye",
+      "confidence": "Confidence",
+      "scene": "Scene"
     },
     "quickFilters": {
-      "all": "All",
-      "unreviewed": "To review",
-      "selected": "Selected",
-      "maybe": "Maybe",
-      "rejected": "Rejected",
       "select": "Top select",
+      "usable": "Usable",
+      "record": "Record",
+      "reject": "Reject",
       "new_species": "New species",
       "bird": "Bird",
       "no_bird": "No bird"
@@ -126,13 +135,11 @@
     "sort": {
       "score": "Score",
       "shot_at": "Shot time",
-      "recent": "Recent",
       "name": "Name"
     },
     "viewModes": {
       "grouped": "Grouped",
-      "flat": "Flat",
-      "selected_only": "Selected only"
+      "flat": "Flat"
     },
     "filter": {
       "advanced": "Advanced filters"
@@ -149,10 +156,24 @@
       "select": "Select"
     },
     "decision": {
-      "unreviewed": "To review",
-      "selected": "Selected",
-      "maybe": "Maybe",
-      "rejected": "Rejected"
+      "select": "Select",
+      "usable": "Usable",
+      "record": "Record",
+      "reject": "Reject"
+    },
+    "gradeSource": {
+      "system": "System",
+      "manual": "Manual"
+    },
+    "speciesSource": {
+      "inline": "({{source}})",
+      "groupConsensus": "Recognition correction",
+      "groupConsensusDetail": "Recognition correction {{support}}",
+      "groupConsensusWithRaw": "Recognition correction {{support}} · Raw: {{species}}",
+      "manual": "Manual species",
+      "manualDetail": "Manual species override",
+      "conflict": "Group conflict",
+      "conflictDetail": "Group conflict; keeping the high-confidence single-frame result"
     },
     "poseTags": {
       "eye_visible": "Eye visible",
@@ -177,12 +198,14 @@
     },
     "photo": {
       "noBird": "No bird detected",
+      "unidentified": "Unidentified species",
       "birdsDetected": "birds",
       "frameLabel": "Frame"
     },
     "actions": {
       "select": "Select",
-      "maybe": "Maybe",
+      "usable": "Usable",
+      "record": "Record",
       "reject": "Reject",
       "compare": "Compare"
     },
@@ -201,21 +224,55 @@
       "label": "Deep review",
       "scoreBreakdown": "Score breakdown",
       "species": "Species candidates",
-      "why": "Why this grade"
+      "why": "Why this grade",
+      "previous": "Previous photo",
+      "next": "Next photo",
+      "original": "Original",
+      "originalHint": "Hold to zoom · drag to pan",
+      "iqaCrop": "IQA crop · 2.5×",
+      "cropHint": "Quality scoring view",
+      "cropNeedsSubject": "Subject required",
+      "toggleBbox": "Detection box",
+      "togglePose": "Pose points",
+      "toggleAfPoint": "AF area / points",
+      "afPointUnknown": " · unavailable",
+      "filmstripLabel": "Review photo thumbnails",
+      "shortcutsLabel": "Review shortcuts",
+      "shortcuts": {
+        "grade": "Grade",
+        "nav": "Navigate/close"
+      }
     },
     "reviewReasons": {
       "no_bird": "No valid bird subject was detected in this frame, so it is better treated as a reject or a record-only frame.",
       "new_species": "This frame carries a high-value new-species candidate and enough pose and clarity quality to deserve manual confirmation.",
       "top_pick": "Subject pose and image quality are both stable, which puts this frame into the recommended keep set for the current group.",
       "has_issues": "The frame is usable, but issue tags still affect confidence. Compare it against nearby frames before keeping it.",
-      "user_selected": "You already marked this frame as selected, so it is a strong export candidate pending a final pass.",
+      "manualOverride": "This frame has a manual grade, so the manual grade is taking precedence.",
       "candidate": "The model sees promise here, but it still needs a human pass before the final keep decision."
+    },
+    "speciesEditor": {
+      "auto": "Auto",
+      "bird": "Bird",
+      "clear": "Clear manual species",
+      "manual": "Manual",
+      "manualOnly": "Manual",
+      "noLatin": "No scientific name",
+      "search": "Search Chinese, English, or scientific name"
     },
     "compare": {
       "label": "Compare mode",
       "title": "Compare similar frames side by side",
       "action": "Open compare",
       "keepBest": "Keep best 1"
+    },
+    "exif": {
+      "shutter": "Shutter",
+      "aperture": "Aperture",
+      "focalLength": "Focal length",
+      "camera": "Camera",
+      "lens": "Lens",
+      "time": "Time"
     },
     "empty": {
       "title": "No folders ready yet",
@@ -225,29 +282,77 @@
   },
   "archive": {
     "label": "Long-term trail",
-    "title": "Browse photos and species across folders",
+    "title": "Light up your species collection and field map",
     "summary": {
-      "photos": "Total photos",
-      "species": "Total species",
-      "selected": "Selected",
-      "newSpecies": "New species"
+      "collected": "Collected",
+      "species": "Catalog size",
+      "protected": "Protected"
     },
     "tabs": {
-      "photos": "Photos",
-      "species": "Species"
+      "species": "Species",
+      "map": "Map"
     },
     "detail": {
       "label": "Bird log",
       "title": "Current species detail",
-      "empty": "Choose a species"
+      "empty": "Choose a species",
+      "noChineseExtract": "No Chinese species introduction is available yet.",
+      "source": "Chinese Wikipedia →"
+    },
+    "collection": {
+      "collected": "Collected",
+      "locked": "Locked",
+      "photoCount": "{{count}} photos",
+      "modelExtraBadge": "Foreign ornamental",
+      "unknownFamily": "Unknown family",
+      "empty": "No species match this filter",
+      "filters": {
+        "all": "All",
+        "collected": "Collected",
+        "locked": "Locked"
+      },
+      "groups": {
+        "protected1": "National class I",
+        "protected2": "National class II",
+        "threatened": "Threatened or near threatened",
+        "regular": "Regular species",
+        "modelExtra": "Foreign ornamental species"
+      }
+    },
+    "map": {
+      "label": "Geography",
+      "title": "China sighting map",
+      "locatedSpecies": "{{count}} species located",
+      "detailLabel": "Matching photos",
+      "empty": "No locatable species photos yet",
+      "unlocated": "{{count}} bird photos have no GPS coordinates and are hidden from the map",
+      "allLocated": "All current bird photos have GPS coordinates and are placed on the map",
+      "regions": {
+        "northeast": "Northeast",
+        "north": "North",
+        "east": "East",
+        "central": "Central",
+        "south": "South",
+        "southwest": "Southwest",
+        "northwest": "Northwest",
+        "qinghaiTibet": "Qinghai-Tibet"
+      }
     },
     "species": {
       "photoCount": "Photo count",
       "bestScore": "Best score",
       "firstSeen": "First seen",
       "lastSeen": "Last seen",
+      "rarity": "Rarity",
       "distribution": "Distribution",
-      "distributionMap": "Species range and my sightings"
+      "distributionMap": "Species range and my sightings",
+      "openPhotos": "Browse {{count}} photos of {{species}}"
+    },
+    "photos": {
+      "label": "My photos",
+      "count": "{{count}} photos",
+      "openReview": "Open review",
+      "empty": "No photos of this species yet"
     }
   },
   "export": {
@@ -256,7 +361,13 @@
     "confirm": "Start export",
     "scope": {
       "label": "Scope",
-      "selected": "Selected frames"
+      "reviewed": "Select, usable, record",
+      "manual": "Manual scope"
+    },
+    "scoreRange": {
+      "label": "Score range",
+      "min": "Min",
+      "max": "Max"
     },
     "structure": {
       "label": "Structure",
@@ -267,7 +378,8 @@
       "report": "Include report and CSV"
     },
     "summary": {
-      "label": "Export summary"
+      "label": "Export summary",
+      "count": "{{count}} photos in current range"
     }
   },
   "background": {

@@ -18,7 +18,10 @@ Usage:
     /tmp/iqa-export/bin/python scripts/export_iqa_onnx.py --out-dir engine/models
 
 输入/输出契约（供 engine/pipeline/quality.py 对齐）：
-    输入: float32 [1, 3, 224, 224]，ImageNet 归一化（mean=[0.485,0.456,0.406], std=[0.229,0.224,0.225]）
+    输入: float32 [1, 3, 224, 224]，RGB raw 0~1
+         注意：pyiqa 的 CLIPIQA+/HyperIQA forward 内部已经做各自的 normalization
+         （CLIPIQA+ 用 CLIP mean/std，HyperIQA 用 ImageNet mean/std），运行时不要
+         在 ONNX 外部再次标准化。
     输出: [1, 1] 画质分 0~1
 """
 from __future__ import annotations

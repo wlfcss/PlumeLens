@@ -14,6 +14,7 @@
    减少 fork 概率（即便 freeze_support 兜底了，也能少一层）。
 3. uvicorn 显式 workers=1 防止意外被 env 覆盖到 multi-worker。
 """
+
 from __future__ import annotations
 
 import multiprocessing
@@ -48,11 +49,12 @@ def main() -> None:
 
     # 延迟 import uvicorn — freeze_support 必须先于任何会 spawn 子进程的代码
     import uvicorn
+
     uvicorn.run(
         "engine.main:app",
         host=host,
         port=port,
-        log_level=os.environ.get("PLUMELENS_LOG_LEVEL", "info"),
+        log_level=os.environ.get("PLUMELENS_LOG_LEVEL", "info").lower(),
         access_log=False,
         workers=1,  # 显式单进程；Electron 子进程模型不需要多 worker
     )

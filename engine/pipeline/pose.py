@@ -24,7 +24,7 @@ EYE_PARTS: tuple[str, ...] = ("left_eye", "right_eye")
 class PoseDetector:
     """Wraps bird_visibility.onnx for head/eye keypoint detection.
 
-    Model: bird_visibility v1.0 (YOLO26l-pose 衍生，28.6M 参数).
+    Model: bird_visibility v1.1 (YOLO26l-pose 衍生，28.6M 参数).
 
     Input:  float32 [1, 3, 640, 640] RGB 0-1, letterbox 114/255 填充
     Output: float32 [1, 300, 21] top-k 槽位
@@ -81,9 +81,7 @@ class PoseDetector:
             阈值或为空，返回 None。
         """
         # Preprocess: letterbox to 640 → CHW → batch
-        letterboxed, scale, (pad_top, pad_left) = resize_letterbox(
-            crop_image, self._input_size
-        )
+        letterboxed, scale, (pad_top, pad_left) = resize_letterbox(crop_image, self._input_size)
         input_tensor = to_batch(to_chw(letterboxed))
 
         outputs = self._session.run(  # type: ignore[union-attr]
@@ -136,9 +134,7 @@ class PoseDetector:
             for i, name in enumerate(PART_NAMES)
         }
 
-        head_vis, eye_vis = self._judge_visibility(
-            (cb_x1, cb_y1, cb_x2, cb_y2), kpts_crop
-        )
+        head_vis, eye_vis = self._judge_visibility((cb_x1, cb_y1, cb_x2, cb_y2), kpts_crop)
 
         return PoseInfo(
             bill=kpts_by_name["bill"],

@@ -33,8 +33,7 @@ async def db(tmp_path: Path) -> Database:
     await db.conn.execute(
         "INSERT INTO photos (id, file_path, file_name, file_size, file_mtime, "
         "created_at, library_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        ("photo-1", str(photo_path), "test.jpg", 15, "2026-04-24",
-         "2026-04-24", "lib-1"),
+        ("photo-1", str(photo_path), "test.jpg", 15, "2026-04-24", "2026-04-24", "lib-1"),
     )
     await db.conn.commit()
     yield db
@@ -146,14 +145,23 @@ class TestErrorPaths:
             await analyze_photo(db, pipeline, "nonexistent")
 
     async def test_raises_when_file_missing(
-        self, db: Database, tmp_path: Path,
+        self,
+        db: Database,
+        tmp_path: Path,
     ) -> None:
         # 插入一条 file_path 指向不存在文件的 photo
         await db.conn.execute(
             "INSERT INTO photos (id, file_path, file_name, file_size, file_mtime, "
             "created_at, library_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            ("photo-missing", str(tmp_path / "nope.jpg"), "nope.jpg", 0,
-             "2026-04-24", "2026-04-24", "lib-1"),
+            (
+                "photo-missing",
+                str(tmp_path / "nope.jpg"),
+                "nope.jpg",
+                0,
+                "2026-04-24",
+                "2026-04-24",
+                "lib-1",
+            ),
         )
         await db.conn.commit()
         pipeline = _make_mock_pipeline()

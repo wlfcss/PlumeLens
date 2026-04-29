@@ -4,25 +4,16 @@ import type { AppRoute, ArchiveTab } from '@/lib/mock-workspace'
 
 export { useShallow } from 'zustand/react/shallow'
 
-export type ViewMode = 'grouped' | 'flat' | 'selected_only'
-export type QuickFilter =
-  | 'all'
-  | 'unreviewed'
-  | 'selected'
-  | 'maybe'
-  | 'rejected'
-  | 'select'
-  | 'new_species'
-  | 'bird'
-  | 'no_bird'
+export type ViewMode = 'grouped' | 'flat'
+export type QuickFilter = 'select' | 'usable' | 'record' | 'reject' | 'no_bird'
 
 interface UIState {
   route: AppRoute
   archiveTab: ArchiveTab
   activeFolderId: string | null
   activeSpeciesId: string | null
-  activeQuickFilter: QuickFilter
-  activeSort: 'score' | 'shot_at' | 'recent' | 'name'
+  activeQuickFilters: QuickFilter[]
+  activeSort: 'score' | 'shot_at' | 'name'
   viewMode: ViewMode
   searchQuery: string
   focusedPhotoId: string | null
@@ -37,6 +28,7 @@ interface UIState {
   setActiveFolderId: (folderId: string | null) => void
   setActiveSpeciesId: (speciesId: string | null) => void
   setActiveQuickFilter: (filter: QuickFilter) => void
+  setActiveQuickFilters: (filters: QuickFilter[]) => void
   setActiveSort: (sort: UIState['activeSort']) => void
   setViewMode: (mode: ViewMode) => void
   setSearchQuery: (value: string) => void
@@ -52,10 +44,10 @@ interface UIState {
 
 export const useUIStore = create<UIState>()((set) => ({
   route: 'start',
-  archiveTab: 'photos',
-  activeFolderId: 'folder-chongming-dawn',
-  activeSpeciesId: 'species-whiskered-tern',
-  activeQuickFilter: 'all',
+  archiveTab: 'species',
+  activeFolderId: null,
+  activeSpeciesId: null,
+  activeQuickFilters: ['select', 'usable', 'record'],
   activeSort: 'score',
   viewMode: 'grouped',
   searchQuery: '',
@@ -77,7 +69,14 @@ export const useUIStore = create<UIState>()((set) => ({
       compareOpen: false,
     }),
   setActiveSpeciesId: (activeSpeciesId) => set({ activeSpeciesId }),
-  setActiveQuickFilter: (activeQuickFilter) => set({ activeQuickFilter }),
+  setActiveQuickFilter: (filter) =>
+    set((state) => {
+      const active = state.activeQuickFilters.includes(filter)
+        ? state.activeQuickFilters.filter((item) => item !== filter)
+        : [...state.activeQuickFilters, filter]
+      return { activeQuickFilters: active }
+    }),
+  setActiveQuickFilters: (activeQuickFilters) => set({ activeQuickFilters }),
   setActiveSort: (activeSort) => set({ activeSort }),
   setViewMode: (viewMode) => set({ viewMode }),
   setSearchQuery: (searchQuery) => set({ searchQuery }),

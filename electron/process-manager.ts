@@ -1,4 +1,5 @@
 import { ChildProcess, spawn } from 'child_process'
+import { randomBytes } from 'crypto'
 import { EventEmitter } from 'events'
 import { app } from 'electron'
 import { join } from 'path'
@@ -19,12 +20,17 @@ export class ProcessManager extends EventEmitter {
   private readonly maxRestarts = 3
   private healthInterval: ReturnType<typeof setInterval> | null = null
   private restartTimer: ReturnType<typeof setTimeout> | null = null
+  private readonly authToken = randomBytes(32).toString('hex')
   // 关停标志：stop() 设为 true，handleCrash 与 setTimeout 都会检查，
   // 防止应用关闭中残留的 setTimeout 触发 spawn 出孤儿 engine。
   private stopped = false
 
   getUrl(): string | null {
     return this.url
+  }
+
+  getAuthToken(): string {
+    return this.authToken
   }
 
   async start(): Promise<void> {
@@ -37,6 +43,11 @@ export class ProcessManager extends EventEmitter {
       ...process.env,
       PYTHONUNBUFFERED: '1',
       PLUMELENS_PORT: '0', // kernel 分配空闲端口
+      // 让 engine 的数据库/缩略图目录和主进程 plumelens://thumb 协议读的目录一致。
+      // 之前 dev 模式 engine 默认写 ~/.plumelens，而 Electron 协议读 userData，
+      // DB 里有 thumb 路径但文件在另一个根目录，选片页就会频繁显示空缩略图。
+      PLUMELENS_DATA_DIR: app.getPath('userData'),
+      PLUMELENS_API_TOKEN: this.authToken,
     }
 
     if (isDev) {
@@ -50,8 +61,6 @@ export class ProcessManager extends EventEmitter {
       cwd = join(process.resourcesPath, 'plumelens-engine')
       // Production：模型文件由 electron-builder extraResources 放在 Resources/models/
       env.PLUMELENS_MODELS_DIR = join(process.resourcesPath, 'models')
-      // 用户数据放 ~/Library/Application Support/PlumeLens/（Electron 默认 userData 目录）
-      env.PLUMELENS_DATA_DIR = app.getPath('userData')
     }
 
     // detached: true + 后续按进程组 kill (-pid) → 杀掉整个 engine 子树（含 torch /
@@ -199,7 +208,10 @@ export class ProcessManager extends EventEmitter {
       const ctrl = new AbortController()
       const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS)
       try {
-        const response = await fetch(`${this.url}/health`, { signal: ctrl.signal })
+        const response = await fetch(`${this.url}/health`, {
+          headers: { Authorization: `Bearer ${this.authToken}` },
+          signal: ctrl.signal,
+        })
         if (!response.ok) throw new Error(`HTTP ${response.status}`)
         consecutiveFailures = 0
       } catch (e) {

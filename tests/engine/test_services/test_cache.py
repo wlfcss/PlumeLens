@@ -77,7 +77,8 @@ class TestStoreAndLookup:
         assert miss is None
 
     async def test_get_active_returns_none_for_unknown_photo(
-        self, db: Database,
+        self,
+        db: Database,
     ) -> None:
         result = await get_active_result(db, "nonexistent")
         assert result is None
@@ -138,7 +139,8 @@ class TestListAndInvalidate:
         assert len(await list_versions(db, "photo-1")) == 0
 
     async def test_invalidate_old_versions_preserves_active(
-        self, db: Database,
+        self,
+        db: Database,
     ) -> None:
         await store_result(db, "photo-1", _make_result("v1-old"))
         await store_result(db, "photo-1", _make_result("v1-new"))

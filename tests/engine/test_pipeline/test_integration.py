@@ -6,6 +6,7 @@
 跳过条件：若 engine/models/ 缺任何核心文件（CI 里可能未同步 DINOv3 backbone），
 测试自动 skip 不 fail。
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -97,7 +98,8 @@ class TestRealFullPipeline:
 
     @pytest.mark.asyncio
     async def test_full_pipeline_initialize_and_analyze(
-        self, tmp_path: Path,
+        self,
+        tmp_path: Path,
     ) -> None:
         # DINOv3 v3 backbone 体积大（safetensors 578MB），若缺失则跳过
         if not (MODELS_DIR / "species" / "backbone" / "model.safetensors").exists():
@@ -125,8 +127,7 @@ class TestRealFullPipeline:
         status = pipeline.model_status
         # v3：species 改用 torch + transformers，不再是 ONNX backbone+ensemble 两个 key，
         # 合并为一个 dinov3_species_v3
-        for name in ("yolo", "bird_visibility", "clipiqa", "hyperiqa",
-                     "dinov3_species_v3"):
+        for name in ("yolo", "bird_visibility", "clipiqa", "hyperiqa", "dinov3_species_v3"):
             assert status[name], f"{name} failed to load"
 
         # 端到端推理

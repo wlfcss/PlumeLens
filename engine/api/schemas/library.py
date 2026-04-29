@@ -3,8 +3,13 @@
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import Any
 
 from pydantic import BaseModel, Field
+
+
+def _empty_species_candidates() -> list[dict[str, Any]]:
+    return []
 
 
 class LibraryStatus(StrEnum):
@@ -81,10 +86,20 @@ class PoseDetail(BaseModel):
 class BestDetection(BaseModel):
     """Top bird in the photo: bbox + pose + species."""
 
+    index: int = 0
     bbox: BBox
     pose: PoseDetail | None = None
-    quality: dict | None = None  # clipiqa/hyperiqa/combined
-    species_candidates: list[dict] = []
+    quality: dict[str, float] | None = None  # clipiqa/hyperiqa/combined
+    species: str | None = None
+    species_latin: str | None = None
+    manual_species: bool = False
+    species_candidates: list[dict[str, Any]] = Field(default_factory=_empty_species_candidates)
+
+
+class BirdDetectionDetail(BestDetection):
+    """One detected bird, including model candidates and manual species override."""
+
+    is_best: bool = False
 
 
 class PhotoRow(BaseModel):
@@ -110,12 +125,27 @@ class PhotoRow(BaseModel):
     quality_score: float | None = None
     bird_count: int | None = None
     species: str | None = None
-    # User layer：当前用户决定（默认 unreviewed）
-    decision: str = "unreviewed"
+    species_latin: str | None = None
+    manual_species: bool = False
+    # Effective species display source. Raw model output is preserved below so
+    # group consensus can stabilize the UI without destroying auditability.
+    species_source: str = "none"  # none / model / manual / group_consensus / conflict
+    model_species: str | None = None
+    model_species_latin: str | None = None
+    group_species: str | None = None
+    group_species_latin: str | None = None
+    group_species_confidence: float | None = None
+    group_species_support: int | None = None
+    group_species_evidence: int | None = None
+    group_species_total: int | None = None
+    species_conflict: bool = False
+    # Manual layer：人工评级覆盖；null 表示使用系统自动 grade。
+    decision: str | None = None
     # 完整 EXIF（whitelist 字段：相机/镜头/快门/光圈/ISO/焦距/...）
-    exif: dict | None = None
+    exif: dict[str, Any] | None = None
     # 最佳鸟的检测细节（深度复核要画 bbox / 关键点）
     best_detection: BestDetection | None = None
+    detections: list[BirdDetectionDetail] | None = None
 
 
 class LibraryDetail(BaseModel):

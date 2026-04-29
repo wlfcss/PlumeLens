@@ -9,7 +9,7 @@ RAW 文件优化（TECHNICAL_SPEC §9.4）：优先用 rawpy.extract_thumb() 读
 内嵌的全尺寸 JPEG 预览（CR3 实测能到 8192×5464），避免完整 RAW 解码的高 CPU
 开销。只有内嵌预览不够大时才回退完整解码。
 
-缓存位置：`~/.plumelens/cache/thumbnails/{grid,preview}/{photo_id}.jpg`
+缓存位置：`~/.plumelens/derived/thumbnails/{grid,preview}/{photo_id}.jpg`
 """
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ from PIL import Image, ImageOps
 
 from engine.core.database import Database
 from engine.pipeline.preprocess import IMAGE_EXTENSIONS, RAW_EXTENSIONS
+from engine.services.event_bus import publish_library_event
 
 logger = structlog.stdlib.get_logger()
 
@@ -35,6 +36,16 @@ PREVIEW_QUALITY = 85
 
 # 内嵌 RAW 预览至少需要该尺寸才能用于 preview；不够大时回退完整解码
 MIN_EMBEDDED_FOR_PREVIEW = PREVIEW_LONG_EDGE
+
+# Avoid a top-level "cache" directory under Electron's userData. Chromium owns
+# "Cache" there, and macOS' default case-insensitive filesystem makes "cache"
+# collide with it.
+THUMBNAIL_CACHE_ROOT = Path("derived") / "thumbnails"
+
+
+def thumbnail_cache_root(data_dir: Path) -> Path:
+    """Return the app-owned thumbnail root for a PlumeLens data directory."""
+    return data_dir / THUMBNAIL_CACHE_ROOT
 
 
 @dataclass
@@ -132,7 +143,9 @@ def _load_raw_with_embedded_preview(path: Path) -> Image.Image:
 
 
 def _generate_pair_sync(
-    source: Path, photo_id: str, cache_root: Path,
+    source: Path,
+    photo_id: str,
+    cache_root: Path,
 ) -> ThumbnailPaths:
     """同步生成 grid + preview 缩略图（runs in thread pool）。"""
     grid_path = cache_root / "grid" / f"{photo_id}.jpg"
@@ -150,7 +163,9 @@ def _generate_pair_sync(
 
 
 async def generate_thumbnails(
-    source: Path, photo_id: str, cache_root: Path,
+    source: Path,
+    photo_id: str,
+    cache_root: Path,
 ) -> ThumbnailPaths:
     """Async wrapper — runs decode + resize + save in a thread pool."""
     return await asyncio.to_thread(_generate_pair_sync, source, photo_id, cache_root)
@@ -167,7 +182,7 @@ async def ensure_thumbnails_for_photo(
 
     Args:
         photo_id: photos.id
-        cache_root: ~/.plumelens/cache/thumbnails/（内部会分 grid/ 和 preview/）
+        cache_root: ~/.plumelens/derived/thumbnails/（内部会分 grid/ 和 preview/）
         force: True → 即使 photos.thumb_grid 已存在也重建
 
     Returns:
@@ -222,55 +237,89 @@ async def generate_library_thumbnails(
     cache_root: Path,
     *,
     concurrency: int = 4,
+    batch_size: int = 64,
 ) -> dict[str, int]:
     """Build thumbnails for all photos in a library that don't have them yet.
 
     Returns:
         {"built": N, "skipped": M, "failed": K}
     """
-    # 取所有照片（不止 thumb_grid IS NULL 的）：让 ensure_thumbnails_for_photo 内部
-    # 判断是否需要重建（DB 记录 path 但磁盘文件丢失时也得补）
-    async with db.conn.execute(
-        "SELECT id, thumb_grid, thumb_preview FROM photos WHERE library_id = ?",
-        (library_id,),
-    ) as cur:
-        rows = await cur.fetchall()
-    photo_ids = [str(r["id"]) for r in rows]
-
     built = 0
     skipped = 0
     failed = 0
     sem = asyncio.Semaphore(concurrency)
 
-    async def _one(pid: str) -> str:
-        """Returns 'built' / 'skipped' / 'failed'."""
+    async def _one(
+        pid: str,
+        thumb_grid: str | None,
+        thumb_preview: str | None,
+    ) -> tuple[str, str]:
+        """Returns (photo_id, 'built' / 'skipped' / 'failed')."""
         async with sem:
             try:
                 # 先看磁盘上文件是否齐全；齐全则 skip 不重做
-                async with db.conn.execute(
-                    "SELECT thumb_grid, thumb_preview FROM photos WHERE id = ?",
-                    (pid,),
-                ) as cur2:
-                    row = await cur2.fetchone()
-                if row and row["thumb_grid"] and row["thumb_preview"]:
-                    grid_p = cache_root / str(row["thumb_grid"])
-                    preview_p = cache_root / str(row["thumb_preview"])
+                if thumb_grid and thumb_preview:
+                    grid_p = cache_root / thumb_grid
+                    preview_p = cache_root / thumb_preview
                     if grid_p.exists() and preview_p.exists():
-                        return "skipped"
+                        return pid, "skipped"
                 # 否则真生成（force=True 让 ensure 不再走它内部的存在判断，避免双重 check）
                 result = await ensure_thumbnails_for_photo(db, pid, cache_root, force=True)
-                return "built" if result is not None else "failed"
+                return pid, "built" if result is not None else "failed"
             except Exception as e:
                 logger.warning("Thumbnail failed", photo_id=pid, error=str(e))
-                return "failed"
+                return pid, "failed"
 
-    outcomes = await asyncio.gather(*[_one(pid) for pid in photo_ids])
-    for outcome in outcomes:
-        if outcome == "built":
-            built += 1
-        elif outcome == "skipped":
-            skipped += 1
-        else:
-            failed += 1
+    # 取所有照片（不止 thumb_grid IS NULL 的），但分页处理：
+    # 真实图片解码由 semaphore 控制并发，DB 记录和 coroutine 也不一次性堆整库。
+    last_rowid = 0
+    while True:
+        async with db.conn.execute(
+            "SELECT rowid AS scan_rowid, id, thumb_grid, thumb_preview "
+            "FROM photos WHERE library_id = ? AND rowid > ? "
+            "ORDER BY rowid LIMIT ?",
+            (library_id, last_rowid, batch_size),
+        ) as cur:
+            rows = list(await cur.fetchall())
+        if not rows:
+            break
 
-    return {"built": built, "skipped": skipped, "failed": failed}
+        outcomes = await asyncio.gather(
+            *[
+                _one(
+                    str(row["id"]),
+                    str(row["thumb_grid"]) if row["thumb_grid"] else None,
+                    str(row["thumb_preview"]) if row["thumb_preview"] else None,
+                )
+                for row in rows
+            ]
+        )
+        last_rowid = int(rows[-1]["scan_rowid"])
+        built_ids: list[str] = []
+        failed_ids: list[str] = []
+        for pid, outcome in outcomes:
+            if outcome == "built":
+                built += 1
+                built_ids.append(pid)
+            elif outcome == "skipped":
+                skipped += 1
+            else:
+                failed += 1
+                failed_ids.append(pid)
+
+        if built_ids or failed_ids:
+            publish_library_event(
+                library_id,
+                "thumbnail_batch",
+                {
+                    "built": built_ids,
+                    "failed": failed_ids,
+                    "built_count": built,
+                    "skipped_count": skipped,
+                    "failed_count": failed,
+                },
+            )
+
+    report = {"built": built, "skipped": skipped, "failed": failed}
+    publish_library_event(library_id, "thumbnail_complete", report)
+    return report

@@ -4,7 +4,9 @@
 
 辅助鸟类摄影爱好者快速筛选鸟类照片的桌面应用。
 
-核心场景：摄影师外拍回来，导入数百至数千张照片，由本地 ONNX 管线自动分析每张照片的鸟类检测和画质评估，快速筛选出最佳作品。
+核心场景：摄影师外拍回来，导入数百至数千张照片，由本地 hybrid 管线自动分析每张照片的鸟类检测、姿态/可见性、画质评估与鸟种识别，快速筛选出最佳作品。
+
+> 2026-04-27 更新：项目已正式切换为 **hybrid ONNX + torch species v3**。检测/姿态/IQA 继续走 ONNX Runtime；DINOv3 鸟种识别走 torch + transformers（MPS/CUDA bf16，CPU fp32）。本文中仍保留的早期 “纯 ONNX species / dinov3_backbone.onnx / species_ensemble.onnx” 叙述均为历史规划痕迹，当前实现以 `AGENTS.md`、`engine/models/README.md` 和 `docs/SESSION_LOG_2026-04-27.md` 为准。
 
 ## 2. 系统架构
 
@@ -29,26 +31,26 @@
 │                                                    │
 │  ┌────────┐ ┌──────────┐ ┌──────────────────┐    │
 │  │ API    │ │ Services │ │    Pipeline       │    │
-│  │ Routes │→│ 业务逻辑  │→│ ONNX Runtime     │    │
-│  └────────┘ └──────────┘ │ (本地推理)         │    │
+│  │ Routes │→│ 业务逻辑  │→│ Hybrid Pipeline   │    │
+│  └────────┘ └──────────┘ │ ONNX + torch       │    │
 │                           └────────┬─────────┘    │
 │                                    │               │
 └────────────────────────────────────┼───────────────┘
-                                     │ onnxruntime
+                                     │ onnxruntime + torch
                                      ▼
 ┌──────────────────────────────────────────────────┐
-│        本地 ONNX 模型（~1.5 GB, 5 模型）            │
-│  检测 / 姿态 / 语义画质 / 技术画质 / 鸟种识别         │
+│      本地模型资产（~1.4 GB, ONNX + species v3）     │
+│  检测 / 姿态 / 语义画质 / 技术画质 / torch 鸟种识别   │
 │  YOLO26l-bird-det + bird_visibility               │
-│  + CLIPIQA+ + HyperIQA + DINOv3 (backbone + heads)│
+│  + CLIPIQA+ + HyperIQA + DINOv3 safetensors/heads │
 └──────────────────────────────────────────────────┘
 ```
 
 ### 2.1 架构原则
 
-- **推理完全本地化**：所有 ONNX 推理在本机完成，无需外部推理服务，零网络依赖
-- **Python 后端保持轻量**：不内嵌 torch/transformers，仅依赖 onnxruntime（~150MB）
-- **用户照片目录只读不写**：应用数据存储在 `~/.plumelens/`
+- **推理完全本地化**：ONNX 与 torch 推理均在本机完成，无需外部推理服务，零网络依赖
+- **species v3 正式使用 torch/transformers**：旧纯 ONNX DINOv3 路线已废弃
+- **用户照片目录只读不写**：standalone 默认存储在 `~/.plumelens/`；Electron 运行时用 app userData 目录
 - **前端不承担业务逻辑**：所有分析、筛选、排序逻辑在 Python 后端完成；Zustand 严格限于纯 UI 状态（选中态、布局模式、面板展开等），筛选条件的计算逻辑不得渗透到前端
 
 ## 3. 技术栈明细
@@ -87,7 +89,8 @@
 |--------|------|------|---------|
 | Web 框架 | FastAPI | 0.132+ | **注意**：0.132 起默认严格 Content-Type 检查，前端 fetch 必须带 `Content-Type: application/json` |
 | ASGI 服务器 | uvicorn | 0.42+ | PyInstaller 需 `collect_submodules('uvicorn')`；Windows `console=False` 会崩溃需重定向 stdout |
-| ONNX 推理 | onnxruntime | 1.24+ | 支持 CPU/CoreML/CUDA Execution Provider；CoreML 在 1.24 有 IQA 模型 bug，暂用 CPU |
+| ONNX 推理 | onnxruntime | 1.25+ | 检测/姿态/IQA；YOLO/pose 在 macOS CoreML 必须关 ANE (`CPUAndGPU`) |
+| Torch 推理 | torch + transformers + safetensors | torch 2.5+ / transformers 4.57+ | DINOv3 species v3；MPS/CUDA bf16，CPU fp32 |
 | 数值计算 | numpy | 2.0+ | ONNX 输入输出均为 numpy ndarray |
 | 数据库 | SQLite + aiosqlite | 0.22+ | **WAL 模式 + busy_timeout=5000**；0.22 起必须显式 close 连接 |
 | 图像处理 | Pillow + rawpy | Pillow 12.x / rawpy 0.23+ | rawpy 0.23.1 已有 macOS arm64 原生 wheel |
@@ -95,41 +98,40 @@
 | 配置管理 | pydantic-settings | 2.13+ | 与 Pydantic v2 + FastAPI 无缝集成 |
 | 结构化日志 | structlog | 25.x | 支持 JSON/logfmt/console 多格式输出，可接管 uvicorn 日志 |
 
-### 3.4 ONNX 模型与 Execution Provider
+### 3.4 模型与 Execution Provider
 
-五个 ONNX 模型，全部本地推理，无需外部服务。完整清单与指标见 [engine/models/README.md](../engine/models/README.md)。
+本地模型资产包含 4 个 ONNX 模型 + 1 套 torch species v3 资产，无需外部服务。完整清单与指标见 [engine/models/README.md](../engine/models/README.md)。
 
 | 模型 | 文件 | 大小 | 输入 | 输出 | 用途 |
 |------|------|------|------|------|------|
 | YOLOv26l-bird-det v1.0 | `yolo26l-bird-det.onnx` | 99.9 MB | float32 [1,3,1280,1280] RGB 0-1, letterbox 114 填充 | [1,300,6] top-k 槽位 (x1,y1,x2,y2,conf,cls)，NMS-free 空槽位 conf≈0 | 鸟类目标检测（Test mAP@0.5=0.936, Recall=0.902） |
-| bird_visibility v1.0 | `bird_visibility.onnx` | 98.0 MB | float32 [1,3,640,640] RGB 0-1 | [1,300,21]：6 检测字段 + 5 关键点×3 (x,y,conf) | 头部/眼睛关键点 + head_visible/eye_visible 判定（Val Eye F1=99.31%, Head F1=99.88%） |
-| CLIPIQA+ | `clipiqa_plus.onnx` | 1.2 MB | float32 [1,3,H,W] 动态尺寸 | [1,1] score 0-1 | 语义画质评估 |
-| HyperIQA | `hyperiqa.onnx` | 0.4 MB | float32 [1,3,H,W] 动态尺寸 | [1,1,1] score 0-1 | 技术画质评估 |
-| DINOv3 backbone | `dinov3_backbone.onnx` | 1.2 GB (fp32) | float32 [1,3,H,W] 动态 H/W（512 或 640）+ ImageNet norm | [1,2048] 池化特征 (CLS ⊕ mean(patch)) | 鸟种分类特征提取（**不入 git**） |
-| DINOv3 ensemble heads | `species_ensemble.onnx` | 83 MB | (feat_512, feat_640) 各 [1,2048] | [1,1516] softmax 概率 | 7-head 集成分类（Test top-1=91.93%） |
+| bird_visibility v1.1 | `bird_visibility.onnx` | 98.0 MB | float32 [1,3,640,640] RGB 0-1 | [1,300,21]：6 检测字段 + 5 关键点×3 (x,y,conf) | 头部/眼睛关键点 + head_visible/eye_visible 判定（Val Eye F1=99.31%, Head F1=99.88%） |
+| CLIPIQA+ | `clipiqa_plus.onnx` | 293 MB | float32 [1,3,224,224] RGB raw 0-1 | [1,1] score 0-1 | 语义画质评估 |
+| HyperIQA | `hyperiqa.onnx` | 104 MB | float32 [1,3,224,224] RGB raw 0-1 | [1,1] score 0-1 | 技术画质评估 |
+| DINOv3 species v3 backbone | `species/backbone/model.safetensors` | 578 MB | torch tensor [1,3,480,480] + ImageNet norm | 2048-d 特征 (CLS ⊕ mean patch) | 鸟种分类特征提取（**不入 git**） |
+| DINOv3 species v3 heads | `species/heads/seed*.pt` × 8 | 267 MB | 2048-d 特征 | [1,1535] softmax 概率 | 8-head 集成分类（Test top-1≈91.5%） |
 
 配套元数据：
 
 - `bird_visibility_config.json`：姿态模型校准阈值（box_threshold, eye/head_threshold, margin）
-- `species_taxonomy.parquet`：1516 种中国鸟类分类表（拉丁/中/英名 + IUCN + 保护等级）
+- `species/canonical_extended.parquet`：1535 类分类表（拉丁/中/英名 + IUCN + 保护等级）
+- `species/species_list_1301.parquet`：1301 个训练类的 output id mask
 - `*.MODEL_CARD.md`：各模型交付文档
 
-**DINOv3 backbone 的特殊处理**：
+**DINOv3 species v3 的特殊处理**：
 
-- 1.2 GB 超过 GitHub 单文件 100 MB 限制；不使用 LFS（速度差）
-- 通过 [`scripts/export_dinov3_backbone.py`](../scripts/export_dinov3_backbone.py) 从原始 PyTorch 包本地导出
+- 旧 `dinov3_backbone.onnx` + `species_ensemble.onnx` 已删除，避免打包僵尸数据
+- `species/backbone/model.safetensors` 与 `species/heads/*.pt` 不入 git
 - 分发时由 electron-builder `extraResources` 打包进安装包
-- `.gitignore` 已排除
 
 **Execution Provider 配置**：
 
 | 模型 | 推荐 Provider | 备注 |
 |------|--------------|------|
-| YOLO det | `auto`（macOS arm64 → CoreML，CUDA 可用 → CUDA，否则 CPU） | CoreML 加速 ~3.8x |
-| bird_visibility | `cpu`（暂定，待 onnxruntime CoreML 成熟） | YOLO26-pose 结构 CoreML 覆盖不完整 |
-| CLIPIQA+ / HyperIQA | `cpu` | onnxruntime 1.24 CoreML bug：model_path must not be empty |
-| DINOv3 backbone | `cpu`（Mac 当前） | ViT-L 在 CoreML NN 格式下仅 30% 节点支持反而更慢；MLProgram 要求固定形状与动态 H/W 不兼容 |
-| DINOv3 ensemble heads | `cpu` | Linear 层为主，CPU 足够 |
+| YOLO det | CoreML EP + `MLComputeUnits=CPUAndGPU` | 关 ANE，绕开 advanced indexing 精度 bug |
+| bird_visibility | CoreML EP + `MLComputeUnits=CPUAndGPU` | 与 YOLO26 同架构家族，统一关 ANE |
+| CLIPIQA+ / HyperIQA | CoreML EP default | CLIP/HyperNet 路径 ANE 安全 |
+| DINOv3 species v3 | torch `auto` | macOS MPS bf16 / CUDA bf16 / CPU fp32 |
 
 **性能基准**（M5 Max, onnxruntime 1.24）：
 
@@ -142,15 +144,15 @@
 | bird_visibility (640) | — (待测) | ~200ms (预估) | 原 PyTorch CPU 280ms |
 | CLIPIQA+ | — | 138ms | |
 | HyperIQA | — | 315ms | |
-| DINOv3 (backbone ×2 + ensemble) | ~4.0s (更慢) | **~1.6s** | ViT-L 全管线，CoreML 节点覆盖差 |
+| DINOv3 species v3 torch | **~60-70ms (MPS bf16)** | ~500ms（CPU fp32，随机器变化） | 单尺度 480 + 8 heads |
 
-DINOv3 推荐按管线串接策略做过滤（只对 `head_visible && eye_visible` 的鸟跑分类），典型场景 40% 过滤率下千张物种分类耗时约 11 分钟。
+DINOv3 仍按管线串接策略过滤：只对 `head_visible && eye_visible` 的鸟跑分类；grade 门已放宽为 `reject`，即任何档位只要头眼可见就识别物种。
 
 **模型版权**：
-- `yolo26l-bird-det.onnx`（v1.0, 2026-04-24）/ `bird_visibility.onnx`（v1.0, 2026-04-21）/ DINOv3 分类 heads：由 wlfcss 个人训练产出，他人使用需注明来源。完整模型卡见 `engine/models/*.MODEL_CARD.md`
+- `yolo26l-bird-det.onnx`（v1.0, 2026-04-24）/ `bird_visibility.onnx`（v1.1）/ DINOv3 分类 heads：由 wlfcss 个人训练产出，他人使用需注明来源。完整模型卡见 `engine/models/*.MODEL_CARD.md`
 - `clipiqa_plus.onnx` / `hyperiqa.onnx`：基于公开 IQA 研究模型的 ONNX 导出
 - DINOv3 backbone：Meta DINOv3 LVD-1689M 预训练权重，遵循 DINOv3 License（非商业限制，商业使用须与 Meta 确认）
-- `species_taxonomy.parquet`：基于《中国鸟类名录 v12.0》整理
+- `species/canonical_extended.parquet`：基于《中国鸟类名录 v12.0》整理
 
 ## 4. 项目目录结构
 
@@ -189,40 +191,41 @@ PlumeLens/
 │   │   └── schemas/             # Pydantic 请求/响应模型
 │   ├── services/
 │   │   ├── scanner.py           # 文件夹扫描、EXIF 读取
-│   │   ├── analyzer.py          # ONNX 管线调用编排
+│   │   ├── analyzer.py          # hybrid 管线调用编排
 │   │   ├── ranker.py            # 筛选/排序逻辑
 │   │   ├── queue.py             # 批量任务队列（状态机 + 持久化）
 │   │   ├── thumbnail.py         # 缩略图生成（双级 + worker 池）
 │   │   └── cache.py             # 结果缓存（文件哈希 + 管线版本）
-│   ├── pipeline/                # ONNX 推理管线
+│   ├── pipeline/                # hybrid 推理管线
 │   │   ├── manager.py           # 生命周期管理 + 编排（PipelineManager）
 │   │   ├── detector.py          # YOLO 鸟类检测封装
-│   │   ├── pose.py              # 姿态/可见性（bird_visibility，待接入）
+│   │   ├── pose.py              # 姿态/可见性（bird_visibility ONNX）
 │   │   ├── quality.py           # CLIPIQA+ & HyperIQA 双模型画质评估
-│   │   ├── species.py           # DINOv3 鸟种分类（待接入）
+│   │   ├── species.py           # DINOv3 species v3（torch + transformers）
 │   │   ├── grader.py            # 综合分 → 4 档分级
 │   │   ├── preprocess.py        # 图像加载/缩放/裁切/归一化
 │   │   └── models.py            # Pydantic 数据模型（BoundingBox, QualityScores 等）
-│   ├── models/                  # ONNX 模型文件 + 模型卡 + 分类表
+│   ├── models/                  # ONNX 模型 + species v3 torch 资产 + 模型卡 + 分类表
 │   │   ├── yolo26l-bird-det.onnx            # 99.9 MB
 │   │   ├── bird_visibility.onnx             # 98.0 MB
-│   │   ├── clipiqa_plus.onnx                # 1.2 MB
-│   │   ├── hyperiqa.onnx                    # 0.4 MB
-│   │   ├── dinov3_backbone.onnx             # 1.2 GB（不入 git，见 .gitignore）
-│   │   ├── species_ensemble.onnx            # 83 MB
+│   │   ├── clipiqa_plus.onnx                # 293 MB
+│   │   ├── hyperiqa.onnx                    # 104 MB
+│   │   ├── species/backbone/model.safetensors # 578 MB（不入 git）
+│   │   ├── species/heads/seed*.pt           # 8 × 33 MB（不入 git）
 │   │   ├── bird_visibility_config.json      # 姿态校准阈值
-│   │   ├── species_taxonomy.parquet         # 1516 种分类表
+│   │   ├── species/canonical_extended.parquet # 1535 类分类表
+│   │   ├── species/species_list_1301.parquet # 1301 训练类 mask
 │   │   ├── *.MODEL_CARD.md                  # 模型交付文档
 │   │   └── README.md                        # 模型总览
 │   ├── core/
 │   │   ├── config.py            # 配置（Pydantic Settings，含管线参数）
 │   │   ├── database.py          # SQLite 连接管理（WAL 模式）
 │   │   ├── logging.py           # 统一日志（结构化 JSON）
-│   │   └── lifespan.py          # FastAPI 启动/关闭 + ONNX 模型加载
+│   │   └── lifespan.py          # FastAPI 启动/关闭 + 模型加载
 │   └── main.py                  # FastAPI 入口
 │
 ├── scripts/                     # 工具脚本
-│   └── export_dinov3_backbone.py # 从 PyTorch 包导出 DINOv3 backbone ONNX
+│   └── *.py                    # 模型/百科数据处理、打包辅助脚本
 │
 ├── evals/                       # 质量评测集
 │   ├── dataset/                 # 固定照片集
@@ -266,7 +269,7 @@ PlumeLens/
 │   ├── engine.log               # Python 后端日志（JSON 格式）
 │   ├── electron.log             # Electron 主进程日志
 │   └── crash/                   # 崩溃转储文件
-└── cache/
+└── derived/
     └── thumbnails/
         ├── grid/                # 网格缩略图（长边 384px, ~30KB）
         └── preview/             # 预览大图（长边 1920px, ~200KB）
@@ -434,7 +437,7 @@ Electron Main Process
 | 检测项 | 说明 |
 |--------|------|
 | Python 后端连通性 | 是否启动成功，端口是否可达 |
-| ONNX 模型文件 | 5 个模型文件（检测/姿态/画质×2/物种×2）是否存在且完整 |
+| 模型文件 | ONNX 模型（检测/姿态/画质×2）与 species v3 资产是否存在且完整 |
 | Execution Provider | 可用的 EP 列表（CPU/CoreML/CUDA） |
 | 管线功能验证 | 加载一张测试图片验证推理流程 |
 | 模块就绪状态 | 核心（检测+画质）/ 增强（姿态 / 物种）分别报告 |
@@ -444,7 +447,7 @@ Electron Main Process
 
 启动异常或用户反馈问题时，引导用户打开此页面。诊断结果可一键导出为文本。
 
-## 7. ONNX 分析管线
+## 7. Hybrid 分析管线
 
 ### 7.1 管线流程
 
@@ -455,23 +458,23 @@ Electron Main Process
   ↓ YOLOv26l-bird-det.onnx v1.0 (conf ≥ 0.5, NMS-free end-to-end)
   ↓ 输出 N 个鸟类 bounding box
   ↓ 对每个 bbox:
-  │   ├── box × 1.0 裁切 (+10% padding for 下游模型)
+  │   ├── box +10% padding 技术裁切（原片坐标）
   │   │
   │   ├── bird_visibility.onnx (letterbox 640)
   │   │   → 5 个头部关键点 (bill/crown/nape/left_eye/right_eye)
   │   │   → 派生二分类：head_visible, eye_visible
   │   │
-  │   ├── CLIPIQA+.onnx → 语义画质分 s1
-  │   ├── HyperIQA.onnx → 技术画质分 s2
+  │   ├── box 2.5× 语义裁切（原片坐标）→ CLIPIQA+.onnx → 语义画质分 s1
+  │   ├── box +10% 技术裁切（原片坐标）→ HyperIQA.onnx → 技术画质分 s2
   │   └── 综合分 = 0.35 × s1 + 0.65 × s2 → 4 档分级
   │
   │   # 物种分类（可选，仅 head_visible && eye_visible 的鸟触发）
-  │   ├── 方形 crop + 15% margin → Resize(512) + CenterCrop + ImageNet norm
-  │   ├── dinov3_backbone.onnx × 2 (H/W=512 和 640)
-  │   │   → 两个 2048-d 特征 (CLS ⊕ mean(patch))
-  │   ├── species_ensemble.onnx(feat_512, feat_640)
-  │   │   → [1,1516] softmax 概率
-  │   └── top-K 查 species_taxonomy.parquet → 物种元数据
+  │   ├── 方形 crop + 15% margin → Resize(short edge=480) + CenterCrop + ImageNet norm
+  │   ├── torch/transformers DINOv3 ViT-L/16
+  │   │   → 2048-d 特征 (CLS ⊕ mean(patch))
+  │   ├── 8 个 torch HeadOnlyClassifier softmax 平均
+  │   │   → [1,1535] softmax 概率，ghost 类由 trained_mask 清零
+  │   └── top-K 查 species/canonical_extended.parquet → 物种元数据
   │
   ↓ 选最高综合分的鸟 → PipelineResult
 ```
@@ -484,7 +487,7 @@ Electron Main Process
 - crop 输入与姿态模型训练分布（NABirds 近景单鸟）天然匹配
 - box_threshold 不再用作过滤（取 crop 内最高置信度的检测即可），可降到 0.05-0.1
 
-**姿态过滤 → 物种分类**：只对同时满足 `head_visible && eye_visible` 的鸟跑 DINOv3，典型场景 40% 通过率，千张照片物种分类耗时约 11 分钟（M5 Max CPU）。
+**姿态过滤 → 物种分类**：只对同时满足 `head_visible && eye_visible` 的鸟跑 DINOv3；grade 门已放宽为 `reject`，即任何档位都可识别物种。MPS bf16 warm 推理约 60-70ms/鸟。
 
 **关键坐标变换**：
 
@@ -495,10 +498,10 @@ Electron Main Process
 
 | 分级 | 综合分范围 | 含义 |
 |------|-----------|------|
-| 淘汰 (REJECT) | < 0.33 | 画质差，不建议保留 |
-| 记录 (RECORD) | 0.33 - 0.43 | 画质一般，可作记录 |
-| 可用 (USABLE) | 0.43 - 0.60 | 画质较好，可使用 |
-| 精选 (SELECT) | ≥ 0.60 | 画质优秀，推荐作品 |
+| 淘汰 (REJECT) | < 0.45 | 画质差，不建议保留 |
+| 记录 (RECORD) | 0.45 - 0.60 | 画质一般，可作记录 |
+| 可用 (USABLE) | 0.60 - 0.75 | 画质较好，可使用 |
+| 精选 (SELECT) | ≥ 0.75 | 画质优秀，推荐作品 |
 
 阈值和 IQA 权重通过 `engine/core/config.py` 配置，支持环境变量覆盖。
 
@@ -511,8 +514,8 @@ class PipelineManager:
     """单例，创建于 FastAPI lifespan startup，挂载到 app.state.pipeline"""
 
     async def initialize(self) -> None
-        # 加载 5 个 ONNX InferenceSession：
-        #   YOLO det / bird_visibility / CLIPIQA+ / HyperIQA / DINOv3 (backbone + heads)
+        # 加载 4 个 ONNX InferenceSession + species v3 torch 资产：
+        #   YOLO det / bird_visibility / CLIPIQA+ / HyperIQA / DINOv3 safetensors+heads
         # 计算 pipeline_version（模型校验和 + 参数哈希）
         # 模型缺失时不崩溃，is_ready 标识各模块可用性（允许部分降级）
 
@@ -538,11 +541,13 @@ class PipelineManager:
 
 ```python
 pipeline_version = f"v1-{sha256(
-    # 5 个模型的文件身份
+    # 模型文件身份
     yolo_checksum
     + bird_visibility_checksum
     + clipiqa_checksum + hyperiqa_checksum
-    + dinov3_backbone_checksum + species_ensemble_checksum
+    + dinov3_species_v3_backbone_checksum
+    + species_head_checksums
+    + species_canonical_checksum + species_trained_checksum
     # 评分 / 分级参数
     + clipiqa_weight + hyperiqa_weight + grade_thresholds
     # 检测参数
@@ -565,7 +570,7 @@ pipeline_version = f"v1-{sha256(
 
 | 类别 | 输入 | 变更影响 |
 |------|------|---------|
-| 模型 | 5 个 SHA-256 checksum（det/pose/clipiqa/hyperiqa/dinov3-bb/ensemble-head）| 模型替换 → 结果变化 |
+| 模型 | ONNX checksum（det/pose/clipiqa/hyperiqa）+ species v3 safetensors/head/taxonomy checksum | 模型替换 → 结果变化 |
 | 画质 | IQA 权重 (clipiqa/hyperiqa) + 分级阈值 (3 档) | 权重/阈值调整 → 评分 / 分级变化 |
 | 检测 | YOLO conf 阈值 + 输入尺寸 | 变更 → 检测数量 / 坐标变化 |
 | 姿态 | box/eye/head/head_eye/margin 5 项阈值 | 变更 → head/eye_visible 判定变化 |
@@ -606,19 +611,20 @@ head_visible = (≥2 个 head_parts conf ≥ head_threshold 且在框内)
 
 完整模型卡：[`engine/models/dinov3_species.MODEL_CARD.md`](../engine/models/dinov3_species.MODEL_CARD.md)。
 
-**覆盖范围**：1,018 种中国鸟类（`species_taxonomy.parquet` 列出 1,516 种名录，训练集 `min_images_per_species=75` 过滤后保留 1,018 种）。
+**覆盖范围**：1535 类输出，其中 1301 类有训练数据；234 个 ghost 类由 trained mask 清零防误命中。
 
 **输入预处理**：
 
 ```
 bbox 方形化 + 15% margin → crop
-  → 双尺度 Resize+CenterCrop (512, 640)
+  → 单尺度 Resize(short edge=480)+CenterCrop
   → ImageNet norm (mean=[0.485,0.456,0.406], std=[0.229,0.224,0.225])
-  → backbone ONNX × 2 → 两个 (1, 2048) 特征
-  → ensemble ONNX(feat_512, feat_640) → (1, 1516) softmax
+  → torch DINOv3 backbone → (1, 2048) 特征
+  → 8-head torch ensemble → (1, 1535) softmax
+  → trained_mask 清零 ghost 类
 ```
 
-**输出查表**（`species_taxonomy.parquet`）：
+**输出查表**（`species/canonical_extended.parquet`）：
 
 - `canonical_sci` / `canonical_zh` / `canonical_en` — 拉丁/中/英名
 - `order_sci` / `family_sci` / `family_zh` — 目/科
@@ -627,16 +633,16 @@ bbox 方形化 + 15% margin → crop
 
 **关键限制**：
 
-- species_head 输出 1516 维，但只有 1018 种有训练数据；前端 top-K 建议过滤 `confidence < 0.01` 避免误命中未训练类
+- species_head 输出 1535 维，但只有 1301 种有训练数据；ghost 类由 mask 清零，前端 top-K 仍建议过滤 `confidence < 0.01`
 - 非中国原生种 / 逸出种 / CR 极危种数据稀少，置信度不可信
-- DINOv3 backbone 1.2 GB 不入 git，见 §3.4
+- species v3 backbone safetensors 与 heads 不入 git，见 §3.4
 
 ### 7.7 物种分类的触发策略
 
-DINOv3 推理 CPU 开销大（Mac CPU ~1.6s/张）。管线仅对满足条件的鸟触发：
+DINOv3 species v3 在 Mac 走 MPS bf16，CPU 才会明显更慢。管线仅对满足条件的鸟触发：
 
 - 必须 `head_visible && eye_visible`（来自姿态模型）
-- 可选：综合分 ≥ `usable` 分级（避免对"淘汰/记录"级别的图做物种识别）
+- 不再用分级做门槛；`reject/record/usable/select` 只要头眼可见都可跑物种识别
 - 用户可在设置里全局关闭物种识别（降级体验，纯筛片模式）
 
 ## 8. 性能控制面
@@ -849,7 +855,7 @@ Python 后端作为 Electron 子进程，打包分发需要把 Python 运行时 
 
 **关键注意事项**：
 - PyInstaller 打包后 Python 运行时体积约 200-250MB（含 onnxruntime，不含 torch）
-- ONNX 模型文件合计 ~1.5 GB（其中 DINOv3 backbone 1.2 GB 来自 `scripts/export_dinov3_backbone.py` 产物），作为 extraResources 随 Electron 一起分发
+- 模型文件合计 ~1.4 GB（ONNX 检测/姿态/IQA + species v3 safetensors/heads/parquet），作为 extraResources 随 Electron 一起分发
 - **预期最终安装包体积 ~2 GB**（Python 运行时 + Node/Electron + 全部模型）；如需精简，可考虑把物种识别作为可选功能按需下载
 - macOS 和 Windows 需要分别打包（CI 中完成，PyInstaller 不支持交叉编译）
 - rawpy 的 libraw C 库：`pyinstaller-hooks-contrib` 提供了 hook，但需实测确认 `.dylib` / `.dll` 被正确捕获
@@ -857,7 +863,7 @@ Python 后端作为 Electron 子进程，打包分发需要把 Python 运行时 
 - onnxruntime 的 C++ 共享库需确保被 PyInstaller 正确捕获
 - Windows 特有问题：`console=False` 会导致 uvicorn 因无 stdout 而崩溃，需重定向 stdout/stderr
 - macOS 分发需要代码签名 + 公证
-- CI 构建前需先跑 `scripts/export_dinov3_backbone.py` 生成 backbone ONNX（需要 PyTorch 原始权重包作为 CI artifact）
+- CI/发布构建前需准备 `engine/models/species/` 资产目录（backbone safetensors + 8 heads + metadata），再由 electron-builder extraResources 打包
 
 ### 11.3 CI 打包流水线
 
@@ -965,7 +971,7 @@ push / PR 触发:
 | selector 死循环 | Zustand v5 | 前端页面卡死 | 所有返回对象的 selector 使用 `useShallow` |
 | PyInstaller 打包 uvicorn | PyInstaller + uvicorn | 打包后启动崩溃 | `collect_submodules('uvicorn')` + Windows stdout 重定向 |
 | PyInstaller 打包 rawpy | PyInstaller + libraw C 库 | RAW 图片无法解码 | 尽早验证，必要时手动添加 binaries |
-| CoreML IQA bug | onnxruntime 1.24 + CoreML | IQA 模型推理失败 | IQA 模型暂用 CPUExecutionProvider |
+| CoreML EP 精度差异 | onnxruntime/CoreML | YOLO/pose 若走 ANE 可能出现 bbox/keypoint 漂移 | YOLO/pose 强制 `MLComputeUnits=CPUAndGPU`，IQA 使用默认 CoreML 并纳入回归测试 |
 
 ### 15.2 中风险（需留意但有明确解决路径）
 

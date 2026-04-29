@@ -63,8 +63,15 @@ export function useBackendHealth() {
     queryKey: ['backend-health', backendUrl],
     queryFn: async () => {
       if (!backendUrl) throw new Error('No backend URL')
+      const token =
+        typeof window !== 'undefined' && window.plumelens
+          ? await window.plumelens.getBackendAuthToken()
+          : null
       const res = await fetch(`${backendUrl}/health`, {
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
       })
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       return res.json() as Promise<BackendHealth>

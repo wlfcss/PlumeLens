@@ -27,8 +27,10 @@ class TestQualityAssessor:
         clipiqa_session = _make_iqa_session(0.8, (1, 1))
         hyperiqa_session = _make_iqa_session(0.6, (1, 1, 1))
         assessor = QualityAssessor(
-            clipiqa_session, hyperiqa_session,
-            clipiqa_weight=0.35, hyperiqa_weight=0.65,
+            clipiqa_session,
+            hyperiqa_session,
+            clipiqa_weight=0.35,
+            hyperiqa_weight=0.65,
         )
 
         crop = np.random.rand(100, 100, 3).astype(np.float32)
@@ -43,8 +45,10 @@ class TestQualityAssessor:
         clipiqa_session = _make_iqa_session(1.1, (1, 1))
         hyperiqa_session = _make_iqa_session(-0.1, (1, 1, 1))
         assessor = QualityAssessor(
-            clipiqa_session, hyperiqa_session,
-            clipiqa_weight=0.35, hyperiqa_weight=0.65,
+            clipiqa_session,
+            hyperiqa_session,
+            clipiqa_weight=0.35,
+            hyperiqa_weight=0.65,
         )
 
         crop = np.random.rand(50, 50, 3).astype(np.float32)
@@ -57,10 +61,39 @@ class TestQualityAssessor:
         clipiqa_session = _make_iqa_session(0.5, (1, 1))
         hyperiqa_session = _make_iqa_session(0.5, (1, 1, 1))
         assessor = QualityAssessor(
-            clipiqa_session, hyperiqa_session,
-            clipiqa_weight=0.5, hyperiqa_weight=0.5,
+            clipiqa_session,
+            hyperiqa_session,
+            clipiqa_weight=0.5,
+            hyperiqa_weight=0.5,
         )
 
         crop = np.random.rand(80, 80, 3).astype(np.float32)
         scores = assessor.assess(crop)
         assert scores.combined == pytest.approx(0.5)
+
+    def test_uses_separate_semantic_and_technical_crops(self) -> None:
+        clipiqa_session = _make_iqa_session(0.7, (1, 1))
+        hyperiqa_session = _make_iqa_session(0.4, (1, 1, 1))
+        assessor = QualityAssessor(
+            clipiqa_session,
+            hyperiqa_session,
+            clipiqa_weight=0.35,
+            hyperiqa_weight=0.65,
+        )
+
+        semantic_crop = np.zeros((120, 180, 3), dtype=np.float32)
+        technical_crop = np.ones((60, 60, 3), dtype=np.float32)
+        scores = assessor.assess(
+            semantic_crop=semantic_crop,
+            technical_crop=technical_crop,
+        )
+
+        clip_input = clipiqa_session.run.call_args.args[1]["input"]
+        hyper_input = hyperiqa_session.run.call_args.args[1]["input"]
+        assert not np.allclose(clip_input, hyper_input)
+        assert clip_input.min() == pytest.approx(0.0)
+        assert clip_input.max() == pytest.approx(0.0)
+        assert hyper_input.min() == pytest.approx(1.0)
+        assert hyper_input.max() == pytest.approx(1.0)
+        assert scores.clipiqa == pytest.approx(0.7)
+        assert scores.hyperiqa == pytest.approx(0.4)

@@ -9,7 +9,7 @@ import structlog
 
 logger = structlog.stdlib.get_logger()
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 5
 
 # SQL 放在模块常量里便于审阅与测试
 _SCHEMA_STATEMENTS: tuple[str, ...] = (
@@ -109,17 +109,35 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
     CREATE INDEX IF NOT EXISTS ix_queue_library_status
         ON task_queue(library_id, status);
     """,
-    # --- photo_decisions：用户对每张照片的复核决定 ---
-    # 独立一张表而非扩展 photos，避免 scan 流程触及 user decision 数据
+    # --- photo_decisions：用户对每张照片的人工评级覆盖 ---
+    # 只保存人工覆盖值；无行表示使用系统自动 grade。
     """
     CREATE TABLE IF NOT EXISTS photo_decisions (
         photo_id TEXT PRIMARY KEY,
-        decision TEXT NOT NULL,  -- unreviewed / selected / maybe / rejected
+        decision TEXT NOT NULL,  -- select / usable / record / reject
         updated_at TEXT NOT NULL,
         FOREIGN KEY (photo_id) REFERENCES photos(id) ON DELETE CASCADE
     );
     """,
     "CREATE INDEX IF NOT EXISTS ix_decisions_decision ON photo_decisions(decision);",
+    # --- photo_species_overrides：用户对每张照片中每只鸟的人工鸟种覆盖 ---
+    # bird_index 对应 analysis_results.result_json.detections 的数组下标。
+    """
+    CREATE TABLE IF NOT EXISTS photo_species_overrides (
+        photo_id TEXT NOT NULL,
+        bird_index INTEGER NOT NULL DEFAULT 0,
+        canonical_sci TEXT NOT NULL,
+        canonical_zh TEXT,
+        canonical_en TEXT,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (photo_id, bird_index),
+        FOREIGN KEY (photo_id) REFERENCES photos(id) ON DELETE CASCADE
+    );
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS ix_species_overrides_photo
+        ON photo_species_overrides(photo_id);
+    """,
 )
 
 
@@ -224,6 +242,27 @@ class Database:
                 # 如果列已存在（重复迁移），SQLite 会抛 OperationalError；忽略
                 if "duplicate column" not in str(e).lower():
                     raise
+        if prior_version < 4:
+            # v4：人工筛选从 selected/maybe/rejected/unreviewed 迁移到
+            # 与系统 grade 同一套 select/usable/record/reject。unreviewed 代表无人工覆盖，
+            # 直接删行；maybe 无一一对应档位，按保守口径归入 record。
+            await self._conn.execute(
+                "UPDATE photo_decisions SET decision = 'select' WHERE decision = 'selected'",
+            )
+            await self._conn.execute(
+                "UPDATE photo_decisions SET decision = 'record' WHERE decision = 'maybe'",
+            )
+            await self._conn.execute(
+                "UPDATE photo_decisions SET decision = 'reject' WHERE decision = 'rejected'",
+            )
+            await self._conn.execute(
+                "DELETE FROM photo_decisions WHERE decision = 'unreviewed'",
+            )
+            await logger.ainfo(
+                "DB migrated",
+                from_version=prior_version,
+                changed="photo_decisions.grade_values",
+            )
 
     async def get_schema_version(self) -> int:
         """Return the PRAGMA user_version as stored in this database."""

@@ -32,6 +32,7 @@ const APP_PATH = join(
 
 let app: ElectronApplication
 let page: Page
+let backendAuthToken: string | null = null
 
 test.beforeAll(async () => {
   app = await _electron.launch({ executablePath: APP_PATH, timeout: 30_000 })
@@ -63,16 +64,28 @@ test.beforeAll(async () => {
   }
   if (!backendUrl) throw new Error('Engine URL never resolved within 30s')
   console.log('[E2E] engine URL =', backendUrl)
+  backendAuthToken = await page.evaluate(async () => {
+    const w = window as unknown as {
+      plumelens?: { getBackendAuthToken: () => Promise<string | null> }
+    }
+    return (await w.plumelens?.getBackendAuthToken()) ?? null
+  })
+  const authHeaders = backendAuthToken
+    ? { Authorization: `Bearer ${backendAuthToken}` }
+    : undefined
 
   // 只确保 plumelens-pkg-test (1 张) 的缩略图就绪 —— 本 spec 只断言这个 library。
   // engine lifespan 启动会后台扫所有 library 补缺，但大 library (n=783) 数十秒，
   // beforeAll 不能等。
-  const libs = await fetch(`${backendUrl}/library`).then(
-    (r) => r.json() as Promise<{ id: string; display_name: string }[]>,
+  const libs = await fetch(`${backendUrl}/library`, { headers: authHeaders }).then((r) =>
+    r.json() as Promise<{ id: string; display_name: string }[]>,
   )
   const target = libs.find((l) => l.display_name === 'plumelens-pkg-test')
   if (target) {
-    const r = await fetch(`${backendUrl}/library/${target.id}/thumbnails`, { method: 'POST' })
+    const r = await fetch(`${backendUrl}/library/${target.id}/thumbnails`, {
+      headers: authHeaders,
+      method: 'POST',
+    })
     const j = await r.json()
     console.log(`[E2E] thumbnails(${target.display_name}):`, JSON.stringify(j))
   }
@@ -104,22 +117,12 @@ test('packaged app: 已分析的 library 渲染真分析结果（select / 山麻
   await expect(page.getByText('IMG_2013.jpg').first()).toBeVisible({ timeout: 10_000 })
   await expect(page.getByText('山麻雀').first()).toBeVisible({ timeout: 10_000 })
 
-  // 视觉断言：photo tile 必须真实加载缩略图，不能只显示渐变
-  // 通过 evaluate 检查 photo-preview 元素的 background-image 是否包含 plumelens:// URL
-  const tileBg = await page.evaluate(() => {
-    const el = document.querySelector('.photo-preview') as HTMLElement | null
-    return el ? getComputedStyle(el).backgroundImage : ''
-  })
-  console.log('[E2E] first tile background-image:', tileBg.slice(0, 200))
-  expect(tileBg).toContain('plumelens://thumb/')
-
-  // 缩略图实际能 load
+  // 视觉断言：photo tile 必须真实加载缩略图，不能只显示渐变。
+  // Tile 的 CSS background 只保留渐变占位，真实图走 lazy <img> + retry。
   const imgLoaded = await page.evaluate(async () => {
-    const tile = document.querySelector('.photo-preview') as HTMLElement | null
-    const bg = tile ? getComputedStyle(tile).backgroundImage : ''
-    const match = bg.match(/url\("(plumelens:\/\/[^"]+)"\)/)
-    const url = match ? match[1] : ''
-    if (!url) return { ok: false, w: 0, h: 0, err: 'no url in bg', url: '' }
+    const img = document.querySelector('.photo-preview img') as HTMLImageElement | null
+    const url = img?.currentSrc || img?.src || ''
+    if (!img || !url) return { ok: false, w: 0, h: 0, err: 'no img url', url: '' }
     // 1) 先 fetch 看 server 端
     let fetchInfo = ''
     try {
@@ -177,7 +180,7 @@ test('packaged app: photo tile 点击 → 信息抽屉出物种/分数/分级', 
   await expect(page.getByText('山麻雀').first()).toBeVisible()
 })
 
-test('packaged app: 决策按钮（已选/待定/淘汰）能切换', async () => {
+test('packaged app: 评级按钮（精选/可用/记录/淘汰）能切换', async () => {
   await page.getByRole('button', { name: '选片', exact: true }).click()
   await page.waitForTimeout(2000)
   await page.getByText('plumelens-pkg-test').first().click()

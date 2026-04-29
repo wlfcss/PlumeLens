@@ -20,8 +20,7 @@ def _make_mock_pipeline() -> MagicMock:
         "bird_visibility": False,
         "clipiqa": False,
         "hyperiqa": False,
-        "dinov3_backbone": False,
-        "species_ensemble": False,
+        "dinov3_species_v3": False,
     }
     pipeline.model_providers = {}
     return pipeline

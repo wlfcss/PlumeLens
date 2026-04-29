@@ -10,6 +10,7 @@
  */
 import type { LibraryDetail, LibrarySummary, PhotoRow } from '@/lib/api-client'
 import type {
+  AfOverlay,
   FolderRecord,
   FolderStatus,
   PhotoGrade,
@@ -17,21 +18,13 @@ import type {
   PhotoRecord,
   ProblemTagId,
   SelectionDecision,
+  SpeciesCandidate,
 } from '@/lib/mock-workspace'
-import speciesWikiJson from '@/lib/species-wiki.json'
+import { resolveSpeciesCanonicalSci } from '@/lib/species-wiki'
 
-// 反向索引：中文名 → 拉丁名（首次访问时构建，~1500 条）
-type WikiEntry = { zh_title: string | null; en_title: string | null }
-let zhToLatinIndex: Map<string, string> | null = null
-function getZhToLatinIndex(): Map<string, string> {
-  if (zhToLatinIndex) return zhToLatinIndex
-  const map = new Map<string, string>()
-  const data = speciesWikiJson as Record<string, WikiEntry>
-  for (const [latin, entry] of Object.entries(data)) {
-    if (entry.zh_title) map.set(entry.zh_title, latin)
-  }
-  zhToLatinIndex = map
-  return map
+function formatScore(score: number | null | undefined): string {
+  if (score === null || score === undefined || !Number.isFinite(score)) return '--'
+  return (score * 100).toFixed(1)
 }
 
 // ---------- Folder ----------
@@ -164,12 +157,7 @@ function buildGroupTitle(group: GroupPlan): string {
 // ---------- Photo ----------
 
 const VALID_GRADES = new Set<PhotoGrade>(['reject', 'record', 'usable', 'select'])
-const VALID_DECISIONS = new Set<SelectionDecision>([
-  'unreviewed',
-  'selected',
-  'maybe',
-  'rejected',
-])
+const VALID_DECISIONS = new Set<SelectionDecision>(['select', 'usable', 'record', 'reject'])
 
 function safeGrade(value: string | null): PhotoGrade {
   if (value && (VALID_GRADES as Set<string>).has(value)) {
@@ -178,16 +166,39 @@ function safeGrade(value: string | null): PhotoGrade {
   return 'reject'
 }
 
-function safeDecision(value: string): SelectionDecision {
+function safeDecision(value: string | null): SelectionDecision {
+  if (value === null) return null
+  if (value === 'selected') return 'select'
+  if (value === 'maybe') return 'record'
+  if (value === 'rejected') return 'reject'
+  if (value === 'unreviewed') return null
   if ((VALID_DECISIONS as Set<string>).has(value)) {
     return value as SelectionDecision
   }
-  return 'unreviewed'
+  return null
 }
 
 function lookupLatinName(speciesName: string | null): string | null {
-  if (!speciesName) return null
-  return getZhToLatinIndex().get(speciesName) ?? null
+  return resolveSpeciesCanonicalSci(speciesName)
+}
+
+function withConsensusCandidate(row: PhotoRow, candidates: SpeciesCandidate[]): SpeciesCandidate[] {
+  if (
+    row.species_source !== 'group_consensus' ||
+    !row.group_species ||
+    !row.group_species_latin
+  ) {
+    return candidates
+  }
+  const consensus: SpeciesCandidate = {
+    name: row.group_species,
+    latinName: row.group_species_latin,
+    confidence: row.group_species_confidence ?? 0,
+  }
+  return [
+    consensus,
+    ...candidates.filter((candidate) => candidate.latinName !== consensus.latinName),
+  ]
 }
 
 /**
@@ -234,7 +245,9 @@ function gradientPlaceholder(photoId: string): string {
 }
 
 /**
- * Photo tile 背景：优先真缩略图（CSS background-image url），fallback 到渐变。
+ * Preview background for larger non-lazy surfaces. Photo tiles use the separate
+ * lazy <img> URL plus placeholderGradient to avoid firing hundreds of eager
+ * CSS background requests at once.
  */
 function buildPreviewBg(thumbRel: string | null, photoId: string): string {
   const url = thumbnailUrl(thumbRel, 'grid')
@@ -254,6 +267,17 @@ export function buildPhotoRecordFromRow(
   const grade = safeGrade(row.grade)
   const decision = safeDecision(row.decision)
   const isAnalyzed = row.pipeline_version !== null
+  const bestQuality = row.best_detection?.quality ?? null
+  const speciesCandidates =
+    withConsensusCandidate(row, row.best_detection?.species_candidates
+      ?.map((candidate) => ({
+        name: candidate.canonical_zh ?? candidate.canonical_sci ?? '',
+        latinName: candidate.canonical_sci ?? null,
+        englishName: candidate.canonical_en ?? null,
+        confidence: candidate.confidence ?? 0,
+      }))
+      .filter((candidate) => candidate.name.length > 0) ?? [])
+  const finalScore = bestQuality?.combined ?? row.quality_score
 
   return {
     id: row.id,
@@ -264,26 +288,49 @@ export function buildPhotoRecordFromRow(
     camera: cameraFallback,
     lens: lensFallback,
     speciesName: row.species,
-    speciesLatinName: lookupLatinName(row.species),
-    speciesCandidates: row.species
-      ? [{ name: row.species, confidence: row.quality_score ?? 0 }]
-      : [],
+    speciesLatinName: row.species_latin ?? lookupLatinName(row.species),
+    manualSpecies: row.manual_species,
+    speciesSource: row.species_source ?? (row.manual_species ? 'manual' : row.species ? 'model' : 'none'),
+    modelSpeciesName: row.model_species ?? row.species,
+    modelSpeciesLatinName: row.model_species_latin ?? row.species_latin ?? lookupLatinName(row.species),
+    groupSpeciesName: row.group_species ?? null,
+    groupSpeciesLatinName: row.group_species_latin ?? null,
+    groupSpeciesConfidence: row.group_species_confidence ?? null,
+    groupSpeciesSupport: row.group_species_support ?? null,
+    groupSpeciesEvidence: row.group_species_evidence ?? null,
+    groupSpeciesTotal: row.group_species_total ?? null,
+    speciesConflict: Boolean(row.species_conflict),
+    speciesCandidates:
+      speciesCandidates.length > 0
+        ? speciesCandidates
+        : row.species
+          ? [
+              {
+                name: row.species,
+                latinName: row.species_latin ?? lookupLatinName(row.species),
+                confidence: row.quality_score ?? 0,
+              },
+            ]
+          : [],
+    birdDetections: buildBirdDetections(row),
     isNewSpecies: false, // TODO: 跨 library 比对决定（archive 视图侧统计）
     birdCount: row.bird_count ?? 0,
     grade,
     decision,
-    finalScore: row.quality_score,
-    semanticScore: row.quality_score, // 后端尚未单独返回 CLIPIQA+ 分量
-    technicalScore: row.quality_score, // 后端尚未单独返回 HyperIQA 分量
+    finalScore,
+    semanticScore: bestQuality?.clipiqa ?? row.quality_score,
+    technicalScore: bestQuality?.hyperiqa ?? row.quality_score,
     poseScore: null,
     analysisStatus: isAnalyzed ? 'done' : 'pending',
     poseTags: [],
     problemTags: deriveProblemTags(row),
     sceneTag: 'record_shot',
     caption: isAnalyzed
-      ? `${row.species ?? '未识别物种'} · ${grade} · 分数 ${(row.quality_score ?? 0).toFixed(2)}`
+      ? `${row.species ?? '未识别物种'} · ${grade} · 分数 ${formatScore(finalScore)}`
       : '等待分析',
     previewGradient: buildPreviewBg(row.thumb_grid, row.id),
+    placeholderGradient: gradientPlaceholder(row.id),
+    thumbGridUrl: thumbnailUrl(row.thumb_grid, 'grid'),
     boxes: bboxToPercentBoxes(row),
     imageWidth: row.width,
     imageHeight: row.height,
@@ -292,30 +339,97 @@ export function buildPhotoRecordFromRow(
     bestBbox: row.best_detection?.bbox ?? null,
     bestPose: row.best_detection?.pose ?? null,
     bestAfPoint: extractAfPoint(row.exif),
+    bestAfArea: extractAfArea(row.exif),
   }
 }
 
+function buildBirdDetections(row: PhotoRow): PhotoRecord['birdDetections'] {
+  const detections = row.detections ? [...row.detections] : []
+  if (detections.length === 0 && row.best_detection) {
+    detections.push({ ...row.best_detection, is_best: true })
+  }
+  return detections.map((d) => {
+    const candidates =
+      d.species_candidates
+        ?.map((candidate) => ({
+          name: candidate.canonical_zh ?? candidate.canonical_sci ?? '',
+          latinName: candidate.canonical_sci ?? null,
+          englishName: candidate.canonical_en ?? null,
+          confidence: candidate.confidence ?? 0,
+        }))
+        .filter((candidate) => candidate.name.length > 0) ?? []
+    const useConsensus =
+      row.species_source === 'group_consensus' &&
+      d.is_best &&
+      !d.manual_species &&
+      row.bird_count === 1 &&
+      row.group_species &&
+      row.group_species_latin
+    const effectiveCandidates = withConsensusCandidate(row, candidates)
+    return {
+      index: d.index,
+      bbox: d.bbox,
+      speciesName: useConsensus ? row.group_species! : d.species,
+      speciesLatinName: useConsensus ? row.group_species_latin! : d.species_latin,
+      speciesCandidates: effectiveCandidates,
+      manualSpecies: d.manual_species,
+      isBest: d.is_best,
+    }
+  })
+}
+
 /**
- * 从 EXIF 字段里读取 af_point（后端 scanner.py::_parse_canon_afinfo2 已注入）。
+ * 从 EXIF 字段里读取 af_area / af_point（后端 scanner.py 已注入）。
  * 没有就返回 null（不是 Canon 机身或 MakerNote 无 AFInfo2 都会落到这里）。
  */
 function extractAfPoint(
-  exif: Record<string, string | number | null> | null | undefined,
+  exif: Record<string, unknown> | null | undefined,
 ): { x: number; y: number } | null {
   if (!exif) return null
-  // af_point 是后端注入的 dict，但我们的类型签名（Record<string, string | number | null>）
-  // 不容许嵌套 dict —— 实际后端会以 JSON dict 形式塞进来，运行时强转读取。
-  const af = (exif as unknown as { af_point?: { x: number; y: number } }).af_point
-  if (af && typeof af.x === 'number' && typeof af.y === 'number') {
+  const af = exif.af_point
+  if (isPoint(af)) {
     return { x: af.x, y: af.y }
   }
   return null
 }
 
+function extractAfArea(exif: Record<string, unknown> | null | undefined): AfOverlay | null {
+  if (!exif) return null
+  const afArea = exif.af_area
+  if (isAfOverlay(afArea)) return afArea
+
+  const afPoint = extractAfPoint(exif)
+  if (!afPoint) return null
+  return {
+    kind: 'point',
+    source: 'legacy',
+    center: afPoint,
+    points: [{ ...afPoint, in_focus: true, selected: true }],
+    focused_points: [{ ...afPoint, in_focus: true, selected: true }],
+    selected_points: [{ ...afPoint, in_focus: true, selected: true }],
+    focused_count: 1,
+    selected_count: 1,
+    point_count: 1,
+  }
+}
+
+function isPoint(value: unknown): value is { x: number; y: number } {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    typeof (value as { x?: unknown }).x === 'number' &&
+    typeof (value as { y?: unknown }).y === 'number'
+  )
+}
+
+function isAfOverlay(value: unknown): value is AfOverlay {
+  if (typeof value !== 'object' || value === null) return false
+  const candidate = value as { center?: unknown; kind?: unknown }
+  return typeof candidate.kind === 'string' && isPoint(candidate.center)
+}
+
 /** 把 best_detection.bbox（原图坐标）转成相对百分比 bbox（review modal 渲染用）。 */
-function bboxToPercentBoxes(
-  row: PhotoRow,
-): Array<{ x: number; y: number; w: number; h: number }> {
+function bboxToPercentBoxes(row: PhotoRow): Array<{ x: number; y: number; w: number; h: number }> {
   const bbox = row.best_detection?.bbox
   const W = row.width
   const H = row.height
@@ -408,7 +522,11 @@ export function buildFragmentFromDetail(detail: LibraryDetail): DetailFragment {
 
   // 2. PhotoRecord：每张照片带正确 groupId
   const photos: PhotoRecord[] = detail.photos.map((row) =>
-    buildPhotoRecordFromRow(row, folder.id, photoToGroup.get(row.id) ?? `group-${folder.id}-orphan`),
+    buildPhotoRecordFromRow(
+      row,
+      folder.id,
+      photoToGroup.get(row.id) ?? `group-${folder.id}-orphan`,
+    ),
   )
 
   // 3. 组内排序：由 SelectionScreen 渲染时按 quality_score 降序（在 App.tsx 已有 sortPhotos）

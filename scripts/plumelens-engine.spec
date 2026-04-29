@@ -12,8 +12,9 @@ Run from repo root:
     uv run pyinstaller scripts/plumelens-engine.spec --clean --noconfirm
 """
 from pathlib import Path
+import shutil
 
-from PyInstaller.utils.hooks import collect_submodules, collect_dynamic_libs
+from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, collect_submodules
 
 block_cipher = None
 
@@ -30,6 +31,8 @@ hidden_imports: list[str] = [
     "onnxruntime.capi._pybind_state",
     # rawpy 底层 C 扩展
     "rawpy._rawpy",
+    # numpy import-time helper; name looks test-related but numpy.__init__ needs it.
+    "numpy._pytesttester",
     # pyarrow parquet reader
     "pyarrow._parquet",
     "pyarrow._dataset",
@@ -72,10 +75,16 @@ binaries: list[tuple[str, str]] = [
 # Non-Python data files。模型权重不打包到 engine 内（容易 700+MB），由 electron-builder
 # extraResources 放到 app bundle 的 Resources/ 下，引擎启动时从 env 读路径。
 # 但 transformers 内置的 model registry / tokenizer config 需要 collect_data_files 兜底。
-from PyInstaller.utils.hooks import collect_data_files
 datas: list[tuple[str, str]] = [
-    *collect_data_files("transformers"),
-    *collect_data_files("torch", includes=["**/*.json", "**/*.txt"]),
+    *collect_data_files(
+        "transformers",
+        excludes=["**/test/**", "**/tests/**", "**/testing/**", "**/__pycache__/**"],
+    ),
+    *collect_data_files(
+        "torch",
+        includes=["**/*.json", "**/*.txt"],
+        excludes=["**/test/**", "**/tests/**", "**/testing/**", "**/__pycache__/**"],
+    ),
 ]
 
 a = Analysis(
@@ -94,13 +103,37 @@ a = Analysis(
         "jax",
         "flax",
         # 测试/开发依赖
-        "pytest",
+        "pytest_asyncio",
         "pyright",
         "ruff",
+        "pyarrow.tests",
     ],
     noarchive=False,
     optimize=0,
 )
+
+
+def _keep_runtime_toc_item(item) -> bool:
+    """Drop dependency test payloads that PyInstaller hooks may collect implicitly."""
+    text = "/".join(str(part) for part in item).replace("\\", "/").lower()
+    if "numpy._pytesttester" in text or "numpy/_pytesttester.py" in text:
+        return True
+    if "torch.testing" in text or "torch/testing/" in text:
+        return True
+    blocked = (
+        "/tests/",
+        "/test/",
+        "/testing/",
+        "pytest",
+        "pytest_asyncio",
+        "_pyarrow_cpp_tests",
+        "benchmark.pxi",
+    )
+    return not any(pattern in text for pattern in blocked)
+
+
+a.datas = [item for item in a.datas if _keep_runtime_toc_item(item)]
+a.pure = [item for item in a.pure if _keep_runtime_toc_item(item)]
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
@@ -131,3 +164,53 @@ coll = COLLECT(
     upx_exclude=[],
     name="plumelens-engine",
 )
+
+
+def _remove_path(path: Path) -> None:
+    if not path.exists():
+        return
+    if path.is_dir():
+        shutil.rmtree(path)
+    else:
+        path.unlink()
+
+
+def _cleanup_packaging_noise(root: Path) -> None:
+    """Remove dependency test/benchmark payloads from the frozen runtime folder."""
+    exact_rel_paths = (
+        "_internal/pyarrow/include",
+        "_internal/pyarrow/src",
+        "_internal/pyarrow/tests",
+        "_internal/torch/utils/benchmark",
+        "_internal/torch/distributed/rpc/_testing",
+    )
+    for rel in exact_rel_paths:
+        _remove_path(root / rel)
+
+    blocked_name_parts = (
+        "pytest_asyncio",
+        "benchmark",
+        "_pyarrow_cpp_tests",
+        "_tests",
+        "testing",
+    )
+    blocked_dir_names = {"test", "tests", "testing", "__pycache__"}
+    blocked_file_prefixes = ("test_",)
+    blocked_file_suffixes = ("_test.py", "_tests.py", "_test.h", "_test.cc")
+
+    for path in sorted(root.rglob("*"), key=lambda p: len(p.parts), reverse=True):
+        rel = path.relative_to(root).as_posix().lower()
+        name = path.name.lower()
+        if any(part in rel for part in blocked_name_parts):
+            _remove_path(path)
+            continue
+        if path.is_dir() and name in blocked_dir_names:
+            _remove_path(path)
+            continue
+        if path.is_file() and (
+            name.startswith(blocked_file_prefixes) or name.endswith(blocked_file_suffixes)
+        ):
+            _remove_path(path)
+
+
+_cleanup_packaging_noise(HERE / "dist" / "plumelens-engine")

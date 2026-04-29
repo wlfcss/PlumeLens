@@ -41,8 +41,7 @@ async def db_with_photos(tmp_path: Path) -> Database:
             "INSERT INTO photos (id, file_path, file_name, file_size, file_mtime, "
             "file_hash, created_at, library_id) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (f"photo-{i}", f"/p/{i}.jpg", f"{i}.jpg", 100, "2026-04-24",
-             h, "2026-04-24", "lib-1"),
+            (f"photo-{i}", f"/p/{i}.jpg", f"{i}.jpg", 100, "2026-04-24", h, "2026-04-24", "lib-1"),
         )
     await db.conn.commit()
     yield db
@@ -51,7 +50,8 @@ async def db_with_photos(tmp_path: Path) -> Database:
 
 class TestEnqueue:
     async def test_enqueue_photos_inserts_pending(
-        self, db_with_photos: Database,
+        self,
+        db_with_photos: Database,
     ) -> None:
         db = db_with_photos
         n = await enqueue_photos(db, "lib-1", ["photo-0", "photo-1"])
@@ -62,7 +62,8 @@ class TestEnqueue:
         assert {t.status for t in tasks} == {TaskStatus.PENDING}
 
     async def test_enqueue_skips_duplicates(
-        self, db_with_photos: Database,
+        self,
+        db_with_photos: Database,
     ) -> None:
         db = db_with_photos
         n1 = await enqueue_photos(db, "lib-1", ["photo-0"])
@@ -71,16 +72,47 @@ class TestEnqueue:
         assert n2 == 1  # 只新增 photo-1
 
     async def test_enqueue_library_excludes_nohash(
-        self, db_with_photos: Database,
+        self,
+        db_with_photos: Database,
     ) -> None:
         # photo-2 没 file_hash，应该跳过
         n = await enqueue_library(db_with_photos, "lib-1")
         assert n == 2
 
+    async def test_force_rerun_does_not_skip_current_version_cache(
+        self,
+        db_with_photos: Database,
+    ) -> None:
+        db = db_with_photos
+        await db.conn.execute(
+            "INSERT INTO analysis_results (id, photo_id, pipeline_version, result_json, "
+            "bird_count, created_at, is_active) VALUES (?, ?, ?, ?, 1, ?, 1)",
+            ("result-1", "photo-0", "v1-test", "{}", "2026-04-24"),
+        )
+        await db.conn.commit()
+
+        skipped = await enqueue_photos(
+            db,
+            "lib-1",
+            ["photo-0"],
+            current_pipeline_version="v1-test",
+        )
+        assert skipped == 0
+
+        forced = await enqueue_photos(
+            db,
+            "lib-1",
+            ["photo-0"],
+            current_pipeline_version="v1-test",
+            force_rerun=True,
+        )
+        assert forced == 1
+
 
 class TestPickNext:
     async def test_pick_pending_marks_processing(
-        self, db_with_photos: Database,
+        self,
+        db_with_photos: Database,
     ) -> None:
         db = db_with_photos
         await enqueue_photos(db, "lib-1", ["photo-0"])
@@ -90,13 +122,15 @@ class TestPickNext:
         assert task.started_at is not None
 
     async def test_pick_none_when_empty(
-        self, db_with_photos: Database,
+        self,
+        db_with_photos: Database,
     ) -> None:
         task = await pick_next(db_with_photos, library_id="lib-1")
         assert task is None
 
     async def test_priority_ordering(
-        self, db_with_photos: Database,
+        self,
+        db_with_photos: Database,
     ) -> None:
         db = db_with_photos
         # 低优先级先入队，高优先级后入队
@@ -115,7 +149,8 @@ class TestTransitions:
         return tasks[0].id
 
     async def test_legal_pending_to_processing(
-        self, db_with_photos: Database,
+        self,
+        db_with_photos: Database,
     ) -> None:
         db = db_with_photos
         tid = await self._enqueue_one(db)
@@ -123,7 +158,8 @@ class TestTransitions:
         assert t.status is TaskStatus.PROCESSING
 
     async def test_illegal_pending_to_completed(
-        self, db_with_photos: Database,
+        self,
+        db_with_photos: Database,
     ) -> None:
         db = db_with_photos
         tid = await self._enqueue_one(db)
@@ -131,7 +167,8 @@ class TestTransitions:
             await transition(db, tid, TaskStatus.COMPLETED)
 
     async def test_completed_is_terminal(
-        self, db_with_photos: Database,
+        self,
+        db_with_photos: Database,
     ) -> None:
         db = db_with_photos
         tid = await self._enqueue_one(db)
@@ -142,13 +179,17 @@ class TestTransitions:
             await transition(db, tid, TaskStatus.PROCESSING)
 
     async def test_failed_to_pending_retry(
-        self, db_with_photos: Database,
+        self,
+        db_with_photos: Database,
     ) -> None:
         db = db_with_photos
         tid = await self._enqueue_one(db)
         await transition(db, tid, TaskStatus.PROCESSING)
         t = await transition(
-            db, tid, TaskStatus.FAILED, error_message="oh no",
+            db,
+            tid,
+            TaskStatus.FAILED,
+            error_message="oh no",
         )
         assert t.attempts == 1
         assert t.error_message == "oh no"
@@ -159,7 +200,8 @@ class TestTransitions:
         assert t2.attempts == 1  # 不重置
 
     async def test_paused_resume_cycle(
-        self, db_with_photos: Database,
+        self,
+        db_with_photos: Database,
     ) -> None:
         db = db_with_photos
         tid = await self._enqueue_one(db)
@@ -170,7 +212,8 @@ class TestTransitions:
         assert resumed.status is TaskStatus.PENDING
 
     async def test_mark_failed_with_retry_auto_dead(
-        self, db_with_photos: Database,
+        self,
+        db_with_photos: Database,
     ) -> None:
         db = db_with_photos
         tid = await self._enqueue_one(db)
@@ -186,7 +229,8 @@ class TestTransitions:
 
 class TestRecovery:
     async def test_recover_processing_to_pending(
-        self, db_with_photos: Database,
+        self,
+        db_with_photos: Database,
     ) -> None:
         db = db_with_photos
         # 手工插入 2 个 PROCESSING + 1 个 COMPLETED
@@ -209,7 +253,8 @@ class TestRecovery:
 
 class TestBatchOps:
     async def test_pause_resume_library(
-        self, db_with_photos: Database,
+        self,
+        db_with_photos: Database,
     ) -> None:
         db = db_with_photos
         await enqueue_photos(db, "lib-1", ["photo-0", "photo-1"])
@@ -225,7 +270,8 @@ class TestBatchOps:
         assert stats["pending"] == 2
 
     async def test_cancel_library(
-        self, db_with_photos: Database,
+        self,
+        db_with_photos: Database,
     ) -> None:
         db = db_with_photos
         await enqueue_photos(db, "lib-1", ["photo-0", "photo-1"])
@@ -239,7 +285,8 @@ class TestBatchOps:
 
 class TestStats:
     async def test_stats_returns_all_status_keys(
-        self, db_with_photos: Database,
+        self,
+        db_with_photos: Database,
     ) -> None:
         stats = await get_stats(db_with_photos, "lib-1")
         # 无任务时所有状态都是 0

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
+import aiosqlite
 import pytest
 from httpx import ASGITransport, AsyncClient
 from PIL import Image
@@ -56,7 +58,8 @@ class TestImportLibrary:
         _make_jpeg(lib_root / "b.jpg")
 
         resp = await client.post(
-            "/library/import", json={"root_path": str(lib_root)},
+            "/library/import",
+            json={"root_path": str(lib_root)},
         )
         assert resp.status_code == 201
         data = resp.json()
@@ -68,7 +71,8 @@ class TestImportLibrary:
     async def test_import_nonexistent_path_400(self, real_client) -> None:
         client, _ = real_client
         resp = await client.post(
-            "/library/import", json={"root_path": "/nonexistent/path"},
+            "/library/import",
+            json={"root_path": "/nonexistent/path"},
         )
         assert resp.status_code == 400
 
@@ -110,6 +114,202 @@ class TestListAndDetail:
         client, _ = real_client
         resp = await client.get("/library/does-not-exist")
         assert resp.status_code == 404
+
+    async def test_detail_applies_manual_species_override_per_bird(self, real_client) -> None:
+        client, tmp = real_client
+        lib_root = tmp / "lib_species_override"
+        _make_jpeg(lib_root / "multi.jpg")
+        await client.post("/library/import", json={"root_path": str(lib_root)})
+
+        libs = (await client.get("/library")).json()
+        lib_id = libs[0]["id"]
+        initial_detail = (await client.get(f"/library/{lib_id}")).json()
+        photo_id = initial_detail["photos"][0]["id"]
+
+        result_json = {
+            "photo_id": photo_id,
+            "pipeline_version": "test-v1",
+            "bird_count": 2,
+            "duration_ms": 12,
+            "best": None,
+            "detections": [
+                {
+                    "bbox": {"x1": 1, "y1": 2, "x2": 30, "y2": 40, "confidence": 0.9},
+                    "quality": {"clipiqa": 80.0, "hyperiqa": 75.0, "combined": 78.0},
+                    "grade": "select",
+                    "pose": None,
+                    "species": "须浮鸥",
+                    "species_candidates": [
+                        {
+                            "canonical_sci": "Chlidonias hybrida",
+                            "canonical_zh": "须浮鸥",
+                            "confidence": 0.91,
+                        }
+                    ],
+                },
+                {
+                    "bbox": {"x1": 50, "y1": 60, "x2": 90, "y2": 100, "confidence": 0.8},
+                    "quality": {"clipiqa": 70.0, "hyperiqa": 68.0, "combined": 69.0},
+                    "grade": "usable",
+                    "pose": None,
+                    "species": "翠鸟",
+                    "species_candidates": [
+                        {
+                            "canonical_sci": "Alcedo atthis",
+                            "canonical_zh": "翠鸟",
+                            "confidence": 0.82,
+                        }
+                    ],
+                },
+            ],
+        }
+        async with aiosqlite.connect(tmp / "test.db") as conn:
+            await conn.execute(
+                "INSERT INTO analysis_results (id, photo_id, pipeline_version, "
+                "quality_score, grade, bird_count, species, result_json, created_at, is_active) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)",
+                (
+                    "ar-override",
+                    photo_id,
+                    "test-v1",
+                    78.0,
+                    "select",
+                    2,
+                    "须浮鸥",
+                    json.dumps(result_json),
+                    "2026-04-23T07:00:00+00:00",
+                ),
+            )
+            await conn.commit()
+
+        override = await client.put(
+            f"/decisions/photo/{photo_id}/species/1",
+            json={
+                "canonical_sci": "Zosterops simplex",
+                "canonical_zh": "暗绿绣眼鸟",
+                "canonical_en": "swinhoe's white eye",
+            },
+        )
+        assert override.status_code == 200
+
+        detail = (await client.get(f"/library/{lib_id}")).json()
+        photo = detail["photos"][0]
+        assert photo["best_detection"]["species"] == "须浮鸥"
+        assert photo["detections"][0]["species"] == "须浮鸥"
+        assert photo["detections"][0]["manual_species"] is False
+        assert photo["detections"][1]["species"] == "暗绿绣眼鸟"
+        assert photo["detections"][1]["species_latin"] == "Zosterops simplex"
+        assert photo["detections"][1]["manual_species"] is True
+
+    async def test_detail_applies_group_species_consensus_for_single_bird_scene(
+        self,
+        real_client,
+    ) -> None:
+        client, tmp = real_client
+        lib_root = tmp / "lib_group_species"
+        for name in ("a.jpg", "b.jpg", "c.jpg", "d.jpg"):
+            _make_jpeg(lib_root / name)
+        await client.post("/library/import", json={"root_path": str(lib_root)})
+
+        libs = (await client.get("/library")).json()
+        lib_id = libs[0]["id"]
+        initial_detail = (await client.get(f"/library/{lib_id}")).json()
+        photos = sorted(initial_detail["photos"], key=lambda p: p["file_name"])
+
+        def result_json(
+            photo_id: str,
+            species: str | None,
+            sci: str | None,
+            confidence: float | None,
+            extra_candidate: tuple[str, str, float] | None = None,
+        ) -> str:
+            candidates = []
+            if species and sci and confidence is not None:
+                candidates.append(
+                    {
+                        "canonical_sci": sci,
+                        "canonical_zh": species,
+                        "confidence": confidence,
+                    }
+                )
+            if extra_candidate is not None:
+                extra_sci, extra_zh, extra_conf = extra_candidate
+                candidates.append(
+                    {
+                        "canonical_sci": extra_sci,
+                        "canonical_zh": extra_zh,
+                        "confidence": extra_conf,
+                    }
+                )
+            detection = {
+                "bbox": {"x1": 1, "y1": 2, "x2": 30, "y2": 40, "confidence": 0.9},
+                "quality": {"clipiqa": 0.7, "hyperiqa": 0.8, "combined": 0.76},
+                "grade": "select",
+                "pose": {"head_visible": True, "eye_visible": True},
+                "species": species,
+                "species_candidates": candidates,
+            }
+            return json.dumps(
+                {
+                    "photo_id": photo_id,
+                    "pipeline_version": "test-v1",
+                    "bird_count": 1,
+                    "duration_ms": 12,
+                    "best": detection,
+                    "detections": [detection],
+                }
+            )
+
+        rows = [
+            ("a.jpg", "暗绿绣眼鸟", "Zosterops simplex", 0.94, None),
+            ("b.jpg", "暗绿绣眼鸟", "Zosterops simplex", 0.91, None),
+            ("c.jpg", "暗绿绣眼鸟", "Zosterops simplex", 0.88, None),
+            (
+                "d.jpg",
+                "日本绣眼鸟",
+                "Zosterops japonicus",
+                0.43,
+                ("Zosterops simplex", "暗绿绣眼鸟", 0.30),
+            ),
+        ]
+
+        async with aiosqlite.connect(tmp / "test.db") as conn:
+            for index, photo in enumerate(photos):
+                await conn.execute(
+                    "UPDATE photos SET scene_id = ?, file_mtime = ? WHERE id = ?",
+                    (0, f"2026-04-23T07:00:0{index}+00:00", photo["id"]),
+                )
+            for file_name, species, sci, confidence, extra in rows:
+                photo = next(p for p in photos if p["file_name"] == file_name)
+                await conn.execute(
+                    "INSERT INTO analysis_results (id, photo_id, pipeline_version, "
+                    "quality_score, grade, bird_count, species, result_json, created_at, "
+                    "is_active) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)",
+                    (
+                        f"ar-{file_name}",
+                        photo["id"],
+                        "test-v1",
+                        0.76,
+                        "select",
+                        1,
+                        species,
+                        result_json(photo["id"], species, sci, confidence, extra),
+                        "2026-04-23T07:00:00+00:00",
+                    ),
+                )
+            await conn.commit()
+
+        detail = (await client.get(f"/library/{lib_id}")).json()
+        by_name = {p["file_name"]: p for p in detail["photos"]}
+        corrected = by_name["d.jpg"]
+        assert corrected["model_species"] == "日本绣眼鸟"
+        assert corrected["species"] == "暗绿绣眼鸟"
+        assert corrected["species_latin"] == "Zosterops simplex"
+        assert corrected["species_source"] == "group_consensus"
+        assert corrected["group_species_support"] == 3
+        assert corrected["group_species_evidence"] == 4
+        assert corrected["species_conflict"] is False
+        assert by_name["a.jpg"]["species_source"] == "model"
 
 
 class TestDelete:

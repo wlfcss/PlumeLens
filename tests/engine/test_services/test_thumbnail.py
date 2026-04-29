@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
 from engine.core.database import Database
+from engine.services.event_bus import subscribe_library_events, unsubscribe_library_events
 from engine.services.thumbnail import (
     GRID_LONG_EDGE,
     PREVIEW_LONG_EDGE,
@@ -32,13 +34,14 @@ async def db_with_photos(tmp_path: Path) -> tuple[Database, Path]:
         path = photo_dir / f"p{i}.jpg"
         # 制作一张足够大的原图，确认 resize 真的缩小
         Image.new("RGB", (4000, 3000), color=(10 * i, 20 * i, 30 * i)).save(
-            path, "JPEG", quality=85,
+            path,
+            "JPEG",
+            quality=85,
         )
         await db.conn.execute(
             "INSERT INTO photos (id, file_path, file_name, file_size, "
             "file_mtime, created_at, library_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (f"photo-{i}", str(path), f"p{i}.jpg", 100,
-             "2026-04-24", "2026-04-24", "lib-1"),
+            (f"photo-{i}", str(path), f"p{i}.jpg", 100, "2026-04-24", "2026-04-24", "lib-1"),
         )
     await db.conn.commit()
     yield db, tmp_path / "cache"
@@ -88,7 +91,8 @@ class TestGenerateThumbnails:
 
 class TestEnsureThumbnailsForPhoto:
     async def test_builds_and_updates_photos_table(
-        self, db_with_photos: tuple[Database, Path],
+        self,
+        db_with_photos: tuple[Database, Path],
     ) -> None:
         db, cache = db_with_photos
         paths = await ensure_thumbnails_for_photo(db, "photo-0", cache)
@@ -104,7 +108,8 @@ class TestEnsureThumbnailsForPhoto:
         assert row["thumb_preview"] == "preview/photo-0.jpg"
 
     async def test_second_call_reuses_existing(
-        self, db_with_photos: tuple[Database, Path],
+        self,
+        db_with_photos: tuple[Database, Path],
     ) -> None:
         db, cache = db_with_photos
         first = await ensure_thumbnails_for_photo(db, "photo-1", cache)
@@ -113,6 +118,7 @@ class TestEnsureThumbnailsForPhoto:
 
         # 手动把 mtime 往前拨 100 秒（避免 async 里 time.sleep），用于观测是否被重建
         import os
+
         os.utime(first.grid, (mtime1 - 100, mtime1 - 100))
 
         # 二次调用应该复用（mtime 不会被覆盖）
@@ -121,7 +127,8 @@ class TestEnsureThumbnailsForPhoto:
         assert second.grid.stat().st_mtime == first.grid.stat().st_mtime
 
     async def test_force_rebuilds(
-        self, db_with_photos: tuple[Database, Path],
+        self,
+        db_with_photos: tuple[Database, Path],
     ) -> None:
         db, cache = db_with_photos
         first = await ensure_thumbnails_for_photo(db, "photo-2", cache)
@@ -130,6 +137,7 @@ class TestEnsureThumbnailsForPhoto:
 
         # 手动把 mtime 往前拨 100 秒（避免 async 里 time.sleep），用于观测是否被重建
         import os
+
         os.utime(first.grid, (mtime1 - 100, mtime1 - 100))
 
         second = await ensure_thumbnails_for_photo(db, "photo-2", cache, force=True)
@@ -138,15 +146,23 @@ class TestEnsureThumbnailsForPhoto:
         assert second.grid.stat().st_mtime > mtime1 - 100
 
     async def test_missing_source_returns_none(
-        self, db_with_photos: tuple[Database, Path],
+        self,
+        db_with_photos: tuple[Database, Path],
     ) -> None:
         db, cache = db_with_photos
         # 插入一条 photo 指向不存在的文件
         await db.conn.execute(
             "INSERT INTO photos (id, file_path, file_name, file_size, "
             "file_mtime, created_at, library_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            ("photo-missing", "/nonexistent/file.jpg", "file.jpg", 0,
-             "2026-04-24", "2026-04-24", "lib-1"),
+            (
+                "photo-missing",
+                "/nonexistent/file.jpg",
+                "file.jpg",
+                0,
+                "2026-04-24",
+                "2026-04-24",
+                "lib-1",
+            ),
         )
         await db.conn.commit()
         result = await ensure_thumbnails_for_photo(db, "photo-missing", cache)
@@ -155,19 +171,50 @@ class TestEnsureThumbnailsForPhoto:
 
 class TestBatchGenerate:
     async def test_library_batch(
-        self, db_with_photos: tuple[Database, Path],
+        self,
+        db_with_photos: tuple[Database, Path],
     ) -> None:
         db, cache = db_with_photos
         report = await generate_library_thumbnails(
-            db, "lib-1", cache, concurrency=2,
+            db,
+            "lib-1",
+            cache,
+            concurrency=2,
         )
         assert report["built"] == 3
         assert report["failed"] == 0
 
         # 第二次运行应全部跳过（因为 photos.thumb_grid 已填）
         report2 = await generate_library_thumbnails(
-            db, "lib-1", cache, concurrency=2,
+            db,
+            "lib-1",
+            cache,
+            concurrency=2,
         )
         # 第二轮 SELECT 条件是 thumb_grid IS NULL OR thumb_preview IS NULL
         # 所有 photo 已填 → 返回空列表 → 0 built
         assert report2["built"] == 0
+
+    async def test_library_batch_publishes_thumbnail_events(
+        self,
+        db_with_photos: tuple[Database, Path],
+    ) -> None:
+        db, cache = db_with_photos
+        queue = subscribe_library_events("lib-1")
+        try:
+            report = await generate_library_thumbnails(
+                db,
+                "lib-1",
+                cache,
+                concurrency=2,
+            )
+            first_event = await asyncio.wait_for(queue.get(), timeout=1)
+            assert report["built"] == 3
+            assert first_event["type"] == "thumbnail_batch"
+            assert first_event["payload"]["built"]
+
+            final_event = await asyncio.wait_for(queue.get(), timeout=1)
+            assert final_event["type"] == "thumbnail_complete"
+            assert final_event["payload"]["built"] == 3
+        finally:
+            unsubscribe_library_events("lib-1", queue)

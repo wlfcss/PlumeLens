@@ -2,7 +2,7 @@
  * Analysis hooks — batch start + stats polling + SSE progress subscription.
  */
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
 import {
   api,
@@ -11,6 +11,9 @@ import {
 } from '@/lib/api-client'
 
 const QUEUE_STATS_KEY = (libraryId: string) => ['queue-stats', libraryId] as const
+const LIBRARY_DETAIL_KEY = (libraryId: string) => ['library', libraryId] as const
+const LIBRARIES_KEY = ['libraries'] as const
+const DETAIL_REFRESH_THROTTLE_MS = 2_000
 
 export function useStartBatch() {
   const qc = useQueryClient()
@@ -73,7 +76,9 @@ export function useAnalysisProgress(
   enabled = true,
   restartKey: number = 0,
 ): AnalysisProgressEvent | null {
+  const qc = useQueryClient()
   const [event, setEvent] = useState<AnalysisProgressEvent | null>(null)
+  const lastDetailRefreshRef = useRef<{ at: number; signature: string } | null>(null)
 
   useEffect(() => {
     if (!libraryId || !enabled) return
@@ -87,9 +92,36 @@ export function useAnalysisProgress(
         source = new EventSource(url)
         source.onmessage = (msg) => {
           try {
-            setEvent(JSON.parse(msg.data))
+            const parsed = JSON.parse(msg.data) as AnalysisProgressEvent
+            setEvent(parsed)
+
+            // SSE 本身只更新进度按钮；照片卡片/统计来自 library detail 查询。
+            // 分析完成数变化时节流刷新 detail/list，让识别结果持续进入 UI。
+            const signature = [
+              parsed.completed,
+              parsed.failed,
+              parsed.dead,
+              parsed.pending,
+              parsed.processing,
+              parsed.total,
+            ].join(':')
+            const active = parsed.pending + parsed.processing > 0
+            const finished =
+              parsed.total > 0 &&
+              parsed.pending + parsed.processing === 0 &&
+              parsed.completed + parsed.failed + parsed.dead >= parsed.total
+            const previous = lastDetailRefreshRef.current
+            const now = Date.now()
+            const due =
+              !previous ||
+              (signature !== previous.signature &&
+                (finished || now - previous.at >= DETAIL_REFRESH_THROTTLE_MS))
+            if ((active || finished) && due) {
+              lastDetailRefreshRef.current = { at: now, signature }
+              qc.invalidateQueries({ queryKey: LIBRARY_DETAIL_KEY(parsed.library_id) })
+              qc.invalidateQueries({ queryKey: LIBRARIES_KEY })
+            }
           } catch (e) {
-            // eslint-disable-next-line no-console
             console.warn('SSE malformed frame:', e)
           }
         }
@@ -97,12 +129,10 @@ export function useAnalysisProgress(
         // 点「开始分析」能立即看到 pending 变化）。这里保留 listener 是
         // 兼容旧后端 / 防御性写法 — 收到 done 不再 close source。
         source.onerror = (e) => {
-          // eslint-disable-next-line no-console
           console.warn('SSE error (browser will reconnect):', e)
         }
       })
       .catch((e) => {
-        // eslint-disable-next-line no-console
         console.warn('Failed to resolve SSE URL:', e)
       })
 
@@ -111,7 +141,7 @@ export function useAnalysisProgress(
       source?.close()
       source = null
     }
-  }, [libraryId, enabled, restartKey])
+  }, [libraryId, enabled, qc, restartKey])
 
   return event
 }

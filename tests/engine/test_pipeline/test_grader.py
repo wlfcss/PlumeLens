@@ -1,6 +1,5 @@
 """Tests for quality score grading."""
 
-
 from engine.pipeline.grader import grade
 from engine.pipeline.models import QualityGrade
 
@@ -11,20 +10,20 @@ class TestGrader:
     def test_reject_below_threshold(self) -> None:
         assert grade(0.0) == QualityGrade.REJECT
         assert grade(0.10) == QualityGrade.REJECT
-        assert grade(0.329) == QualityGrade.REJECT
+        assert grade(0.449) == QualityGrade.REJECT
 
     def test_record_at_boundary(self) -> None:
-        assert grade(0.33) == QualityGrade.RECORD
-        assert grade(0.38) == QualityGrade.RECORD
-        assert grade(0.429) == QualityGrade.RECORD
+        assert grade(0.45) == QualityGrade.RECORD
+        assert grade(0.52) == QualityGrade.RECORD
+        assert grade(0.599) == QualityGrade.RECORD
 
     def test_usable_range(self) -> None:
-        assert grade(0.43) == QualityGrade.USABLE
-        assert grade(0.50) == QualityGrade.USABLE
-        assert grade(0.599) == QualityGrade.USABLE
+        assert grade(0.60) == QualityGrade.USABLE
+        assert grade(0.68) == QualityGrade.USABLE
+        assert grade(0.749) == QualityGrade.USABLE
 
     def test_select_above_threshold(self) -> None:
-        assert grade(0.60) == QualityGrade.SELECT
+        assert grade(0.75) == QualityGrade.SELECT
         assert grade(0.85) == QualityGrade.SELECT
         assert grade(1.0) == QualityGrade.SELECT
 

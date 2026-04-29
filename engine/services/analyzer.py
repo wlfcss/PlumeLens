@@ -60,7 +60,8 @@ async def analyze_photo(
         raise RuntimeError(msg)
 
     async with db.conn.execute(
-        "SELECT file_path FROM photos WHERE id = ?", (photo_id,),
+        "SELECT file_path FROM photos WHERE id = ?",
+        (photo_id,),
     ) as cur:
         row = await cur.fetchone()
     if row is None:

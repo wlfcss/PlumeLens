@@ -2,46 +2,66 @@ import {
   Aperture,
   ArrowRight,
   Check,
+  ChevronLeft,
+  ChevronRight,
   Clock3,
   Download,
   Feather,
   FolderOpen,
   FolderSearch2,
-  ImageIcon,
   LibraryBig,
+  MapPin,
   RefreshCw,
   Search,
   Settings2,
+  Shield,
   Sparkles,
+  Trophy,
   Waypoints,
   X,
 } from 'lucide-react'
 import {
   startTransition,
+  useCallback,
   useDeferredValue,
   useEffect,
   useMemo,
   useRef,
   useState,
+  type CSSProperties,
   type ReactNode,
 } from 'react'
 import { useTranslation } from 'react-i18next'
 
+import { ThumbnailImage, type ThumbnailLoadStatus } from '@/components/thumbnail-image'
 import { useAnalysisProgress, useStartBatch } from '@/hooks/use-analysis'
 import { useBackendHealth } from '@/hooks/use-backend'
-import { useBatchSetDecisions, useSetDecision } from '@/hooks/use-decisions'
+import { useBatchSetDecisions, useSetDecision, useSetSpeciesOverride } from '@/hooks/use-decisions'
 import {
   useAllLibraryDetails,
+  useBuildPhotoThumbnail,
   useImportLibrary,
   useLibraries,
   useLibraryDetail,
+  useLibraryEvents,
 } from '@/hooks/use-library'
 import { buildFragmentFromDetail, computeIqaCropBox } from '@/lib/backend-adapter'
-import type { AnalysisProgressEvent, DecisionValue } from '@/lib/api-client'
+import type {
+  AnalysisProgressEvent,
+  DecisionValue,
+  LibraryDetail,
+  SpeciesOverrideValue,
+} from '@/lib/api-client'
 
 type AnalysisProgressEventLite = AnalysisProgressEvent
-import { getSpeciesWiki } from '@/lib/species-wiki'
+import {
+  getSpeciesWiki,
+  listAllSpecies,
+  normalizeSpeciesAlias,
+  resolveSpeciesCanonicalSci,
+} from '@/lib/species-wiki'
 import type {
+  AfOverlay,
   AnalysisStatus,
   ArchiveTab,
   AppRoute,
@@ -62,12 +82,10 @@ import { cn } from '@/lib/utils'
 import { useShallow, useUIStore, type QuickFilter, type ViewMode } from '@/stores/ui-store'
 
 type Tone = 'neutral' | 'warning' | 'accent' | 'success' | 'muted'
-type SortMode = 'score' | 'shot_at' | 'recent' | 'name'
+type SortMode = 'score' | 'shot_at' | 'name'
+type PhotoCategory = PhotoGrade | 'no_bird'
 
 type FolderSummary = {
-  selectedCount: number
-  maybeCount: number
-  rejectedCount: number
   newSpeciesCount: number
   birdPhotoCount: number
   noBirdCount: number
@@ -86,19 +104,72 @@ const routeIcons: Record<AppRoute, typeof Aperture> = {
   archive: LibraryBig,
 }
 
-const quickFilters: QuickFilter[] = [
-  'all',
-  'unreviewed',
-  'selected',
-  'maybe',
-  'rejected',
-  'select',
-  'new_species',
-]
+const THUMBNAIL_REPAIR_COOLDOWN_MS = 30_000
 
-const archiveTabs: ArchiveTab[] = ['photos', 'species']
-const viewModes: ViewMode[] = ['grouped', 'flat', 'selected_only']
-const sortModes: SortMode[] = ['score', 'shot_at', 'recent', 'name']
+const quickFilters: QuickFilter[] = ['select', 'usable', 'record', 'reject', 'no_bird']
+
+const archiveTabs: ArchiveTab[] = ['species', 'map']
+type SpeciesCollectionFilter = 'all' | 'collected' | 'locked'
+const speciesCollectionFilters: SpeciesCollectionFilter[] = ['all', 'collected', 'locked']
+const viewModes: ViewMode[] = ['grouped', 'flat']
+const sortModes: SortMode[] = ['score', 'shot_at', 'name']
+const speciesCatalog = listAllSpecies()
+
+type SpeciesCatalogItem = (typeof speciesCatalog)[number]
+type SpeciesCollectionGroupId =
+  | 'protected1'
+  | 'protected2'
+  | 'threatened'
+  | 'regular'
+  | 'modelExtra'
+type SpeciesCollectionGroup = {
+  id: SpeciesCollectionGroupId
+  litCount: number
+  species: SpeciesRecord[]
+}
+const speciesCollectionGroupOrder: SpeciesCollectionGroupId[] = [
+  'protected1',
+  'protected2',
+  'threatened',
+  'regular',
+  'modelExtra',
+]
+const archiveEligibleGrades = new Set<PhotoGrade>(['select', 'usable', 'record'])
+const unknownSpeciesAliases = new Set(['未识别物种', 'unidentified', 'unknown species', 'unknown'])
+export type ArchiveSpeciesEntry = {
+  key: string
+  name: string
+  latinName: string
+  englishName: string | null
+}
+type MapRegionId =
+  | 'northeast'
+  | 'north'
+  | 'east'
+  | 'central'
+  | 'south'
+  | 'southwest'
+  | 'northwest'
+  | 'qinghaiTibet'
+
+export interface ArchiveMapPin {
+  id: string
+  speciesId: string
+  speciesName: string
+  latinName: string
+  regionId: MapRegionId
+  regionLabelKey: string
+  x: number
+  y: number
+  photos: PhotoRecord[]
+  source: 'gps'
+}
+
+function formatScore(score: number | null | undefined): string {
+  if (score === null || score === undefined || !Number.isFinite(score)) return '--'
+  return (score * 100).toFixed(1)
+}
+
 const birdGlyphPattern = [
   '........................',
   '...............11.......',
@@ -151,22 +222,38 @@ function formatRatio(current: number, total: number): string {
   return `${current}/${total}`
 }
 
+export function isPlainSpaceKey(event: KeyboardEvent): boolean {
+  return (
+    (event.key === ' ' || event.key === 'Spacebar' || event.code === 'Space') &&
+    !event.metaKey &&
+    !event.ctrlKey &&
+    !event.altKey &&
+    !event.shiftKey
+  )
+}
+
+export function shouldIgnoreSelectionReviewShortcutTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false
+  if (target.closest('[data-selection-review-shortcut="true"]')) return false
+  if (target.isContentEditable) return true
+  return (
+    target.closest(
+      'input, textarea, select, button, a, [role="button"], [contenteditable="true"]',
+    ) !== null
+  )
+}
+
 function buildFolderSummary(photos: PhotoRecord[]): FolderSummary {
   return photos.reduce<FolderSummary>(
     (acc, photo) => {
-      acc.gradeCounts[photo.grade] += 1
-      if (photo.decision === 'selected') acc.selectedCount += 1
-      if (photo.decision === 'maybe') acc.maybeCount += 1
-      if (photo.decision === 'rejected') acc.rejectedCount += 1
+      const category = photoCategory(photo)
+      if (category !== 'no_bird') acc.gradeCounts[category] += 1
       if (photo.isNewSpecies) acc.newSpeciesCount += 1
       if (photo.birdCount > 0) acc.birdPhotoCount += 1
       if (photo.birdCount === 0) acc.noBirdCount += 1
       return acc
     },
     {
-      selectedCount: 0,
-      maybeCount: 0,
-      rejectedCount: 0,
       newSpeciesCount: 0,
       birdPhotoCount: 0,
       noBirdCount: 0,
@@ -178,27 +265,119 @@ function buildFolderSummary(photos: PhotoRecord[]): FolderSummary {
   )
 }
 
-function filterPhotoByQuickFilter(photo: PhotoRecord, filter: QuickFilter): boolean {
-  switch (filter) {
-    case 'unreviewed':
-      return photo.decision === 'unreviewed'
-    case 'selected':
-      return photo.decision === 'selected'
-    case 'maybe':
-      return photo.decision === 'maybe'
-    case 'rejected':
-      return photo.decision === 'rejected'
-    case 'select':
-      return photo.grade === 'select'
-    case 'new_species':
-      return photo.isNewSpecies
-    case 'bird':
-      return photo.birdCount > 0
-    case 'no_bird':
-      return photo.birdCount === 0
-    default:
-      return true
+function effectivePhotoGrade(photo: PhotoRecord): PhotoGrade {
+  return photo.decision ?? photo.grade
+}
+
+function photoCategory(photo: PhotoRecord): PhotoCategory {
+  if (photo.decision) return photo.decision
+  return photo.birdCount === 0 ? 'no_bird' : photo.grade
+}
+
+export function isArchiveEligiblePhoto(photo: PhotoRecord): boolean {
+  return (
+    photo.analysisStatus === 'done' &&
+    photo.birdCount > 0 &&
+    archiveEligibleGrades.has(effectivePhotoGrade(photo))
+  )
+}
+
+function normalizeArchiveSpeciesEntry(input: {
+  englishName?: string | null
+  latinName?: string | null
+  name?: string | null
+}): ArchiveSpeciesEntry | null {
+  const resolvedNameLatinName = resolveSpeciesCanonicalSci(input.name)
+  const resolvedEnglishLatinName = resolveSpeciesCanonicalSci(input.englishName)
+  const resolvedLatinName =
+    resolveSpeciesCanonicalSci(input.latinName) ?? resolvedNameLatinName ?? resolvedEnglishLatinName
+  const fallbackLatinName = input.latinName?.trim() ?? ''
+  const normalizedName = normalizeSpeciesAlias(input.name)
+  const isUnknownName = normalizedName ? unknownSpeciesAliases.has(normalizedName) : false
+  if (!resolvedLatinName && !fallbackLatinName && (!normalizedName || isUnknownName)) return null
+
+  const latinName = resolvedLatinName ?? fallbackLatinName
+  const key = latinName ? `sci:${latinName}` : `name:${normalizedName}`
+  const wiki = latinName ? getSpeciesWiki(latinName) : undefined
+  const name = wiki?.canonical_zh ?? input.name ?? latinName
+  return {
+    key,
+    name,
+    latinName,
+    englishName: wiki?.canonical_en ?? input.englishName ?? null,
   }
+}
+
+export function getArchiveSpeciesEntries(photo: PhotoRecord): ArchiveSpeciesEntry[] {
+  if (!isArchiveEligiblePhoto(photo)) return []
+  const rawEntries: Array<{
+    englishName?: string | null
+    latinName?: string | null
+    name?: string | null
+  }> = []
+  const manualEntries: typeof rawEntries = []
+
+  for (const detection of photo.birdDetections ?? []) {
+    if (!detection.manualSpecies) continue
+    manualEntries.push({
+      name: detection.speciesName,
+      latinName: detection.speciesLatinName,
+      englishName: detection.speciesEnglishName,
+    })
+  }
+
+  if (manualEntries.length > 0) {
+    rawEntries.push(...manualEntries)
+  } else if (photo.manualSpecies || photo.speciesSource === 'manual') {
+    rawEntries.push({
+      name: photo.speciesName,
+      latinName: photo.speciesLatinName,
+      englishName: photo.speciesEnglishName,
+    })
+  } else if (photo.speciesSource === 'group_consensus') {
+    rawEntries.push({
+      name: photo.groupSpeciesName ?? photo.speciesName,
+      latinName: photo.groupSpeciesLatinName ?? photo.speciesLatinName,
+      englishName: photo.speciesEnglishName,
+    })
+  } else {
+    rawEntries.push({
+      name: photo.modelSpeciesName ?? photo.speciesName,
+      latinName: photo.modelSpeciesLatinName ?? photo.speciesLatinName,
+      englishName: photo.speciesEnglishName,
+    })
+  }
+
+  const seen = new Set<string>()
+  const entries: ArchiveSpeciesEntry[] = []
+  for (const rawEntry of rawEntries) {
+    const entry = normalizeArchiveSpeciesEntry(rawEntry)
+    if (!entry || seen.has(entry.key)) continue
+    seen.add(entry.key)
+    entries.push(entry)
+  }
+  return entries
+}
+
+function archivePhotoSearchParts(photo: PhotoRecord): Array<string | null | undefined> {
+  return [
+    photo.fileName,
+    photo.speciesName,
+    photo.speciesLatinName,
+    photo.speciesEnglishName,
+    photo.caption,
+    ...getArchiveSpeciesEntries(photo).flatMap((entry) => [
+      entry.name,
+      entry.latinName,
+      entry.englishName,
+    ]),
+  ]
+}
+
+function filterPhotoByQuickFilters(photo: PhotoRecord, filters: QuickFilter[]): boolean {
+  if (photo.analysisStatus !== 'done') return true
+  if (filters.length === 0) return false
+  return filters.includes(photoCategory(photo))
 }
 
 // 档位优先级：精选(3) > 可用(2) > 记录(1) > 淘汰(0)
@@ -213,10 +392,9 @@ function sortPhotos(photos: PhotoRecord[], sortBy: SortMode): PhotoRecord[] {
   return photos.toSorted((left, right) => {
     if (sortBy === 'name') return left.fileName.localeCompare(right.fileName)
     if (sortBy === 'shot_at') return right.shotAt.localeCompare(left.shotAt)
-    if (sortBy === 'recent') return right.id.localeCompare(left.id)
     // 综合评分（默认）：先按档位降序（精选 → 可用 → 记录 → 淘汰），
     // 同档内按 quality_score 降序
-    const gradeDiff = GRADE_RANK[right.grade] - GRADE_RANK[left.grade]
+    const gradeDiff = GRADE_RANK[effectivePhotoGrade(right)] - GRADE_RANK[effectivePhotoGrade(left)]
     if (gradeDiff !== 0) return gradeDiff
     return (right.finalScore ?? -1) - (left.finalScore ?? -1)
   })
@@ -237,10 +415,90 @@ function gradeTone(grade: PhotoGrade): Tone {
   return 'neutral'
 }
 
+function categoryTone(category: PhotoCategory): Tone {
+  if (category === 'no_bird') return 'muted'
+  return gradeTone(category)
+}
+
+function speciesSourceTone(photo: PhotoRecord): Tone {
+  if (photo.speciesSource === 'group_consensus') return 'success'
+  if (photo.speciesConflict || photo.speciesSource === 'conflict') return 'warning'
+  if (photo.speciesSource === 'manual' || photo.manualSpecies) return 'accent'
+  return 'muted'
+}
+
+function speciesSourceKind(photo: PhotoRecord): 'conflict' | 'correction' | 'manual' | null {
+  if (photo.speciesSource === 'group_consensus') return 'correction'
+  if (photo.speciesConflict || photo.speciesSource === 'conflict') return 'conflict'
+  if (photo.speciesSource === 'manual' || photo.manualSpecies) return 'manual'
+  return null
+}
+
+function speciesSourceBadge(
+  photo: PhotoRecord,
+  t: ReturnType<typeof useTranslation>['t'],
+): string | null {
+  if (photo.speciesSource === 'group_consensus') {
+    return t('selection.speciesSource.groupConsensus')
+  }
+  if (photo.speciesConflict || photo.speciesSource === 'conflict') {
+    return t('selection.speciesSource.conflict')
+  }
+  if (photo.speciesSource === 'manual' || photo.manualSpecies) {
+    return t('selection.speciesSource.manual')
+  }
+  return null
+}
+
+function effectiveSpeciesName(photo: PhotoRecord): string | null {
+  if (photo.manualSpecies || photo.speciesSource === 'manual') return photo.speciesName
+  if (photo.speciesSource === 'group_consensus') return photo.groupSpeciesName ?? photo.speciesName
+  if (photo.speciesSource === 'model') return photo.modelSpeciesName ?? photo.speciesName
+  return photo.speciesName
+}
+
+function effectiveSpeciesLatinName(photo: PhotoRecord): string | null {
+  if (photo.manualSpecies || photo.speciesSource === 'manual') return photo.speciesLatinName
+  if (photo.speciesSource === 'group_consensus') {
+    return photo.groupSpeciesLatinName ?? photo.speciesLatinName
+  }
+  if (photo.speciesSource === 'model') return photo.modelSpeciesLatinName ?? photo.speciesLatinName
+  return photo.speciesLatinName
+}
+
+function speciesSourceDetail(
+  photo: PhotoRecord,
+  t: ReturnType<typeof useTranslation>['t'],
+): string | null {
+  const support =
+    photo.groupSpeciesSupport !== null &&
+    photo.groupSpeciesSupport !== undefined &&
+    photo.groupSpeciesEvidence !== null &&
+    photo.groupSpeciesEvidence !== undefined
+      ? `${photo.groupSpeciesSupport}/${photo.groupSpeciesEvidence}`
+      : '--'
+  const raw = photo.modelSpeciesName
+  const effective = effectiveSpeciesName(photo)
+
+  if (photo.speciesSource === 'group_consensus') {
+    if (raw && raw !== effective) {
+      return t('selection.speciesSource.groupConsensusWithRaw', { species: raw, support })
+    }
+    return t('selection.speciesSource.groupConsensusDetail', { support })
+  }
+  if (photo.speciesConflict || photo.speciesSource === 'conflict') {
+    return t('selection.speciesSource.conflictDetail')
+  }
+  if (photo.speciesSource === 'manual' || photo.manualSpecies) {
+    return t('selection.speciesSource.manualDetail')
+  }
+  return null
+}
+
 function decisionTone(decision: SelectionDecision): Tone {
-  if (decision === 'selected') return 'success'
-  if (decision === 'maybe') return 'warning'
-  if (decision === 'rejected') return 'accent'
+  if (decision === 'select' || decision === 'usable') return 'success'
+  if (decision === 'record') return 'warning'
+  if (decision === 'reject') return 'accent'
   return 'muted'
 }
 
@@ -255,12 +513,12 @@ function statusLabelKey(status: FolderStatus) {
   return `selection.folderStatus.${status}` as const
 }
 
-function decisionLabelKey(decision: SelectionDecision) {
-  return `selection.decision.${decision}` as const
-}
-
 function gradeLabelKey(grade: PhotoGrade) {
   return `selection.grade.${grade}` as const
+}
+
+function categoryLabelKey(category: PhotoCategory) {
+  return category === 'no_bird' ? 'selection.quickFilters.no_bird' : gradeLabelKey(category)
 }
 
 function poseTagKey(tag: PoseTagId) {
@@ -305,76 +563,580 @@ function mergeWorkspace(current: WorkspaceSnapshot, patch: WorkspaceSnapshot): W
 }
 
 function photoReviewReason(photo: PhotoRecord): string {
+  if (photo.decision) return 'selection.reviewReasons.manualOverride'
   if (photo.problemTags.includes('no_bird')) return 'selection.reviewReasons.no_bird'
   if (photo.isNewSpecies) return 'selection.reviewReasons.new_species'
-  if (photo.grade === 'select') return 'selection.reviewReasons.top_pick'
+  if (effectivePhotoGrade(photo) === 'select') return 'selection.reviewReasons.top_pick'
   if (photo.problemTags.length > 0) return 'selection.reviewReasons.has_issues'
-  if (photo.decision === 'selected') return 'selection.reviewReasons.user_selected'
   return 'selection.reviewReasons.candidate'
 }
 
-function deriveSpeciesRecords(workspace: WorkspaceSnapshot): SpeciesRecord[] {
-  // 从真实分析结果聚合：扫所有 photos，按物种分组
-  const groups = new Map<
+function legacyAfPointToOverlay(point: { x: number; y: number } | null): AfOverlay | null {
+  if (!point) return null
+  return {
+    kind: 'point',
+    source: 'legacy',
+    center: point,
+    points: [{ ...point, in_focus: true, selected: true }],
+    focused_points: [{ ...point, in_focus: true, selected: true }],
+    selected_points: [{ ...point, in_focus: true, selected: true }],
+    focused_count: 1,
+    selected_count: 1,
+    point_count: 1,
+  }
+}
+
+function stableHue(input: string): number {
+  let hue = 0
+  for (let i = 0; i < input.length; i++) hue = (hue * 31 + input.charCodeAt(i)) >>> 0
+  return hue % 360
+}
+
+function hashStableValue(seed: number, value: unknown): number {
+  let text: string
+  if (value === null || value === undefined) {
+    text = ''
+  } else if (typeof value === 'string') {
+    text = value
+  } else {
+    try {
+      text = JSON.stringify(value) ?? ''
+    } catch {
+      text = String(value)
+    }
+  }
+
+  let hash = seed >>> 0
+  for (let i = 0; i < text.length; i += 1) {
+    hash = Math.imul(hash ^ text.charCodeAt(i), 16777619) >>> 0
+  }
+  return Math.imul(hash ^ 31, 16777619) >>> 0
+}
+
+function libraryDetailContentHash(detail: LibraryDetail): string {
+  let hash = 2166136261
+  for (const photo of detail.photos) {
+    hash = hashStableValue(hash, photo.id)
+    hash = hashStableValue(hash, photo.pipeline_version)
+    hash = hashStableValue(hash, photo.grade)
+    hash = hashStableValue(hash, photo.quality_score)
+    hash = hashStableValue(hash, photo.bird_count)
+    hash = hashStableValue(hash, photo.species)
+    hash = hashStableValue(hash, photo.species_latin)
+    hash = hashStableValue(hash, photo.species_source)
+    hash = hashStableValue(hash, photo.model_species)
+    hash = hashStableValue(hash, photo.model_species_latin)
+    hash = hashStableValue(hash, photo.group_species)
+    hash = hashStableValue(hash, photo.group_species_latin)
+    hash = hashStableValue(hash, photo.group_species_confidence)
+    hash = hashStableValue(hash, photo.decision)
+    hash = hashStableValue(hash, photo.thumb_grid)
+    hash = hashStableValue(hash, photo.thumb_preview)
+    hash = hashStableValue(hash, photo.scene_id)
+    hash = hashStableValue(hash, photo.exif)
+    hash = hashStableValue(hash, photo.best_detection)
+    hash = hashStableValue(hash, photo.detections)
+  }
+  return hash.toString(36)
+}
+
+function speciesRecordId(latinName: string, fallbackName = ''): string {
+  const seed = latinName.trim() || fallbackName.trim() || 'unknown'
+  return `species-${seed.toLowerCase().replace(/[^a-z0-9\u4e00-\u9fa5]+/g, '-')}`
+}
+
+function speciesDisplayName(item: SpeciesCatalogItem): string {
+  return item.canonical_zh ?? item.zh_title ?? item.canonical_en ?? item.canonical_sci
+}
+
+function speciesCollectionGroupId(
+  species: Pick<SpeciesRecord, 'protectLevel' | 'iucn' | 'inChinaV12'>,
+): SpeciesCollectionGroupId {
+  if (species.inChinaV12 === false) return 'modelExtra'
+  const protect = species.protectLevel ?? ''
+  const iucn = (species.iucn ?? '').toUpperCase()
+  if (protect.includes('一级')) return 'protected1'
+  if (protect.includes('二级')) return 'protected2'
+  if (['NT', 'VU', 'EN', 'CR'].includes(iucn)) return 'threatened'
+  return 'regular'
+}
+
+function speciesCollectionGroupRank(groupId: SpeciesCollectionGroupId): number {
+  return speciesCollectionGroupOrder.indexOf(groupId)
+}
+
+function speciesCollectionGroupTone(groupId: SpeciesCollectionGroupId): Tone {
+  if (groupId === 'protected1' || groupId === 'threatened') return 'accent'
+  if (groupId === 'protected2') return 'warning'
+  if (groupId === 'modelExtra') return 'muted'
+  return 'neutral'
+}
+
+function speciesSortValue(species: SpeciesRecord): string {
+  return `${species.name}|${species.latinName}`
+}
+
+export function buildSpeciesCollectionGroups(
+  speciesRecords: SpeciesRecord[],
+): SpeciesCollectionGroup[] {
+  const groups = new Map<SpeciesCollectionGroupId, SpeciesRecord[]>()
+  for (const species of speciesRecords) {
+    const groupId = speciesCollectionGroupId(species)
+    groups.set(groupId, [...(groups.get(groupId) ?? []), species])
+  }
+
+  return speciesCollectionGroupOrder.flatMap((id) => {
+    const species = groups.get(id)
+    if (!species || species.length === 0) return []
+    return [
+      {
+        id,
+        litCount: species.filter((item) => item.collected).length,
+        species: species.toSorted((left, right) => {
+          if (Boolean(left.collected) !== Boolean(right.collected)) {
+            return left.collected ? -1 : 1
+          }
+          const scoreDiff = (right.bestScore ?? -1) - (left.bestScore ?? -1)
+          if (scoreDiff !== 0) return scoreDiff
+          return speciesSortValue(left).localeCompare(speciesSortValue(right), 'zh-Hans-CN')
+        }),
+      },
+    ]
+  })
+}
+
+function cssImageUrl(url: string): string {
+  return `url("${url.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}")`
+}
+
+function speciesArtworkStyle(imageUrl: string | null | undefined, fallbackGradient: string) {
+  return {
+    '--species-artwork-bg': imageUrl ? cssImageUrl(imageUrl) : fallbackGradient,
+  } as CSSProperties
+}
+
+type SpeciesArtworkAspect = 'unknown' | 'landscape' | 'portrait' | 'square'
+
+const speciesArtworkAspectCache = new Map<string, SpeciesArtworkAspect>()
+
+function classifySpeciesArtworkAspect(width: number, height: number): SpeciesArtworkAspect {
+  if (width <= 0 || height <= 0) return 'unknown'
+  const aspect = width / height
+  if (aspect >= 1.18) return 'landscape'
+  if (aspect <= 0.82) return 'portrait'
+  return 'square'
+}
+
+function useSpeciesArtworkAspect(imageUrl: string | null | undefined): SpeciesArtworkAspect {
+  const [aspect, setAspect] = useState<SpeciesArtworkAspect>(() => {
+    if (!imageUrl) return 'unknown'
+    return speciesArtworkAspectCache.get(imageUrl) ?? 'unknown'
+  })
+
+  useEffect(() => {
+    if (!imageUrl) {
+      setAspect('unknown')
+      return
+    }
+    const cached = speciesArtworkAspectCache.get(imageUrl)
+    if (cached) {
+      setAspect(cached)
+      return
+    }
+    setAspect('unknown')
+
+    let cancelled = false
+    const image = new Image()
+    image.onload = () => {
+      if (cancelled) return
+      const next = classifySpeciesArtworkAspect(image.naturalWidth, image.naturalHeight)
+      speciesArtworkAspectCache.set(imageUrl, next)
+      setAspect(next)
+    }
+    image.onerror = () => {
+      if (!cancelled) setAspect('unknown')
+    }
+    image.src = imageUrl
+
+    return () => {
+      cancelled = true
+    }
+  }, [imageUrl])
+
+  return aspect
+}
+
+export function deriveSpeciesRecords(workspace: WorkspaceSnapshot): SpeciesRecord[] {
+  const capturedGroups = new Map<
     string,
     {
+      name: string
+      latinName: string
+      englishName: string | null
       photos: PhotoRecord[]
       bestScore: number
       firstSeenAt: string
       lastSeenAt: string
     }
   >()
+  const aliasToGroupKey = new Map<string, string>()
+
+  const bindAlias = (alias: string | null | undefined, key: string) => {
+    const normalized = normalizeSpeciesAlias(alias)
+    if (normalized) aliasToGroupKey.set(normalized, key)
+  }
+
   for (const photo of workspace.photos) {
-    const name = photo.speciesName
-    if (!name || photo.analysisStatus !== 'done') continue
-    const score = photo.finalScore ?? 0
-    const existing = groups.get(name)
-    if (existing) {
-      existing.photos.push(photo)
-      if (score > existing.bestScore) existing.bestScore = score
-      if (photo.shotAt < existing.firstSeenAt) existing.firstSeenAt = photo.shotAt
-      if (photo.shotAt > existing.lastSeenAt) existing.lastSeenAt = photo.shotAt
-    } else {
-      groups.set(name, {
-        photos: [photo],
-        bestScore: score,
-        firstSeenAt: photo.shotAt,
-        lastSeenAt: photo.shotAt,
-      })
+    for (const entry of getArchiveSpeciesEntries(photo)) {
+      const groupKey = entry.key
+      const score = photo.finalScore ?? 0
+      const existing = capturedGroups.get(groupKey)
+      if (existing) {
+        if (!existing.photos.some((item) => item.id === photo.id)) {
+          existing.photos.push(photo)
+        }
+        if (score > existing.bestScore) existing.bestScore = score
+        if (photo.shotAt < existing.firstSeenAt) existing.firstSeenAt = photo.shotAt
+        if (photo.shotAt > existing.lastSeenAt) existing.lastSeenAt = photo.shotAt
+      } else {
+        capturedGroups.set(groupKey, {
+          name: entry.name,
+          latinName: entry.latinName,
+          englishName: entry.englishName,
+          photos: [photo],
+          bestScore: score,
+          firstSeenAt: photo.shotAt,
+          lastSeenAt: photo.shotAt,
+        })
+      }
+      bindAlias(entry.latinName, groupKey)
+      bindAlias(entry.name, groupKey)
+      bindAlias(entry.englishName, groupKey)
     }
   }
-  // 渐变封面：用物种名 hash 给每个物种一个稳定色相
-  const hueOf = (s: string): number => {
-    let h = 0
-    for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0
-    return h % 360
+
+  const matchedGroupKeys = new Set<string>()
+  const resolveCaptured = (item: SpeciesCatalogItem) => {
+    const canonical = normalizeSpeciesAlias(item.canonical_sci)
+    const canonicalGroupKey = canonical ? aliasToGroupKey.get(canonical) : null
+    if (canonicalGroupKey && !matchedGroupKeys.has(canonicalGroupKey)) {
+      matchedGroupKeys.add(canonicalGroupKey)
+      return capturedGroups.get(canonicalGroupKey) ?? null
+    }
+
+    const aliases = [item.canonical_zh, item.canonical_en]
+    for (const alias of aliases) {
+      const normalized = normalizeSpeciesAlias(alias)
+      const groupKey = normalized ? aliasToGroupKey.get(normalized) : null
+      if (groupKey && !matchedGroupKeys.has(groupKey)) {
+        matchedGroupKeys.add(groupKey)
+        return capturedGroups.get(groupKey) ?? null
+      }
+    }
+    return null
   }
-  const aggregated: SpeciesRecord[] = Array.from(groups.entries()).map(([name, g]) => {
-    const hue = hueOf(name)
-    const latinName = g.photos[0]?.speciesLatinName ?? ''
+
+  const catalogRecords: SpeciesRecord[] = speciesCatalog.map((item) => {
+    const captured = resolveCaptured(item)
+    const hue = stableHue(item.canonical_sci)
     return {
-      id: `species-real-${name}`,
-      name,
-      latinName,
+      id: speciesRecordId(item.canonical_sci),
+      name: speciesDisplayName(item),
+      latinName: item.canonical_sci,
+      englishName: item.canonical_en,
       coverGradient: `linear-gradient(135deg, hsl(${hue}, 45%, 32%), hsl(${(hue + 40) % 360}, 38%, 16%))`,
-      photoCount: g.photos.length,
-      firstSeenAt: g.firstSeenAt,
-      lastSeenAt: g.lastSeenAt,
-      bestScore: g.bestScore,
+      imageUrl: item.image_url,
+      photoCount: captured?.photos.length ?? 0,
+      firstSeenAt: captured?.firstSeenAt ?? '',
+      lastSeenAt: captured?.lastSeenAt ?? '',
+      bestScore: captured?.bestScore ?? null,
       newSightings: 0,
       regions: [],
-      summary: `${g.photos.length} 张照片`,
+      summary: item.zh_extract ?? item.en_extract ?? '',
+      collected: Boolean(captured),
+      protectLevel: item.protect_level,
+      iucn: item.iucn,
+      familyName: item.family_zh ?? item.family_sci,
+      isTrained: item.is_trained,
+      inChinaV12: item.in_china_v12,
+      catalogSource: item.in_china_v12 ? 'china_v12' : 'model_extra',
     }
   })
-  // 真后端聚合优先；如果完全没有真数据（启动初期），fallback 到 mock seeds
-  if (aggregated.length === 0) {
-    return workspace.species.toSorted((left, right) => right.bestScore - left.bestScore)
-  }
-  return aggregated.toSorted((left, right) => right.bestScore - left.bestScore)
+
+  const uncataloguedRecords: SpeciesRecord[] = Array.from(capturedGroups.entries())
+    .filter(([key]) => !matchedGroupKeys.has(key))
+    .map(([key, captured]) => {
+      const hue = stableHue(key)
+      return {
+        id: speciesRecordId(captured.latinName, captured.name),
+        name: captured.name,
+        latinName: captured.latinName,
+        englishName: captured.englishName,
+        coverGradient: `linear-gradient(135deg, hsl(${hue}, 45%, 32%), hsl(${(hue + 40) % 360}, 38%, 16%))`,
+        imageUrl: null,
+        photoCount: captured.photos.length,
+        firstSeenAt: captured.firstSeenAt,
+        lastSeenAt: captured.lastSeenAt,
+        bestScore: captured.bestScore,
+        newSightings: 0,
+        regions: [],
+        summary: '',
+        collected: true,
+        protectLevel: null,
+        iucn: null,
+        familyName: null,
+        isTrained: true,
+        inChinaV12: false,
+        catalogSource: 'uncatalogued',
+      }
+    })
+
+  return [...catalogRecords, ...uncataloguedRecords].toSorted((left, right) => {
+    const groupDiff =
+      speciesCollectionGroupRank(speciesCollectionGroupId(left)) -
+      speciesCollectionGroupRank(speciesCollectionGroupId(right))
+    if (groupDiff !== 0) return groupDiff
+    if (Boolean(left.collected) !== Boolean(right.collected)) {
+      return left.collected ? -1 : 1
+    }
+    return speciesSortValue(left).localeCompare(speciesSortValue(right), 'zh-Hans-CN')
+  })
 }
 
 function folderHasActiveTasks(status: FolderStatus): boolean {
   return ['scanning', 'hashing', 'analyzing_partial', 'updating', 'exporting'].includes(status)
+}
+
+const chinaMapRegions: Array<{
+  id: MapRegionId
+  labelKey: string
+  x: number
+  y: number
+  keywords: string[]
+}> = [
+  {
+    id: 'northeast',
+    labelKey: 'archive.map.regions.northeast',
+    x: 78,
+    y: 19,
+    keywords: ['东北', '辽宁', '吉林', '黑龙江', '沈阳', '长春', '哈尔滨'],
+  },
+  {
+    id: 'north',
+    labelKey: 'archive.map.regions.north',
+    x: 57,
+    y: 31,
+    keywords: ['华北', '北京', '天津', '河北', '山西', '山东', '内蒙古'],
+  },
+  {
+    id: 'east',
+    labelKey: 'archive.map.regions.east',
+    x: 67,
+    y: 51,
+    keywords: [
+      '华东',
+      '上海',
+      '江苏',
+      '浙江',
+      '安徽',
+      '江西',
+      '杭州',
+      '南京',
+      '苏州',
+      '崇明',
+      '南汇',
+    ],
+  },
+  {
+    id: 'central',
+    labelKey: 'archive.map.regions.central',
+    x: 55,
+    y: 55,
+    keywords: ['华中', '河南', '湖北', '湖南', '武汉', '长沙', '郑州'],
+  },
+  {
+    id: 'south',
+    labelKey: 'archive.map.regions.south',
+    x: 61,
+    y: 73,
+    keywords: ['华南', '广东', '广西', '福建', '海南', '香港', '澳门', '广州', '深圳', '厦门'],
+  },
+  {
+    id: 'southwest',
+    labelKey: 'archive.map.regions.southwest',
+    x: 42,
+    y: 67,
+    keywords: ['西南', '四川', '重庆', '贵州', '云南', '成都', '昆明', '贵阳'],
+  },
+  {
+    id: 'northwest',
+    labelKey: 'archive.map.regions.northwest',
+    x: 32,
+    y: 36,
+    keywords: ['西北', '新疆', '甘肃', '宁夏', '陕西', '西安', '兰州', '银川', '乌鲁木齐'],
+  },
+  {
+    id: 'qinghaiTibet',
+    labelKey: 'archive.map.regions.qinghaiTibet',
+    x: 28,
+    y: 60,
+    keywords: ['青藏', '西藏', '青海', '拉萨', '西宁'],
+  },
+]
+
+const chinaMapRegionById = new Map<
+  MapRegionId,
+  (typeof chinaMapRegions)[number]
+>(chinaMapRegions.map((region) => [region.id, region] as const))
+
+function gpsScalarToNumber(value: unknown): number | null {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null
+  if (typeof value === 'string' && value.trim()) {
+    const parsed = Number(value)
+    return Number.isFinite(parsed) ? parsed : null
+  }
+  if (Array.isArray(value) && value.length === 2) {
+    const numerator = gpsScalarToNumber(value[0])
+    const denominator = gpsScalarToNumber(value[1])
+    if (numerator !== null && denominator !== null && denominator !== 0) {
+      return numerator / denominator
+    }
+  }
+  if (typeof value === 'object' && value !== null) {
+    const rational = value as { numerator?: unknown; denominator?: unknown }
+    const numerator = gpsScalarToNumber(rational.numerator)
+    const denominator = gpsScalarToNumber(rational.denominator)
+    if (numerator !== null && denominator !== null && denominator !== 0) {
+      return numerator / denominator
+    }
+  }
+  return null
+}
+
+function gpsPartToDecimal(value: unknown): number | null {
+  if (Array.isArray(value) && value.length >= 3) {
+    const degree = gpsScalarToNumber(value[0])
+    const minute = gpsScalarToNumber(value[1])
+    const second = gpsScalarToNumber(value[2])
+    if (degree !== null && minute !== null && second !== null) {
+      return degree + minute / 60 + second / 3600
+    }
+  }
+  return gpsScalarToNumber(value)
+}
+
+function gpsCoordinateToDecimal(value: unknown, ref: unknown): number | null {
+  const decimal = gpsPartToDecimal(value)
+  if (decimal === null) return null
+  const direction = String(ref ?? '').toUpperCase()
+  return direction === 'S' || direction === 'W' ? -decimal : decimal
+}
+
+export function extractPhotoGps(
+  exif: Record<string, unknown> | null | undefined,
+): { lat: number; lon: number } | null {
+  if (!exif) return null
+  const gpsInfo =
+    typeof exif.GPSInfo === 'object' && exif.GPSInfo !== null
+      ? (exif.GPSInfo as Record<string, unknown>)
+      : exif
+  const lat = gpsCoordinateToDecimal(
+    gpsInfo.GPSLatitude ?? gpsInfo['GPSLatitude'] ?? gpsInfo['2'],
+    gpsInfo.GPSLatitudeRef ?? gpsInfo['GPSLatitudeRef'] ?? gpsInfo['1'],
+  )
+  const lon = gpsCoordinateToDecimal(
+    gpsInfo.GPSLongitude ?? gpsInfo['GPSLongitude'] ?? gpsInfo['4'],
+    gpsInfo.GPSLongitudeRef ?? gpsInfo['GPSLongitudeRef'] ?? gpsInfo['3'],
+  )
+  if (lat === null || lon === null) return null
+  return { lat, lon }
+}
+
+function gpsToChinaMapPoint(lat: number, lon: number): { x: number; y: number } | null {
+  if (lat < 15 || lat > 56 || lon < 70 || lon > 140) return null
+  return {
+    x: Math.min(94, Math.max(6, ((lon - 70) / 70) * 100)),
+    y: Math.min(94, Math.max(6, ((56 - lat) / 41) * 100)),
+  }
+}
+
+function regionIdFromGps(lat: number, lon: number): MapRegionId {
+  if (lat >= 42 && lon >= 115) return 'northeast'
+  if (lat >= 34 && lon >= 110 && lon < 123) return 'north'
+  if (lon >= 116 && lat >= 25 && lat < 34) return 'east'
+  if (lat < 25 && lon >= 105) return 'south'
+  if (lon < 100 && lat < 34) return 'qinghaiTibet'
+  if (lon < 110 && lat >= 34) return 'northwest'
+  if (lon < 110 && lat < 34) return 'southwest'
+  return 'central'
+}
+
+function photoMatchesSpecies(photo: PhotoRecord, species: SpeciesRecord): boolean {
+  return getArchiveSpeciesEntries(photo).some((entry) => {
+    if (entry.latinName && species.latinName) return entry.latinName === species.latinName
+    return entry.name === species.name
+  })
+}
+
+export function buildArchiveMapPins(
+  photos: PhotoRecord[],
+  speciesRecords: SpeciesRecord[],
+): ArchiveMapPin[] {
+  const speciesByLatin = new Map(speciesRecords.map((species) => [species.latinName, species]))
+  const speciesByName = new Map(speciesRecords.map((species) => [species.name, species]))
+  const pins = new Map<string, ArchiveMapPin>()
+
+  for (const photo of photos) {
+    const gps = extractPhotoGps(photo.exif)
+    if (!gps) continue
+    const gpsPoint = gpsToChinaMapPoint(gps.lat, gps.lon)
+    if (!gpsPoint) continue
+    const regionId = regionIdFromGps(gps.lat, gps.lon)
+    const region = chinaMapRegionById.get(regionId)
+    if (!region) continue
+    for (const entry of getArchiveSpeciesEntries(photo)) {
+      const species =
+        (entry.latinName ? speciesByLatin.get(entry.latinName) : null) ??
+        (entry.name ? speciesByName.get(entry.name) : null)
+      const speciesId = species?.id ?? speciesRecordId(entry.latinName, entry.name)
+      const speciesName = species?.name ?? entry.name
+      const latinName = species?.latinName ?? entry.latinName
+      const coordinateKey = `${gps.lat.toFixed(2)}:${gps.lon.toFixed(2)}`
+      const jitter = ((stableHue(`${speciesId}-${coordinateKey}`) % 9) - 4) * 1.3
+      const baseX = gpsPoint.x
+      const baseY = gpsPoint.y
+      const x = Math.min(94, Math.max(6, baseX + jitter))
+      const y = Math.min(
+        94,
+        Math.max(6, baseY + ((stableHue(`${coordinateKey}-${speciesId}`) % 7) - 3) * 1.1),
+      )
+      const pinKey = `${coordinateKey}:${speciesId}`
+      const existing = pins.get(pinKey)
+      if (existing) {
+        if (!existing.photos.some((item) => item.id === photo.id)) {
+          existing.photos.push(photo)
+        }
+      } else {
+        pins.set(pinKey, {
+          id: pinKey,
+          speciesId,
+          speciesName,
+          latinName,
+          regionId,
+          regionLabelKey: region.labelKey,
+          x,
+          y,
+          photos: [photo],
+          source: 'gps',
+        })
+      }
+    }
+  }
+
+  return Array.from(pins.values()).toSorted((left, right) => {
+    if (left.photos.length !== right.photos.length) return right.photos.length - left.photos.length
+    return left.speciesName.localeCompare(right.speciesName, 'zh-Hans-CN')
+  })
 }
 
 export default function App() {
@@ -394,7 +1156,7 @@ export default function App() {
     archiveTab,
     activeFolderId,
     activeSpeciesId,
-    activeQuickFilter,
+    activeQuickFilters,
     activeSort,
     viewMode,
     searchQuery,
@@ -423,7 +1185,7 @@ export default function App() {
       archiveTab: state.archiveTab,
       activeFolderId: state.activeFolderId,
       activeSpeciesId: state.activeSpeciesId,
-      activeQuickFilter: state.activeQuickFilter,
+      activeQuickFilters: state.activeQuickFilters,
       activeSort: state.activeSort,
       viewMode: state.viewMode,
       searchQuery: state.searchQuery,
@@ -455,7 +1217,11 @@ export default function App() {
   // TODO: Replace mock workspace mutations with backend API + TanStack Query mutations
   // once scan, decision, compare, and export endpoints are wired.
   useEffect(() => {
-    if (!activeFolderId && workspace.folders.length > 0) {
+    if (workspace.folders.length === 0) {
+      if (activeFolderId !== null) setActiveFolderId(null)
+      return
+    }
+    if (!activeFolderId || !workspace.folders.some((folder) => folder.id === activeFolderId)) {
       setActiveFolderId(workspace.folders[0]?.id ?? null)
     }
   }, [activeFolderId, setActiveFolderId, workspace.folders])
@@ -470,9 +1236,8 @@ export default function App() {
   const filteredSelectionPhotos = sortPhotos(
     activeFolderPhotos.filter(
       (photo) =>
-        filterPhotoByQuickFilter(photo, activeQuickFilter) &&
-        matchesQuery([photo.fileName, photo.speciesName, photo.caption], deferredSearch) &&
-        (viewMode !== 'selected_only' || photo.decision === 'selected'),
+        filterPhotoByQuickFilters(photo, activeQuickFilters) &&
+        matchesQuery([photo.fileName, photo.speciesName, photo.caption], deferredSearch),
     ),
     activeSort,
   )
@@ -490,16 +1255,14 @@ export default function App() {
       // 所以就是组内最佳那张。
       const lp = left.photos[0]
       const rp = right.photos[0]
-      const lRank = lp ? GRADE_RANK[lp.grade] : -1
-      const rRank = rp ? GRADE_RANK[rp.grade] : -1
+      const lRank = lp ? GRADE_RANK[effectivePhotoGrade(lp)] : -1
+      const rRank = rp ? GRADE_RANK[effectivePhotoGrade(rp)] : -1
       if (lRank !== rRank) return rRank - lRank
       return (rp?.finalScore ?? -1) - (lp?.finalScore ?? -1)
     })
 
   const flatSelectionPhotos =
-    viewMode === 'flat' || viewMode === 'selected_only'
-      ? filteredSelectionPhotos
-      : folderGroups.flatMap((entry) => entry.photos)
+    viewMode === 'flat' ? filteredSelectionPhotos : folderGroups.flatMap((entry) => entry.photos)
 
   const focusedPhoto = workspace.photos.find((photo) => photo.id === focusedPhotoId) ?? null
   const reviewPhoto = workspace.photos.find((photo) => photo.id === reviewPhotoId) ?? null
@@ -508,38 +1271,80 @@ export default function App() {
     .map((id) => workspace.photos.find((photo) => photo.id === id) ?? null)
     .filter((photo): photo is PhotoRecord => photo !== null)
   const activeSpecies =
-    speciesRecords.find((species) => species.id === activeSpeciesId) ?? speciesRecords[0] ?? null
+    speciesRecords.find((species) => species.id === activeSpeciesId) ??
+    speciesRecords.find((species) => species.collected) ??
+    speciesRecords[0] ??
+    null
+
+  useEffect(() => {
+    if (speciesRecords.length === 0) {
+      if (activeSpeciesId !== null) setActiveSpeciesId(null)
+      return
+    }
+    if (!activeSpeciesId || !speciesRecords.some((species) => species.id === activeSpeciesId)) {
+      setActiveSpeciesId(
+        speciesRecords.find((species) => species.collected)?.id ?? speciesRecords[0]?.id ?? null,
+      )
+    }
+  }, [activeSpeciesId, setActiveSpeciesId, speciesRecords])
 
   const archivePhotos = sortPhotos(
-    workspace.photos.filter((photo) =>
-      matchesQuery([photo.fileName, photo.speciesName, photo.caption], deferredSearch),
+    workspace.photos.filter(
+      (photo) => isArchiveEligiblePhoto(photo) && matchesQuery(archivePhotoSearchParts(photo), deferredSearch),
     ),
     'score',
   )
   const archiveSpecies = speciesRecords.filter((species) =>
     matchesQuery([species.name, species.latinName, species.summary], deferredSearch),
   )
+  const reviewPhotos = useMemo(() => {
+    if (!reviewPhoto) return []
+    const source = route === 'archive' ? archivePhotos : flatSelectionPhotos
+    if (source.some((photo) => photo.id === reviewPhoto.id)) return source
+    return [reviewPhoto, ...source.filter((photo) => photo.id !== reviewPhoto.id)]
+  }, [archivePhotos, flatSelectionPhotos, reviewPhoto, route])
 
   const { data: realLibraries } = useLibraries()
-  const allLibraryIds = useMemo(
-    () => (realLibraries ?? []).map((l) => l.id),
-    [realLibraries],
-  )
+  const allLibraryIds = useMemo(() => (realLibraries ?? []).map((l) => l.id), [realLibraries])
   const allDetails = useAllLibraryDetails(allLibraryIds)
   const { data: activeDetail } = useLibraryDetail(activeFolderId)
+  useLibraryEvents(activeFolderId, Boolean(activeFolderId))
   const importLibrary = useImportLibrary()
   const startBatch = useStartBatch()
+  const { mutate: rebuildPhotoThumbnail } = useBuildPhotoThumbnail(activeFolderId)
+  const thumbnailRepairingRef = useRef(new Set<string>())
+  const thumbnailLastRepairAtRef = useRef(new Map<string, number>())
   // SSE 重连 key：startBatch 成功后 bump，强制 useAnalysisProgress 重建连接。
   // 应对 SSE idle close（v0.1.0 后端 bug）/ 网络抖动 / 老连接卡住等场景，
   // 确保用户点「开始分析」后立刻能看到 pending 数变化。
   const [sseRestartKey, setSseRestartKey] = useState(0)
-  const progressEvent = useAnalysisProgress(
-    activeFolderId,
-    Boolean(activeFolderId),
-    sseRestartKey,
-  )
+  const progressEvent = useAnalysisProgress(activeFolderId, Boolean(activeFolderId), sseRestartKey)
   const setDecisionMutation = useSetDecision(activeFolderId)
   const batchSetDecisionsMutation = useBatchSetDecisions(activeFolderId)
+  const setSpeciesOverrideMutation = useSetSpeciesOverride(activeFolderId)
+
+  const handleThumbnailLoadStatus = useCallback(
+    (photoId: string, status: ThumbnailLoadStatus) => {
+      if (status !== 'error') {
+        if (status === 'loaded') thumbnailRepairingRef.current.delete(photoId)
+        return
+      }
+      if (thumbnailRepairingRef.current.has(photoId)) return
+
+      const now = Date.now()
+      const lastRepairAt = thumbnailLastRepairAtRef.current.get(photoId) ?? 0
+      if (now - lastRepairAt < THUMBNAIL_REPAIR_COOLDOWN_MS) return
+
+      thumbnailRepairingRef.current.add(photoId)
+      thumbnailLastRepairAtRef.current.set(photoId, now)
+      rebuildPhotoThumbnail(photoId, {
+        onSettled: () => {
+          thumbnailRepairingRef.current.delete(photoId)
+        },
+      })
+    },
+    [rebuildPhotoThumbnail],
+  )
 
   // 后端 library 列表就绪时：用真 folders 替换 mock seeds，
   // 同时**清空 mock photos/groups/species**（避免 archive 页 / 物种墙混入"池鹭/翠鸟"等假数据）。
@@ -578,7 +1383,7 @@ export default function App() {
       allDetails
         .map(
           (d) =>
-            `${d.library.id}:${d.library.last_analyzed_at ?? ''}:${d.photos.length}:${d.library.analyzed_count}`,
+            `${d.library.id}:${d.library.status}:${d.library.last_scanned_at ?? ''}:${d.library.last_analyzed_at ?? ''}:${d.photos.length}:${d.library.analyzed_count}:${libraryDetailContentHash(d)}`,
         )
         .join('|'),
     [allDetails],
@@ -613,9 +1418,7 @@ export default function App() {
     const fragment = buildFragmentFromDetail(activeDetail)
     setWorkspace((current) => ({
       ...current,
-      folders: current.folders.map((f) =>
-        f.id === fragment.folder.id ? fragment.folder : f,
-      ),
+      folders: current.folders.map((f) => (f.id === fragment.folder.id ? fragment.folder : f)),
       photos: [
         ...current.photos.filter((p) => p.folderId !== fragment.folder.id),
         ...fragment.photos,
@@ -634,7 +1437,6 @@ export default function App() {
     // 先切到 selection 路由，给用户即时视觉反馈
     startTransition(() => {
       setRoute('selection')
-      setActiveQuickFilter('all')
       setViewMode('grouped')
     })
 
@@ -702,12 +1504,78 @@ export default function App() {
     )
   }
 
+  function handleSetSpeciesOverride(
+    photoId: string,
+    birdIndex: number,
+    species: SpeciesOverrideValue | null,
+  ) {
+    const displayName =
+      species?.canonical_zh ?? species?.canonical_en ?? species?.canonical_sci ?? null
+    startTransition(() => {
+      setWorkspace((current) => ({
+        ...current,
+        photos: current.photos.map((photo) => {
+          if (photo.id !== photoId) return photo
+          const detections = (photo.birdDetections ?? []).map((bird) =>
+            bird.index === birdIndex
+              ? {
+                  ...bird,
+                  speciesName: displayName,
+                  speciesLatinName: species?.canonical_sci ?? null,
+                  speciesEnglishName: species?.canonical_en ?? null,
+                  manualSpecies: species !== null,
+                }
+              : bird,
+          )
+          const isBest = detections.find((bird) => bird.index === birdIndex)?.isBest ?? false
+          return {
+            ...photo,
+            birdDetections: detections,
+            ...(isBest
+              ? {
+                  speciesName: displayName,
+                  speciesLatinName: species?.canonical_sci ?? null,
+                  speciesEnglishName: species?.canonical_en ?? null,
+                  manualSpecies: species !== null,
+                }
+              : {}),
+          }
+        }),
+      }))
+      setFocusedPhotoId(photoId)
+    })
+
+    setSpeciesOverrideMutation.mutate(
+      { photoId, birdIndex, species },
+      {
+        onError: (err) => {
+          console.warn('Failed to persist species override:', err)
+        },
+      },
+    )
+  }
+
   function handleOpenReview(photoId: string) {
     startTransition(() => {
       setFocusedPhotoId(photoId)
       setReviewPhotoId(photoId)
     })
   }
+
+  useEffect(() => {
+    if (route !== 'selection' || reviewPhotoId !== null || compareOpen || exportOpen) return
+    if (!focusedPhotoId || !flatSelectionPhotos.some((photo) => photo.id === focusedPhotoId)) return
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || !isPlainSpaceKey(event)) return
+      if (shouldIgnoreSelectionReviewShortcutTarget(event.target)) return
+      event.preventDefault()
+      handleOpenReview(focusedPhotoId)
+    }
+
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [compareOpen, exportOpen, flatSelectionPhotos, focusedPhotoId, reviewPhotoId, route])
 
   function handleOpenCompare() {
     if (comparePhotos.length >= 2) {
@@ -723,7 +1591,7 @@ export default function App() {
 
     const updates: Array<[string, DecisionValue]> = comparePhotoIds.map((pid) => [
       pid,
-      pid === bestPhoto.id ? 'selected' : 'rejected',
+      pid === bestPhoto.id ? 'select' : 'reject',
     ])
 
     // 乐观更新
@@ -734,7 +1602,7 @@ export default function App() {
           if (!comparePhotoIds.includes(photo.id)) return photo
           return {
             ...photo,
-            decision: photo.id === bestPhoto.id ? 'selected' : 'rejected',
+            decision: photo.id === bestPhoto.id ? 'select' : 'reject',
           }
         }),
       }))
@@ -761,18 +1629,18 @@ export default function App() {
         <SelectionScreen
           activeFolder={activeFolder}
           activeFolderSummary={activeFolderSummary}
-          activeQuickFilter={activeQuickFilter}
+          activeQuickFilters={activeQuickFilters}
           activeSort={activeSort}
           analysisStarting={startBatch.isPending}
           compareCount={comparePhotoIds.length}
           compareEnabled={comparePhotos.length >= 2}
-          comparePhotoIds={comparePhotoIds}
           filteredGroups={folderGroups}
           flatPhotos={flatSelectionPhotos}
           focusedPhoto={focusedPhoto}
           focusedPhotoId={focusedPhotoId}
           folderPhotos={activeFolderPhotos}
           folders={visibleFolders}
+          onThumbnailLoadStatus={handleThumbnailLoadStatus}
           onOpenCompare={handleOpenCompare}
           onOpenExport={() => setExportOpen(true)}
           onOpenReview={handleOpenReview}
@@ -819,7 +1687,11 @@ export default function App() {
           detail={{ photo: reviewPhoto, group: reviewGroup }}
           onAddToCompare={toggleComparePhotoId}
           onClose={() => setReviewPhotoId(null)}
+          onSelectPhoto={handleOpenReview}
           onSetDecision={handleSetDecision}
+          onSetSpeciesOverride={handleSetSpeciesOverride}
+          onThumbnailLoadStatus={handleThumbnailLoadStatus}
+          photos={reviewPhotos}
           t={t}
         />
       ) : null}
@@ -837,6 +1709,7 @@ export default function App() {
       {exportOpen ? (
         <ExportDrawer
           activeFolder={activeFolder}
+          photos={activeFolderPhotos}
           onClose={() => setExportOpen(false)}
           summary={activeFolderSummary}
           t={t}
@@ -881,7 +1754,10 @@ function AppShell({
             const Icon = routeIcons[item]
             return (
               <button
-                className={cn('route-switcher__item', route === item && 'route-switcher__item--active')}
+                className={cn(
+                  'route-switcher__item',
+                  route === item && 'route-switcher__item--active',
+                )}
                 key={item}
                 onClick={() => onNavigate(item)}
                 type="button"
@@ -943,7 +1819,12 @@ function StartScreen({
   const hasRecentFolders = recentFolders.length > 0
 
   return (
-    <main className={cn('start-screen selection-scroll', !hasRecentFolders && 'start-screen--empty-history')}>
+    <main
+      className={cn(
+        'start-screen selection-scroll',
+        !hasRecentFolders && 'start-screen--empty-history',
+      )}
+    >
       <section className="start-hero">
         <div className="start-copy">
           <div className="eyebrow-row">
@@ -1049,7 +1930,9 @@ function EnginePanel({
       <div className="pipeline-bar__summary">
         <StatusDot tone={statusToneValue} />
         <span>{t('start.pipelineState')}</span>
-        <strong>{isReady ? t('status.connected') : isError ? t('status.error') : t('status.connecting')}</strong>
+        <strong>
+          {isReady ? t('status.connected') : isError ? t('status.error') : t('status.connecting')}
+        </strong>
       </div>
 
       <div className="pipeline-bar__items">
@@ -1068,15 +1951,7 @@ function EnginePanel({
   )
 }
 
-function PipelineStatusItem({
-  label,
-  tone,
-  value,
-}: {
-  label: string
-  tone: Tone
-  value: string
-}) {
+function PipelineStatusItem({ label, tone, value }: { label: string; tone: Tone; value: string }) {
   return (
     <div className="pipeline-bar__item">
       <small>{label}</small>
@@ -1110,12 +1985,11 @@ function BirdGlyph() {
 function SelectionScreen({
   activeFolder,
   activeFolderSummary,
-  activeQuickFilter,
+  activeQuickFilters,
   activeSort,
   analysisStarting,
   compareCount,
   compareEnabled,
-  comparePhotoIds,
   filteredGroups,
   flatPhotos,
   focusedPhoto,
@@ -1128,6 +2002,7 @@ function SelectionScreen({
   onSelectFolder,
   onSetDecision,
   onStartAnalysis,
+  onThumbnailLoadStatus,
   onToggleCompare,
   progressEvent,
   setActiveQuickFilter,
@@ -1141,12 +2016,11 @@ function SelectionScreen({
 }: {
   activeFolder: FolderRecord | null
   activeFolderSummary: FolderSummary
-  activeQuickFilter: QuickFilter
+  activeQuickFilters: QuickFilter[]
   activeSort: SortMode
   analysisStarting: boolean
   compareCount: number
   compareEnabled: boolean
-  comparePhotoIds: string[]
   filteredGroups: Array<{ group: PhotoGroupRecord; photos: PhotoRecord[] }>
   flatPhotos: PhotoRecord[]
   focusedPhoto: PhotoRecord | null
@@ -1159,6 +2033,7 @@ function SelectionScreen({
   onSelectFolder: (folderId: string) => void
   onSetDecision: (photoId: string, decision: SelectionDecision) => void
   onStartAnalysis: () => void
+  onThumbnailLoadStatus: (photoId: string, status: ThumbnailLoadStatus) => void
   onToggleCompare: (photoId: string) => void
   progressEvent: AnalysisProgressEventLite | null
   setActiveQuickFilter: (filter: QuickFilter) => void
@@ -1206,7 +2081,7 @@ function SelectionScreen({
         />
         <MetricStrip photos={folderPhotos} summary={activeFolderSummary} t={t} />
         <SelectionControls
-          activeQuickFilter={activeQuickFilter}
+          activeQuickFilters={activeQuickFilters}
           activeSort={activeSort}
           compareCount={compareCount}
           compareEnabled={compareEnabled}
@@ -1219,33 +2094,29 @@ function SelectionScreen({
         />
 
         <div className="photo-flow">
-          {viewMode === 'grouped'
-            ? filteredGroups.map(({ group, photos }) => (
-                <PhotoGroup
-                  comparePhotoIds={comparePhotoIds}
-                  focusedPhotoId={focusedPhotoId}
-                  group={group}
-                  key={group.id}
-                  onFocusPhoto={setFocusedPhotoId}
-                  onOpenReview={onOpenReview}
-                  onSetDecision={onSetDecision}
-                  onToggleCompare={onToggleCompare}
-                  photos={photos}
-                  t={t}
-                />
-              ))
-            : (
-                <PhotoGrid
-                  comparePhotoIds={comparePhotoIds}
-                  focusedPhotoId={focusedPhotoId}
-                  onFocusPhoto={setFocusedPhotoId}
-                  onOpenReview={onOpenReview}
-                  onSetDecision={onSetDecision}
-                  onToggleCompare={onToggleCompare}
-                  photos={flatPhotos}
-                  t={t}
-                />
-              )}
+          {viewMode === 'grouped' ? (
+            filteredGroups.map(({ group, photos }) => (
+              <PhotoGroup
+                focusedPhotoId={focusedPhotoId}
+                group={group}
+                key={group.id}
+                onFocusPhoto={setFocusedPhotoId}
+                onOpenReview={onOpenReview}
+                onThumbnailLoadStatus={onThumbnailLoadStatus}
+                photos={photos}
+                t={t}
+              />
+            ))
+          ) : (
+            <PhotoGrid
+              focusedPhotoId={focusedPhotoId}
+              onFocusPhoto={setFocusedPhotoId}
+              onOpenReview={onOpenReview}
+              onThumbnailLoadStatus={onThumbnailLoadStatus}
+              photos={flatPhotos}
+              t={t}
+            />
+          )}
         </div>
       </section>
 
@@ -1283,7 +2154,11 @@ function FolderRail({
       statuses: ['scanning', 'hashing', 'analyzing_partial', 'updating', 'exporting'],
     },
     { key: 'recent', titleKey: 'selection.sidebar.recent', statuses: ['ready'] },
-    { key: 'missing', titleKey: 'selection.sidebar.pathMissing', statuses: ['path_missing', 'error'] },
+    {
+      key: 'missing',
+      titleKey: 'selection.sidebar.pathMissing',
+      statuses: ['path_missing', 'error'],
+    },
   ]
 
   return (
@@ -1303,7 +2178,10 @@ function FolderRail({
               const summary = buildFolderSummary(photos)
               return (
                 <button
-                  className={cn('folder-rail-item', folder.id === activeFolderId && 'folder-rail-item--active')}
+                  className={cn(
+                    'folder-rail-item',
+                    folder.id === activeFolderId && 'folder-rail-item--active',
+                  )}
                   key={folder.id}
                   onClick={() => onSelectFolder(folder.id)}
                   type="button"
@@ -1315,7 +2193,7 @@ function FolderRail({
                   <span className="folder-rail-item__meta">
                     <StatusDot tone={statusTone(folder.status)} />
                     <span>{formatRatio(folder.analyzedCount, folder.totalCount)}</span>
-                    <span>{summary.selectedCount}</span>
+                    <span>{summary.gradeCounts.select}</span>
                   </span>
                 </button>
               )
@@ -1343,16 +2221,12 @@ function FolderTopline({
   t: ReturnType<typeof useTranslation>['t']
 }) {
   // 是否正在跑：pending/processing 还有任务
-  const running = progressEvent
-    ? progressEvent.pending + progressEvent.processing > 0
-    : false
+  const running = progressEvent ? progressEvent.pending + progressEvent.processing > 0 : false
   const hasProgress = progressEvent !== null && progressEvent.total > 0
   const ratio = hasProgress
     ? Math.min(1, progressEvent.completed / Math.max(progressEvent.total, 1))
     : 0
-  const progressLabel = hasProgress
-    ? `${progressEvent.completed} / ${progressEvent.total}`
-    : null
+  const progressLabel = hasProgress ? `${progressEvent.completed} / ${progressEvent.total}` : null
 
   return (
     <header className="folder-topline">
@@ -1374,8 +2248,8 @@ function FolderTopline({
           >
             <span className="text-[11px] text-white/60">
               {running
-                ? `分析中 ${progressLabel}`
-                : `已分析 ${progressLabel}`}
+                ? t('selection.folderHeader.analyzingProgress', { progress: progressLabel })
+                : t('selection.folderHeader.analyzedProgress', { progress: progressLabel })}
             </span>
           </span>
         ) : null}
@@ -1387,10 +2261,10 @@ function FolderTopline({
         >
           <Sparkles className="h-4 w-4" />
           {running
-            ? `分析中… ${Math.round(ratio * 100)}%`
+            ? t('selection.folderHeader.analyzingPercent', { percent: Math.round(ratio * 100) })
             : analysisStarting
-              ? '启动中…'
-              : '开始分析'}
+              ? t('selection.folderHeader.starting')
+              : t('selection.folderHeader.startAnalysis')}
         </button>
         <button className="button-ghost button-compact" onClick={onOpenExport} type="button">
           <Download className="h-4 w-4" />
@@ -1419,16 +2293,33 @@ function MetricStrip({
   return (
     <section className="metric-strip">
       <MetricCell label={t('selection.metrics.totalPhotos')} value={photos.length} />
-      <MetricCell label={t('selection.metrics.birdPhotos')} tone="success" value={summary.birdPhotoCount} />
-      <MetricCell label={t('selection.metrics.selectPhotos')} tone="success" value={summary.gradeCounts.select} />
-      <MetricCell label={t('selection.metrics.newSpeciesCount')} tone="accent" value={summary.newSpeciesCount} />
-      <MetricCell label={t('selection.metrics.rejectedCount')} tone="accent" value={summary.rejectedCount} />
+      <MetricCell
+        label={t('selection.metrics.birdPhotos')}
+        tone="success"
+        value={summary.birdPhotoCount}
+      />
+      <MetricCell
+        label={t('selection.metrics.selectPhotos')}
+        tone="success"
+        value={summary.gradeCounts.select}
+      />
+      <MetricCell label={t('selection.metrics.usablePhotos')} value={summary.gradeCounts.usable} />
+      <MetricCell
+        label={t('selection.metrics.recordPhotos')}
+        tone="warning"
+        value={summary.gradeCounts.record}
+      />
+      <MetricCell
+        label={t('selection.metrics.rejectCount')}
+        tone="accent"
+        value={summary.gradeCounts.reject}
+      />
     </section>
   )
 }
 
 function SelectionControls({
-  activeQuickFilter,
+  activeQuickFilters,
   activeSort,
   compareCount,
   compareEnabled,
@@ -1439,7 +2330,7 @@ function SelectionControls({
   t,
   viewMode,
 }: {
-  activeQuickFilter: QuickFilter
+  activeQuickFilters: QuickFilter[]
   activeSort: SortMode
   compareCount: number
   compareEnabled: boolean
@@ -1455,7 +2346,7 @@ function SelectionControls({
       <div className="filter-row">
         {quickFilters.map((filter) => (
           <button
-            className={cn('chip', activeQuickFilter === filter && 'chip--active')}
+            className={cn('chip', activeQuickFilters.includes(filter) && 'chip--active')}
             key={filter}
             onClick={() => setActiveQuickFilter(filter)}
             type="button"
@@ -1505,23 +2396,19 @@ function SelectionControls({
 }
 
 function PhotoGroup({
-  comparePhotoIds,
   focusedPhotoId,
   group,
   onFocusPhoto,
   onOpenReview,
-  onSetDecision,
-  onToggleCompare,
+  onThumbnailLoadStatus,
   photos,
   t,
 }: {
-  comparePhotoIds: string[]
   focusedPhotoId: string | null
   group: PhotoGroupRecord
   onFocusPhoto: (photoId: string | null) => void
   onOpenReview: (photoId: string) => void
-  onSetDecision: (photoId: string, decision: SelectionDecision) => void
-  onToggleCompare: (photoId: string) => void
+  onThumbnailLoadStatus: (photoId: string, status: ThumbnailLoadStatus) => void
   photos: PhotoRecord[]
   t: ReturnType<typeof useTranslation>['t']
 }) {
@@ -1535,7 +2422,9 @@ function PhotoGroup({
           <h2>{group.title}</h2>
           <p>
             {photos.length} {t('selection.group.photos')}
-            {bestScore ? ` · ${t('selection.group.bestScore')} ${bestScore.toFixed(2)}` : ''}
+            {bestScore !== null
+              ? ` · ${t('selection.group.bestScore')} ${formatScore(bestScore)}`
+              : ''}
           </p>
         </div>
         {group.containsNewSpecies ? (
@@ -1543,12 +2432,10 @@ function PhotoGroup({
         ) : null}
       </div>
       <PhotoGrid
-        comparePhotoIds={comparePhotoIds}
         focusedPhotoId={focusedPhotoId}
         onFocusPhoto={onFocusPhoto}
         onOpenReview={onOpenReview}
-        onSetDecision={onSetDecision}
-        onToggleCompare={onToggleCompare}
+        onThumbnailLoadStatus={onThumbnailLoadStatus}
         photos={photos}
         t={t}
       />
@@ -1557,21 +2444,17 @@ function PhotoGroup({
 }
 
 function PhotoGrid({
-  comparePhotoIds,
   focusedPhotoId,
   onFocusPhoto,
   onOpenReview,
-  onSetDecision,
-  onToggleCompare,
+  onThumbnailLoadStatus,
   photos,
   t,
 }: {
-  comparePhotoIds: string[]
   focusedPhotoId: string | null
   onFocusPhoto: (photoId: string | null) => void
   onOpenReview: (photoId: string) => void
-  onSetDecision: (photoId: string, decision: SelectionDecision) => void
-  onToggleCompare: (photoId: string) => void
+  onThumbnailLoadStatus: (photoId: string, status: ThumbnailLoadStatus) => void
   photos: PhotoRecord[]
   t: ReturnType<typeof useTranslation>['t']
 }) {
@@ -1579,13 +2462,11 @@ function PhotoGrid({
     <div className="photo-grid">
       {photos.map((photo) => (
         <PhotoTile
-          compareSelected={comparePhotoIds.includes(photo.id)}
           focused={focusedPhotoId === photo.id}
           key={photo.id}
           onFocusPhoto={onFocusPhoto}
           onOpenReview={onOpenReview}
-          onSetDecision={onSetDecision}
-          onToggleCompare={onToggleCompare}
+          onThumbnailLoadStatus={onThumbnailLoadStatus}
           photo={photo}
           t={t}
         />
@@ -1595,24 +2476,35 @@ function PhotoGrid({
 }
 
 function PhotoTile({
-  compareSelected,
   focused,
   onFocusPhoto,
   onOpenReview,
-  onSetDecision,
-  onToggleCompare,
+  onThumbnailLoadStatus,
   photo,
   t,
 }: {
-  compareSelected: boolean
   focused: boolean
   onFocusPhoto: (photoId: string | null) => void
   onOpenReview: (photoId: string) => void
-  onSetDecision: (photoId: string, decision: SelectionDecision) => void
-  onToggleCompare: (photoId: string) => void
+  onThumbnailLoadStatus: (photoId: string, status: ThumbnailLoadStatus) => void
   photo: PhotoRecord
   t: ReturnType<typeof useTranslation>['t']
 }) {
+  const category = photoCategory(photo)
+  const manual = photo.decision !== null
+  const speciesBadge = speciesSourceBadge(photo, t)
+  const speciesKind = speciesSourceKind(photo)
+  const displaySpecies =
+    effectiveSpeciesName(photo) ??
+    (photo.analysisStatus === 'pending'
+      ? t('selection.analysisStatus.pending')
+      : photo.analysisStatus === 'running'
+        ? t('selection.analysisStatus.running')
+        : photo.analysisStatus === 'failed'
+          ? t('selection.analysisStatus.failed')
+          : photo.birdCount === 0
+            ? t('selection.photo.noBird')
+            : t('selection.photo.unidentified'))
   return (
     <article
       className={cn(
@@ -1623,20 +2515,29 @@ function PhotoTile({
       )}
     >
       <button
+        aria-keyshortcuts="Space"
         className="photo-preview"
+        data-selection-review-shortcut="true"
         onClick={() => onFocusPhoto(photo.id)}
         onDoubleClick={() => onOpenReview(photo.id)}
-        style={{ backgroundImage: photo.previewGradient }}
+        style={{ backgroundImage: photo.placeholderGradient ?? photo.previewGradient }}
         type="button"
       >
+        <ThumbnailImage
+          alt={photo.fileName}
+          className="photo-preview__image"
+          onStatusChange={onThumbnailLoadStatus}
+          photoId={photo.id}
+          src={photo.thumbGridUrl}
+        />
         <span className="photo-preview__top">
           {photo.analysisStatus === 'pending' || photo.analysisStatus === 'running' ? (
             <StatusPill
-              label={photo.analysisStatus === 'pending' ? '等待分析' : '分析中'}
+              label={t(`selection.analysisStatus.${photo.analysisStatus}`)}
               tone="muted"
             />
           ) : (
-            <StatusPill label={t(gradeLabelKey(photo.grade))} tone={gradeTone(photo.grade)} />
+            <StatusPill label={t(categoryLabelKey(category))} tone={categoryTone(category)} />
           )}
           {photo.isNewSpecies ? (
             <StatusPill label={t('selection.quickFilters.new_species')} tone="accent" />
@@ -1644,55 +2545,31 @@ function PhotoTile({
         </span>
         <span className="photo-preview__bottom">
           <span>
-            <strong>
-              {photo.speciesName ??
-                (photo.analysisStatus === 'pending'
-                  ? '等待分析'
-                  : photo.analysisStatus === 'running'
-                    ? '分析中…'
-                    : photo.analysisStatus === 'failed'
-                      ? '分析失败'
-                      : photo.birdCount === 0
-                        ? t('selection.photo.noBird')
-                        : '未识别物种')}
+            <strong className="photo-preview__species">
+              <span>{displaySpecies}</span>
+              {speciesBadge && speciesKind ? (
+                <em className={cn('species-source-inline', `species-source-inline--${speciesKind}`)}>
+                  {t('selection.speciesSource.inline', { source: speciesBadge })}
+                </em>
+              ) : null}
             </strong>
             <small>{photo.fileName}</small>
           </span>
-          <b>{photo.finalScore !== null ? photo.finalScore.toFixed(2) : '--'}</b>
+          <b>{formatScore(photo.finalScore)}</b>
         </span>
       </button>
 
       <div className="photo-tile__meta">
         <span>
           <StatusDot tone={decisionTone(photo.decision)} />
-          {t(decisionLabelKey(photo.decision))}
+          {manual
+            ? `${t('selection.gradeSource.manual')}：${t(gradeLabelKey(effectivePhotoGrade(photo)))}`
+            : `${t('selection.gradeSource.system')}：${t(categoryLabelKey(category))}`}
         </span>
         <span>
           <StatusDot tone={analysisTone(photo.analysisStatus)} />
           {t(`selection.analysisStatus.${photo.analysisStatus}`)}
         </span>
-      </div>
-
-      <div className="photo-actions">
-        <IconButton label={t('selection.review.label')} onClick={() => onOpenReview(photo.id)}>
-          <ImageIcon className="h-4 w-4" />
-        </IconButton>
-        <IconButton
-          active={compareSelected}
-          label={t('selection.actions.compare')}
-          onClick={() => onToggleCompare(photo.id)}
-        >
-          <Waypoints className="h-4 w-4" />
-        </IconButton>
-        <IconButton label={t('selection.actions.reject')} onClick={() => onSetDecision(photo.id, 'rejected')}>
-          <X className="h-4 w-4" />
-        </IconButton>
-        <IconButton label={t('selection.actions.maybe')} onClick={() => onSetDecision(photo.id, 'maybe')}>
-          <Clock3 className="h-4 w-4" />
-        </IconButton>
-        <IconButton label={t('selection.actions.select')} onClick={() => onSetDecision(photo.id, 'selected')}>
-          <Check className="h-4 w-4" />
-        </IconButton>
       </div>
     </article>
   )
@@ -1713,6 +2590,8 @@ function InspectorPanel({
   setFocusedPhotoId: (photoId: string | null) => void
   t: ReturnType<typeof useTranslation>['t']
 }) {
+  const speciesBadge = photo ? speciesSourceBadge(photo, t) : null
+  const speciesKind = photo ? speciesSourceKind(photo) : null
   return (
     <aside className="inspector selection-scroll">
       <SectionLabel label={t('selection.inspector.label')} />
@@ -1721,30 +2600,73 @@ function InspectorPanel({
           <div className="inspector-preview" style={{ backgroundImage: photo.previewGradient }} />
           <div className="score-block">
             <span>{t('selection.inspector.score')}</span>
-            <strong>{photo.finalScore !== null ? photo.finalScore.toFixed(2) : '--'}</strong>
-            <small>{photo.speciesName ?? t('selection.photo.noBird')}</small>
+            <strong>{formatScore(photo.finalScore)}</strong>
+            <small className="score-block__species">
+              <span>{effectiveSpeciesName(photo) ?? t('selection.photo.noBird')}</span>
+              {speciesBadge && speciesKind ? (
+                <em className={cn('species-source-inline', `species-source-inline--${speciesKind}`)}>
+                  {t('selection.speciesSource.inline', { source: speciesBadge })}
+                </em>
+              ) : null}
+            </small>
+            {speciesSourceDetail(photo, t) ? (
+              <em className="score-block__source">{speciesSourceDetail(photo, t)}</em>
+            ) : null}
           </div>
           <div className="stat-stack">
-            <StatRow label={t('selection.metrics.semanticScore')} value={photo.semanticScore ? photo.semanticScore.toFixed(2) : '--'} />
-            <StatRow label={t('selection.metrics.technicalScore')} value={photo.technicalScore ? photo.technicalScore.toFixed(2) : '--'} />
-            <StatRow label={t('selection.metrics.poseScore')} value={photo.poseScore ? photo.poseScore.toFixed(2) : '--'} />
+            <StatRow
+              label={t('selection.metrics.semanticScore')}
+              value={formatScore(photo.semanticScore)}
+            />
+            <StatRow
+              label={t('selection.metrics.technicalScore')}
+              value={formatScore(photo.technicalScore)}
+            />
+            <StatRow
+              label={t('selection.metrics.poseScore')}
+              value={formatScore(photo.poseScore)}
+            />
             <StatRow label={t('selection.metrics.birdCount')} value={photo.birdCount} />
           </div>
           <TagCluster photo={photo} t={t} />
           <div className="inspector-actions">
-            <button className="button-primary" onClick={() => onSetDecision(photo.id, 'selected')} type="button">
-              <Check className="h-4 w-4" />
+            <button
+              className="button-primary"
+              onClick={() => onSetDecision(photo.id, 'select')}
+              type="button"
+            >
+              <Sparkles className="h-4 w-4" />
               {t('selection.actions.select')}
             </button>
-            <button className="button-ghost" onClick={() => onSetDecision(photo.id, 'maybe')} type="button">
-              <Clock3 className="h-4 w-4" />
-              {t('selection.actions.maybe')}
+            <button
+              className="button-ghost"
+              onClick={() => onSetDecision(photo.id, 'usable')}
+              type="button"
+            >
+              <Check className="h-4 w-4" />
+              {t('selection.actions.usable')}
             </button>
-            <button className="button-danger" onClick={() => onSetDecision(photo.id, 'rejected')} type="button">
+            <button
+              className="button-ghost"
+              onClick={() => onSetDecision(photo.id, 'record')}
+              type="button"
+            >
+              <Clock3 className="h-4 w-4" />
+              {t('selection.actions.record')}
+            </button>
+            <button
+              className="button-danger"
+              onClick={() => onSetDecision(photo.id, 'reject')}
+              type="button"
+            >
               <X className="h-4 w-4" />
               {t('selection.actions.reject')}
             </button>
-            <button className="button-ghost" onClick={() => onToggleCompare(photo.id)} type="button">
+            <button
+              className="button-ghost"
+              onClick={() => onToggleCompare(photo.id)}
+              type="button"
+            >
               <Waypoints className="h-4 w-4" />
               {t('selection.actions.compare')}
             </button>
@@ -1785,8 +2707,60 @@ function ArchiveScreen({
   onSetArchiveTab: (tab: ArchiveTab) => void
   t: ReturnType<typeof useTranslation>['t']
 }) {
-  const selectedArchiveCount = archivePhotos.filter((photo) => photo.decision === 'selected').length
-  const newSpeciesCount = archivePhotos.filter((photo) => photo.isNewSpecies).length
+  const [selectedMapPinId, setSelectedMapPinId] = useState<string | null>(null)
+  const [collectionFilter, setCollectionFilter] = useState<SpeciesCollectionFilter>('all')
+  const [speciesPhotosOpen, setSpeciesPhotosOpen] = useState(false)
+  const activeSpeciesWiki = useMemo(
+    () => (activeSpecies ? getSpeciesWiki(activeSpecies.latinName) : null),
+    [activeSpecies?.latinName],
+  )
+  const activeSpeciesImageUrl = activeSpeciesWiki?.image_url ?? null
+  const activeSpeciesArtworkAspect = useSpeciesArtworkAspect(activeSpeciesImageUrl)
+  const collectedSpeciesCount = archiveSpecies.filter((species) => species.collected).length
+  const collectionGroupStats = useMemo(() => {
+    return buildSpeciesCollectionGroups(archiveSpecies)
+  }, [archiveSpecies])
+  const activeSpeciesPhotos = useMemo(() => {
+    if (!activeSpecies) return []
+    return archivePhotos.filter((photo) => photoMatchesSpecies(photo, activeSpecies))
+  }, [activeSpecies, archivePhotos])
+  useEffect(() => {
+    setSpeciesPhotosOpen(false)
+  }, [activeSpecies?.id])
+  const filteredArchiveSpecies = useMemo(() => {
+    if (collectionFilter === 'collected') {
+      return archiveSpecies.filter((species) => species.collected)
+    }
+    if (collectionFilter === 'locked') {
+      return archiveSpecies.filter((species) => !species.collected)
+    }
+    return archiveSpecies
+  }, [archiveSpecies, collectionFilter])
+  const mapPins = useMemo(
+    () => buildArchiveMapPins(archivePhotos, archiveSpecies),
+    [archivePhotos, archiveSpecies],
+  )
+  const unmappedPhotoCount = useMemo(
+    () =>
+      new Set(
+        archivePhotos
+          .filter((photo) => {
+            const gps = extractPhotoGps(photo.exif)
+            return !gps || !gpsToChinaMapPoint(gps.lat, gps.lon)
+          })
+          .map((photo) => photo.id),
+      ).size,
+    [archivePhotos],
+  )
+  const selectedMapPin =
+    mapPins.find((pin) => pin.id === selectedMapPinId) ??
+    mapPins.find((pin) => pin.speciesId === activeSpecies?.id) ??
+    mapPins[0] ??
+    null
+  const mapSpeciesCount = new Set(mapPins.map((pin) => pin.speciesId)).size
+  const collectionGroups = useMemo(() => {
+    return buildSpeciesCollectionGroups(filteredArchiveSpecies)
+  }, [filteredArchiveSpecies])
 
   return (
     <main className="archive-screen selection-scroll">
@@ -1810,104 +2784,400 @@ function ArchiveScreen({
           </div>
         </div>
 
-        <section className="metric-strip">
-          <MetricCell label={t('archive.summary.photos')} value={archivePhotos.length} />
+        <section className="metric-strip metric-strip--archive">
+          <MetricCell
+            label={t('archive.summary.collected')}
+            tone="success"
+            value={collectedSpeciesCount}
+          />
           <MetricCell label={t('archive.summary.species')} value={archiveSpecies.length} />
-          <MetricCell label={t('archive.summary.selected')} tone="success" value={selectedArchiveCount} />
-          <MetricCell label={t('archive.summary.newSpecies')} tone="accent" value={newSpeciesCount} />
+          {collectionGroupStats.map((group) => (
+            <MetricCell
+              key={group.id}
+              label={t(`archive.collection.groups.${group.id}`)}
+              tone={speciesCollectionGroupTone(group.id)}
+              value={formatRatio(group.litCount, group.species.length)}
+            />
+          ))}
         </section>
 
-        {archiveTab === 'photos' ? (
-          <div className="archive-grid">
-            {archivePhotos.map((photo) => (
-              <button
-                className="archive-card"
-                key={photo.id}
-                onClick={() => onOpenReview(photo.id)}
-                type="button"
-              >
-                <span className="archive-card__image" style={{ backgroundImage: photo.previewGradient }} />
-                <span className="archive-card__copy">
-                  <strong>{photo.speciesName ?? t('selection.photo.noBird')}</strong>
-                  <small>{photo.caption}</small>
-                </span>
-                <b>{photo.finalScore !== null ? photo.finalScore.toFixed(2) : '--'}</b>
-              </button>
-            ))}
+        {archiveTab === 'species' ? (
+          <div className="collection-board">
+            <div className="collection-toolbar">
+              <div className="mini-segment mini-segment--compact">
+                {speciesCollectionFilters.map((filter) => (
+                  <button
+                    className={cn(collectionFilter === filter && 'is-active')}
+                    key={filter}
+                    onClick={() => setCollectionFilter(filter)}
+                    type="button"
+                  >
+                    {t(`archive.collection.filters.${filter}`)}
+                  </button>
+                ))}
+              </div>
+            </div>
+            {collectionGroups.map((group) => {
+              const litCount = group.species.filter((species) => species.collected).length
+              return (
+                <section className="collection-section" key={group.id}>
+                  <div className="collection-section__heading">
+                    <span>
+                      <Shield className="h-4 w-4" />
+                      {t(`archive.collection.groups.${group.id}`)}
+                    </span>
+                    <small>{formatRatio(litCount, group.species.length)}</small>
+                  </div>
+                  <div className="collection-grid">
+                    {group.species.map((species) => (
+                      <button
+                        className={cn(
+                          'collection-card',
+                          species.collected ? 'collection-card--lit' : 'collection-card--locked',
+                          !species.imageUrl && 'collection-card--empty-art',
+                          activeSpecies?.id === species.id && 'collection-card--active',
+                        )}
+                        key={species.id}
+                        onClick={() => onSelectSpecies(species.id)}
+                        style={speciesArtworkStyle(species.imageUrl, species.coverGradient)}
+                        type="button"
+                      >
+                        <span className="collection-card__signal">
+                          {species.collected ? (
+                            <Trophy className="h-3.5 w-3.5" />
+                          ) : (
+                            <span aria-hidden="true" />
+                          )}
+                          {species.collected
+                            ? t('archive.collection.collected')
+                            : t('archive.collection.locked')}
+                        </span>
+                        <strong>{species.name}</strong>
+                        <small>{species.latinName}</small>
+                        <span className="collection-card__meta">
+                          <span>{species.familyName ?? t('archive.collection.unknownFamily')}</span>
+                          <b>
+                            {species.collected
+                              ? t('archive.collection.photoCount', { count: species.photoCount })
+                              : species.catalogSource === 'model_extra'
+                                ? t('archive.collection.modelExtraBadge')
+                                : (species.protectLevel ?? species.iucn ?? '--')}
+                          </b>
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                </section>
+              )
+            })}
+            {collectionGroups.length === 0 ? (
+              <p className="collection-empty">{t('archive.collection.empty')}</p>
+            ) : null}
           </div>
         ) : (
-          <div className="archive-grid">
-            {archiveSpecies.map((species) => (
-              <button
-                className={cn('archive-card', activeSpecies?.id === species.id && 'archive-card--active')}
-                key={species.id}
-                onClick={() => onSelectSpecies(species.id)}
-                type="button"
-              >
-                <span className="archive-card__image" style={{ backgroundImage: species.coverGradient }} />
-                <span className="archive-card__copy">
-                  <strong>{species.name}</strong>
-                  <small>{species.latinName}</small>
-                </span>
-                <b>{species.bestScore.toFixed(2)}</b>
-              </button>
-            ))}
+          <div className="archive-map-layout">
+            <section className="china-map-card">
+              <div className="china-map-card__heading">
+                <div>
+                  <SectionLabel label={t('archive.map.label')} />
+                  <h2>{t('archive.map.title')}</h2>
+                </div>
+                <span>{t('archive.map.locatedSpecies', { count: mapSpeciesCount })}</span>
+              </div>
+              <div className="china-map-canvas" aria-label={t('archive.map.title')}>
+                <svg className="china-map-svg" viewBox="0 0 640 460" aria-hidden="true">
+                  <path
+                    className="china-map-svg__land"
+                    d="M95 158 L142 117 L218 102 L270 62 L350 88 L418 70 L520 120 L560 196 L521 258 L544 326 L478 379 L384 364 L320 410 L242 370 L154 388 L104 324 L122 244 Z"
+                  />
+                  <path
+                    className="china-map-svg__inner"
+                    d="M164 142 L230 132 L296 96 M320 116 L354 352 M214 186 L512 206 M170 276 L486 306 M274 244 L194 360 M410 120 L472 342"
+                  />
+                </svg>
+                {chinaMapRegions.map((region) => (
+                  <span
+                    className="map-region-label"
+                    key={region.id}
+                    style={{ left: `${region.x}%`, top: `${region.y}%` }}
+                  >
+                    {t(region.labelKey)}
+                  </span>
+                ))}
+                {mapPins.map((pin) => (
+                  <button
+                    className={cn(
+                      'map-pin',
+                      selectedMapPin?.id === pin.id && 'map-pin--active',
+                    )}
+                    key={pin.id}
+                    onClick={() => {
+                      setSelectedMapPinId(pin.id)
+                      onSelectSpecies(pin.speciesId)
+                    }}
+                    style={{ left: `${pin.x}%`, top: `${pin.y}%` }}
+                    type="button"
+                  >
+                    <MapPin className="h-4 w-4" />
+                    <span>{pin.photos.length}</span>
+                  </button>
+                ))}
+              </div>
+              <p className="archive-map-note">
+                {unmappedPhotoCount > 0
+                  ? t('archive.map.unlocated', { count: unmappedPhotoCount })
+                  : t('archive.map.allLocated')}
+              </p>
+            </section>
+
+            <aside className="map-photo-panel">
+              <SectionLabel label={t('archive.map.detailLabel')} />
+              {selectedMapPin ? (
+                <>
+                  <div className="map-photo-panel__heading">
+                    <strong>{selectedMapPin.speciesName}</strong>
+                    <small>
+                      {t(selectedMapPin.regionLabelKey)} · {selectedMapPin.latinName}
+                    </small>
+                  </div>
+                  <div className="map-photo-list selection-scroll">
+                    {selectedMapPin.photos.map((photo) => (
+                      <button
+                        className="map-photo-card"
+                        key={photo.id}
+                        onClick={() => onOpenReview(photo.id)}
+                        style={{
+                          backgroundImage: photo.placeholderGradient ?? photo.previewGradient,
+                        }}
+                        type="button"
+                      >
+                        <ThumbnailImage
+                          alt={photo.fileName}
+                          className="map-photo-card__image"
+                          src={photo.thumbGridUrl}
+                        />
+                        <span>
+                          <strong>{photo.fileName}</strong>
+                          <small>{formatScore(photo.finalScore)}</small>
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                </>
+              ) : (
+                <p className="archive-map-empty">{t('archive.map.empty')}</p>
+              )}
+            </aside>
           </div>
         )}
       </section>
 
-      <aside className="archive-detail">
-        <SectionLabel label={t('archive.detail.label')} />
+      <aside
+        className={cn(
+          'archive-detail',
+          activeSpecies && 'archive-detail--species',
+          activeSpecies && `archive-detail--art-${activeSpeciesArtworkAspect}`,
+          activeSpecies && !activeSpeciesImageUrl && 'archive-detail--empty',
+        )}
+        style={
+          activeSpecies
+            ? speciesArtworkStyle(activeSpeciesImageUrl, activeSpecies.coverGradient)
+            : undefined
+        }
+      >
         {activeSpecies ? (
           (() => {
-            const wiki = getSpeciesWiki(activeSpecies.latinName)
-            const extract = wiki?.zh_extract ?? wiki?.en_extract ?? activeSpecies.summary
-            const sourceUrl = wiki?.zh_url ?? wiki?.en_url ?? null
-            const imageUrl = wiki?.image_url ?? null
+            const wiki = activeSpeciesWiki
+            const extract = wiki?.zh_extract ?? t('archive.detail.noChineseExtract')
+            const sourceUrl = wiki?.zh_url ?? null
             return (
               <div className="archive-detail__content">
-                {imageUrl ? (
-                  <div
-                    className="inspector-preview"
-                    style={{
-                      backgroundImage: `url(${imageUrl})`,
-                      backgroundSize: 'cover',
-                      backgroundPosition: 'center',
-                    }}
+                <div className="archive-detail__heading">
+                  <SectionLabel label={t('archive.detail.label')} />
+                  <h2>{activeSpecies.name}</h2>
+                  <small>{activeSpecies.latinName}</small>
+                  <StatusPill
+                    label={
+                      activeSpecies.collected
+                        ? t('archive.collection.collected')
+                        : t('archive.collection.locked')
+                    }
+                    tone={activeSpecies.collected ? 'success' : 'muted'}
                   />
-                ) : (
-                  <div
-                    className="inspector-preview"
-                    style={{ backgroundImage: activeSpecies.coverGradient }}
-                  />
-                )}
-                <h2>{activeSpecies.name}</h2>
-                <small>{activeSpecies.latinName}</small>
-                <p className="archive-detail__extract">{extract}</p>
-                {sourceUrl ? (
-                  <a
-                    className="archive-detail__source"
-                    href={sourceUrl}
-                    target="_blank"
-                    rel="noreferrer"
-                  >
-                    Wikipedia →
-                  </a>
-                ) : null}
-                <div className="stat-stack">
-                  <StatRow label={t('archive.species.photoCount')} value={activeSpecies.photoCount} />
-                  <StatRow label={t('archive.species.firstSeen')} value={activeSpecies.firstSeenAt.slice(0, 10)} />
-                  <StatRow label={t('archive.species.lastSeen')} value={activeSpecies.lastSeenAt.slice(0, 10)} />
-                  <StatRow label={t('archive.species.bestScore')} value={activeSpecies.bestScore.toFixed(2)} />
+                </div>
+                <div className="archive-detail__body">
+                  <p className="archive-detail__extract">{extract}</p>
+                  {sourceUrl ? (
+                    <a
+                      className="archive-detail__source"
+                      href={sourceUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      {t('archive.detail.source')}
+                    </a>
+                  ) : null}
+                  <div className="stat-stack">
+                    <StatRow
+                      label={t('archive.species.photoCount')}
+                      onValueClick={
+                        activeSpeciesPhotos.length > 0
+                          ? () => setSpeciesPhotosOpen(true)
+                          : undefined
+                      }
+                      valueAriaLabel={t('archive.species.openPhotos', {
+                        count: activeSpeciesPhotos.length,
+                        species: activeSpecies.name,
+                      })}
+                      value={activeSpecies.photoCount}
+                    />
+                    <StatRow
+                      label={t('archive.species.firstSeen')}
+                      value={
+                        activeSpecies.firstSeenAt ? activeSpecies.firstSeenAt.slice(0, 10) : '--'
+                      }
+                    />
+                    <StatRow
+                      label={t('archive.species.lastSeen')}
+                      value={
+                        activeSpecies.lastSeenAt ? activeSpecies.lastSeenAt.slice(0, 10) : '--'
+                      }
+                    />
+                    <StatRow
+                      label={t('archive.species.bestScore')}
+                      value={formatScore(activeSpecies.bestScore)}
+                    />
+                    <StatRow
+                      label={t('archive.species.rarity')}
+                      value={activeSpecies.protectLevel ?? activeSpecies.iucn ?? '--'}
+                    />
+                  </div>
                 </div>
               </div>
             )
           })()
         ) : (
-          <p>{t('archive.detail.empty')}</p>
+          <div className="archive-detail__empty">
+            <SectionLabel label={t('archive.detail.label')} />
+            <p>{t('archive.detail.empty')}</p>
+          </div>
         )}
       </aside>
+      {speciesPhotosOpen && activeSpecies ? (
+        <SpeciesPhotosModal
+          onClose={() => setSpeciesPhotosOpen(false)}
+          onOpenReview={onOpenReview}
+          photos={activeSpeciesPhotos}
+          species={activeSpecies}
+          t={t}
+        />
+      ) : null}
     </main>
+  )
+}
+
+function SpeciesPhotosModal({
+  onClose,
+  onOpenReview,
+  photos,
+  species,
+  t,
+}: {
+  onClose: () => void
+  onOpenReview: (photoId: string) => void
+  photos: PhotoRecord[]
+  species: SpeciesRecord
+  t: ReturnType<typeof useTranslation>['t']
+}) {
+  const [selectedPhotoId, setSelectedPhotoId] = useState<string | null>(photos[0]?.id ?? null)
+
+  useEffect(() => {
+    setSelectedPhotoId(photos[0]?.id ?? null)
+  }, [photos])
+
+  const selectedPhoto = photos.find((photo) => photo.id === selectedPhotoId) ?? photos[0] ?? null
+
+  return (
+    <div className="overlay-backdrop">
+      <div className="species-photo-panel">
+        <div className="modal-heading">
+          <div>
+            <SectionLabel label={t('archive.photos.label')} />
+            <h2>{species.name}</h2>
+            <small>
+              {species.latinName} · {t('archive.photos.count', { count: photos.length })}
+            </small>
+          </div>
+          <div className="action-row">
+            {selectedPhoto ? (
+              <button
+                className="button-ghost button-compact"
+                onClick={() => onOpenReview(selectedPhoto.id)}
+                type="button"
+              >
+                {t('archive.photos.openReview')}
+              </button>
+            ) : null}
+            <IconButton label={t('common.close')} onClick={onClose}>
+              <X className="h-4 w-4" />
+            </IconButton>
+          </div>
+        </div>
+
+        {selectedPhoto ? (
+          <div className="species-photo-browser">
+            <section className="species-photo-browser__preview">
+              <div
+                className="species-photo-browser__image"
+                style={{
+                  backgroundImage:
+                    selectedPhoto.placeholderGradient ?? selectedPhoto.previewGradient,
+                }}
+              >
+                <ThumbnailImage
+                  alt={selectedPhoto.fileName}
+                  className="species-photo-browser__preview-img"
+                  src={selectedPhoto.thumbPreviewUrl ?? selectedPhoto.thumbGridUrl}
+                />
+              </div>
+              <div className="species-photo-browser__meta">
+                <div>
+                  <strong>{selectedPhoto.fileName}</strong>
+                  <small>{selectedPhoto.shotAt.replace('T', ' ').slice(0, 16)}</small>
+                </div>
+                <b>{formatScore(selectedPhoto.finalScore)}</b>
+              </div>
+            </section>
+            <section className="species-photo-browser__rail selection-scroll">
+              {photos.map((photo) => (
+                <button
+                  className={cn(
+                    'species-photo-thumb',
+                    photo.id === selectedPhoto.id && 'species-photo-thumb--active',
+                  )}
+                  key={photo.id}
+                  onClick={() => setSelectedPhotoId(photo.id)}
+                  style={{ backgroundImage: photo.placeholderGradient ?? photo.previewGradient }}
+                  type="button"
+                >
+                  <ThumbnailImage
+                    alt={photo.fileName}
+                    className="species-photo-thumb__image"
+                    src={photo.thumbGridUrl}
+                  />
+                  <span>
+                    <strong>{formatScore(photo.finalScore)}</strong>
+                    <small>{photo.fileName}</small>
+                  </span>
+                </button>
+              ))}
+            </section>
+          </div>
+        ) : (
+          <p className="archive-map-empty">{t('archive.photos.empty')}</p>
+        )}
+      </div>
+    </div>
   )
 }
 
@@ -1915,17 +3185,29 @@ function ReviewModal({
   detail,
   onAddToCompare,
   onClose,
+  onSelectPhoto,
   onSetDecision,
+  onSetSpeciesOverride,
+  onThumbnailLoadStatus,
+  photos,
   t,
 }: {
   detail: ReviewDetail
   onAddToCompare: (photoId: string) => void
   onClose: () => void
+  onSelectPhoto: (photoId: string) => void
   onSetDecision: (photoId: string, decision: SelectionDecision) => void
+  onSetSpeciesOverride: (
+    photoId: string,
+    birdIndex: number,
+    species: SpeciesOverrideValue | null,
+  ) => void
+  onThumbnailLoadStatus: (photoId: string, status: ThumbnailLoadStatus) => void
+  photos: PhotoRecord[]
   t: ReturnType<typeof useTranslation>['t']
 }) {
   const { photo, group } = detail
-  // toggle 仅作用于裁切图（原图永远纯净，让用户看构图）
+  // 覆盖层分工：检测框 / 对焦区域在原图上看全局位置；姿态点保留在 IQA 裁切图上看细节。
   const [showBbox, setShowBbox] = useState(true)
   const [showPose, setShowPose] = useState(false)
   const [showAfPoint, setShowAfPoint] = useState(true)
@@ -1933,15 +3215,86 @@ function ReviewModal({
   const imgW = photo.imageWidth ?? null
   const imgH = photo.imageHeight ?? null
   const aspect = imgW && imgH && imgW > 0 && imgH > 0 ? imgW / imgH : null
-  // 横版（含正方形）→ 上下布局；竖版 → 左右布局
-  const isLandscape = aspect === null ? true : aspect >= 1.0
 
   const bbox = photo.bestBbox ?? null
   const pose = photo.bestPose ?? null
-  // AF 对焦点：来自 EXIF MakerNote（Canon AFInfo 解析），暂未接入则为 null
-  const afPoint = photo.bestAfPoint ?? null
+  // AF 覆盖层：Canon 官方语义中，单点 / 扩展 / Zone / Whole area 的呈现不同。
+  // 新数据使用结构化 af_area；旧数据退回 legacy af_point。
+  const afOverlay = photo.bestAfArea ?? legacyAfPointToOverlay(photo.bestAfPoint ?? null)
 
   const previewSrc = photo.thumbPreviewUrl ?? null
+  const activeIndex = photos.findIndex((item) => item.id === photo.id)
+  const canGoPrevious = activeIndex > 0
+  const canGoNext = activeIndex >= 0 && activeIndex < photos.length - 1
+
+  const selectRelativePhoto = useCallback(
+    (offset: -1 | 1) => {
+      if (activeIndex < 0) return
+      const nextIndex = Math.max(0, Math.min(photos.length - 1, activeIndex + offset))
+      const nextPhoto = photos[nextIndex]
+      if (!nextPhoto || nextPhoto.id === photo.id) return
+      onSelectPhoto(nextPhoto.id)
+    },
+    [activeIndex, onSelectPhoto, photo.id, photos],
+  )
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      const target = event.target
+      if (
+        target instanceof HTMLInputElement ||
+        target instanceof HTMLTextAreaElement ||
+        target instanceof HTMLSelectElement ||
+        (target instanceof HTMLElement && target.isContentEditable)
+      ) {
+        return
+      }
+
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        onClose()
+        return
+      }
+      if (event.key === 'ArrowLeft') {
+        event.preventDefault()
+        selectRelativePhoto(-1)
+        return
+      }
+      if (event.key === 'ArrowRight') {
+        event.preventDefault()
+        selectRelativePhoto(1)
+        return
+      }
+      if (event.metaKey || event.ctrlKey || event.altKey) return
+      if (event.key === '1') {
+        event.preventDefault()
+        onSetDecision(photo.id, 'select')
+        return
+      }
+      if (event.key === '2') {
+        event.preventDefault()
+        onSetDecision(photo.id, 'usable')
+        return
+      }
+      if (event.key === '3') {
+        event.preventDefault()
+        onSetDecision(photo.id, 'record')
+        return
+      }
+      if (event.key === '4') {
+        event.preventDefault()
+        onSetDecision(photo.id, 'reject')
+        return
+      }
+      if (event.key.toLowerCase() === 'c') {
+        event.preventDefault()
+        onAddToCompare(photo.id)
+      }
+    }
+
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [onAddToCompare, onClose, onSetDecision, photo.id, selectRelativePhoto])
 
   // IQA 裁切框（与后端 expand_for_iqa 一致：2.5× + 比例约束 + cap + shift）
   const iqaCrop = useMemo(() => {
@@ -1950,20 +3303,51 @@ function ReviewModal({
   }, [bbox, imgW, imgH])
 
   return (
-    <div className="overlay-backdrop">
-      <div className="review-panel">
-        <div className="review-stage selection-scroll">
-          <div className="modal-heading">
+    <div
+      className="overlay-backdrop"
+      onPointerDown={(event) => {
+        if (event.target === event.currentTarget) onClose()
+      }}
+    >
+      <div className="review-panel" onPointerDown={(event) => event.stopPropagation()}>
+        <div className="review-stage">
+          <div className="modal-heading review-heading">
             <div>
               <SectionLabel label={t('selection.review.label')} />
               <h2>{photo.fileName}</h2>
             </div>
-            <IconButton label={t('common.close')} onClick={onClose}>
-              <X className="h-4 w-4" />
-            </IconButton>
+            <div className="review-heading__switcher">
+              <IconButton
+                ariaKeyShortcuts="ArrowLeft"
+                disabled={!canGoPrevious}
+                label={t('selection.review.previous')}
+                onClick={() => selectRelativePhoto(-1)}
+              >
+                <ChevronLeft className="h-4 w-4" />
+              </IconButton>
+              <span className="review-heading__count">
+                {activeIndex >= 0 ? activeIndex + 1 : 1}/{Math.max(photos.length, 1)}
+              </span>
+              <IconButton
+                ariaKeyShortcuts="ArrowRight"
+                disabled={!canGoNext}
+                label={t('selection.review.next')}
+                onClick={() => selectRelativePhoto(1)}
+              >
+                <ChevronRight className="h-4 w-4" />
+              </IconButton>
+              <IconButton
+                ariaKeyShortcuts="Escape"
+                className="review-panel__close"
+                label={t('common.close')}
+                onClick={onClose}
+              >
+                <X className="h-4 w-4" />
+              </IconButton>
+            </div>
           </div>
 
-          {/* 覆盖层 toggle 行（只控制裁切图） */}
+          {/* 覆盖层 toggle 行 */}
           <div className="review-toggles">
             <label className="review-toggle">
               <input
@@ -1971,7 +3355,7 @@ function ReviewModal({
                 checked={showBbox}
                 onChange={(e) => setShowBbox(e.target.checked)}
               />
-              <span>检测框</span>
+              <span>{t('selection.review.toggleBbox')}</span>
             </label>
             <label className="review-toggle">
               <input
@@ -1979,151 +3363,346 @@ function ReviewModal({
                 checked={showPose}
                 onChange={(e) => setShowPose(e.target.checked)}
               />
-              <span>姿态点</span>
+              <span>{t('selection.review.togglePose')}</span>
             </label>
             <label className="review-toggle">
               <input
                 type="checkbox"
                 checked={showAfPoint}
                 onChange={(e) => setShowAfPoint(e.target.checked)}
-                disabled={afPoint === null}
+                disabled={afOverlay === null}
               />
-              <span>对焦点{afPoint === null ? ' · 未识别' : ''}</span>
+              <span>
+                {t('selection.review.toggleAfPoint')}
+                {afOverlay === null ? t('selection.review.afPointUnknown') : ''}
+              </span>
             </label>
           </div>
 
-          {/* 双图布局：横版 → 上下；竖版 → 左右 */}
-          <div
-            className={cn(
-              'review-stage__images',
-              isLandscape
-                ? 'review-stage__images--vertical'
-                : 'review-stage__images--horizontal',
-            )}
-          >
+          <div className="review-stage__images">
             <ReviewImageStage
-              label="原图"
-              hint="按住放大 · 拖动平移"
-              previewSrc={previewSrc}
-              fallbackGradient={photo.previewGradient}
-              aspect={aspect}
-              imgW={imgW}
-              imgH={imgH}
-              bbox={null}
-              pose={null}
-              afPoint={null}
-              photoId={photo.id}
-              loupeEnabled
-              cropRect={null}
-            />
-            <ReviewImageStage
-              label={`IQA 裁切 · 2.5×`}
-              hint={iqaCrop ? '画质评分依据' : '需先识别'}
+              label={t('selection.review.original')}
+              hint={t('selection.review.originalHint')}
               previewSrc={previewSrc}
               fallbackGradient={photo.previewGradient}
               aspect={aspect}
               imgW={imgW}
               imgH={imgH}
               bbox={showBbox ? bbox : null}
+              pose={null}
+              afOverlay={showAfPoint ? afOverlay : null}
+              photoId={photo.id}
+              loupeEnabled
+              cropRect={null}
+              variant="primary"
+            />
+            <ReviewImageStage
+              label={t('selection.review.iqaCrop')}
+              hint={
+                iqaCrop ? t('selection.review.cropHint') : t('selection.review.cropNeedsSubject')
+              }
+              previewSrc={previewSrc}
+              fallbackGradient={photo.previewGradient}
+              aspect={aspect}
+              imgW={imgW}
+              imgH={imgH}
+              bbox={null}
               pose={showPose ? pose : null}
-              afPoint={showAfPoint ? afPoint : null}
+              afOverlay={null}
               photoId={photo.id}
               loupeEnabled={false}
               cropRect={iqaCrop}
+              variant="crop"
             />
           </div>
         </div>
 
-        <aside className="review-detail review-detail--compact selection-scroll">
+        <aside className="review-detail review-detail--compact">
           {/* 顶部：分数 + 物种 + 分级 */}
           <ScoreHeader photo={photo} t={t} />
 
           {/* 关键指标紧凑网格 */}
           <div className="review-stats-grid">
             <CompactStat
-              label="语义"
-              value={photo.semanticScore !== null ? photo.semanticScore.toFixed(2) : '--'}
+              label={t('selection.metrics.semanticScore')}
+              value={formatScore(photo.semanticScore)}
             />
             <CompactStat
-              label="技术"
-              value={photo.technicalScore !== null ? photo.technicalScore.toFixed(2) : '--'}
+              label={t('selection.metrics.technicalScore')}
+              value={formatScore(photo.technicalScore)}
             />
             <CompactStat
-              label="头"
+              label={t('selection.metrics.head')}
               value={pose ? (pose.head_visible ? '✓' : '✗') : '--'}
               tone={pose ? (pose.head_visible ? 'ok' : 'warn') : 'muted'}
             />
             <CompactStat
-              label="眼"
+              label={t('selection.metrics.eye')}
               value={pose ? (pose.eye_visible ? '✓' : '✗') : '--'}
               tone={pose ? (pose.eye_visible ? 'ok' : 'warn') : 'muted'}
             />
-            <CompactStat label="鸟数" value={String(photo.birdCount ?? 0)} />
             <CompactStat
-              label="置信"
+              label={t('selection.metrics.birdCount')}
+              value={String(photo.birdCount ?? 0)}
+            />
+            <CompactStat
+              label={t('selection.metrics.confidence')}
               value={bbox ? `${Math.round((bbox.confidence ?? 0) * 100)}%` : '--'}
             />
           </div>
 
-          <CompactKV label="场景" value={group?.title ?? '--'} />
+          <CompactKV label={t('selection.metrics.scene')} value={group?.title ?? '--'} />
 
-          {photo.speciesCandidates.length > 0 ? (
-            <div>
-              <SectionLabel label={t('selection.review.species')} />
-              <div className="species-candidates species-candidates--compact">
-                {photo.speciesCandidates.slice(0, 5).map((candidate) => (
-                  <div className="species-row" key={`${photo.id}-${candidate.name}`}>
-                    <span className="species-row__name">{candidate.name}</span>
-                    <span className="species-row__pct">
-                      {Math.round(candidate.confidence * 100)}%
-                    </span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          ) : null}
+          <SpeciesOverrideEditor onSetSpeciesOverride={onSetSpeciesOverride} photo={photo} t={t} />
 
-          <ExifPanel exif={photo.exif} />
+          <ExifPanel exif={photo.exif} t={t} />
 
           <p className="review-reason">{t(photoReviewReason(photo))}</p>
           <TagCluster photo={photo} t={t} />
 
+          <div className="review-shortcuts" aria-label={t('selection.review.shortcutsLabel')}>
+            <span>{t('selection.review.shortcuts.grade')}</span>
+            <kbd>1</kbd>
+            <b>{t('selection.actions.select')}</b>
+            <kbd>2</kbd>
+            <b>{t('selection.actions.usable')}</b>
+            <kbd>3</kbd>
+            <b>{t('selection.actions.record')}</b>
+            <kbd>4</kbd>
+            <b>{t('selection.actions.reject')}</b>
+            <span>{t('selection.review.shortcuts.nav')}</span>
+            <kbd>←</kbd>
+            <kbd>→</kbd>
+            <kbd>Esc</kbd>
+          </div>
+
           <div className="inspector-actions inspector-actions--compact">
             <button
               className="button-primary"
-              onClick={() => onSetDecision(photo.id, 'selected')}
+              onClick={() => onSetDecision(photo.id, 'select')}
               type="button"
             >
-              <Check className="h-4 w-4" />
+              <Sparkles className="h-4 w-4" />
               {t('selection.actions.select')}
             </button>
             <button
               className="button-ghost"
-              onClick={() => onSetDecision(photo.id, 'maybe')}
+              onClick={() => onSetDecision(photo.id, 'usable')}
+              type="button"
+            >
+              <Check className="h-4 w-4" />
+              {t('selection.actions.usable')}
+            </button>
+            <button
+              className="button-ghost"
+              onClick={() => onSetDecision(photo.id, 'record')}
               type="button"
             >
               <Clock3 className="h-4 w-4" />
-              {t('selection.actions.maybe')}
+              {t('selection.actions.record')}
             </button>
             <button
               className="button-danger"
-              onClick={() => onSetDecision(photo.id, 'rejected')}
+              onClick={() => onSetDecision(photo.id, 'reject')}
               type="button"
             >
               <X className="h-4 w-4" />
               {t('selection.actions.reject')}
             </button>
-            <button
-              className="button-ghost"
-              onClick={() => onAddToCompare(photo.id)}
-              type="button"
-            >
+            <button className="button-ghost" onClick={() => onAddToCompare(photo.id)} type="button">
               <Waypoints className="h-4 w-4" />
               {t('selection.actions.compare')}
             </button>
           </div>
         </aside>
+
+        <ReviewFilmstrip
+          activePhotoId={photo.id}
+          onThumbnailLoadStatus={onThumbnailLoadStatus}
+          onSelectPhoto={onSelectPhoto}
+          photos={photos}
+          t={t}
+        />
       </div>
+    </div>
+  )
+}
+
+type SpeciesOption = ReturnType<typeof listAllSpecies>[number]
+
+function SpeciesOverrideEditor({
+  onSetSpeciesOverride,
+  photo,
+  t,
+}: {
+  onSetSpeciesOverride: (
+    photoId: string,
+    birdIndex: number,
+    species: SpeciesOverrideValue | null,
+  ) => void
+  photo: PhotoRecord
+  t: ReturnType<typeof useTranslation>['t']
+}) {
+  const birds = useMemo(() => {
+    if (photo.birdDetections && photo.birdDetections.length > 0) {
+      return photo.birdDetections
+    }
+    if (!photo.bestBbox) return []
+    return [
+      {
+        index: 0,
+        bbox: photo.bestBbox,
+        speciesName: photo.speciesName,
+        speciesLatinName: photo.speciesLatinName,
+        speciesCandidates: photo.speciesCandidates,
+        manualSpecies: Boolean(photo.manualSpecies),
+        isBest: true,
+      },
+    ]
+  }, [photo])
+  const [activeIndex, setActiveIndex] = useState(0)
+  const [query, setQuery] = useState('')
+  const allSpecies = useMemo(() => listAllSpecies(), [])
+
+  useEffect(() => {
+    setActiveIndex(birds[0]?.index ?? 0)
+    setQuery('')
+  }, [photo.id])
+
+  useEffect(() => {
+    setActiveIndex((current) =>
+      birds.some((bird) => bird.index === current) ? current : (birds[0]?.index ?? 0),
+    )
+  }, [birds])
+
+  const activeBird = birds.find((bird) => bird.index === activeIndex) ?? birds[0] ?? null
+  const modelOptions = useMemo(() => {
+    if (!activeBird) return []
+    const byLatin = new Set<string>()
+    const options: SpeciesOption[] = []
+    for (const candidate of activeBird.speciesCandidates) {
+      const latin = candidate.latinName
+      if (!latin || byLatin.has(latin)) continue
+      const option = allSpecies.find((item) => item.canonical_sci === latin)
+      if (option) {
+        options.push(option)
+        byLatin.add(latin)
+      }
+    }
+    return options
+  }, [activeBird, allSpecies])
+
+  const filteredOptions = useMemo(() => {
+    const q = query.trim().toLowerCase()
+    const source = q ? allSpecies : modelOptions.length > 0 ? modelOptions : allSpecies
+    const filtered = q
+      ? source.filter((item) => {
+          const fields = [
+            item.canonical_sci,
+            item.canonical_zh,
+            item.canonical_en,
+            item.zh_title,
+            item.en_title,
+            item.family_zh,
+            item.family_sci,
+          ]
+          return fields.some((field) => field?.toLowerCase().includes(q))
+        })
+      : source
+    return filtered.slice(0, 8)
+  }, [allSpecies, modelOptions, query])
+
+  if (!activeBird) return null
+
+  const currentName =
+    activeBird.speciesName ??
+    (activeBird.speciesCandidates[0]?.name || t('selection.photo.unidentified'))
+
+  return (
+    <div className="species-editor">
+      <div className="species-editor__head">
+        <SectionLabel label={t('selection.review.species')} />
+        {activeBird.manualSpecies ? (
+          <span className="species-editor__manual">{t('selection.speciesEditor.manual')}</span>
+        ) : null}
+      </div>
+
+      {birds.length > 1 ? (
+        <div className="species-editor__birds" role="tablist">
+          {birds.map((bird) => (
+            <button
+              className={cn(
+                'species-editor__bird',
+                bird.index === activeBird.index && 'species-editor__bird--active',
+              )}
+              key={`${photo.id}-bird-${bird.index}`}
+              onClick={() => setActiveIndex(bird.index)}
+              type="button"
+            >
+              {t('selection.speciesEditor.bird')} {bird.index + 1}
+            </button>
+          ))}
+        </div>
+      ) : null}
+
+      <div className="species-editor__current">
+        <strong>{currentName}</strong>
+        <small>{activeBird.speciesLatinName ?? t('selection.speciesEditor.noLatin')}</small>
+      </div>
+
+      <div className="species-editor__search">
+        <Search className="h-3.5 w-3.5" />
+        <input
+          aria-label={t('selection.speciesEditor.search')}
+          onChange={(event) => setQuery(event.target.value)}
+          placeholder={t('selection.speciesEditor.search')}
+          value={query}
+        />
+      </div>
+
+      <div className="species-editor__options">
+        {filteredOptions.map((option) => {
+          const label = option.canonical_zh ?? option.canonical_en ?? option.canonical_sci
+          const isCurrent = option.canonical_sci === activeBird.speciesLatinName
+          return (
+            <button
+              className={cn(
+                'species-editor__option',
+                isCurrent && 'species-editor__option--active',
+              )}
+              key={`${photo.id}-${activeBird.index}-${option.canonical_sci}`}
+              onClick={() => {
+                onSetSpeciesOverride(photo.id, activeBird.index, {
+                  canonical_sci: option.canonical_sci,
+                  canonical_zh: option.canonical_zh,
+                  canonical_en: option.canonical_en,
+                })
+                setQuery('')
+              }}
+              type="button"
+            >
+              <span>
+                <strong>{label}</strong>
+                <small>{option.canonical_sci}</small>
+              </span>
+              <b>
+                {option.is_trained
+                  ? t('selection.speciesEditor.auto')
+                  : t('selection.speciesEditor.manualOnly')}
+              </b>
+            </button>
+          )
+        })}
+      </div>
+
+      <button
+        className="species-editor__clear"
+        disabled={!activeBird.manualSpecies}
+        onClick={() => onSetSpeciesOverride(photo.id, activeBird.index, null)}
+        type="button"
+      >
+        {t('selection.speciesEditor.clear')}
+      </button>
     </div>
   )
 }
@@ -2148,10 +3727,11 @@ function ReviewImageStage({
   imgH,
   bbox,
   pose,
-  afPoint,
+  afOverlay,
   photoId,
   loupeEnabled,
   cropRect,
+  variant,
 }: {
   label: string
   hint: string
@@ -2162,18 +3742,42 @@ function ReviewImageStage({
   imgH: number | null
   bbox: { x1: number; y1: number; x2: number; y2: number } | null
   pose: PhotoRecord['bestPose']
-  afPoint: { x: number; y: number } | null
+  afOverlay: AfOverlay | null
   photoId: string
   loupeEnabled: boolean
   cropRect: { x1: number; y1: number; x2: number; y2: number } | null
+  variant: 'primary' | 'crop'
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null)
+  const frameRef = useRef<HTMLDivElement | null>(null)
+  const [frameSize, setFrameSize] = useState<{ width: number; height: number }>({
+    width: 0,
+    height: 0,
+  })
   const [loupeActive, setLoupeActive] = useState(false)
   const [loupePos, setLoupePos] = useState<{ xPct: number; yPct: number }>({
     xPct: 50,
     yPct: 50,
   })
   const LOUPE_SCALE = 2.5
+
+  useEffect(() => {
+    const element = frameRef.current
+    if (!element) return
+
+    const updateSize = () => {
+      const rect = element.getBoundingClientRect()
+      setFrameSize({
+        width: rect.width,
+        height: rect.height,
+      })
+    }
+
+    updateSize()
+    const observer = new ResizeObserver(updateSize)
+    observer.observe(element)
+    return () => observer.disconnect()
+  }, [])
 
   const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     if (!loupeEnabled || !previewSrc) return
@@ -2203,23 +3807,54 @@ function ReviewImageStage({
     }
   }
 
-  // 算 background：cropRect 给定就放大显示该区域；否则按 contain（普通预览）或 loupe
+  const stageAspect = useMemo<number>(() => {
+    if (cropRect) {
+      const cw = cropRect.x2 - cropRect.x1
+      const ch = cropRect.y2 - cropRect.y1
+      if (cw > 0 && ch > 0) return cw / ch
+    }
+    if (aspect && aspect > 0) return aspect
+    if (imgW && imgH && imgW > 0 && imgH > 0) return imgW / imgH
+    return 4 / 3
+  }, [aspect, cropRect, imgH, imgW])
+
+  const fittedSize = useMemo<React.CSSProperties>(() => {
+    if (frameSize.width <= 0 || frameSize.height <= 0) {
+      return { aspectRatio: stageAspect }
+    }
+
+    const frameAspect = frameSize.width / frameSize.height
+    if (frameAspect > stageAspect) {
+      const height = frameSize.height
+      return {
+        width: Math.max(1, Math.floor(height * stageAspect)),
+        height: Math.max(1, Math.floor(height)),
+      }
+    }
+
+    const width = frameSize.width
+    return {
+      width: Math.max(1, Math.floor(width)),
+      height: Math.max(1, Math.floor(width / stageAspect)),
+    }
+  }, [frameSize.height, frameSize.width, stageAspect])
+
+  // 算 background：裁切图等比放大显示 cropRect；否则按 contain（普通预览）或 loupe
   const cropStyle = useMemo<React.CSSProperties>(() => {
     if (!previewSrc) return {}
     if (cropRect && imgW && imgH) {
-      // 显示 cropRect 内容：把原图缩放，使 cropRect 充满容器
+      // 显示 cropRect 内容：容器本身保持 cropRect 比例，背景只按一个轴等比缩放。
       const cw = cropRect.x2 - cropRect.x1
       const ch = cropRect.y2 - cropRect.y1
       if (cw <= 0 || ch <= 0) return {}
       const sizeX = (imgW / cw) * 100
-      const sizeY = (imgH / ch) * 100
       // background-position 百分比：(crop 中心 / (原图 - crop)) * 100
       const posX = imgW > cw ? ((cropRect.x1 + cw / 2 - cw / 2) / (imgW - cw)) * 100 : 50
       const posY = imgH > ch ? ((cropRect.y1 + ch / 2 - ch / 2) / (imgH - ch)) * 100 : 50
       return {
         backgroundImage: `url("${previewSrc}")`,
         backgroundPosition: `${posX}% ${posY}%`,
-        backgroundSize: `${sizeX}% ${sizeY}%`,
+        backgroundSize: `${sizeX}% auto`,
         backgroundRepeat: 'no-repeat',
       }
     }
@@ -2227,14 +3862,14 @@ function ReviewImageStage({
       return {
         backgroundImage: `url("${previewSrc}")`,
         backgroundPosition: `${loupePos.xPct}% ${loupePos.yPct}%`,
-        backgroundSize: `${LOUPE_SCALE * 100}% ${LOUPE_SCALE * 100}%`,
+        backgroundSize: `${LOUPE_SCALE * 100}% auto`,
         backgroundRepeat: 'no-repeat',
       }
     }
     return {
       backgroundImage: `url("${previewSrc}")`,
       backgroundPosition: 'center',
-      backgroundSize: 'cover',
+      backgroundSize: 'contain',
       backgroundRepeat: 'no-repeat',
     }
   }, [previewSrc, cropRect, imgW, imgH, loupeActive, loupePos.xPct, loupePos.yPct])
@@ -2269,10 +3904,7 @@ function ReviewImageStage({
         height: ((y2 - y1) / imgH) * 100,
       }
     }
-    const toLocalPoint = (
-      x: number,
-      y: number,
-    ): { left: number; top: number } | null => {
+    const toLocalPoint = (x: number, y: number): { left: number; top: number } | null => {
       if (cropRect) {
         const cw = cropRect.x2 - cropRect.x1
         const ch = cropRect.y2 - cropRect.y1
@@ -2292,10 +3924,7 @@ function ReviewImageStage({
       if (r) {
         overlays.push(
           <span
-            className={cn(
-              'detect-box',
-              cropRect && 'detect-box--accent',
-            )}
+            className={cn('detect-box', cropRect && 'detect-box--accent')}
             key="bbox"
             style={{
               left: `${r.left}%`,
@@ -2328,16 +3957,45 @@ function ReviewImageStage({
         )
       }
     }
-    // AF 对焦点（Canon AFInfo MakerNote）：方框 + 中心十字（DSLR 风格）
-    if (afPoint) {
-      const p = toLocalPoint(afPoint.x, afPoint.y)
-      if (p) {
+    // AF 覆盖层：按 Canon 官方 AF area 语义渲染。
+    // point = 单点；expanded/zone/whole_area = 区域框 + 实际合焦点。
+    if (afOverlay) {
+      const areaBounds = afOverlay.kind !== 'point' ? afOverlay.bounds : undefined
+      if (areaBounds) {
+        const r = toLocalRect(areaBounds.x1, areaBounds.y1, areaBounds.x2, areaBounds.y2)
+        if (r) {
+          overlays.push(
+            <span
+              className={cn('af-area', `af-area--${afOverlay.kind}`)}
+              key="af-area"
+              style={{
+                left: `${r.left}%`,
+                top: `${r.top}%`,
+                width: `${r.width}%`,
+                height: `${r.height}%`,
+              }}
+              title="对焦区域"
+            />,
+          )
+        }
+      }
+
+      const focusPoints =
+        afOverlay.focused_points && afOverlay.focused_points.length > 0
+          ? afOverlay.focused_points
+          : afOverlay.points && afOverlay.points.length > 0
+            ? afOverlay.points
+            : [afOverlay.center]
+
+      for (const [index, point] of focusPoints.entries()) {
+        const p = toLocalPoint(point.x, point.y)
+        if (!p) continue
         overlays.push(
           <span
-            className="af-point"
-            key="af-point"
+            className={cn('af-point', afOverlay.kind !== 'point' && 'af-point--mini')}
+            key={`af-point-${index}`}
             style={{ left: `${p.left}%`, top: `${p.top}%` }}
-            title="对焦点"
+            title={afOverlay.kind === 'point' ? '对焦点' : '合焦点'}
           />,
         )
       }
@@ -2345,45 +4003,95 @@ function ReviewImageStage({
     return overlays
   }
 
-  // 容器的 aspect-ratio：原图模式用原图比例；裁切模式用裁切框比例（避免黑边）
-  const stageAspect = useMemo<string | undefined>(() => {
-    if (cropRect) {
-      const cw = cropRect.x2 - cropRect.x1
-      const ch = cropRect.y2 - cropRect.y1
-      if (cw > 0 && ch > 0) return `${cw} / ${ch}`
-    }
-    if (aspect && imgW && imgH) return `${imgW} / ${imgH}`
-    return '4 / 3'
-  }, [cropRect, aspect, imgW, imgH])
-
   return (
     <div className="review-stage__pane">
       <div className="review-stage__head">
         <span className="review-stage__label">{label}</span>
         <span className="review-stage__hint">{hint}</span>
       </div>
-      <div
-        ref={containerRef}
-        className={cn(
-          'review-image',
-          loupeEnabled && previewSrc && 'review-image--loupe',
-          loupeActive && 'review-image--loupe-active',
-        )}
-        style={{
-          ...cropStyle,
-          aspectRatio: stageAspect,
-          ...(previewSrc ? {} : { backgroundImage: fallbackGradient }),
-        }}
-        onPointerDown={handlePointerDown}
-        onPointerMove={handlePointerMove}
-        onPointerUp={handlePointerEnd}
-        onPointerCancel={handlePointerEnd}
-        onLostPointerCapture={() => setLoupeActive(false)}
-        data-photo-id={photoId}
-      >
-        {!loupeActive ? renderOverlays() : null}
+      <div className="review-image-frame" ref={frameRef}>
+        <div
+          ref={containerRef}
+          className={cn(
+            'review-image',
+            `review-image--${variant}`,
+            loupeEnabled && previewSrc && 'review-image--loupe',
+            loupeActive && 'review-image--loupe-active',
+          )}
+          style={{
+            ...cropStyle,
+            ...fittedSize,
+            ...(previewSrc ? {} : { backgroundImage: fallbackGradient }),
+          }}
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
+          onPointerUp={handlePointerEnd}
+          onPointerCancel={handlePointerEnd}
+          onLostPointerCapture={() => setLoupeActive(false)}
+          data-photo-id={photoId}
+        >
+          {!loupeActive ? renderOverlays() : null}
+        </div>
       </div>
     </div>
+  )
+}
+
+function ReviewFilmstrip({
+  activePhotoId,
+  onThumbnailLoadStatus,
+  onSelectPhoto,
+  photos,
+  t,
+}: {
+  activePhotoId: string
+  onThumbnailLoadStatus: (photoId: string, status: ThumbnailLoadStatus) => void
+  onSelectPhoto: (photoId: string) => void
+  photos: PhotoRecord[]
+  t: ReturnType<typeof useTranslation>['t']
+}) {
+  const activeButtonRef = useRef<HTMLButtonElement | null>(null)
+
+  useEffect(() => {
+    activeButtonRef.current?.scrollIntoView({
+      behavior: 'smooth',
+      block: 'nearest',
+      inline: 'center',
+    })
+  }, [activePhotoId])
+
+  return (
+    <footer className="review-filmstrip" aria-label={t('selection.review.filmstripLabel')}>
+      <div className="review-filmstrip__track selection-scroll">
+        {photos.map((item) => (
+          <button
+            aria-current={item.id === activePhotoId ? 'true' : undefined}
+            className={cn(
+              'review-filmstrip__item',
+              item.id === activePhotoId && 'review-filmstrip__item--active',
+            )}
+            key={item.id}
+            onClick={() => onSelectPhoto(item.id)}
+            ref={item.id === activePhotoId ? activeButtonRef : null}
+            style={{ backgroundImage: item.placeholderGradient ?? item.previewGradient }}
+            type="button"
+          >
+            <ThumbnailImage
+              alt={item.fileName}
+              className="review-filmstrip__image"
+              onStatusChange={onThumbnailLoadStatus}
+              photoId={item.id}
+              src={item.thumbGridUrl}
+            />
+            <span className="review-filmstrip__shade" />
+            <span className="review-filmstrip__meta">
+              <strong>{formatScore(item.finalScore)}</strong>
+              <small>{item.fileName}</small>
+            </span>
+          </button>
+        ))}
+      </div>
+    </footer>
   )
 }
 
@@ -2395,37 +4103,35 @@ function ScoreHeader({
   photo: PhotoRecord
   t: ReturnType<typeof useTranslation>['t']
 }) {
-  void t
+  const grade = effectivePhotoGrade(photo)
   const score = photo.finalScore
+  const sourceDetail = speciesSourceDetail(photo, t)
+  const sourceBadge = speciesSourceBadge(photo, t)
+  const sourceKind = speciesSourceKind(photo)
+  const speciesName = effectiveSpeciesName(photo) ?? t('selection.photo.unidentified')
+  const speciesLatinName = effectiveSpeciesLatinName(photo)
   return (
-    <div className={cn('score-header', `score-header--${photo.grade}`)}>
+    <div className={cn('score-header', `score-header--${grade}`)}>
       <div className="score-header__score">
-        <strong>{score !== null ? score.toFixed(2) : '--'}</strong>
-        <span className={cn('grade-pill', `grade-pill--${photo.grade}`)}>
-          {gradeLabel(photo.grade)}
-        </span>
+        <strong>{formatScore(score)}</strong>
+        <span className={cn('grade-pill', `grade-pill--${grade}`)}>{t(gradeLabelKey(grade))}</span>
       </div>
       <div className="score-header__species">
-        {photo.speciesName ?? '未识别物种'}
-        {photo.speciesLatinName ? (
-          <em>{photo.speciesLatinName}</em>
+        <span>{speciesName}</span>
+        {sourceBadge && sourceKind ? (
+          <em className={cn('species-source-inline', `species-source-inline--${sourceKind}`)}>
+            {t('selection.speciesSource.inline', { source: sourceBadge })}
+          </em>
         ) : null}
+        {speciesLatinName ? <em>{speciesLatinName}</em> : null}
       </div>
+      {sourceDetail ? (
+        <div className={cn('score-header__source', `score-header__source--${speciesSourceTone(photo)}`)}>
+          {sourceDetail}
+        </div>
+      ) : null}
     </div>
   )
-}
-
-function gradeLabel(g: PhotoGrade): string {
-  switch (g) {
-    case 'select':
-      return '精选'
-    case 'usable':
-      return '可用'
-    case 'record':
-      return '记录'
-    case 'reject':
-      return '淘汰'
-  }
 }
 
 /** 紧凑指标格：1 行 label + value，颜色 tone */
@@ -2459,8 +4165,10 @@ function CompactKV({ label, value }: { label: string; value: string }) {
 /** EXIF 信息面板（相机 / 镜头 / 曝光参数） */
 function ExifPanel({
   exif,
+  t,
 }: {
-  exif?: Record<string, string | number | null> | null
+  exif?: Record<string, unknown> | null
+  t: ReturnType<typeof useTranslation>['t']
 }) {
   if (!exif) return null
 
@@ -2518,11 +4226,11 @@ function ExifPanel({
       {/* 曝光参数：4 列横排，重点突出 */}
       <div className="exif-exposure">
         <div className="exif-exposure__cell">
-          <span className="exif-exposure__label">快门</span>
+          <span className="exif-exposure__label">{t('selection.exif.shutter')}</span>
           <span className="exif-exposure__value">{fmtShutter()}</span>
         </div>
         <div className="exif-exposure__cell">
-          <span className="exif-exposure__label">光圈</span>
+          <span className="exif-exposure__label">{t('selection.exif.aperture')}</span>
           <span className="exif-exposure__value">{fmtAperture()}</span>
         </div>
         <div className="exif-exposure__cell">
@@ -2530,15 +4238,15 @@ function ExifPanel({
           <span className="exif-exposure__value">{fmtIso()}</span>
         </div>
         <div className="exif-exposure__cell">
-          <span className="exif-exposure__label">焦距</span>
+          <span className="exif-exposure__label">{t('selection.exif.focalLength')}</span>
           <span className="exif-exposure__value">{fmtFocal()}</span>
         </div>
       </div>
       {/* 机身/镜头/时间：紧凑单行 */}
       <div className="exif-meta">
-        <CompactKV label="机身" value={camera} />
-        <CompactKV label="镜头" value={lens} />
-        <CompactKV label="时间" value={dt} />
+        <CompactKV label={t('selection.exif.camera')} value={camera} />
+        <CompactKV label={t('selection.exif.lens')} value={lens} />
+        <CompactKV label={t('selection.exif.time')} value={dt} />
       </div>
     </div>
   )
@@ -2578,22 +4286,40 @@ function CompareModal({
         <div className="compare-grid">
           {photos.map((photo) => (
             <article className="compare-card" key={photo.id}>
-              <div className="archive-card__image" style={{ backgroundImage: photo.previewGradient }} />
+              <div
+                className="archive-card__image"
+                style={{ backgroundImage: photo.previewGradient }}
+              />
               <div className="compare-card__body">
                 <div>
                   <strong>{photo.speciesName ?? t('selection.photo.noBird')}</strong>
                   <small>{photo.fileName}</small>
                 </div>
-                <b>{photo.finalScore !== null ? photo.finalScore.toFixed(2) : '--'}</b>
+                <b>{formatScore(photo.finalScore)}</b>
                 <div className="action-row">
-                  <IconButton label={t('selection.actions.reject')} onClick={() => onSetDecision(photo.id, 'rejected')}>
-                    <X className="h-4 w-4" />
+                  <IconButton
+                    label={t('selection.actions.select')}
+                    onClick={() => onSetDecision(photo.id, 'select')}
+                  >
+                    <Sparkles className="h-4 w-4" />
                   </IconButton>
-                  <IconButton label={t('selection.actions.maybe')} onClick={() => onSetDecision(photo.id, 'maybe')}>
+                  <IconButton
+                    label={t('selection.actions.usable')}
+                    onClick={() => onSetDecision(photo.id, 'usable')}
+                  >
+                    <Check className="h-4 w-4" />
+                  </IconButton>
+                  <IconButton
+                    label={t('selection.actions.record')}
+                    onClick={() => onSetDecision(photo.id, 'record')}
+                  >
                     <Clock3 className="h-4 w-4" />
                   </IconButton>
-                  <IconButton label={t('selection.actions.select')} onClick={() => onSetDecision(photo.id, 'selected')}>
-                    <Check className="h-4 w-4" />
+                  <IconButton
+                    label={t('selection.actions.reject')}
+                    onClick={() => onSetDecision(photo.id, 'reject')}
+                  >
+                    <X className="h-4 w-4" />
                   </IconButton>
                 </div>
               </div>
@@ -2607,15 +4333,37 @@ function CompareModal({
 
 function ExportDrawer({
   activeFolder,
+  photos,
   onClose,
   summary,
   t,
 }: {
   activeFolder: FolderRecord | null
+  photos: PhotoRecord[]
   onClose: () => void
   summary: FolderSummary
   t: ReturnType<typeof useTranslation>['t']
 }) {
+  const [grades, setGrades] = useState<PhotoGrade[]>(['select', 'usable', 'record'])
+  const [minScore, setMinScore] = useState('')
+  const [maxScore, setMaxScore] = useState('')
+
+  const min = minScore.trim() === '' ? null : Number(minScore)
+  const max = maxScore.trim() === '' ? null : Number(maxScore)
+  const exportPhotos = photos.filter((photo) => {
+    if (!grades.includes(effectivePhotoGrade(photo))) return false
+    const score = photo.finalScore === null ? null : photo.finalScore * 100
+    if (score !== null && min !== null && Number.isFinite(min) && score < min) return false
+    if (score !== null && max !== null && Number.isFinite(max) && score > max) return false
+    return true
+  })
+
+  const toggleGrade = (grade: PhotoGrade) => {
+    setGrades((current) =>
+      current.includes(grade) ? current.filter((item) => item !== grade) : [...current, grade],
+    )
+  }
+
   return (
     <div className="overlay-backdrop overlay-backdrop--bottom">
       <div className="export-drawer">
@@ -2625,14 +4373,74 @@ function ExportDrawer({
           <p>{activeFolder ? `${activeFolder.displayName} · ${activeFolder.rootPath}` : '--'}</p>
         </div>
         <div className="export-grid">
-          <ExportOption title={t('export.scope.label')} value={t('export.scope.selected')} />
+          <ExportOption title={t('export.scope.label')} value={t('export.scope.reviewed')} />
           <ExportOption title={t('export.structure.label')} value={t('export.structure.keep')} />
           <ExportOption title={t('export.bundle.label')} value={t('export.bundle.report')} />
         </div>
+        <div className="export-controls">
+          <div className="export-control-block">
+            <SectionLabel label={t('export.scope.manual')} />
+            <div className="export-grade-grid">
+              {(['select', 'usable', 'record', 'reject'] as PhotoGrade[]).map((grade) => (
+                <label className="export-check" key={grade}>
+                  <input
+                    checked={grades.includes(grade)}
+                    onChange={() => toggleGrade(grade)}
+                    type="checkbox"
+                  />
+                  <span>{t(gradeLabelKey(grade))}</span>
+                </label>
+              ))}
+            </div>
+          </div>
+          <div className="export-control-block">
+            <SectionLabel label={t('export.scoreRange.label')} />
+            <div className="export-range">
+              <input
+                inputMode="decimal"
+                max="100"
+                min="0"
+                onChange={(event) => setMinScore(event.target.value)}
+                placeholder={t('export.scoreRange.min')}
+                type="number"
+                value={minScore}
+              />
+              <span>–</span>
+              <input
+                inputMode="decimal"
+                max="100"
+                min="0"
+                onChange={(event) => setMaxScore(event.target.value)}
+                placeholder={t('export.scoreRange.max')}
+                type="number"
+                value={maxScore}
+              />
+            </div>
+          </div>
+        </div>
         <div className="metric-strip">
-          <MetricCell label={t('selection.metrics.selectedCount')} tone="success" value={summary.selectedCount} />
-          <MetricCell label={t('selection.metrics.maybeCount')} tone="warning" value={summary.maybeCount} />
-          <MetricCell label={t('selection.metrics.newSpeciesCount')} tone="accent" value={summary.newSpeciesCount} />
+          <MetricCell
+            label={t('selection.metrics.selectPhotos')}
+            tone="success"
+            value={summary.gradeCounts.select}
+          />
+          <MetricCell
+            label={t('selection.metrics.usablePhotos')}
+            value={summary.gradeCounts.usable}
+          />
+          <MetricCell
+            label={t('selection.metrics.recordPhotos')}
+            tone="warning"
+            value={summary.gradeCounts.record}
+          />
+          <MetricCell
+            label={t('selection.metrics.rejectCount')}
+            tone="accent"
+            value={summary.gradeCounts.reject}
+          />
+        </div>
+        <div className="export-result-count">
+          {t('export.summary.count', { count: exportPhotos.length })}
         </div>
         <div className="action-row">
           <button className="button-primary" type="button">
@@ -2660,7 +4468,13 @@ function BackgroundTaskBar({
   return (
     <footer className="background-taskbar">
       <span>{t(statusLabelKey(activeFolder.status))}</span>
-      <GlyphMatrix tone={statusTone(activeFolder.status)} value={Math.max(3, Math.round((activeFolder.analyzedCount / Math.max(activeFolder.totalCount, 1)) * 12))} />
+      <GlyphMatrix
+        tone={statusTone(activeFolder.status)}
+        value={Math.max(
+          3,
+          Math.round((activeFolder.analyzedCount / Math.max(activeFolder.totalCount, 1)) * 12),
+        )}
+      />
       <span>{formatRatio(activeFolder.analyzedCount, activeFolder.totalCount)}</span>
     </footer>
   )
@@ -2727,17 +4541,32 @@ function MetricCell({
 
 function StatRow({
   label,
+  onValueClick,
   tone = 'neutral',
   value,
+  valueAriaLabel,
 }: {
   label: string
+  onValueClick?: () => void
   tone?: Tone
   value: number | string
+  valueAriaLabel?: string
 }) {
   return (
     <div className="stat-row">
       <span>{label}</span>
-      <strong className={`tone-text-${tone}`}>{value}</strong>
+      {onValueClick ? (
+        <button
+          aria-label={valueAriaLabel}
+          className={cn('stat-row__value-button', `tone-text-${tone}`)}
+          onClick={onValueClick}
+          type="button"
+        >
+          {value}
+        </button>
+      ) : (
+        <strong className={`tone-text-${tone}`}>{value}</strong>
+      )}
     </div>
   )
 }
@@ -2752,19 +4581,27 @@ function StatusDot({ tone = 'neutral' }: { tone?: Tone }) {
 
 function IconButton({
   active,
+  ariaKeyShortcuts,
   children,
+  className,
+  disabled,
   label,
   onClick,
 }: {
   active?: boolean
+  ariaKeyShortcuts?: string
   children: ReactNode
+  className?: string
+  disabled?: boolean
   label: string
   onClick?: () => void
 }) {
   return (
     <button
       aria-label={label}
-      className={cn('icon-button', active && 'icon-button--active')}
+      aria-keyshortcuts={ariaKeyShortcuts}
+      className={cn('icon-button', active && 'icon-button--active', className)}
+      disabled={disabled}
       onClick={onClick}
       type="button"
     >

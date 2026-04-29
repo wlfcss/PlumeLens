@@ -15,7 +15,7 @@ from engine.core.logging import setup_logging
 from engine.pipeline.manager import PipelineManager
 from engine.services.queue import recover_on_startup
 from engine.services.scene_grouper import regroup_library
-from engine.services.thumbnail import generate_library_thumbnails
+from engine.services.thumbnail import generate_library_thumbnails, thumbnail_cache_root
 
 logger = structlog.stdlib.get_logger()
 
@@ -30,12 +30,12 @@ async def _resume_pending_workers(app: FastAPI, db: Database) -> None:
     个有 pending tasks 的 library 起一个 _drain_queue 协程。
     """
     pipeline = getattr(app.state, "pipeline", None)
-    if pipeline is None or not pipeline.is_ready:
+    if not isinstance(pipeline, PipelineManager) or not pipeline.is_ready:
         await logger.ainfo("Skipping queue resume: pipeline not ready")
         return
 
     # 延迟 import 避免循环依赖（analysis route 也 import services）
-    from engine.api.routes.analysis import _drain_queue, _workers
+    from engine.api.routes.analysis import start_library_worker
     from engine.core.config import settings
 
     async with db.conn.execute(
@@ -46,11 +46,13 @@ async def _resume_pending_workers(app: FastAPI, db: Database) -> None:
     for row in rows:
         library_id = str(row["library_id"])
         pending_count = int(row["n"])
-        if library_id in _workers and not _workers[library_id].done():
-            continue  # 已有 worker 在跑
-        _workers[library_id] = asyncio.create_task(
-            _drain_queue(db, pipeline, library_id, settings.analysis_concurrency),
+        await db.conn.execute(
+            "UPDATE libraries SET status = 'analyzing_partial' "
+            "WHERE id = ? AND status NOT IN ('path_missing', 'error')",
+            (library_id,),
         )
+        await db.conn.commit()
+        start_library_worker(db, pipeline, library_id, settings.analysis_concurrency)
         await logger.ainfo(
             "Resumed pending queue worker",
             library_id=library_id,
@@ -60,7 +62,7 @@ async def _resume_pending_workers(app: FastAPI, db: Database) -> None:
 
 async def _refresh_all_thumbnails(db: Database) -> None:
     """启动后扫所有 library：补缩略图 + 补 scene_id + 补缺失 EXIF（曝光参数）。"""
-    cache_root = settings.data_dir / "cache" / "thumbnails"
+    cache_root = thumbnail_cache_root(settings.data_dir)
     # 延迟 import 避免循环依赖
     from engine.services.scanner import refresh_library_exif
 
@@ -146,12 +148,15 @@ def _kill_orphan_engines(my_pid: int) -> int:
         # /.../plumelens-engine/plumelens-engine 路径）
         result = subprocess.run(
             ["pgrep", "-f", "plumelens-engine"],
-            capture_output=True, text=True, timeout=2,
+            capture_output=True,
+            text=True,
+            timeout=2,
         )
         if result.returncode != 0:
             return 0
         pids = [
-            int(p) for p in result.stdout.strip().split()
+            int(p)
+            for p in result.stdout.strip().split()
             if p.strip().isdigit() and int(p) != my_pid
         ]
         killed = 0
@@ -217,6 +222,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     # Shutdown
     refresh_task.cancel()
     import contextlib
+
     with contextlib.suppress(asyncio.CancelledError, Exception):
         await refresh_task
     app.state.pipeline.close()

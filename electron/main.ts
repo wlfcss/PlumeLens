@@ -1,7 +1,7 @@
 import { app, BrowserWindow, ipcMain, dialog, net, protocol, session } from 'electron'
 import { pathToFileURL } from 'url'
-import { join } from 'path'
-import { is } from '@electron-toolkit/utils'
+import { realpath } from 'fs/promises'
+import { join, resolve } from 'path'
 import { ProcessManager } from './process-manager'
 
 // plumelens:// 协议必须在 app ready 之前注册 scheme（标准 + secure），
@@ -29,6 +29,7 @@ const windowBounds = {
 } as const
 
 function createWindow(): void {
+  const isDev = !app.isPackaged
   mainWindow = new BrowserWindow({
     ...windowBounds,
     backgroundColor: '#050505',
@@ -43,7 +44,7 @@ function createWindow(): void {
 
   // CSP
   session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
-    const contentSecurityPolicy = is.dev
+    const contentSecurityPolicy = isDev
       ? [
           "default-src 'self' http://localhost:5173 ws://localhost:5173;",
           "script-src 'self' 'unsafe-inline' 'unsafe-eval' http://localhost:5173;",
@@ -69,7 +70,7 @@ function createWindow(): void {
     })
   })
 
-  if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
+  if (isDev && process.env['ELECTRON_RENDERER_URL']) {
     mainWindow.loadURL(process.env['ELECTRON_RENDERER_URL'])
   } else {
     mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
@@ -83,6 +84,10 @@ function createWindow(): void {
 // IPC handlers
 ipcMain.handle('get-backend-url', () => {
   return processManager?.getUrl() ?? null
+})
+
+ipcMain.handle('get-backend-auth-token', () => {
+  return processManager?.getAuthToken() ?? null
 })
 
 ipcMain.handle('get-app-version', () => {
@@ -99,7 +104,7 @@ ipcMain.handle('dialog:open-folder', async () => {
 
 // Lifecycle
 app.whenReady().then(async () => {
-  const thumbnailsRoot = join(app.getPath('userData'), 'cache', 'thumbnails')
+  const thumbnailsRoot = join(app.getPath('userData'), 'derived', 'thumbnails')
   process.stderr.write(`[main] userData=${app.getPath('userData')}\n`)
   process.stderr.write(`[main] thumbnailsRoot=${thumbnailsRoot}\n`)
   protocol.handle('plumelens', async (request) => {
@@ -123,17 +128,20 @@ app.whenReady().then(async () => {
       return new Response('Forbidden (bad prefix)', { status: 403 })
     }
     const filePath = join(thumbnailsRoot, rel)
-    // path.resolve 后必须仍在 thumbnailsRoot 之内（防 symlink 跳出）
-    const { resolve, normalize } = await import('path')
+    // path.resolve 后必须仍在 thumbnailsRoot 之内（防普通 path traversal）
     const resolved = resolve(filePath)
     const rootResolved = resolve(thumbnailsRoot)
     if (!resolved.startsWith(rootResolved + '/') && resolved !== rootResolved) {
       return new Response('Forbidden (escape)', { status: 403 })
     }
-    void normalize  // unused
-    const fileUrl = pathToFileURL(resolved).toString()
     try {
-      return await net.fetch(fileUrl)
+      // realpath 再确认真实落点，防止 thumbnailsRoot 内的 symlink 指向外部文件。
+      const realRoot = await realpath(thumbnailsRoot)
+      const realFile = await realpath(resolved)
+      if (!realFile.startsWith(realRoot + '/') && realFile !== realRoot) {
+        return new Response('Forbidden (symlink escape)', { status: 403 })
+      }
+      return await net.fetch(pathToFileURL(realFile).toString())
     } catch {
       return new Response('Not found', { status: 404 })
     }
@@ -159,6 +167,13 @@ app.on('window-all-closed', () => {
   // 非 macOS：关窗即退出应用，stop 由 before-quit 兜底。
   if (process.platform !== 'darwin') {
     app.quit()
+  }
+})
+
+app.on('activate', () => {
+  // macOS Dock 激活时重建窗口；engine 进程保持原样，preload 会继续取现有 URL。
+  if (BrowserWindow.getAllWindows().length === 0) {
+    createWindow()
   }
 })
 

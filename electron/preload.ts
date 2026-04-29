@@ -2,6 +2,8 @@ import { contextBridge, ipcRenderer } from 'electron'
 
 contextBridge.exposeInMainWorld('plumelens', {
   getBackendUrl: (): Promise<string | null> => ipcRenderer.invoke('get-backend-url'),
+  getBackendAuthToken: (): Promise<string | null> =>
+    ipcRenderer.invoke('get-backend-auth-token'),
   getAppVersion: (): Promise<string> => ipcRenderer.invoke('get-app-version'),
   openFolder: (): Promise<string | null> => ipcRenderer.invoke('dialog:open-folder'),
   onBackendReady: (cb: (url: string) => void): void => {

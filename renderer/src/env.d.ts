@@ -2,6 +2,7 @@
 
 interface PlumeLensAPI {
   getBackendUrl(): Promise<string | null>
+  getBackendAuthToken(): Promise<string | null>
   getAppVersion(): Promise<string>
   openFolder(): Promise<string | null>
   onBackendReady(cb: (url: string) => void): void

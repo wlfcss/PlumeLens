@@ -120,7 +120,7 @@ def _file_checksum(path: Path) -> str:
 
 
 class PipelineManager:
-    """Central manager for the ONNX bird analysis pipeline.
+    """Central manager for the hybrid bird analysis pipeline.
 
     Created once at app startup, stored in app.state.pipeline.
 
@@ -144,13 +144,12 @@ class PipelineManager:
             "bird_visibility": False,
             "clipiqa": False,
             "hyperiqa": False,
-            "dinov3_backbone": False,
-            "species_ensemble": False,
+            "dinov3_species_v3": False,
         }
         self._model_providers: dict[str, str] = {}
 
     async def initialize(self) -> None:
-        """Load all ONNX models. Called once during FastAPI lifespan startup."""
+        """Load ONNX models and torch species assets during FastAPI startup."""
         import onnxruntime as ort
 
         models_dir = self._settings.models_dir
@@ -183,10 +182,12 @@ class PipelineManager:
             if self._detector is not None and "coreml" in self._settings.yolo_provider.lower():
                 try:
                     cpu_sess = ort.InferenceSession(
-                        str(yolo_path), providers=["CPUExecutionProvider"],
+                        str(yolo_path),
+                        providers=["CPUExecutionProvider"],
                     )
                     self._detector_cpu_fallback = BirdDetector(
-                        session=cpu_sess, input_size=self._settings.yolo_input_size,
+                        session=cpu_sess,
+                        input_size=self._settings.yolo_input_size,
                     )
                     await logger.ainfo("Loaded YOLO CPU fallback session")
                 except Exception:
@@ -218,9 +219,7 @@ class PipelineManager:
                 )
                 self._model_status["bird_visibility"] = True
                 active = sess.get_providers()
-                self._model_providers["bird_visibility"] = (
-                    active[0] if active else "unknown"
-                )
+                self._model_providers["bird_visibility"] = active[0] if active else "unknown"
                 checksums["bird_visibility"] = _file_checksum(pose_path)
             except Exception:
                 await logger.aexception("Failed to load pose detector")
@@ -234,9 +233,7 @@ class PipelineManager:
             providers = resolve_providers(self._settings.iqa_provider)
             await logger.ainfo("Loading CLIPIQA+", path=str(clipiqa_path))
             try:
-                clipiqa_session = ort.InferenceSession(
-                    str(clipiqa_path), providers=providers
-                )
+                clipiqa_session = ort.InferenceSession(str(clipiqa_path), providers=providers)
                 self._model_status["clipiqa"] = True
                 active = clipiqa_session.get_providers()
                 self._model_providers["clipiqa"] = active[0] if active else "unknown"
@@ -253,9 +250,7 @@ class PipelineManager:
             providers = resolve_providers(self._settings.iqa_provider)
             await logger.ainfo("Loading HyperIQA", path=str(hyperiqa_path))
             try:
-                hyperiqa_session = ort.InferenceSession(
-                    str(hyperiqa_path), providers=providers
-                )
+                hyperiqa_session = ort.InferenceSession(str(hyperiqa_path), providers=providers)
                 self._model_status["hyperiqa"] = True
                 active = hyperiqa_session.get_providers()
                 self._model_providers["hyperiqa"] = active[0] if active else "unknown"
@@ -274,8 +269,8 @@ class PipelineManager:
             )
 
         # ---- DINOv3 species classifier v3 (torch + transformers, 845 MB) ----
-        # 旧路径（dinov3_backbone.onnx + species_ensemble.onnx）已弃用，转 ONNX
-        # 路线已验证不可行（RoPE fp16 NaN + CoreML EP ViT 覆盖差，准确率显著下降）。
+        # 旧路径（dinov3_backbone.onnx + species_ensemble.onnx）已弃用；纯 ONNX
+        # species 路线已验证不可行（RoPE fp16 NaN + CoreML EP ViT 覆盖差，准确率显著下降）。
         species_dir = models_dir / "species"
         species_backbone_safetensors = species_dir / "backbone" / "model.safetensors"
         species_canonical = species_dir / "canonical_extended.parquet"
@@ -365,8 +360,9 @@ class PipelineManager:
         h.update(f"iqe:{self._settings.iqa_expand_ratio}".encode())
         h.update(f"iqar:{self._settings.iqa_max_aspect_ratio}".encode())
         # 算法版本：bump 每当评分/降档逻辑变（pose penalty / grading 形式）
-        # v3：species 切换到 torch v3（480 单尺度 + 8 head + 1535 类）
-        h.update(b"alg:v3-species-torch")
+        # v5：IQA 拆分输入 + 修正 PyIQA ONNX 输入契约。
+        # CLIPIQA/HyperIQA 图内已经做 ImageNet normalization，engine 只传 raw RGB 0-1。
+        h.update(b"alg:v5-iqa-raw-input-split-crops")
         # Pose thresholds (5 项)
         h.update(f"pbt:{self._settings.pose_box_threshold}".encode())
         h.update(f"pet:{self._settings.pose_eye_threshold}".encode())
@@ -459,6 +455,9 @@ class PipelineManager:
         t_species_ms = 0.0
 
         _t = time.perf_counter()
+        # Full-resolution image in display orientation. Every downstream crop is cut from
+        # this original image array. Letterbox-resized tensors are only transient model
+        # inputs; their coordinates are always mapped back before cropping.
         image = load_image(image_path)
         t_load_ms = (time.perf_counter() - _t) * 1000
         img_h, img_w = image.shape[:2]
@@ -477,7 +476,8 @@ class PipelineManager:
                     error=str(e)[:120],
                 )
                 boxes = self._detector_cpu_fallback.detect(
-                    image, confidence_threshold=self._settings.yolo_confidence,
+                    image,
+                    confidence_threshold=self._settings.yolo_confidence,
                 )
             else:
                 raise
@@ -487,7 +487,9 @@ class PipelineManager:
         padding = self._settings.crop_padding_ratio
 
         for box in boxes:
-            # Step 2a: pose 用紧裁切（bbox + 10% padding，定位精准）
+            # Step 2a: pose / HyperIQA 用原图紧主体裁切（bbox + 10% padding）。
+            # pose 需要定位精准；HyperIQA 负责主体技术画质，不能被 2.5x 大裁切里的
+            # 背景/虚化/留白稀释。
             bw = box.x2 - box.x1
             bh = box.y2 - box.y1
             px = bw * padding
@@ -497,7 +499,7 @@ class PipelineManager:
             pad_x2 = min(float(img_w), box.x2 + px)
             pad_y2 = min(float(img_h), box.y2 + py)
 
-            pose_crop = crop_bbox(
+            technical_crop = crop_bbox(
                 image,
                 x1=pad_x1,
                 y1=pad_y1,
@@ -506,8 +508,8 @@ class PipelineManager:
                 expand_ratio=self._settings.crop_expand_ratio,
             )
 
-            # Step 2b: IQA 用大裁切（bbox 放大 expand_ratio 倍，含背景构图）
-            iqa_crop = expand_for_iqa(
+            # Step 2b: CLIPIQA 用原图大裁切（bbox 放大 expand_ratio 倍，含背景/构图）。
+            semantic_crop = expand_for_iqa(
                 image,
                 x1=box.x1,
                 y1=box.y1,
@@ -523,7 +525,8 @@ class PipelineManager:
             if self._pose is not None:
                 try:
                     pose_info = self._pose.detect(
-                        pose_crop, crop_origin=(pad_x1, pad_y1)
+                        technical_crop,
+                        crop_origin=(pad_x1, pad_y1),
                     )
                 except Exception:
                     logger.exception("Pose detection failed", photo_id=photo_id)
@@ -532,7 +535,10 @@ class PipelineManager:
             # Step 3b: quality assessment (降级：IQA 模型缺失时用固定分数)
             _t = time.perf_counter()
             if self._assessor is not None:
-                scores = self._assessor.assess(iqa_crop)
+                scores = self._assessor.assess(
+                    semantic_crop=semantic_crop,
+                    technical_crop=technical_crop,
+                )
             else:
                 # IQA 模型未加载 → 返回中性分数 0.5，grade 降级为 USABLE
                 from engine.pipeline.models import QualityScores
@@ -554,14 +560,11 @@ class PipelineManager:
                 try:
                     species_candidates = self._species.classify(species_crop)
                 except Exception:
-                    logger.exception(
-                        "Species classification failed", photo_id=photo_id
-                    )
+                    logger.exception("Species classification failed", photo_id=photo_id)
             t_species_ms += (time.perf_counter() - _t) * 1000
 
             species_name = (
-                species_candidates[0].canonical_zh
-                or species_candidates[0].canonical_sci
+                species_candidates[0].canonical_zh or species_candidates[0].canonical_sci
                 if species_candidates
                 else None
             )

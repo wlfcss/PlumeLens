@@ -1,5 +1,5 @@
 export type AppRoute = 'start' | 'selection' | 'archive'
-export type ArchiveTab = 'photos' | 'species'
+export type ArchiveTab = 'species' | 'map'
 export type FolderStatus =
   | 'idle'
   | 'scanning'
@@ -11,8 +11,8 @@ export type FolderStatus =
   | 'exporting'
   | 'error'
 
-export type SelectionDecision = 'unreviewed' | 'selected' | 'maybe' | 'rejected'
 export type PhotoGrade = 'reject' | 'record' | 'usable' | 'select'
+export type SelectionDecision = PhotoGrade | null
 export type AnalysisStatus = 'pending' | 'running' | 'done' | 'failed'
 export type PhotoGroupType = 'burst' | 'scene' | 'time' | 'species'
 export type PoseTagId = 'eye_visible' | 'head_clean' | 'wings_open' | 'perched' | 'multi_bird'
@@ -51,7 +51,46 @@ export interface PhotoGroupRecord {
 
 export interface SpeciesCandidate {
   name: string
+  latinName?: string | null
+  englishName?: string | null
   confidence: number
+}
+
+export interface BirdDetectionRecord {
+  index: number
+  bbox: { x1: number; y1: number; x2: number; y2: number; confidence: number }
+  speciesName: string | null
+  speciesLatinName: string | null
+  speciesEnglishName?: string | null
+  speciesCandidates: SpeciesCandidate[]
+  manualSpecies: boolean
+  isBest: boolean
+}
+
+export interface AfOverlayPoint {
+  index?: number
+  x: number
+  y: number
+  width?: number
+  height?: number
+  bounds?: { x1: number; y1: number; x2: number; y2: number }
+  in_focus?: boolean
+  selected?: boolean
+}
+
+export interface AfOverlay {
+  provider?: string
+  mode?: number
+  kind: 'point' | 'expanded' | 'zone' | 'whole_area' | 'unknown'
+  source?: 'in_focus' | 'selected' | 'legacy'
+  center: { x: number; y: number }
+  bounds?: { x1: number; y1: number; x2: number; y2: number }
+  points?: AfOverlayPoint[]
+  focused_points?: AfOverlayPoint[]
+  selected_points?: AfOverlayPoint[]
+  focused_count?: number
+  selected_count?: number
+  point_count?: number
 }
 
 export interface PhotoRecord {
@@ -64,7 +103,20 @@ export interface PhotoRecord {
   lens: string
   speciesName: string | null
   speciesLatinName: string | null
+  speciesEnglishName?: string | null
+  manualSpecies?: boolean
+  speciesSource?: 'none' | 'model' | 'manual' | 'group_consensus' | 'conflict'
+  modelSpeciesName?: string | null
+  modelSpeciesLatinName?: string | null
+  groupSpeciesName?: string | null
+  groupSpeciesLatinName?: string | null
+  groupSpeciesConfidence?: number | null
+  groupSpeciesSupport?: number | null
+  groupSpeciesEvidence?: number | null
+  groupSpeciesTotal?: number | null
+  speciesConflict?: boolean
   speciesCandidates: SpeciesCandidate[]
+  birdDetections?: BirdDetectionRecord[]
   isNewSpecies: boolean
   birdCount: number
   grade: PhotoGrade
@@ -79,12 +131,14 @@ export interface PhotoRecord {
   sceneTag: SceneTagId
   caption: string
   previewGradient: string
+  placeholderGradient?: string
+  thumbGridUrl?: string | null
   boxes: Array<{ x: number; y: number; w: number; h: number }>
   // 深度复核字段（mock 不填，真后端在 backend-adapter 注入）
   imageWidth?: number | null
   imageHeight?: number | null
   thumbPreviewUrl?: string | null
-  exif?: Record<string, string | number | null> | null
+  exif?: Record<string, unknown> | null
   bestBbox?: { x1: number; y1: number; x2: number; y2: number; confidence: number } | null
   bestPose?: {
     bill: { x: number; y: number; confidence: number }
@@ -97,20 +151,30 @@ export interface PhotoRecord {
   } | null
   // 对焦点（原图坐标系，Canon AFInfo MakerNote 解析得到）
   bestAfPoint?: { x: number; y: number } | null
+  bestAfArea?: AfOverlay | null
 }
 
 export interface SpeciesRecord {
   id: string
   name: string
   latinName: string
+  englishName?: string | null
   coverGradient: string
+  imageUrl?: string | null
   photoCount: number
   firstSeenAt: string
   lastSeenAt: string
-  bestScore: number
+  bestScore: number | null
   newSightings: number
   regions: string[]
   summary: string
+  collected?: boolean
+  protectLevel?: string | null
+  iucn?: string | null
+  familyName?: string | null
+  isTrained?: boolean
+  inChinaV12?: boolean
+  catalogSource?: 'china_v12' | 'model_extra' | 'uncatalogued'
 }
 
 export interface WorkspaceSnapshot {
@@ -122,14 +186,7 @@ export interface WorkspaceSnapshot {
 
 type PhotoSeed = Omit<
   PhotoRecord,
-  | 'id'
-  | 'folderId'
-  | 'groupId'
-  | 'fileName'
-  | 'shotAt'
-  | 'camera'
-  | 'lens'
-  | 'speciesLatinName'
+  'id' | 'folderId' | 'groupId' | 'fileName' | 'shotAt' | 'camera' | 'lens' | 'speciesLatinName'
 >
 
 interface FolderSeed {
@@ -175,7 +232,7 @@ const folderSeeds: FolderSeed[] = [
             isNewSpecies: false,
             birdCount: 1,
             grade: 'select',
-            decision: 'selected',
+            decision: 'select',
             finalScore: 0.91,
             semanticScore: 0.84,
             technicalScore: 0.93,
@@ -198,7 +255,7 @@ const folderSeeds: FolderSeed[] = [
             isNewSpecies: false,
             birdCount: 1,
             grade: 'usable',
-            decision: 'maybe',
+            decision: 'record',
             finalScore: 0.77,
             semanticScore: 0.74,
             technicalScore: 0.8,
@@ -221,7 +278,7 @@ const folderSeeds: FolderSeed[] = [
             isNewSpecies: false,
             birdCount: 1,
             grade: 'record',
-            decision: 'rejected',
+            decision: 'reject',
             finalScore: 0.49,
             semanticScore: 0.52,
             technicalScore: 0.47,
@@ -254,7 +311,7 @@ const folderSeeds: FolderSeed[] = [
             isNewSpecies: true,
             birdCount: 1,
             grade: 'select',
-            decision: 'selected',
+            decision: 'select',
             finalScore: 0.88,
             semanticScore: 0.79,
             technicalScore: 0.86,
@@ -278,7 +335,7 @@ const folderSeeds: FolderSeed[] = [
             isNewSpecies: true,
             birdCount: 1,
             grade: 'usable',
-            decision: 'maybe',
+            decision: 'record',
             finalScore: 0.73,
             semanticScore: 0.69,
             technicalScore: 0.71,
@@ -301,7 +358,7 @@ const folderSeeds: FolderSeed[] = [
             isNewSpecies: false,
             birdCount: 1,
             grade: 'record',
-            decision: 'rejected',
+            decision: 'reject',
             finalScore: 0.45,
             semanticScore: 0.43,
             technicalScore: 0.51,
@@ -334,7 +391,7 @@ const folderSeeds: FolderSeed[] = [
             isNewSpecies: false,
             birdCount: 3,
             grade: 'usable',
-            decision: 'maybe',
+            decision: 'record',
             finalScore: 0.71,
             semanticScore: 0.75,
             technicalScore: 0.68,
@@ -361,7 +418,7 @@ const folderSeeds: FolderSeed[] = [
             isNewSpecies: false,
             birdCount: 2,
             grade: 'record',
-            decision: 'rejected',
+            decision: 'reject',
             finalScore: 0.43,
             semanticScore: 0.46,
             technicalScore: 0.44,
@@ -387,7 +444,7 @@ const folderSeeds: FolderSeed[] = [
             isNewSpecies: false,
             birdCount: 0,
             grade: 'reject',
-            decision: 'rejected',
+            decision: 'reject',
             finalScore: 0.12,
             semanticScore: null,
             technicalScore: null,
@@ -432,7 +489,7 @@ const folderSeeds: FolderSeed[] = [
             isNewSpecies: false,
             birdCount: 1,
             grade: 'usable',
-            decision: 'selected',
+            decision: 'select',
             finalScore: 0.81,
             semanticScore: 0.76,
             technicalScore: 0.84,
@@ -455,7 +512,7 @@ const folderSeeds: FolderSeed[] = [
             isNewSpecies: false,
             birdCount: 1,
             grade: 'record',
-            decision: 'maybe',
+            decision: 'record',
             finalScore: 0.52,
             semanticScore: 0.51,
             technicalScore: 0.56,
@@ -488,7 +545,7 @@ const folderSeeds: FolderSeed[] = [
             isNewSpecies: false,
             birdCount: 1,
             grade: 'usable',
-            decision: 'maybe',
+            decision: 'record',
             finalScore: 0.74,
             semanticScore: 0.7,
             technicalScore: 0.72,
@@ -511,7 +568,7 @@ const folderSeeds: FolderSeed[] = [
             isNewSpecies: false,
             birdCount: 1,
             grade: 'record',
-            decision: 'unreviewed',
+            decision: null,
             finalScore: 0.39,
             semanticScore: 0.41,
             technicalScore: 0.38,
@@ -534,7 +591,7 @@ const folderSeeds: FolderSeed[] = [
             isNewSpecies: false,
             birdCount: 0,
             grade: 'reject',
-            decision: 'unreviewed',
+            decision: null,
             finalScore: null,
             semanticScore: null,
             technicalScore: null,
@@ -579,7 +636,7 @@ const folderSeeds: FolderSeed[] = [
             isNewSpecies: false,
             birdCount: 1,
             grade: 'record',
-            decision: 'rejected',
+            decision: 'reject',
             finalScore: 0.46,
             semanticScore: 0.49,
             technicalScore: 0.43,
@@ -602,7 +659,7 @@ const folderSeeds: FolderSeed[] = [
             isNewSpecies: false,
             birdCount: 0,
             grade: 'reject',
-            decision: 'rejected',
+            decision: 'reject',
             finalScore: 0.08,
             semanticScore: null,
             technicalScore: null,
@@ -647,7 +704,7 @@ const folderSeeds: FolderSeed[] = [
             isNewSpecies: false,
             birdCount: 1,
             grade: 'select',
-            decision: 'selected',
+            decision: 'select',
             finalScore: 0.89,
             semanticScore: 0.82,
             technicalScore: 0.9,
@@ -824,7 +881,7 @@ export function createImportedFolder(path: string): WorkspaceSnapshot {
             isNewSpecies: false,
             birdCount: 0,
             grade: 'reject',
-            decision: 'unreviewed',
+            decision: null,
             finalScore: null,
             semanticScore: null,
             technicalScore: null,

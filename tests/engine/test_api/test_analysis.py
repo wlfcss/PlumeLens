@@ -80,13 +80,15 @@ async def client_with_lib(tmp_path: Path):
         lib_id = r.json()["id"]
         # 手工补 file_hash（否则 enqueue_library 会跳过）
         await db.conn.execute(
-            "UPDATE photos SET file_hash = id WHERE library_id = ?", (lib_id,),
+            "UPDATE photos SET file_hash = id WHERE library_id = ?",
+            (lib_id,),
         )
         await db.conn.commit()
         yield ac, lib_id, db, pipeline
 
     # Fixture teardown: 等 worker 收尾，避免 DB 关闭时还在查询
     from engine.api.routes.analysis import _workers
+
     for task in list(_workers.values()):
         if not task.done():
             try:
@@ -101,7 +103,8 @@ class TestBatch:
     async def test_batch_enqueues_and_runs(self, client_with_lib) -> None:
         client, lib_id, db, _ = client_with_lib
         resp = await client.post(
-            "/analysis/batch", json={"library_id": lib_id},
+            "/analysis/batch",
+            json={"library_id": lib_id},
         )
         assert resp.status_code == 200
         data = resp.json()
@@ -118,13 +121,87 @@ class TestBatch:
             await asyncio.sleep(0.05)
         assert stats.get("completed", 0) == 2
 
+    async def test_batch_updates_library_status_and_completion_time(self, client_with_lib) -> None:
+        client, lib_id, _, pipeline = client_with_lib
+        release = asyncio.Event()
+
+        async def slow_analyze(image_path: Path, photo_id: str = "") -> PipelineResult:
+            await release.wait()
+            return _fake_result(photo_id)
+
+        pipeline.analyze = AsyncMock(side_effect=slow_analyze)
+
+        resp = await client.post(
+            "/analysis/batch",
+            json={"library_id": lib_id},
+        )
+        assert resp.status_code == 200
+        detail = await client.get(f"/library/{lib_id}")
+        assert detail.json()["library"]["status"] == "analyzing_partial"
+
+        release.set()
+        for _ in range(50):
+            stats_resp = await client.get(f"/analysis/library/{lib_id}/stats")
+            stats = stats_resp.json()["stats"]
+            if stats.get("completed", 0) >= 2:
+                break
+            await asyncio.sleep(0.05)
+
+        detail = await client.get(f"/library/{lib_id}")
+        library = detail.json()["library"]
+        assert library["status"] == "ready"
+        assert library["analyzed_count"] == 2
+        assert library["last_analyzed_at"] is not None
+
+    async def test_starting_new_batch_clears_old_terminal_queue_rows(self, client_with_lib) -> None:
+        client, lib_id, _, _ = client_with_lib
+        await client.post("/analysis/batch", json={"library_id": lib_id})
+        for _ in range(50):
+            stats_resp = await client.get(f"/analysis/library/{lib_id}/stats")
+            stats = stats_resp.json()["stats"]
+            if stats.get("completed", 0) >= 2:
+                break
+            await asyncio.sleep(0.05)
+        assert stats.get("completed", 0) == 2
+
+        resp = await client.post("/analysis/batch", json={"library_id": lib_id})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["enqueued"] == 0
+        assert sum(data["stats"].values()) == 0
+
+    async def test_batch_force_rerun_ignores_current_version_cache(self, client_with_lib) -> None:
+        client, lib_id, _, pipeline = client_with_lib
+        await client.post("/analysis/batch", json={"library_id": lib_id})
+        for _ in range(50):
+            stats_resp = await client.get(f"/analysis/library/{lib_id}/stats")
+            stats = stats_resp.json()["stats"]
+            if stats.get("completed", 0) >= 2:
+                break
+            await asyncio.sleep(0.05)
+
+        pipeline.analyze.reset_mock()
+        resp = await client.post(
+            "/analysis/batch",
+            json={"library_id": lib_id, "force_rerun": True},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["enqueued"] == 2
+
+        for _ in range(50):
+            stats_resp = await client.get(f"/analysis/library/{lib_id}/stats")
+            stats = stats_resp.json()["stats"]
+            if stats.get("completed", 0) >= 2:
+                break
+            await asyncio.sleep(0.05)
+        assert pipeline.analyze.await_count == 2
+
     async def test_stats_returns_all_keys(self, client_with_lib) -> None:
         client, lib_id, _, _ = client_with_lib
         resp = await client.get(f"/analysis/library/{lib_id}/stats")
         assert resp.status_code == 200
         stats = resp.json()["stats"]
-        for key in ("pending", "processing", "completed", "failed", "dead",
-                    "cancelled", "paused"):
+        for key in ("pending", "processing", "completed", "failed", "dead", "cancelled", "paused"):
             assert key in stats
 
     async def test_tasks_list(self, client_with_lib) -> None:
@@ -199,8 +276,7 @@ class TestAutoBackfill:
 
             # 验证 file_hash 被同步补齐（且非 NULL）
             async with db.conn.execute(
-                "SELECT COUNT(*) AS c FROM photos "
-                "WHERE library_id = ? AND file_hash IS NOT NULL",
+                "SELECT COUNT(*) AS c FROM photos WHERE library_id = ? AND file_hash IS NOT NULL",
                 (lib_id,),
             ) as cur:
                 row = await cur.fetchone()
@@ -208,6 +284,7 @@ class TestAutoBackfill:
 
         # teardown 清理 worker
         from engine.api.routes.analysis import _workers
+
         for task in list(_workers.values()):
             if not task.done():
                 try:
@@ -240,7 +317,8 @@ class TestPipelineGate:
         app.state.pipeline = pipeline
 
         async with AsyncClient(
-            transport=ASGITransport(app=app), base_url="http://test",
+            transport=ASGITransport(app=app),
+            base_url="http://test",
         ) as c:
             resp = await c.post("/analysis/batch", json={"library_id": "lib-x"})
         assert resp.status_code == 503

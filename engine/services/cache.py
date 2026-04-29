@@ -34,8 +34,7 @@ def _now_iso() -> str:
 async def get_active_result(db: Database, photo_id: str) -> PipelineResult | None:
     """Return the currently active analysis result for a photo, if any."""
     async with db.conn.execute(
-        "SELECT result_json FROM analysis_results "
-        "WHERE photo_id = ? AND is_active = 1",
+        "SELECT result_json FROM analysis_results WHERE photo_id = ? AND is_active = 1",
         (photo_id,),
     ) as cur:
         row = await cur.fetchone()
@@ -45,7 +44,9 @@ async def get_active_result(db: Database, photo_id: str) -> PipelineResult | Non
 
 
 async def get_result_for_version(
-    db: Database, photo_id: str, pipeline_version: str,
+    db: Database,
+    photo_id: str,
+    pipeline_version: str,
 ) -> PipelineResult | None:
     """Lookup analysis result for a specific (photo, pipeline_version) pair.
 
@@ -53,8 +54,7 @@ async def get_result_for_version(
     the current pipeline_version, we can reuse it instead of rerunning ONNX.
     """
     async with db.conn.execute(
-        "SELECT result_json FROM analysis_results "
-        "WHERE photo_id = ? AND pipeline_version = ?",
+        "SELECT result_json FROM analysis_results WHERE photo_id = ? AND pipeline_version = ?",
         (photo_id, pipeline_version),
     ) as cur:
         row = await cur.fetchone()
@@ -64,7 +64,9 @@ async def get_result_for_version(
 
 
 async def store_result(
-    db: Database, photo_id: str, result: PipelineResult,
+    db: Database,
+    photo_id: str,
+    result: PipelineResult,
 ) -> str:
     """Store a fresh analysis result and mark it as the active version.
 
@@ -83,13 +85,9 @@ async def store_result(
     conn = db.conn
     now = _now_iso()
     result_json = result.model_dump_json()
-    quality = (
-        result.best.quality.combined if result.best is not None else None
-    )
+    quality = result.best.quality.combined if result.best is not None else None
     grade = result.best.grade.value if result.best is not None else None
-    species = (
-        result.best.species if result.best is not None and result.best.species else None
-    )
+    species = result.best.species if result.best is not None and result.best.species else None
 
     # Step 1: 把该 photo 的所有现有行置 inactive（避免 partial unique 冲突）
     await conn.execute(
@@ -113,7 +111,12 @@ async def store_result(
             "bird_count = ?, species = ?, created_at = ?, is_active = 1 "
             "WHERE id = ?",
             (
-                result_json, quality, grade, result.bird_count, species, now,
+                result_json,
+                quality,
+                grade,
+                result.bird_count,
+                species,
+                now,
                 row_id,
             ),
         )
@@ -124,8 +127,15 @@ async def store_result(
             "result_json, quality_score, grade, bird_count, species, "
             "created_at, is_active) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)",
             (
-                row_id, photo_id, result.pipeline_version, result_json,
-                quality, grade, result.bird_count, species, now,
+                row_id,
+                photo_id,
+                result.pipeline_version,
+                result_json,
+                quality,
+                grade,
+                result.bird_count,
+                species,
+                now,
             ),
         )
 
@@ -167,7 +177,8 @@ async def list_versions(db: Database, photo_id: str) -> list[dict]:
 async def invalidate_photo(db: Database, photo_id: str) -> int:
     """Delete all analysis rows for a photo (hard invalidation)."""
     async with db.conn.execute(
-        "DELETE FROM analysis_results WHERE photo_id = ?", (photo_id,),
+        "DELETE FROM analysis_results WHERE photo_id = ?",
+        (photo_id,),
     ) as cur:
         deleted = cur.rowcount or 0
     await db.conn.commit()
@@ -175,7 +186,9 @@ async def invalidate_photo(db: Database, photo_id: str) -> int:
 
 
 async def invalidate_old_versions(
-    db: Database, keep_version: str, dry_run: bool = False,
+    db: Database,
+    keep_version: str,
+    dry_run: bool = False,
 ) -> int:
     """Optionally delete analysis rows that don't match the current pipeline_version.
 

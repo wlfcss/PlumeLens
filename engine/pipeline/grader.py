@@ -5,7 +5,7 @@ from __future__ import annotations
 from engine.pipeline.models import PoseInfo, QualityGrade
 
 # Default thresholds (configurable via Settings)
-DEFAULT_THRESHOLDS: tuple[float, float, float] = (0.33, 0.43, 0.60)
+DEFAULT_THRESHOLDS: tuple[float, float, float] = (0.45, 0.60, 0.75)
 
 # 4 档从低到高
 _GRADE_ORDER: tuple[QualityGrade, ...] = (
