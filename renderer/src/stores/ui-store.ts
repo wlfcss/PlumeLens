@@ -1,11 +1,13 @@
 import { create } from 'zustand'
 
-import type { AppRoute, ArchiveTab } from '@/lib/mock-workspace'
+import type { AppRoute, ArchiveTab, PhotoGrade } from '@/lib/mock-workspace'
 
 export { useShallow } from 'zustand/react/shallow'
 
 export type ViewMode = 'grouped' | 'flat'
-export type QuickFilter = 'select' | 'usable' | 'record' | 'reject' | 'no_bird'
+// QuickFilter = 4 个质量档位 + "无鸟" 独立筛选状态。"无鸟" 不是第五档，
+// 是与档位正交的过滤维度，因此显式从 PhotoGrade 派生避免未来漂移。
+export type QuickFilter = PhotoGrade | 'no_bird'
 
 interface UIState {
   route: AppRoute

@@ -34,17 +34,25 @@ extraResources:
     to: plumelens-engine
     filter:
       - "**/*"
+      - "!**/.DS_Store"
+      - "!**/__pycache__/**"
+      - "!**/*.pyc"
   - from: engine/models
     to: models
     filter:
       - "*.onnx"
       - "*.parquet"
       - "*.json"
-  # species v3 的子目录（safetensors backbone + 8 head .pt + parquet）单独捞
+  # species v3 的子目录（safetensors backbone + 8 head .pt + parquet）单独捞。
+  # **/* 是全包，因此显式排除开发期临时产物，避免 .bak/缓存文件意外进 DMG。
   - from: engine/models/species
     to: models/species
     filter:
       - "**/*"
+      - "!**/.DS_Store"
+      - "!**/__pycache__/**"
+      - "!**/*.bak"
+      - "!**/*.tmp"
 mac:
   # target 用 dir：electron-builder 的 dmg-builder 在打包时**丢失 Electron Framework
   # binary**（157MB 的核心库），导致从 dmg 装机后启动 dyld 报 Library missing。
