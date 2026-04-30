@@ -93,19 +93,21 @@ export function ReviewModal({
   // Active bird index（多鸟图切换鸟时驱动 bbox / pose / IQA 裁切跟随变动）。
   // 默认值是 best detection 的 index；photo 切换时 reset。state 提升到 ReviewModal
   // 是因为 SpeciesOverrideEditor 改 activeIndex 后，左侧 ReviewImageStage 也要响应。
-  const detections = photo.birdDetections ?? []
+  // useMemo 依赖直接走 photo.birdDetections（稳定 prop ref），不走 `?? []` 派生值
+  // — 派生 `[]` 每次 render 是新引用，会让 memo 永远 miss。
   const bestDetectionIndex = useMemo(() => {
-    const best = detections.find((d) => d.isBest)
-    return best?.index ?? detections[0]?.index ?? 0
-  }, [detections])
+    const dets = photo.birdDetections ?? []
+    const best = dets.find((d) => d.isBest)
+    return best?.index ?? dets[0]?.index ?? 0
+  }, [photo.birdDetections])
   const [activeBirdIndex, setActiveBirdIndex] = useState<number>(bestDetectionIndex)
   useEffect(() => {
     setActiveBirdIndex(bestDetectionIndex)
   }, [photo.id, bestDetectionIndex])
 
   const activeBird = useMemo(
-    () => detections.find((d) => d.index === activeBirdIndex) ?? null,
-    [detections, activeBirdIndex],
+    () => (photo.birdDetections ?? []).find((d) => d.index === activeBirdIndex) ?? null,
+    [photo.birdDetections, activeBirdIndex],
   )
 
   // bbox / pose 优先用 activeBird 的，fallback 到 photo-level 兼容老数据 / 单鸟无 detections 数组场景
@@ -316,7 +318,7 @@ export function ReviewModal({
           <ScoreHeader
             photo={photo}
             activeBird={activeBird}
-            totalBirds={detections.length}
+            totalBirds={photo.birdDetections?.length ?? 0}
             t={t}
           />
 

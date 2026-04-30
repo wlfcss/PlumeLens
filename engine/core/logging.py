@@ -15,6 +15,7 @@ PyInstaller binary 自身的 stderr（uvicorn 启动错误 / segfault / OS 错�
 from __future__ import annotations
 
 import atexit
+import contextlib
 import logging
 import logging.handlers
 import sys
@@ -98,10 +99,8 @@ def setup_logging(
         # 进程退出前 flush 所有 handler — 防止 SIGTERM / 崩溃前 buffer 内日志丢失
         def _flush_handlers() -> None:
             for h in handlers:
-                try:
+                with contextlib.suppress(Exception):
                     h.flush()
-                except Exception:  # noqa: BLE001
-                    pass
 
         atexit.register(_flush_handlers)
 

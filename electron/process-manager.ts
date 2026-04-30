@@ -103,10 +103,14 @@ export class ProcessManager extends EventEmitter {
     }
   }
 
-  /** 为本次 spawn 新建 engine.stderr.{startup_ts}.log 写入流。 */
+  /** 为本次 spawn 新建 engine.stderr.{startup_ts}.log 写入流。
+   *
+   * timestamp 保留毫秒精度（20260429T120000123Z），避免 1 秒内连续两次 spawn
+   * （崩溃重启 / 快速 dev 循环）撞同名 → createWriteStream 走 append flag 把两次
+   * 启动日志混到一个文件里。 */
   private openStderrLog(): WriteStream | null {
     if (!this.ensureLogsDir()) return null
-    const ts = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z')
+    const ts = new Date().toISOString().replace(/[-:.]/g, '')
     const path = join(this.logsDir, `engine.stderr.${ts}.log`)
     try {
       const stream = createWriteStream(path, { flags: 'a', encoding: 'utf-8' })
