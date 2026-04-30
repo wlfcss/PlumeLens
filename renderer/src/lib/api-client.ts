@@ -397,8 +397,11 @@ export const api = {
     birdIndex: number,
     species: SpeciesOverrideValue | null,
     bbox?: SpeciesOverrideBBox | null,
-  ) =>
-    request<SpeciesOverrideRow>(`/decisions/photo/${photoId}/species/${birdIndex}`, {
+  ) => {
+    // bbox 在 set 和 clear 两种路径都送 — clear 时后端用它 IoU 反查 DB 实际行的
+    // bird_index,避免 pipeline_version bump 后 caller 看到的下标 ≠ DB 下标导致删错行。
+    const bboxBody = bbox ? { x1: bbox.x1, y1: bbox.y1, x2: bbox.x2, y2: bbox.y2 } : null
+    return request<SpeciesOverrideRow>(`/decisions/photo/${photoId}/species/${birdIndex}`, {
       method: 'PUT',
       body: JSON.stringify(
         species
@@ -406,11 +409,12 @@ export const api = {
               canonical_sci: species.canonical_sci,
               canonical_zh: species.canonical_zh ?? null,
               canonical_en: species.canonical_en ?? null,
-              bbox: bbox ? { x1: bbox.x1, y1: bbox.y1, x2: bbox.x2, y2: bbox.y2 } : null,
+              bbox: bboxBody,
             }
-          : { canonical_sci: null },
+          : { canonical_sci: null, bbox: bboxBody },
       ),
-    }),
+    })
+  },
   listLibraryDecisions: (libraryId: string) =>
     request<DecisionRow[]>(`/decisions/library/${libraryId}`),
   libraryDecisionCounts: (libraryId: string) =>

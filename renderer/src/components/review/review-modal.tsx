@@ -653,7 +653,21 @@ function SpeciesOverrideEditor({
       <button
         className="species-editor__clear"
         disabled={!activeBird.manualSpecies}
-        onClick={() => onSetSpeciesOverride(photo.id, activeBird.index, null)}
+        onClick={() =>
+          onSetSpeciesOverride(
+            photo.id,
+            activeBird.index,
+            null,
+            activeBird.bbox
+              ? {
+                  x1: activeBird.bbox.x1,
+                  y1: activeBird.bbox.y1,
+                  x2: activeBird.bbox.x2,
+                  y2: activeBird.bbox.y2,
+                }
+              : null,
+          )
+        }
         type="button"
       >
         {t('selection.speciesEditor.clear')}

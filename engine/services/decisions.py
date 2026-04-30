@@ -191,6 +191,73 @@ async def count_by_decision(db: Database, library_id: str) -> dict[str, int]:
     return counts
 
 
+def _iou_xyxy(
+    a: tuple[float, float, float, float],
+    b: tuple[float, float, float, float],
+) -> float:
+    """IoU between two (x1,y1,x2,y2) bboxes — 与 routes/library._iou_tuple 同实现，
+    write-time 解析稳定身份用。"""
+    inter_x1 = max(a[0], b[0])
+    inter_y1 = max(a[1], b[1])
+    inter_x2 = min(a[2], b[2])
+    inter_y2 = min(a[3], b[3])
+    inter_w = max(0.0, inter_x2 - inter_x1)
+    inter_h = max(0.0, inter_y2 - inter_y1)
+    inter = inter_w * inter_h
+    if inter <= 0:
+        return 0.0
+    area_a = (a[2] - a[0]) * (a[3] - a[1])
+    area_b = (b[2] - b[0]) * (b[3] - b[1])
+    union = area_a + area_b - inter
+    if union <= 0:
+        return 0.0
+    return inter / union
+
+
+# write-time IoU 阈值 — 与 read-time SPECIES_OVERRIDE_MATCH_IOU (0.3) 一致,
+# 保证写入和读取看到的是"同一只鸟"。
+_SET_OVERRIDE_MATCH_IOU = 0.3
+
+
+async def _resolve_db_bird_index(
+    db: Database,
+    photo_id: str,
+    caller_bird_index: int,
+    bbox: tuple[float, float, float, float] | None,
+) -> int:
+    """Find the actual DB row's bird_index for this physical bird.
+
+    bbox 给了 → IoU 反查已存在的 override 行(read-time stable matching 的写入侧对偶);
+    没匹配上(或 bbox=None)→ 用 caller 传入的 bird_index。
+
+    用途:pipeline_version bump 后 caller 看到的 bird_index 是新数组下标,但 DB 行
+    用的是写入时的旧下标。无此反查则 Clear/Update 会删错行 / 留 stale 行。
+    """
+    if bbox is None:
+        return caller_bird_index
+
+    async with db.conn.execute(
+        "SELECT bird_index, bbox_x1, bbox_y1, bbox_x2, bbox_y2 "
+        "FROM photo_species_overrides WHERE photo_id = ?",
+        (photo_id,),
+    ) as cur:
+        rows = await cur.fetchall()
+
+    best_iou = 0.0
+    best_bi: int | None = None
+    for row in rows:
+        x1, y1, x2, y2 = row["bbox_x1"], row["bbox_y1"], row["bbox_x2"], row["bbox_y2"]
+        if x1 is None or y1 is None or x2 is None or y2 is None:
+            continue
+        iou = _iou_xyxy(bbox, (float(x1), float(y1), float(x2), float(y2)))
+        if iou > best_iou:
+            best_iou = iou
+            best_bi = int(row["bird_index"])
+    if best_iou >= _SET_OVERRIDE_MATCH_IOU and best_bi is not None:
+        return best_bi
+    return caller_bird_index
+
+
 async def set_species_override(
     db: Database,
     photo_id: str,
@@ -201,9 +268,10 @@ async def set_species_override(
 ) -> SpeciesOverride | None:
     """Set or clear a manual species override for one detected bird.
 
-    `bird_index` 是写入时 detections 数组的位置（不稳定，pipeline_version bump 后可能错配）。
-    `bbox` 是该 detection 当时的原图像素坐标 (x1, y1, x2, y2)；read-time 用它做 IoU 匹配
-    新一轮 detections，是稳定语义的来源。bbox=None 兼容老调用方（v5 schema 无 bbox 字段）。
+    `bird_index` 是 caller(UI)看到的 detections 数组位置(不稳定 — pipeline_version
+    bump 后可能错配)。`bbox` 是该 detection 当时的原图像素坐标 (x1, y1, x2, y2);
+    给了 bbox → 后端先 IoU 反查 DB 已存在的 override 行,以稳定身份 UPSERT/DELETE,
+    避免 bump 后删错行 / 留 stale 行。bbox=None 兼容老调用方(v5 schema)。
     """
     if bird_index < 0:
         msg = f"Invalid bird index: {bird_index}"
@@ -217,16 +285,20 @@ async def set_species_override(
             msg = f"Photo not found: {photo_id}"
             raise RuntimeError(msg)
 
+    # bbox 给了就 IoU 反查 DB 行的稳定 bird_index;否则按 caller 传入的处理
+    target_bird_index = await _resolve_db_bird_index(db, photo_id, bird_index, bbox)
+
     if species is None:
         await db.conn.execute(
             "DELETE FROM photo_species_overrides WHERE photo_id = ? AND bird_index = ?",
-            (photo_id, bird_index),
+            (photo_id, target_bird_index),
         )
         await db.conn.commit()
         await logger.ainfo(
             "Species override cleared",
             photo_id=photo_id,
-            bird_index=bird_index,
+            caller_bird_index=bird_index,
+            db_bird_index=target_bird_index,
         )
         return None
 
@@ -251,7 +323,7 @@ async def set_species_override(
         "updated_at = excluded.updated_at",
         (
             photo_id,
-            bird_index,
+            target_bird_index,
             species["canonical_sci"],
             species.get("canonical_zh"),
             species.get("canonical_en"),
@@ -266,7 +338,8 @@ async def set_species_override(
     await logger.ainfo(
         "Species override set",
         photo_id=photo_id,
-        bird_index=bird_index,
+        caller_bird_index=bird_index,
+        db_bird_index=target_bird_index,
         canonical_sci=species["canonical_sci"],
         has_bbox=bbox is not None,
     )

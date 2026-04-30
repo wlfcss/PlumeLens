@@ -226,3 +226,107 @@ class TestSpeciesOverrides:
                     "canonical_en": "Swinhoe's white-eye",
                 },
             )
+
+    async def test_clear_after_pipeline_bump_finds_old_row_by_bbox(
+        self,
+        db_with_photos: Database,
+    ) -> None:
+        """场景:写入时 bird_index=0、bbox=A;再分析后 caller(UI) 看到该鸟在
+        bird_index=2(detections 数组重排) 但 bbox 不变(IoU 命中)。Clear 时 caller 传
+        bird_index=2 + bbox=A;后端应 IoU 反查到 DB 的 bird_index=0 行并删,而不是
+        按 bird_index=2 找(删错鸟 / 找不到行)。"""
+        await set_species_override(
+            db_with_photos,
+            "photo-0",
+            0,
+            {"canonical_sci": "Sp.A", "canonical_zh": None, "canonical_en": None},
+            bbox=(100.0, 100.0, 200.0, 200.0),
+        )
+
+        # 模拟 pipeline_version bump:caller 看到该鸟在新数组的 bird_index=2,bbox 不变
+        await set_species_override(
+            db_with_photos,
+            "photo-0",
+            2,
+            None,
+            bbox=(100.0, 100.0, 200.0, 200.0),
+        )
+
+        overrides = await list_species_overrides(db_with_photos, "lib-1")
+        assert overrides == {}, "应通过 IoU 反查到 bird_index=0 的行删掉"
+
+    async def test_update_after_pipeline_bump_no_stale_row(
+        self,
+        db_with_photos: Database,
+    ) -> None:
+        """同上,但 update 改物种。DB 应仍只有 1 行(原 bird_index=0,species 改 Sp.B,
+        bbox 更新为新位置),不留 stale 行让 read-time 匹配产生非确定性。"""
+        await set_species_override(
+            db_with_photos,
+            "photo-0",
+            0,
+            {"canonical_sci": "Sp.A", "canonical_zh": None, "canonical_en": None},
+            bbox=(100.0, 100.0, 200.0, 200.0),
+        )
+
+        # caller 看到该鸟在新 bird_index=2,bbox 微动(同一只鸟,IoU 仍 >= 0.3)
+        await set_species_override(
+            db_with_photos,
+            "photo-0",
+            2,
+            {"canonical_sci": "Sp.B", "canonical_zh": None, "canonical_en": None},
+            bbox=(105.0, 105.0, 205.0, 205.0),
+        )
+
+        overrides = await list_species_overrides(db_with_photos, "lib-1")
+        assert len(overrides["photo-0"]) == 1
+        assert overrides["photo-0"][0]["bird_index"] == 0  # PK 保持稳定
+        assert overrides["photo-0"][0]["canonical_sci"] == "Sp.B"
+        assert overrides["photo-0"][0]["bbox"] == (105.0, 105.0, 205.0, 205.0)
+
+    async def test_set_with_bbox_no_iou_match_creates_new_row(
+        self,
+        db_with_photos: Database,
+    ) -> None:
+        """新鸟(与已有 override 的 bbox 都不匹配 IoU)→ 用 caller 传入的 bird_index
+        新建一行,不会误覆盖到旧行。"""
+        await set_species_override(
+            db_with_photos,
+            "photo-0",
+            0,
+            {"canonical_sci": "Sp.A", "canonical_zh": None, "canonical_en": None},
+            bbox=(100.0, 100.0, 200.0, 200.0),
+        )
+
+        # 不同位置的鸟 — IoU=0,应新建 bird_index=1 行
+        await set_species_override(
+            db_with_photos,
+            "photo-0",
+            1,
+            {"canonical_sci": "Sp.B", "canonical_zh": None, "canonical_en": None},
+            bbox=(500.0, 500.0, 600.0, 600.0),
+        )
+
+        overrides = await list_species_overrides(db_with_photos, "lib-1")
+        assert len(overrides["photo-0"]) == 2
+        bis = sorted(r["bird_index"] for r in overrides["photo-0"])
+        assert bis == [0, 1]
+
+    async def test_clear_without_bbox_falls_back_to_bird_index(
+        self,
+        db_with_photos: Database,
+    ) -> None:
+        """老 client 不传 bbox(向后兼容)→ 后端按 caller 传入的 bird_index 直接删,
+        与 v5 行为一致。"""
+        await set_species_override(
+            db_with_photos,
+            "photo-0",
+            0,
+            {"canonical_sci": "Sp.A", "canonical_zh": None, "canonical_en": None},
+            bbox=(100.0, 100.0, 200.0, 200.0),
+        )
+
+        await set_species_override(db_with_photos, "photo-0", 0, None)  # bbox=None
+
+        overrides = await list_species_overrides(db_with_photos, "lib-1")
+        assert overrides == {}
