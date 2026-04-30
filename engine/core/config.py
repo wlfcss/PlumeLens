@@ -44,6 +44,10 @@ class Settings(BaseSettings):
     # Pipeline — detection (yolo26l-bird v1.0: imgsz=1280, conf=0.5 for photography)
     yolo_confidence: float = 0.5
     yolo_input_size: int = 1280
+    # 防御性 IoU dedup 阈值：YOLO26 NMS-free 模型在密集场景（鸟群 / 花丛）仍可能
+    # over-detect 同一只鸟（多个高度重叠 bbox）。> 此阈值视为重复，保留 conf 最高那个。
+    # 0.85 很严格，只杀"几乎完全重叠"的 ghost bbox，不误合真鸟群（IoU ~0.5 那种）。
+    yolo_iou_dedup_threshold: float = 0.85
 
     # Pipeline — crop strategy
     crop_expand_ratio: float = 1.0  # YOLO det bbox expand for IQA/pose input
@@ -95,7 +99,9 @@ class Settings(BaseSettings):
     #     read-time 把这类结果标记为 species_source='model_unconfirmed'
     # v6: species_source 升级为 detection-level（每个 BestDetection / BirdDetectionDetail
     #     都有自己的 species_source）— 多鸟图混合可见性不再被 photo-level 一刀切
-    preprocess_version: int = 6
+    # v7: detector 输出加 IoU 0.85 dedup — YOLO26 NMS-free 在密集场景仍 over-detect
+    #     同一只鸟，bbox 几乎完全重叠的视为 ghost duplicate，保留 conf 最高的
+    preprocess_version: int = 7
 
     # Pipeline — concurrency
     # 每个 task 内部 ONNX 推理会 to_thread 释放 GIL，多 worker 并发 = 多张图同时跑 ONNX。

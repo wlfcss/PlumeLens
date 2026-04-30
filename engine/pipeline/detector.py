@@ -26,9 +26,17 @@ class BirdDetector:
             with conf ~0 and filtered by caller. Bbox in letterboxed coords.
     """
 
-    def __init__(self, session: OrtSession, input_size: int = 1280) -> None:
+    def __init__(
+        self,
+        session: OrtSession,
+        input_size: int = 1280,
+        iou_dedup_threshold: float = 0.85,
+    ) -> None:
         self._session = session
         self._input_size = input_size
+        # YOLO26 NMS-free 模型在密集场景（花丛/鸟群）仍可能 over-detect 同一只鸟，
+        # 输出多个高度重叠的 bbox。本阈值用于 confidence 过滤后的 IoU dedup。
+        self._iou_dedup_threshold = iou_dedup_threshold
         # Cache input/output names
         self._input_name: str = session.get_inputs()[0].name  # type: ignore[union-attr]
         self._output_name: str = session.get_outputs()[0].name  # type: ignore[union-attr]
@@ -95,4 +103,41 @@ class BirdDetector:
                     )
                 )
 
+        return _dedup_iou(boxes, self._iou_dedup_threshold)
+
+
+def _iou(a: BoundingBox, b: BoundingBox) -> float:
+    """Intersection-over-Union of two axis-aligned boxes (original image coords)."""
+    inter_x1 = max(a.x1, b.x1)
+    inter_y1 = max(a.y1, b.y1)
+    inter_x2 = min(a.x2, b.x2)
+    inter_y2 = min(a.y2, b.y2)
+    inter_w = max(0.0, inter_x2 - inter_x1)
+    inter_h = max(0.0, inter_y2 - inter_y1)
+    inter = inter_w * inter_h
+    if inter <= 0:
+        return 0.0
+    area_a = (a.x2 - a.x1) * (a.y2 - a.y1)
+    area_b = (b.x2 - b.x1) * (b.y2 - b.y1)
+    union = area_a + area_b - inter
+    if union <= 0:
+        return 0.0
+    return inter / union
+
+
+def _dedup_iou(boxes: list[BoundingBox], iou_threshold: float) -> list[BoundingBox]:
+    """Greedy NMS-style dedup: drop boxes whose IoU with any already-kept higher-conf
+    box exceeds the threshold. Used as a defensive post-process for YOLO26 NMS-free
+    output, which may still emit near-duplicate bboxes in dense bird scenes.
+
+    Threshold should be high (~0.85) — we only want to remove "ghost" duplicates,
+    not merge legitimate side-by-side birds (typical IoU ~0.3-0.5).
+    """
+    if iou_threshold >= 1.0 or len(boxes) <= 1:
         return boxes
+    sorted_boxes = sorted(boxes, key=lambda b: b.confidence, reverse=True)
+    kept: list[BoundingBox] = []
+    for box in sorted_boxes:
+        if all(_iou(box, k) <= iou_threshold for k in kept):
+            kept.append(box)
+    return kept

@@ -169,7 +169,9 @@ class PipelineManager:
             try:
                 sess = ort.InferenceSession(str(yolo_path), providers=providers)
                 self._detector = BirdDetector(
-                    session=sess, input_size=self._settings.yolo_input_size
+                    session=sess,
+                    input_size=self._settings.yolo_input_size,
+                    iou_dedup_threshold=self._settings.yolo_iou_dedup_threshold,
                 )
                 self._model_status["yolo"] = True
                 active = sess.get_providers()
@@ -188,6 +190,7 @@ class PipelineManager:
                     self._detector_cpu_fallback = BirdDetector(
                         session=cpu_sess,
                         input_size=self._settings.yolo_input_size,
+                        iou_dedup_threshold=self._settings.yolo_iou_dedup_threshold,
                     )
                     await logger.ainfo("Loaded YOLO CPU fallback session")
                 except Exception:
@@ -368,6 +371,7 @@ class PipelineManager:
         # Detection
         h.update(f"yc:{self._settings.yolo_confidence}".encode())
         h.update(f"ys:{self._settings.yolo_input_size}".encode())
+        h.update(f"yid:{self._settings.yolo_iou_dedup_threshold}".encode())
         # Crop
         h.update(f"cr:{self._settings.crop_expand_ratio}".encode())
         h.update(f"cp:{self._settings.crop_padding_ratio}".encode())
