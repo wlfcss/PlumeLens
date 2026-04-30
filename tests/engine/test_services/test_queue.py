@@ -17,6 +17,7 @@ from engine.services.queue import (
     get_task,
     list_tasks,
     mark_failed_with_retry,
+    mark_stuck_tasks_failed,
     pause_library,
     pick_next,
     recover_on_startup,
@@ -249,6 +250,81 @@ class TestRecovery:
             assert t is not None
             assert t.status is TaskStatus.PENDING
             assert t.started_at is None
+
+
+class TestStuckSweeper:
+    """`mark_stuck_tasks_failed` — worker 卡死(MPS hang / 死锁) 的兜底回收。"""
+
+    async def test_old_processing_task_marked_failed_and_requeued(
+        self,
+        db_with_photos: Database,
+    ) -> None:
+        """started_at 超过阈值 → mark_failed_with_retry → attempts<MAX 时回 PENDING。"""
+        db = db_with_photos
+        await enqueue_photos(db, "lib-1", ["photo-0"])
+        task_id = (await list_tasks(db))[0].id
+        await transition(db, task_id, TaskStatus.PROCESSING)
+
+        # 手动把 started_at 倒推 10 分钟,模拟卡死
+        await db.conn.execute(
+            "UPDATE task_queue SET started_at = '2020-01-01T00:00:00+00:00' WHERE id = ?",
+            (task_id,),
+        )
+        await db.conn.commit()
+
+        handled = await mark_stuck_tasks_failed(db, threshold_sec=300)
+        assert handled == 1
+
+        t = await get_task(db, task_id)
+        assert t is not None
+        assert t.status is TaskStatus.PENDING  # attempts=1 < MAX → 重新排队
+        assert t.attempts == 1
+
+    async def test_recent_processing_task_not_touched(
+        self,
+        db_with_photos: Database,
+    ) -> None:
+        """started_at 在阈值内的 PROCESSING task 不该被误杀。"""
+        db = db_with_photos
+        await enqueue_photos(db, "lib-1", ["photo-0"])
+        task_id = (await list_tasks(db))[0].id
+        await transition(db, task_id, TaskStatus.PROCESSING)
+        # started_at 是刚才 transition 设的 now,远在阈值内
+
+        handled = await mark_stuck_tasks_failed(db, threshold_sec=300)
+        assert handled == 0
+        t = await get_task(db, task_id)
+        assert t is not None
+        assert t.status is TaskStatus.PROCESSING
+
+    async def test_stuck_after_max_attempts_goes_to_dead(
+        self,
+        db_with_photos: Database,
+    ) -> None:
+        """已经 fail 过 MAX-1 次的 task 再 stuck → DEAD,而不是无限重试。"""
+        db = db_with_photos
+        await enqueue_photos(db, "lib-1", ["photo-0"])
+        task_id = (await list_tasks(db))[0].id
+
+        # 模拟 attempts 已经积累到 MAX-1
+        for _ in range(MAX_ATTEMPTS - 1):
+            await transition(db, task_id, TaskStatus.PROCESSING)
+            await transition(db, task_id, TaskStatus.FAILED, error_message="prev")
+            await transition(db, task_id, TaskStatus.PENDING)
+
+        # 最后一次 PROCESSING + 卡死
+        await transition(db, task_id, TaskStatus.PROCESSING)
+        await db.conn.execute(
+            "UPDATE task_queue SET started_at = '2020-01-01T00:00:00+00:00' WHERE id = ?",
+            (task_id,),
+        )
+        await db.conn.commit()
+
+        handled = await mark_stuck_tasks_failed(db, threshold_sec=300)
+        assert handled == 1
+        t = await get_task(db, task_id)
+        assert t is not None
+        assert t.status is TaskStatus.DEAD  # 不再无限重试
 
 
 class TestBatchOps:

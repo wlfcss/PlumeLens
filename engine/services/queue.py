@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 
 import structlog
@@ -431,6 +431,58 @@ async def recover_on_startup(db: Database) -> int:
     if recovered > 0:
         await logger.ainfo("Recovered processing tasks", count=recovered)
     return recovered
+
+
+# 一张照片正常分析(YOLO + pose + IQA + species)经验值 ~0.4-1s。冷启 species 第一推
+# 包含 backbone JIT/cache 预热,5s 内能过。300s = 5 分钟,远超任何正常推理时长 + 留
+# 出 bf16 backbone reload / GIL 拥塞等极端情况的 buffer。超过这个值仍 PROCESSING
+# 视为某个 worker 卡死(MPS hang / 死锁 / I/O 永久阻塞),mark_failed 让 attempts 累加,
+# 队列恢复推进。
+STUCK_TASK_THRESHOLD_SEC = 300
+
+
+async def mark_stuck_tasks_failed(
+    db: Database,
+    *,
+    threshold_sec: int = STUCK_TASK_THRESHOLD_SEC,
+) -> int:
+    """Find PROCESSING tasks whose started_at is older than threshold and fail them.
+
+    Used by a periodic background sweeper(lifespan 启动)。被卡死的 task 算一次失败,
+    走 mark_failed_with_retry 路径:attempts<MAX → 回 PENDING 重试,>=MAX → DEAD。
+
+    Returns: 处理的 stuck task 数。
+    """
+    cutoff = (datetime.now(UTC) - timedelta(seconds=threshold_sec)).isoformat()
+    conn = db.conn
+    async with conn.execute(
+        "SELECT id FROM task_queue "
+        "WHERE status = ? AND started_at IS NOT NULL AND started_at < ?",
+        (TaskStatus.PROCESSING.value, cutoff),
+    ) as cur:
+        stuck_ids = [str(row["id"]) for row in await cur.fetchall()]
+
+    if not stuck_ids:
+        return 0
+
+    handled = 0
+    for task_id in stuck_ids:
+        try:
+            await mark_failed_with_retry(
+                db,
+                task_id,
+                f"Stuck in PROCESSING > {threshold_sec}s — assumed worker hang",
+            )
+            handled += 1
+        except Exception:
+            logger.exception("Failed to mark stuck task as failed", task_id=task_id)
+    if handled > 0:
+        await logger.awarning(
+            "Marked stuck tasks as failed",
+            count=handled,
+            threshold_sec=threshold_sec,
+        )
+    return handled
 
 
 # ---------------------------------------------------------------------------

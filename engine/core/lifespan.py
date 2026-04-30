@@ -13,7 +13,7 @@ from engine.core.config import settings
 from engine.core.database import Database
 from engine.core.logging import setup_logging
 from engine.pipeline.manager import PipelineManager
-from engine.services.queue import recover_on_startup
+from engine.services.queue import mark_stuck_tasks_failed, recover_on_startup
 from engine.services.scene_grouper import regroup_library
 from engine.services.thumbnail import generate_library_thumbnails, thumbnail_cache_root
 
@@ -58,6 +58,23 @@ async def _resume_pending_workers(app: FastAPI, db: Database) -> None:
             library_id=library_id,
             pending=pending_count,
         )
+
+
+async def _sweep_stuck_tasks(db: Database) -> None:
+    """周期性扫 PROCESSING 超时 task,强制 fail 让队列推进。
+
+    对应场景:某个 worker 卡死(MPS hang / 死锁) — 整个进程没崩,但单个 task 永远
+    不会完成。前端看进度条不动,以为是后端崩了。30s 周期 + 5min 阈值能覆盖正常
+    抖动而不误杀。
+    """
+    while True:
+        try:
+            await asyncio.sleep(30)
+            await mark_stuck_tasks_failed(db)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Stuck task sweeper iteration failed")
 
 
 async def _refresh_all_thumbnails(db: Database) -> None:
@@ -218,6 +235,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     # Background：扫所有 library 补磁盘上丢失的缩略图（重装应用 / 缓存清理后保证 UI 能看到照片）
     refresh_task = asyncio.create_task(_refresh_all_thumbnails(db))
 
+    # Background：周期性把卡死 (PROCESSING > 5min) 的 task 标记 failed,让队列继续推进
+    sweep_task = asyncio.create_task(_sweep_stuck_tasks(db))
+
     # Print ready signal for Electron process manager to parse
     print("PLUMELENS_READY", file=sys.stderr, flush=True)
 
@@ -225,10 +245,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
 
     # Shutdown
     refresh_task.cancel()
+    sweep_task.cancel()
     import contextlib
 
     with contextlib.suppress(asyncio.CancelledError, Exception):
         await refresh_task
+    with contextlib.suppress(asyncio.CancelledError, Exception):
+        await sweep_task
     app.state.pipeline.close()
     await app.state.db.close()
     await logger.ainfo("PlumeLens Engine shutting down")
