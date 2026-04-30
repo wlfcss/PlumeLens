@@ -23,6 +23,16 @@
     "connected": "本地引擎就绪",
     "error": "后端连接失败"
   },
+  "engineBanner": {
+    "reconnecting": "后端正在重启 ({{count}}/{{max}}) — 分析进度会自动恢复，请稍候",
+    "reconnectingNoCount": "后端无响应，正在重连 — 分析进度会自动恢复",
+    "fatal": "后端多次重启失败，请重启应用",
+    "cpuFallback": "已自动切换至 CPU 模式（GPU 推理不稳定）— 物种识别速度会变慢，但更稳定",
+    "lastCrash": "最近一次：{{signal}}",
+    "totalCrashes": "累计崩溃 {{count}} 次",
+    "logsHint": "日志：{{path}}",
+    "openLogs": "查看日志"
+  },
   "start": {
     "kicker": "本地智能筛片工作台",
     "title": "阅尽千鸟，鉴翎独选",

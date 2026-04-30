@@ -2,8 +2,6 @@ import {
   Aperture,
   ArrowRight,
   Check,
-  ChevronLeft,
-  ChevronRight,
   Clock3,
   Download,
   Feather,
@@ -33,6 +31,7 @@ import {
 } from 'react'
 import { useTranslation } from 'react-i18next'
 
+import { EngineStatusBanner } from '@/components/engine-status-banner'
 import { ReviewModal } from '@/components/review/review-modal'
 import { ThumbnailImage, type ThumbnailLoadStatus } from '@/components/thumbnail-image'
 import { useAnalysisProgress, useStartBatch } from '@/hooks/use-analysis'
@@ -48,7 +47,7 @@ import {
   useLibraryEvents,
 } from '@/hooks/use-library'
 import { useQueryClient } from '@tanstack/react-query'
-import { buildFragmentFromDetail, computeIqaCropBox } from '@/lib/backend-adapter'
+import { buildFragmentFromDetail } from '@/lib/backend-adapter'
 import type {
   AnalysisProgressEvent,
   DecisionValue,
@@ -84,6 +83,7 @@ import type {
 import { createImportedFolder } from '@/lib/mock-workspace'
 import { cn } from '@/lib/utils'
 import { useShallow, useUIStore, type QuickFilter, type ViewMode } from '@/stores/ui-store'
+import { subscribeEngineStatus, useEngineStore } from '@/stores/engine-store'
 
 type Tone = 'neutral' | 'warning' | 'accent' | 'success' | 'muted'
 type SortMode = 'score' | 'shot_at' | 'name'
@@ -1541,11 +1541,24 @@ export default function App() {
       timers.clear()
     }
   }, [])
+
+  // 引擎状态订阅 — 只在 App mount 时挂一次,IPC 推送通过 zustand store 全局可见。
+  useEffect(() => {
+    const unsubscribe = subscribeEngineStatus()
+    return unsubscribe
+  }, [])
+
   // SSE 重连 key：startBatch 成功后 bump，强制 useAnalysisProgress 重建连接。
   // 应对 SSE idle close（v0.1.0 后端 bug）/ 网络抖动 / 老连接卡住等场景，
   // 确保用户点「开始分析」后立刻能看到 pending 数变化。
   const [sseRestartKey, setSseRestartKey] = useState(0)
-  const progressEvent = useAnalysisProgress(activeFolderId, Boolean(activeFolderId), sseRestartKey)
+  // engine 重启后端口可能变 — engineStore 在 'ready' 事件时也 bump 一次,两边相加。
+  const engineSseKey = useEngineStore((s) => s.sseRestartKey)
+  const progressEvent = useAnalysisProgress(
+    activeFolderId,
+    Boolean(activeFolderId),
+    sseRestartKey + engineSseKey,
+  )
   const setDecisionMutation = useSetDecision(activeFolderId)
   const batchSetDecisionsMutation = useBatchSetDecisions(activeFolderId)
   const setSpeciesOverrideMutation = useSetSpeciesOverride(activeFolderId)
@@ -2051,6 +2064,7 @@ function AppShell({
         </div>
       </header>
 
+      <EngineStatusBanner />
       <div className="app-body">{children}</div>
     </div>
   )
