@@ -442,38 +442,63 @@ function categoryTone(category: PhotoCategory): Tone {
   return gradeTone(category)
 }
 
-export function speciesSourceTone(photo: PhotoRecord): Tone {
-  if (photo.speciesSource === 'group_consensus') return 'success'
-  if (photo.speciesConflict || photo.speciesSource === 'conflict') return 'warning'
-  if (photo.speciesSource === 'model_unconfirmed') return 'warning'
-  if (photo.speciesSource === 'manual' || photo.manualSpecies) return 'accent'
+// Source helpers 接收可选 detection — 多鸟图深度复核切鸟时，ScoreHeader 会
+// 把 activeBird 传进来；其他场景（PhotoTile、CompareModal）按 photo-level。
+type DetectionLike = NonNullable<PhotoRecord['birdDetections']>[number]
+
+function resolveSourceFor(
+  photo: PhotoRecord,
+  detection?: DetectionLike | null,
+): { source: PhotoRecord['speciesSource']; manualSpecies: boolean } {
+  if (detection) {
+    return {
+      source: detection.speciesSource,
+      manualSpecies: detection.manualSpecies,
+    }
+  }
+  return {
+    source: photo.speciesSource,
+    manualSpecies: photo.manualSpecies ?? false,
+  }
+}
+
+export function speciesSourceTone(photo: PhotoRecord, detection?: DetectionLike | null): Tone {
+  const { source, manualSpecies } = resolveSourceFor(photo, detection)
+  if (source === 'group_consensus') return 'success'
+  if (photo.speciesConflict || source === 'conflict') return 'warning'
+  if (source === 'model_unconfirmed') return 'warning'
+  if (source === 'manual' || manualSpecies) return 'accent'
   return 'muted'
 }
 
 export function speciesSourceKind(
   photo: PhotoRecord,
+  detection?: DetectionLike | null,
 ): 'conflict' | 'correction' | 'manual' | 'unconfirmed' | null {
-  if (photo.speciesSource === 'group_consensus') return 'correction'
-  if (photo.speciesConflict || photo.speciesSource === 'conflict') return 'conflict'
-  if (photo.speciesSource === 'model_unconfirmed') return 'unconfirmed'
-  if (photo.speciesSource === 'manual' || photo.manualSpecies) return 'manual'
+  const { source, manualSpecies } = resolveSourceFor(photo, detection)
+  if (source === 'group_consensus') return 'correction'
+  if (photo.speciesConflict || source === 'conflict') return 'conflict'
+  if (source === 'model_unconfirmed') return 'unconfirmed'
+  if (source === 'manual' || manualSpecies) return 'manual'
   return null
 }
 
 export function speciesSourceBadge(
   photo: PhotoRecord,
   t: ReturnType<typeof useTranslation>['t'],
+  detection?: DetectionLike | null,
 ): string | null {
-  if (photo.speciesSource === 'group_consensus') {
+  const { source, manualSpecies } = resolveSourceFor(photo, detection)
+  if (source === 'group_consensus') {
     return t('selection.speciesSource.groupConsensus')
   }
-  if (photo.speciesConflict || photo.speciesSource === 'conflict') {
+  if (photo.speciesConflict || source === 'conflict') {
     return t('selection.speciesSource.conflict')
   }
-  if (photo.speciesSource === 'model_unconfirmed') {
+  if (source === 'model_unconfirmed') {
     return t('selection.speciesSource.unconfirmed')
   }
-  if (photo.speciesSource === 'manual' || photo.manualSpecies) {
+  if (source === 'manual' || manualSpecies) {
     return t('selection.speciesSource.manual')
   }
   return null
@@ -502,7 +527,9 @@ export function effectiveSpeciesLatinName(photo: PhotoRecord): string | null {
 export function speciesSourceDetail(
   photo: PhotoRecord,
   t: ReturnType<typeof useTranslation>['t'],
+  detection?: DetectionLike | null,
 ): string | null {
+  const { source, manualSpecies } = resolveSourceFor(photo, detection)
   const support =
     photo.groupSpeciesSupport !== null &&
     photo.groupSpeciesSupport !== undefined &&
@@ -513,22 +540,164 @@ export function speciesSourceDetail(
   const raw = photo.modelSpeciesName
   const effective = effectiveSpeciesName(photo)
 
-  if (photo.speciesSource === 'group_consensus') {
+  if (source === 'group_consensus') {
     if (raw && raw !== effective) {
       return t('selection.speciesSource.groupConsensusWithRaw', { species: raw, support })
     }
     return t('selection.speciesSource.groupConsensusDetail', { support })
   }
-  if (photo.speciesConflict || photo.speciesSource === 'conflict') {
+  if (photo.speciesConflict || source === 'conflict') {
     return t('selection.speciesSource.conflictDetail')
   }
-  if (photo.speciesSource === 'model_unconfirmed') {
+  if (source === 'model_unconfirmed') {
     return t('selection.speciesSource.unconfirmedDetail')
   }
-  if (photo.speciesSource === 'manual' || photo.manualSpecies) {
+  if (source === 'manual' || manualSpecies) {
     return t('selection.speciesSource.manualDetail')
   }
   return null
+}
+
+// 多鸟图按 detection 维度聚合的物种摘要 — tile / 对比页 / 物种照片浏览统一
+// 使用，避免 photo.speciesName（best 那只）淹没其他鸟的物种信息。
+//
+// 仅聚合"已可信"的 detection（manual / model / group_consensus）；
+// model_unconfirmed / conflict / none 单独标在 hasUnconfirmed / hasConflict
+// 字段上，UI 决定是否在 tile 用"部分待审"/"存疑"徽标提示。
+export interface SpeciesSummaryEntry {
+  name: string | null
+  latinName: string | null
+  englishName: string | null
+  count: number
+  isBest: boolean
+}
+
+export interface SpeciesSummary {
+  confirmedEntries: SpeciesSummaryEntry[]
+  hasUnconfirmed: boolean
+  hasConflict: boolean
+  /** 老数据 fallback 标志：detections 全无 speciesSource 字段 → 落回 photo-level */
+  fromPhotoLevelFallback: boolean
+}
+
+export function effectiveSpeciesSummary(photo: PhotoRecord): SpeciesSummary {
+  const detections = photo.birdDetections ?? []
+  const detectionsHaveSource = detections.some((d) => d.speciesSource !== undefined)
+  if (!detectionsHaveSource) {
+    return {
+      confirmedEntries: [],
+      hasUnconfirmed: false,
+      hasConflict: false,
+      fromPhotoLevelFallback: true,
+    }
+  }
+  const map = new Map<string, SpeciesSummaryEntry>()
+  let hasUnconfirmed = false
+  let hasConflict = false
+  for (const d of detections) {
+    const source = d.speciesSource
+    if (source === 'model_unconfirmed') {
+      hasUnconfirmed = true
+      continue
+    }
+    if (source === 'conflict') {
+      hasConflict = true
+      continue
+    }
+    if (source === 'none' || !d.speciesName) continue
+    const key = d.speciesLatinName ?? d.speciesName ?? ''
+    if (!key) continue
+    const existing = map.get(key)
+    if (existing) {
+      existing.count += 1
+      if (d.isBest) existing.isBest = true
+    } else {
+      map.set(key, {
+        name: d.speciesName,
+        latinName: d.speciesLatinName ?? null,
+        englishName: d.speciesEnglishName ?? null,
+        count: 1,
+        isBest: d.isBest,
+      })
+    }
+  }
+  const confirmedEntries = [...map.values()].sort((a, b) => {
+    if (a.isBest && !b.isBest) return -1
+    if (!a.isBest && b.isBest) return 1
+    return b.count - a.count
+  })
+  return {
+    confirmedEntries,
+    hasUnconfirmed,
+    hasConflict,
+    fromPhotoLevelFallback: false,
+  }
+}
+
+// 选片 tile / 对比 / 物种照片浏览 统一用的物种文本格式化函数。
+// 把 effectiveSpeciesSummary 的纯数据 + photo 状态 + i18n 拼成可显示字符串。
+export function formatPhotoSpeciesDisplay(
+  photo: PhotoRecord,
+  t: ReturnType<typeof useTranslation>['t'],
+): string {
+  if (photo.analysisStatus === 'pending') return t('selection.analysisStatus.pending')
+  if (photo.analysisStatus === 'running') return t('selection.analysisStatus.running')
+  if (photo.analysisStatus === 'failed') return t('selection.analysisStatus.failed')
+  if (photo.birdCount === 0) return t('selection.photo.noBird')
+
+  const summary = effectiveSpeciesSummary(photo)
+  if (summary.fromPhotoLevelFallback) {
+    return effectiveSpeciesName(photo) ?? t('selection.photo.unidentified')
+  }
+  const entries = summary.confirmedEntries
+  if (entries.length === 0) {
+    // 全 unconfirmed / conflict / none → 仍展示模型识别物种（待审标在外面 source badge）
+    return effectiveSpeciesName(photo) ?? t('selection.photo.unidentified')
+  }
+  if (entries.length === 1) {
+    const e = entries[0]
+    return e.count > 1
+      ? t('selection.photo.speciesTimes', { name: e.name ?? '', count: e.count })
+      : (e.name ?? t('selection.photo.unidentified'))
+  }
+  if (entries.length === 2) {
+    return t('selection.photo.speciesPlus', {
+      a: entries[0].name ?? '',
+      b: entries[1].name ?? '',
+    })
+  }
+  return t('selection.photo.speciesEtc', {
+    name: entries[0].name ?? '',
+    count: entries.length,
+  })
+}
+
+// 多鸟图 tile 来源徽标策略：
+// - 全部 detection source 一致 → 走 photo-level（不变）
+// - 多源混合且包含 unconfirmed → "部分待审"（warning 色，复用 unconfirmed CSS）
+// - 多源混合不含 unconfirmed → 取最高优先级 source 的 badge（manual > group_consensus > model）
+// 单鸟图直接走 photo-level。
+export function tileSpeciesSourceBadge(
+  photo: PhotoRecord,
+  t: ReturnType<typeof useTranslation>['t'],
+): { label: string; kind: 'conflict' | 'correction' | 'manual' | 'unconfirmed' } | null {
+  const summary = effectiveSpeciesSummary(photo)
+  if (summary.fromPhotoLevelFallback) {
+    const label = speciesSourceBadge(photo, t)
+    const kind = speciesSourceKind(photo)
+    return label && kind ? { label, kind } : null
+  }
+  // 多源混合且有 unconfirmed → 部分待审
+  if (summary.hasUnconfirmed && summary.confirmedEntries.length > 0) {
+    return {
+      label: t('selection.speciesSource.partialUnconfirmed'),
+      kind: 'unconfirmed',
+    }
+  }
+  // 否则走 photo-level（best detection 决定的）
+  const label = speciesSourceBadge(photo, t)
+  const kind = speciesSourceKind(photo)
+  return label && kind ? { label, kind } : null
 }
 
 function decisionTone(decision: SelectionDecision): Tone {
@@ -2528,19 +2697,10 @@ function PhotoTile({
 }) {
   const category = photoCategory(photo)
   const manual = photo.decision !== null
-  const speciesBadge = speciesSourceBadge(photo, t)
-  const speciesKind = speciesSourceKind(photo)
-  const displaySpecies =
-    effectiveSpeciesName(photo) ??
-    (photo.analysisStatus === 'pending'
-      ? t('selection.analysisStatus.pending')
-      : photo.analysisStatus === 'running'
-        ? t('selection.analysisStatus.running')
-        : photo.analysisStatus === 'failed'
-          ? t('selection.analysisStatus.failed')
-          : photo.birdCount === 0
-            ? t('selection.photo.noBird')
-            : t('selection.photo.unidentified'))
+  // 物种文字 + 来源徽标都走 detection 维度聚合（多鸟图：白鹭 × 2 / 白鹭 + 苍鹭 /
+  // 白鹭 等 N 种 / 部分待审）。单鸟图行为与之前一致。
+  const displaySpecies = formatPhotoSpeciesDisplay(photo, t)
+  const tileSourceBadge = tileSpeciesSourceBadge(photo, t)
   return (
     <article
       className={cn(
@@ -2583,9 +2743,14 @@ function PhotoTile({
           <span>
             <strong className="photo-preview__species">
               <span>{displaySpecies}</span>
-              {speciesBadge && speciesKind ? (
-                <em className={cn('species-source-inline', `species-source-inline--${speciesKind}`)}>
-                  {t('selection.speciesSource.inline', { source: speciesBadge })}
+              {tileSourceBadge ? (
+                <em
+                  className={cn(
+                    'species-source-inline',
+                    `species-source-inline--${tileSourceBadge.kind}`,
+                  )}
+                >
+                  {t('selection.speciesSource.inline', { source: tileSourceBadge.label })}
                 </em>
               ) : null}
             </strong>
@@ -2626,8 +2791,7 @@ function InspectorPanel({
   setFocusedPhotoId: (photoId: string | null) => void
   t: ReturnType<typeof useTranslation>['t']
 }) {
-  const speciesBadge = photo ? speciesSourceBadge(photo, t) : null
-  const speciesKind = photo ? speciesSourceKind(photo) : null
+  const tileSourceBadge = photo ? tileSpeciesSourceBadge(photo, t) : null
   return (
     <aside className="inspector selection-scroll">
       <SectionLabel label={t('selection.inspector.label')} />
@@ -2638,10 +2802,15 @@ function InspectorPanel({
             <span>{t('selection.inspector.score')}</span>
             <strong>{formatScore(photo.finalScore)}</strong>
             <small className="score-block__species">
-              <span>{effectiveSpeciesName(photo) ?? t('selection.photo.noBird')}</span>
-              {speciesBadge && speciesKind ? (
-                <em className={cn('species-source-inline', `species-source-inline--${speciesKind}`)}>
-                  {t('selection.speciesSource.inline', { source: speciesBadge })}
+              <span>{formatPhotoSpeciesDisplay(photo, t)}</span>
+              {tileSourceBadge ? (
+                <em
+                  className={cn(
+                    'species-source-inline',
+                    `species-source-inline--${tileSourceBadge.kind}`,
+                  )}
+                >
+                  {t('selection.speciesSource.inline', { source: tileSourceBadge.label })}
                 </em>
               ) : null}
             </small>
@@ -3258,7 +3427,7 @@ function CompareModal({
               />
               <div className="compare-card__body">
                 <div>
-                  <strong>{photo.speciesName ?? t('selection.photo.noBird')}</strong>
+                  <strong>{formatPhotoSpeciesDisplay(photo, t)}</strong>
                   <small>{photo.fileName}</small>
                 </div>
                 <b>{formatScore(photo.finalScore)}</b>

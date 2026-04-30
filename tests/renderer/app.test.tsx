@@ -7,11 +7,14 @@ import App, {
   buildArchiveMapPins,
   buildSpeciesCollectionGroups,
   deriveSpeciesRecords,
+  effectiveSpeciesSummary,
   extractPhotoGps,
   getArchiveSpeciesEntries,
   isPlainSpaceKey,
   shouldIgnoreSelectionReviewShortcutTarget,
+  tileSpeciesSourceBadge,
 } from '@/App'
+import i18next from 'i18next'
 import { listAllSpecies, resolveSpeciesCanonicalSci } from '@/lib/species-wiki'
 import type { FolderRecord, PhotoRecord, WorkspaceSnapshot } from '@/lib/mock-workspace'
 
@@ -294,6 +297,69 @@ describe('App', () => {
     expect(entries.map((entry) => entry.latinName)).toEqual(['Egretta garzetta'])
     expect(egretta?.collected).toBe(true)
     expect(egretta?.photoCount).toBe(1)
+  })
+
+  it('aggregates multi-species in tile display: × N / + / 等 N 种', () => {
+    // 单鸟图: 按 photo-level fallback
+    const singleBird = {
+      id: 'p-single',
+      birdDetections: [
+        { index: 0, bbox: { x1: 0, y1: 0, x2: 1, y2: 1, confidence: 0.9 },
+          speciesName: '白鹭', speciesLatinName: 'Egretta garzetta',
+          speciesCandidates: [], manualSpecies: false, isBest: true,
+          speciesSource: 'model' },
+      ],
+      birdCount: 1, analysisStatus: 'done', grade: 'select', decision: null,
+      finalScore: 0.78, speciesName: '白鹭', speciesLatinName: 'Egretta garzetta',
+    } as PhotoRecord
+    expect(effectiveSpeciesSummary(singleBird).confirmedEntries.map((e) => e.name)).toEqual(['白鹭'])
+
+    // 多鸟同物种 (× 2)
+    const sameSpecies = {
+      ...singleBird,
+      id: 'p-same',
+      birdCount: 2,
+      birdDetections: [
+        { ...singleBird.birdDetections![0], index: 0, isBest: true },
+        { ...singleBird.birdDetections![0], index: 1, isBest: false },
+      ],
+    } as PhotoRecord
+    const sameSummary = effectiveSpeciesSummary(sameSpecies)
+    expect(sameSummary.confirmedEntries).toHaveLength(1)
+    expect(sameSummary.confirmedEntries[0].count).toBe(2)
+    expect(sameSummary.confirmedEntries[0].name).toBe('白鹭')
+
+    // 多鸟多物种 (best 优先)
+    const mixedSpecies = {
+      ...singleBird,
+      id: 'p-mixed',
+      birdCount: 2,
+      birdDetections: [
+        { ...singleBird.birdDetections![0], index: 0, isBest: true,
+          speciesName: '白鹭', speciesLatinName: 'Egretta garzetta' },
+        { ...singleBird.birdDetections![0], index: 1, isBest: false,
+          speciesName: '苍鹭', speciesLatinName: 'Ardea cinerea' },
+      ],
+    } as PhotoRecord
+    const mixedSummary = effectiveSpeciesSummary(mixedSpecies)
+    expect(mixedSummary.confirmedEntries.map((e) => e.name)).toEqual(['白鹭', '苍鹭'])
+    expect(mixedSummary.hasUnconfirmed).toBe(false)
+
+    // 多鸟混合: best 是 model + 另一只 model_unconfirmed → "部分待审"
+    const partialUnconfirmed = {
+      ...mixedSpecies,
+      id: 'p-partial',
+      birdDetections: [
+        { ...mixedSpecies.birdDetections![0], speciesSource: 'model' },
+        { ...mixedSpecies.birdDetections![1], speciesSource: 'model_unconfirmed' },
+      ],
+    } as PhotoRecord
+    const partialSummary = effectiveSpeciesSummary(partialUnconfirmed)
+    expect(partialSummary.confirmedEntries.map((e) => e.name)).toEqual(['白鹭'])
+    expect(partialSummary.hasUnconfirmed).toBe(true)
+    // tile 徽标策略：partial unconfirmed 时使用专门的 partialUnconfirmed 标签
+    const partialBadge = tileSpeciesSourceBadge(partialUnconfirmed, i18next.t.bind(i18next) as never)
+    expect(partialBadge?.kind).toBe('unconfirmed')
   })
 
   it('aggregates multi-bird mixed visibility per detection (v6 detection-level)', () => {

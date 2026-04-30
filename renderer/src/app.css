@@ -3417,6 +3417,16 @@ button:disabled {
   transform: translateX(-120%);
 }
 
+/* 多鸟图当前鸟 hint — 克制 muted 小字，section-label 同级语义，不抢主分数视觉 */
+.score-header__bird-hint {
+  font-family: var(--pl-font-data);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.06em;
+  color: var(--pl-fg-3, rgba(255, 255, 255, 0.5));
+  text-transform: uppercase;
+}
+
 .score-header__score {
   display: flex;
   align-items: center;

@@ -45,7 +45,12 @@ import {
 } from '@/App'
 import type { SpeciesOverrideValue } from '@/lib/api-client'
 import { computeIqaCropBox } from '@/lib/backend-adapter'
-import type { AfOverlay, PhotoRecord, SelectionDecision } from '@/lib/mock-workspace'
+import type {
+  AfOverlay,
+  BirdDetectionRecord,
+  PhotoRecord,
+  SelectionDecision,
+} from '@/lib/mock-workspace'
 import { listAllSpecies } from '@/lib/species-wiki'
 import { cn } from '@/lib/utils'
 
@@ -307,7 +312,12 @@ export function ReviewModal({
 
         <aside className="review-detail review-detail--compact">
           {/* 顶部：分数 + 物种 + 分级 */}
-          <ScoreHeader photo={photo} t={t} />
+          <ScoreHeader
+            photo={photo}
+            activeBird={activeBird}
+            totalBirds={detections.length}
+            t={t}
+          />
 
           {/* 关键指标紧凑网格 */}
           <div className="review-stats-grid">
@@ -1012,23 +1022,42 @@ function ReviewFilmstrip({
   )
 }
 
-/** 顶部：大字号分数 + 分级胶囊 + 物种名（颜色按 grade 区分） */
+/** 顶部：大字号分数 + 分级胶囊 + 物种名（颜色按 grade 区分）。
+ * 多鸟图深度复核切换鸟时，分数/档位 photo-level 不变，但物种/来源徽标跟随 activeBird。 */
 function ScoreHeader({
   photo,
+  activeBird,
+  totalBirds,
   t,
 }: {
   photo: PhotoRecord
+  activeBird: BirdDetectionRecord | null
+  totalBirds: number
   t: ReturnType<typeof useTranslation>['t']
 }) {
   const grade = effectivePhotoGrade(photo)
   const score = photo.finalScore
-  const sourceDetail = speciesSourceDetail(photo, t)
-  const sourceBadge = speciesSourceBadge(photo, t)
-  const sourceKind = speciesSourceKind(photo)
-  const speciesName = effectiveSpeciesName(photo) ?? t('selection.photo.unidentified')
-  const speciesLatinName = effectiveSpeciesLatinName(photo)
+  // 物种 / 来源 优先 activeBird，fallback photo-level（单鸟图 / 老数据）
+  const sourceDetail = speciesSourceDetail(photo, t, activeBird)
+  const sourceBadge = speciesSourceBadge(photo, t, activeBird)
+  const sourceKind = speciesSourceKind(photo, activeBird)
+  const speciesName =
+    activeBird?.speciesName ??
+    effectiveSpeciesName(photo) ??
+    t('selection.photo.unidentified')
+  const speciesLatinName = activeBird?.speciesLatinName ?? effectiveSpeciesLatinName(photo)
+  // 多鸟图：当前鸟的提示（克制小字，section-label 同级语义）
+  const showBirdHint = totalBirds >= 2 && activeBird != null
   return (
     <div className={cn('score-header', `score-header--${grade}`)}>
+      {showBirdHint ? (
+        <div className="score-header__bird-hint">
+          {t('selection.review.activeBirdHint', {
+            current: activeBird!.index + 1,
+            total: totalBirds,
+          })}
+        </div>
+      ) : null}
       <div className="score-header__score">
         <strong>{formatScore(score)}</strong>
         <span className={cn('grade-pill', `grade-pill--${grade}`)}>{t(gradeLabelKey(grade))}</span>
@@ -1043,7 +1072,12 @@ function ScoreHeader({
         {speciesLatinName ? <em>{speciesLatinName}</em> : null}
       </div>
       {sourceDetail ? (
-        <div className={cn('score-header__source', `score-header__source--${speciesSourceTone(photo)}`)}>
+        <div
+          className={cn(
+            'score-header__source',
+            `score-header__source--${speciesSourceTone(photo, activeBird)}`,
+          )}
+        >
           {sourceDetail}
         </div>
       ) : null}

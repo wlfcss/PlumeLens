@@ -175,7 +175,8 @@
       "conflict": "Group conflict",
       "conflictDetail": "Group conflict; keeping the high-confidence single-frame result",
       "unconfirmed": "Partial · Pending review",
-      "unconfirmedDetail": "Bird head not visible; model confidence is limited until you confirm in the deep review"
+      "unconfirmedDetail": "Bird head not visible; model confidence is limited until you confirm in the deep review",
+      "partialUnconfirmed": "Partial pending review"
     },
     "poseTags": {
       "eye_visible": "Eye visible",
@@ -202,7 +203,10 @@
       "noBird": "No bird detected",
       "unidentified": "Unidentified species",
       "birdsDetected": "birds",
-      "frameLabel": "Frame"
+      "frameLabel": "Frame",
+      "speciesTimes": "{{name}} × {{count}}",
+      "speciesPlus": "{{a}} + {{b}}",
+      "speciesEtc": "{{name}} +{{count}} species"
     },
     "actions": {
       "select": "Select",
@@ -240,6 +244,7 @@
       "afPointUnknown": " · unavailable",
       "filmstripLabel": "Review photo thumbnails",
       "shortcutsLabel": "Review shortcuts",
+      "activeBirdHint": "{{total}} birds · current Bird {{current}}",
       "shortcuts": {
         "grade": "Grade",
         "nav": "Navigate/close"

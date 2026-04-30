@@ -175,7 +175,8 @@
       "conflict": "组内分歧",
       "conflictDetail": "组内分歧，保留单张高置信结果",
       "unconfirmed": "不全 · 待审",
-      "unconfirmedDetail": "鸟头不可见，识别置信度受限，需在深度复核确认后才进羽迹"
+      "unconfirmedDetail": "鸟头不可见，识别置信度受限，需在深度复核确认后才进羽迹",
+      "partialUnconfirmed": "部分待审"
     },
     "poseTags": {
       "eye_visible": "见眼",
@@ -202,7 +203,10 @@
       "noBird": "未检测到鸟",
       "unidentified": "未识别物种",
       "birdsDetected": "只鸟",
-      "frameLabel": "帧"
+      "frameLabel": "帧",
+      "speciesTimes": "{{name}} × {{count}}",
+      "speciesPlus": "{{a}} + {{b}}",
+      "speciesEtc": "{{name}} 等 {{count}} 种"
     },
     "actions": {
       "select": "精选",
@@ -240,6 +244,7 @@
       "afPointUnknown": " · 未识别",
       "filmstripLabel": "复核照片缩略图",
       "shortcutsLabel": "复核快捷键",
+      "activeBirdHint": "共 {{total}} 只 · 当前 鸟 {{current}}",
       "shortcuts": {
         "grade": "评级",
         "nav": "切换/关闭"
