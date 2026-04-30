@@ -177,6 +177,16 @@ export interface BestDetection {
   species: string | null
   species_latin: string | null
   manual_species: boolean
+  // 每个 detection 独立的 species_source（多鸟图混合可见性的关键 — 后端 v6 schema）。
+  // photo-level species_source 由 best detection 决定，但 detection-level 才是
+  // 羽迹聚合 / confirm 按钮显隐的真实依据。
+  species_source?:
+    | 'none'
+    | 'model'
+    | 'model_unconfirmed'
+    | 'manual'
+    | 'group_consensus'
+    | 'conflict'
   species_candidates: SpeciesCandidate[]
 }
 

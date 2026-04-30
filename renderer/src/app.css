@@ -1739,6 +1739,12 @@ button:disabled {
   color: color-mix(in srgb, var(--pl-warning) 72%, rgba(255, 255, 255, 0.72));
 }
 
+/* "不全 · 待审" — head 不可见但模型给了识别，需用户在深度复核确认才进羽迹。
+   与 conflict 同色（warning），通过文案区分。 */
+.species-source-inline--unconfirmed {
+  color: color-mix(in srgb, var(--pl-warning) 72%, rgba(255, 255, 255, 0.72));
+}
+
 .photo-preview__bottom b,
 .archive-card b,
 .compare-card b {

@@ -316,41 +316,58 @@ export function getArchiveSpeciesEntries(photo: PhotoRecord): ArchiveSpeciesEntr
     latinName?: string | null
     name?: string | null
   }> = []
-  const manualEntries: typeof rawEntries = []
 
-  for (const detection of photo.birdDetections ?? []) {
-    if (!detection.manualSpecies) continue
-    manualEntries.push({
-      name: detection.speciesName,
-      latinName: detection.speciesLatinName,
-      englishName: detection.speciesEnglishName,
-    })
-  }
-
-  if (manualEntries.length > 0) {
-    rawEntries.push(...manualEntries)
-  } else if (photo.manualSpecies || photo.speciesSource === 'manual') {
-    rawEntries.push({
-      name: photo.speciesName,
-      latinName: photo.speciesLatinName,
-      englishName: photo.speciesEnglishName,
-    })
-  } else if (photo.speciesSource === 'model_unconfirmed') {
-    // head 不可见 → 模型识别"待审"。不进羽迹 — 用户在深度复核确认后会
-    // 升级 species_source 为 'manual' 再入。多鸟图中部分人工标注的 detection
-    // 已经走 manualEntries 分支，不会被这里"否决"掉。
-  } else if (photo.speciesSource === 'group_consensus') {
-    rawEntries.push({
-      name: photo.groupSpeciesName ?? photo.speciesName,
-      latinName: photo.groupSpeciesLatinName ?? photo.speciesLatinName,
-      englishName: photo.speciesEnglishName,
-    })
+  // 优先：按 detection 维度聚合（v6 backend schema：每个 detection 独立 speciesSource）。
+  // 多鸟图混合可见性的关键 — head 可见的 detection 进羽迹，head 不可见的不进，
+  // 不再被 photo-level 一刀切。
+  const detections = photo.birdDetections ?? []
+  const detectionsHaveSource = detections.some((d) => d.speciesSource !== undefined)
+  if (detectionsHaveSource) {
+    for (const detection of detections) {
+      const source = detection.speciesSource
+      // model_unconfirmed / conflict / none / undefined-with-no-species → 跳过
+      if (source === 'model_unconfirmed' || source === 'conflict' || source === 'none') continue
+      if (source === undefined && !detection.manualSpecies) continue
+      rawEntries.push({
+        name: detection.speciesName,
+        latinName: detection.speciesLatinName,
+        englishName: detection.speciesEnglishName,
+      })
+    }
   } else {
-    rawEntries.push({
-      name: photo.modelSpeciesName ?? photo.speciesName,
-      latinName: photo.modelSpeciesLatinName ?? photo.speciesLatinName,
-      englishName: photo.speciesEnglishName,
-    })
+    // 老数据 fallback（v5 之前没有 detection.speciesSource）— 按 photo-level 走老逻辑
+    const manualEntries: typeof rawEntries = []
+    for (const detection of detections) {
+      if (!detection.manualSpecies) continue
+      manualEntries.push({
+        name: detection.speciesName,
+        latinName: detection.speciesLatinName,
+        englishName: detection.speciesEnglishName,
+      })
+    }
+    if (manualEntries.length > 0) {
+      rawEntries.push(...manualEntries)
+    } else if (photo.manualSpecies || photo.speciesSource === 'manual') {
+      rawEntries.push({
+        name: photo.speciesName,
+        latinName: photo.speciesLatinName,
+        englishName: photo.speciesEnglishName,
+      })
+    } else if (photo.speciesSource === 'model_unconfirmed') {
+      // head 不可见 → 不进羽迹（与新逻辑一致）
+    } else if (photo.speciesSource === 'group_consensus') {
+      rawEntries.push({
+        name: photo.groupSpeciesName ?? photo.speciesName,
+        latinName: photo.groupSpeciesLatinName ?? photo.speciesLatinName,
+        englishName: photo.speciesEnglishName,
+      })
+    } else {
+      rawEntries.push({
+        name: photo.modelSpeciesName ?? photo.speciesName,
+        latinName: photo.modelSpeciesLatinName ?? photo.speciesLatinName,
+        englishName: photo.speciesEnglishName,
+      })
+    }
   }
 
   const seen = new Set<string>()
@@ -466,6 +483,8 @@ export function effectiveSpeciesName(photo: PhotoRecord): string | null {
   if (photo.manualSpecies || photo.speciesSource === 'manual') return photo.speciesName
   if (photo.speciesSource === 'group_consensus') return photo.groupSpeciesName ?? photo.speciesName
   if (photo.speciesSource === 'model') return photo.modelSpeciesName ?? photo.speciesName
+  // model_unconfirmed: 仍展示模型识别物种（但 UI 会带"待审"徽标）
+  if (photo.speciesSource === 'model_unconfirmed') return photo.speciesName
   return photo.speciesName
 }
 
@@ -475,6 +494,8 @@ export function effectiveSpeciesLatinName(photo: PhotoRecord): string | null {
     return photo.groupSpeciesLatinName ?? photo.speciesLatinName
   }
   if (photo.speciesSource === 'model') return photo.modelSpeciesLatinName ?? photo.speciesLatinName
+  // model_unconfirmed: 仍展示模型识别拉丁名（带"待审"徽标）
+  if (photo.speciesSource === 'model_unconfirmed') return photo.speciesLatinName
   return photo.speciesLatinName
 }
 

@@ -65,6 +65,16 @@ export interface BirdDetectionRecord {
   speciesCandidates: SpeciesCandidate[]
   manualSpecies: boolean
   isBest: boolean
+  // 每个 detection 独立的 species_source（多鸟图混合可见性的关键 — 后端 v6 schema）。
+  // 羽迹聚合按 detection 维度，head 不可见的 detection（speciesSource ===
+  // 'model_unconfirmed'）不进羽迹，直到用户在深度复核确认。
+  speciesSource?:
+    | 'none'
+    | 'model'
+    | 'model_unconfirmed'
+    | 'manual'
+    | 'group_consensus'
+    | 'conflict'
 }
 
 export interface AfOverlayPoint {

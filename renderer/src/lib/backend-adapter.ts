@@ -373,6 +373,11 @@ function buildBirdDetections(row: PhotoRow): PhotoRecord['birdDetections'] {
       speciesLatinName: useConsensus ? row.group_species_latin! : d.species_latin,
       speciesCandidates: effectiveCandidates,
       manualSpecies: d.manual_species,
+      // detection-level species_source（v6 backend schema）。useConsensus 命中时
+      // best detection 后端就已写为 'group_consensus'，无需在前端额外处理。
+      // 老数据（v5 之前）detection 没这字段 → undefined，下游 getArchiveSpeciesEntries
+      // 走 fallback 按老逻辑（按 photo-level / manualSpecies）走。
+      speciesSource: d.species_source,
       isBest: d.is_best,
     }
   })

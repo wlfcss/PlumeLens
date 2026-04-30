@@ -296,6 +296,66 @@ describe('App', () => {
     expect(egretta?.photoCount).toBe(1)
   })
 
+  it('aggregates multi-bird mixed visibility per detection (v6 detection-level)', () => {
+    // 关键：多鸟图中 head 可见的 detection 进羽迹，head 不可见的不进，
+    // 不被 photo-level 一刀切。photo.speciesSource 由 best detection 决定，
+    // 但羽迹聚合按 detection 维度。
+    const photo = {
+      id: 'photo-multi-mixed',
+      folderId: 'folder-1',
+      groupId: 'group-1',
+      fileName: '5Y3A0020.JPG',
+      shotAt: '2026-04-30T10:00:00Z',
+      speciesName: '白鹭', // best detection 的物种
+      speciesLatinName: 'Egretta garzetta',
+      speciesSource: 'model', // best detection head 可见
+      modelSpeciesName: '白鹭',
+      modelSpeciesLatinName: 'Egretta garzetta',
+      birdDetections: [
+        {
+          index: 0,
+          bbox: { x1: 0, y1: 0, x2: 100, y2: 100, confidence: 0.9 },
+          speciesName: '白鹭',
+          speciesLatinName: 'Egretta garzetta',
+          speciesCandidates: [],
+          manualSpecies: false,
+          speciesSource: 'model', // head 可见
+          isBest: true,
+        },
+        {
+          index: 1,
+          bbox: { x1: 200, y1: 0, x2: 300, y2: 100, confidence: 0.8 },
+          speciesName: '苍鹭',
+          speciesLatinName: 'Ardea cinerea',
+          speciesCandidates: [],
+          manualSpecies: false,
+          speciesSource: 'model_unconfirmed', // head 不可见
+          isBest: false,
+        },
+      ],
+      birdCount: 2,
+      analysisStatus: 'done',
+      grade: 'select',
+      decision: null,
+      finalScore: 0.83,
+    } as PhotoRecord
+    const workspace = {
+      folders: [],
+      groups: [],
+      photos: [photo],
+      species: [],
+    } as WorkspaceSnapshot
+
+    const entries = getArchiveSpeciesEntries(photo)
+    const records = deriveSpeciesRecords(workspace)
+
+    // 白鹭（detection 0, head 可见, 'model'）进羽迹；
+    // 苍鹭（detection 1, head 不可见, 'model_unconfirmed'）不进
+    expect(entries.map((e) => e.latinName).sort()).toEqual(['Egretta garzetta'])
+    expect(records.find((s) => s.latinName === 'Egretta garzetta')?.collected).toBe(true)
+    expect(records.find((s) => s.latinName === 'Ardea cinerea')?.collected).toBe(false)
+  })
+
   it('excludes model_unconfirmed species from archive collection until user confirms', () => {
     // 不变量：head 不可见时 species_source='model_unconfirmed'，
     // 该照片即使是精选档也不应让该物种"已点亮"。用户在深度复核确认后

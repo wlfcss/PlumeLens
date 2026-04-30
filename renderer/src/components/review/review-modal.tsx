@@ -518,7 +518,12 @@ function SpeciesOverrideEditor({
         <small>{activeBird.speciesLatinName ?? t('selection.speciesEditor.noLatin')}</small>
       </div>
 
-      {photo.speciesSource === 'model_unconfirmed' &&
+      {/* 按 activeBird.speciesSource 判断（v6 detection-level）— 多鸟图混合可见性
+          下，每个 detection 独立判断按钮显隐，不被 photo-level 一刀切。
+          老数据 fallback：activeBird.speciesSource undefined 时退回 photo.speciesSource。 */}
+      {(activeBird.speciesSource === 'model_unconfirmed' ||
+        (activeBird.speciesSource === undefined &&
+          photo.speciesSource === 'model_unconfirmed')) &&
       !activeBird.manualSpecies &&
       activeBird.speciesLatinName ? (
         <button
