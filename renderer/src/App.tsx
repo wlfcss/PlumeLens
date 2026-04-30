@@ -1519,6 +1519,10 @@ export default function App() {
   const { mutate: rebuildPhotoThumbnail } = useBuildPhotoThumbnail(activeFolderId)
   const thumbnailRepairingRef = useRef(new Set<string>())
   const thumbnailLastRepairAtRef = useRef(new Map<string, number>())
+  // photos ref 给 handleThumbnailLoadStatus 在 'missing' 状态下查 photo.analysisStatus，
+  // 用 ref 而不是 useCallback 依赖，避免 photos 变化导致 callback 频繁重建。
+  const photosForRepairRef = useRef(workspace.photos)
+  photosForRepairRef.current = workspace.photos
   // SSE 重连 key：startBatch 成功后 bump，强制 useAnalysisProgress 重建连接。
   // 应对 SSE idle close（v0.1.0 后端 bug）/ 网络抖动 / 老连接卡住等场景，
   // 确保用户点「开始分析」后立刻能看到 pending 数变化。
@@ -1530,12 +1534,21 @@ export default function App() {
 
   const handleThumbnailLoadStatus = useCallback(
     (photoId: string, status: ThumbnailLoadStatus) => {
-      if (status !== 'error') {
-        if (status === 'loaded') thumbnailRepairingRef.current.delete(photoId)
+      if (status === 'loaded') {
+        thumbnailRepairingRef.current.delete(photoId)
         return
       }
+      if (status === 'loading') return
+      // 'missing' 信号：thumbGridUrl=null 时 ThumbnailImage 上报。
+      // 仅在 photo 已分析完成（或分析失败）时视为异常并主动重建 —
+      // 分析中 thumb 还没跑完是正常的，等 SSE 事件自然刷新。
+      // 'error' 信号：图片 URL 有但加载 404 / 解码失败 — 任何阶段都重建。
+      if (status === 'missing') {
+        const photo = photosForRepairRef.current.find((p) => p.id === photoId)
+        if (!photo) return
+        if (photo.analysisStatus !== 'done' && photo.analysisStatus !== 'failed') return
+      }
       if (thumbnailRepairingRef.current.has(photoId)) return
-
       const now = Date.now()
       const lastRepairAt = thumbnailLastRepairAtRef.current.get(photoId) ?? 0
       if (now - lastRepairAt < THUMBNAIL_REPAIR_COOLDOWN_MS) return
