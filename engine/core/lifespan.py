@@ -176,8 +176,15 @@ def _kill_orphan_engines(my_pid: int) -> int:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
-    # Startup
-    setup_logging(log_level=settings.log_level)
+    # Startup — 提前确保 data_dir 存在，再 setup_logging 让文件日志落到 data_dir/logs/
+    # 这样所有后续步骤（孤儿清理、模型加载、崩溃 traceback）都能进 engine.jsonl 文件。
+    settings.data_dir.mkdir(parents=True, exist_ok=True)
+    setup_logging(log_level=settings.log_level, logs_dir=settings.data_dir / "logs")
+    await logger.ainfo(
+        "Engine logging initialized",
+        data_dir=str(settings.data_dir),
+        logs_dir=str(settings.data_dir / "logs"),
+    )
 
     # 启动预清理：杀掉所有除自己外的 plumelens-engine 孤儿进程，避免它们
     # 继续吃 RAM / 持有 db lock / 抢 MPS 资源。
@@ -187,9 +194,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
             "Killed orphan plumelens-engine processes at startup",
             count=orphans_killed,
         )
-
-    # Ensure data directory exists
-    settings.data_dir.mkdir(parents=True, exist_ok=True)
 
     await logger.ainfo("PlumeLens Engine starting", data_dir=str(settings.data_dir))
 
