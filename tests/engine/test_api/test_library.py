@@ -330,6 +330,173 @@ class TestListAndDetail:
         assert corrected["species_conflict"] is False
         assert by_name["a.jpg"]["species_source"] == "model"
 
+    async def test_detection_level_species_source_for_multi_bird_mixed_visibility(
+        self,
+        real_client,
+    ) -> None:
+        """多鸟图混合可见性：每个 detection 独立计算 species_source。
+        photo-level 由 best detection 决定；非 best detection 按自己的 pose 判断。"""
+        client, tmp = real_client
+        lib_root = tmp / "lib_multi_bird_mixed"
+        _make_jpeg(lib_root / "multi.jpg")
+        await client.post("/library/import", json={"root_path": str(lib_root)})
+
+        libs = (await client.get("/library")).json()
+        lib_id = libs[0]["id"]
+        photo_id = (await client.get(f"/library/{lib_id}")).json()["photos"][0]["id"]
+
+        # detection 0: head 可见 + 高 quality（best） → model
+        # detection 1: head 不可见 + 低 quality → model_unconfirmed
+        result_json = {
+            "photo_id": photo_id,
+            "pipeline_version": "test-v1",
+            "bird_count": 2,
+            "duration_ms": 12,
+            "best": None,
+            "detections": [
+                {
+                    "bbox": {"x1": 1, "y1": 2, "x2": 30, "y2": 40, "confidence": 0.9},
+                    "quality": {"clipiqa": 0.8, "hyperiqa": 0.85, "combined": 0.83},
+                    "grade": "select",
+                    "pose": _make_pose(head_visible=True),
+                    "species": "白鹭",
+                    "species_candidates": [
+                        {
+                            "canonical_sci": "Egretta garzetta",
+                            "canonical_zh": "白鹭",
+                            "confidence": 0.91,
+                        }
+                    ],
+                },
+                {
+                    "bbox": {"x1": 50, "y1": 60, "x2": 90, "y2": 100, "confidence": 0.8},
+                    "quality": {"clipiqa": 0.6, "hyperiqa": 0.62, "combined": 0.61},
+                    "grade": "usable",
+                    "pose": _make_pose(head_visible=False),
+                    "species": "苍鹭",
+                    "species_candidates": [
+                        {
+                            "canonical_sci": "Ardea cinerea",
+                            "canonical_zh": "苍鹭",
+                            "confidence": 0.55,
+                        }
+                    ],
+                },
+            ],
+        }
+        async with aiosqlite.connect(tmp / "test.db") as conn:
+            await conn.execute(
+                "INSERT INTO analysis_results (id, photo_id, pipeline_version, "
+                "quality_score, grade, bird_count, species, result_json, created_at, is_active) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)",
+                (
+                    "ar-multi-mixed",
+                    photo_id,
+                    "test-v1",
+                    0.83,
+                    "select",
+                    2,
+                    "白鹭",
+                    json.dumps(result_json),
+                    "2026-04-23T07:00:00+00:00",
+                ),
+            )
+            await conn.commit()
+
+        photo = (await client.get(f"/library/{lib_id}")).json()["photos"][0]
+        # photo-level 由 best（detection 0，quality 高）决定
+        assert photo["species_source"] == "model"
+        assert photo["best_detection"]["species_source"] == "model"
+        # detection-level：detection 0 head 可见 → model；detection 1 head 不可见 → model_unconfirmed
+        det_by_species = {d["species"]: d for d in photo["detections"]}
+        assert det_by_species["白鹭"]["species_source"] == "model"
+        assert det_by_species["白鹭"]["is_best"] is True
+        assert det_by_species["苍鹭"]["species_source"] == "model_unconfirmed"
+        assert det_by_species["苍鹭"]["is_best"] is False
+
+    async def test_group_consensus_upgrades_unconfirmed_when_model_already_agrees(
+        self,
+        real_client,
+    ) -> None:
+        """规则 #3：群内共识能"代审"head 不可见的鸟。
+        即使模型 top-1 已与共识 winner 一致，head 不可见的单鸟图也应从
+        'model_unconfirmed' 升级到 'group_consensus' 才能进羽迹。"""
+        client, tmp = real_client
+        lib_root = tmp / "lib_unconfirmed_consensus"
+        for name in ("a.jpg", "b.jpg", "c.jpg", "d.jpg"):
+            _make_jpeg(lib_root / name)
+        await client.post("/library/import", json={"root_path": str(lib_root)})
+
+        libs = (await client.get("/library")).json()
+        lib_id = libs[0]["id"]
+        photos = sorted(
+            (await client.get(f"/library/{lib_id}")).json()["photos"],
+            key=lambda p: p["file_name"],
+        )
+
+        def make_result(photo_id: str, head_visible: bool) -> str:
+            detection = {
+                "bbox": {"x1": 1, "y1": 2, "x2": 30, "y2": 40, "confidence": 0.9},
+                "quality": {"clipiqa": 0.7, "hyperiqa": 0.8, "combined": 0.76},
+                "grade": "select",
+                "pose": _make_pose(head_visible=head_visible),
+                "species": "暗绿绣眼鸟",
+                "species_candidates": [
+                    {
+                        "canonical_sci": "Zosterops simplex",
+                        "canonical_zh": "暗绿绣眼鸟",
+                        "confidence": 0.92,
+                    }
+                ],
+            }
+            return json.dumps(
+                {
+                    "photo_id": photo_id,
+                    "pipeline_version": "test-v1",
+                    "bird_count": 1,
+                    "duration_ms": 12,
+                    "best": detection,
+                    "detections": [detection],
+                }
+            )
+
+        # a/b/c head 可见，d head 不可见；4 张都识别同一物种 → 共识达成 winner = 该物种
+        cases = [("a.jpg", True), ("b.jpg", True), ("c.jpg", True), ("d.jpg", False)]
+        async with aiosqlite.connect(tmp / "test.db") as conn:
+            for index, (file_name, head_visible) in enumerate(cases):
+                photo = next(p for p in photos if p["file_name"] == file_name)
+                await conn.execute(
+                    "UPDATE photos SET scene_id = ?, file_mtime = ? WHERE id = ?",
+                    (0, f"2026-04-23T07:00:0{index}+00:00", photo["id"]),
+                )
+                await conn.execute(
+                    "INSERT INTO analysis_results (id, photo_id, pipeline_version, "
+                    "quality_score, grade, bird_count, species, result_json, created_at, "
+                    "is_active) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)",
+                    (
+                        f"ar-{file_name}",
+                        photo["id"],
+                        "test-v1",
+                        0.76,
+                        "select",
+                        1,
+                        "暗绿绣眼鸟",
+                        make_result(photo["id"], head_visible),
+                        "2026-04-23T07:00:00+00:00",
+                    ),
+                )
+            await conn.commit()
+
+        detail = (await client.get(f"/library/{lib_id}")).json()
+        by_name = {p["file_name"]: p for p in detail["photos"]}
+
+        # head 可见的 a 走普通 model 分支
+        assert by_name["a.jpg"]["species_source"] == "model"
+        # head 不可见的 d 在共识"代审"下从 model_unconfirmed 升级为 group_consensus，
+        # 即使模型 top-1（暗绿绣眼鸟）已经与 winner 一致
+        assert by_name["d.jpg"]["species_source"] == "group_consensus"
+        assert by_name["d.jpg"]["group_species_latin"] == "Zosterops simplex"
+
     async def test_species_source_marks_head_invisible_as_model_unconfirmed(
         self,
         real_client,
@@ -383,8 +550,14 @@ class TestListAndDetail:
             ("manual.jpg", _make_pose(head_visible=False)),
         ]
         async with aiosqlite.connect(tmp / "test.db") as conn:
-            for file_name, pose in cases:
+            for index, (file_name, pose) in enumerate(cases):
                 photo = next(p for p in photos if p["file_name"] == file_name)
+                # 每张 photo 给独立 scene_id，避免 group consensus 干扰 species_source
+                # 计算（_apply_group_species_consensus 要求组内 ≥ 3 张才触发；单张组直接跳过）
+                await conn.execute(
+                    "UPDATE photos SET scene_id = ? WHERE id = ?",
+                    (100 + index, photo["id"]),
+                )
                 await conn.execute(
                     "INSERT INTO analysis_results (id, photo_id, pipeline_version, "
                     "quality_score, grade, bird_count, species, result_json, created_at, "

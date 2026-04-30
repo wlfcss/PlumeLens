@@ -3,9 +3,19 @@
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
+
+# 共用 species_source union：避免 typo 静默通过（schema audit C 修复）
+SpeciesSource = Literal[
+    "none",
+    "model",
+    "model_unconfirmed",
+    "manual",
+    "group_consensus",
+    "conflict",
+]
 
 
 def _empty_species_candidates() -> list[dict[str, Any]]:
@@ -94,6 +104,10 @@ class BestDetection(BaseModel):
     species_latin: str | None = None
     manual_species: bool = False
     species_candidates: list[dict[str, Any]] = Field(default_factory=_empty_species_candidates)
+    # 每个 detection 独立的 species_source（多鸟图混合可见性的关键 — 见 routes/library.py
+    # 的 _compute_detection_species_source）。photo-level species_source 由 best
+    # detection 的 species_source 决定。
+    species_source: SpeciesSource = "none"
 
 
 class BirdDetectionDetail(BestDetection):
@@ -129,10 +143,10 @@ class PhotoRow(BaseModel):
     manual_species: bool = False
     # Effective species display source. Raw model output is preserved below so
     # group consensus can stabilize the UI without destroying auditability.
-    # none / model / model_unconfirmed / manual / group_consensus / conflict
+    # photo-level species_source = best detection 的 species_source（见 BestDetection）。
     # model_unconfirmed: head 不可见但模型给了识别 → UI 显示"不全 · 待审"，
     # 用户在深度复核确认后升级为 manual；group consensus 可覆盖为 group_consensus。
-    species_source: str = "none"
+    species_source: SpeciesSource = "none"
     model_species: str | None = None
     model_species_latin: str | None = None
     group_species: str | None = None

@@ -202,11 +202,13 @@ def _apply_effective_species(photo: PhotoRow, name: str, sci: str, source: str) 
     if photo.best_detection is not None:
         photo.best_detection.species = name
         photo.best_detection.species_latin = sci
+        photo.best_detection.species_source = source
     if photo.detections:
         for detection in photo.detections:
             if detection.is_best:
                 detection.species = name
                 detection.species_latin = sci
+                detection.species_source = source
                 break
 
 
@@ -321,10 +323,22 @@ def _apply_group_species_consensus(photos: list[PhotoRow]) -> None:
                 continue
             original_sci, _original_name, original_conf = _best_candidate(photo)
             if original_sci == winner_sci:
+                # 模型 top-1 与共识一致 → 通常不需要改 species_source。但若该照片
+                # 当前是 'model_unconfirmed'（head 不可见但模型给了识别），共识就
+                # 是"代审"信号 → 升级为 'group_consensus' 让它能进羽迹（规则 #3）。
+                if photo.species_source == "model_unconfirmed":
+                    _apply_effective_species(photo, winner_name, winner_sci, "group_consensus")
                 continue
             if original_sci and original_conf > GROUP_SPECIES_MAX_CONFLICT_TOP1_CONF:
                 photo.species_conflict = True
                 photo.species_source = "conflict"
+                if photo.best_detection is not None:
+                    photo.best_detection.species_source = "conflict"
+                if photo.detections:
+                    for detection in photo.detections:
+                        if detection.is_best:
+                            detection.species_source = "conflict"
+                            break
                 continue
             _apply_effective_species(photo, winner_name, winner_sci, "group_consensus")
 
@@ -613,6 +627,16 @@ async def library_detail(request: Request, library_id: str) -> LibraryDetail:
                 }
 
         species, latin, manual = _display_species(detection, override)
+        # Detection-level species_source（多鸟图混合可见性的关键 — 每个 detection
+        # 独立判断而非按 best detection 一刀切）。优先级：manual > model > model_unconfirmed > none。
+        # group_consensus / conflict 由 _apply_group_species_consensus 在 photo 装配后改写。
+        head_confirmed = pose is not None and pose["head_visible"]
+        if manual:
+            detection_source: str = "manual"
+        elif species:
+            detection_source = "model" if head_confirmed else "model_unconfirmed"
+        else:
+            detection_source = "none"
         return BirdDetectionDetail.model_validate(
             {
                 "index": index,
@@ -622,6 +646,7 @@ async def library_detail(request: Request, library_id: str) -> LibraryDetail:
                 "species": species,
                 "species_latin": latin,
                 "manual_species": manual,
+                "species_source": detection_source,
                 "species_candidates": detection.get("species_candidates", []),
                 "is_best": is_best,
             }
@@ -691,18 +716,11 @@ async def library_detail(request: Request, library_id: str) -> LibraryDetail:
         )
         effective_species_latin = best.species_latin if best else model_species_latin
         manual_species = bool(best.manual_species) if best else False
-        # head 可见才把模型识别记作 'model'（可信展示 + 进羽迹）；
-        # head 不可见 / pose 缺失 → 'model_unconfirmed'，UI 显示"不全 · 待审"
-        # 标签，用户在深度复核确认后才升级为 'manual'。group consensus 应用
-        # 阶段（_apply_group_species_consensus）会进一步把 unconfirmed 覆盖
-        # 为 'group_consensus'，因为组内其他 head 可见的鸟用票权"代审"了。
-        head_confirmed = best is not None and best.pose is not None and best.pose.head_visible
-        if manual_species:
-            species_source = "manual"
-        elif effective_species:
-            species_source = "model" if head_confirmed else "model_unconfirmed"
-        else:
-            species_source = "none"
+        # photo-level species_source = best detection 的 species_source。
+        # 每个 detection 自己的 species_source 已在 _build_detection_detail 计算好
+        # （多鸟图混合可见性的关键：见 best_detection.species_source vs detections[i].species_source）。
+        # group_consensus / conflict 由 _apply_group_species_consensus 后续改写。
+        species_source: str = best.species_source if best else "none"
         photos.append(
             PhotoRow(
                 id=str(r["id"]),

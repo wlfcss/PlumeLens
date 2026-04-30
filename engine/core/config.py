@@ -93,7 +93,9 @@ class Settings(BaseSettings):
     #     对齐 MODEL_CARD §5.5 参考实现 → 启用 CoreML EP YOLO 加速时 bbox 不再错位
     # v5: species 触发条件放宽 — 不再要求 head+eye visible，head 不可见也跑识别，
     #     read-time 把这类结果标记为 species_source='model_unconfirmed'
-    preprocess_version: int = 5
+    # v6: species_source 升级为 detection-level（每个 BestDetection / BirdDetectionDetail
+    #     都有自己的 species_source）— 多鸟图混合可见性不再被 photo-level 一刀切
+    preprocess_version: int = 6
 
     # Pipeline — concurrency
     # 每个 task 内部 ONNX 推理会 to_thread 释放 GIL，多 worker 并发 = 多张图同时跑 ONNX。
