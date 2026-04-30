@@ -18,8 +18,8 @@ import {
   type LibrarySummary,
 } from '@/lib/api-client'
 
-const LIBRARIES_KEY = ['libraries'] as const
-const LIBRARY_DETAIL_KEY = (id: string) => ['library', id] as const
+export const LIBRARIES_KEY = ['libraries'] as const
+export const LIBRARY_DETAIL_KEY = (id: string) => ['library', id] as const
 
 const EVENT_REFRESH_DEBOUNCE_MS = 150
 

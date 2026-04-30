@@ -39,6 +39,7 @@ import { useAnalysisProgress, useStartBatch } from '@/hooks/use-analysis'
 import { useBackendHealth } from '@/hooks/use-backend'
 import { useBatchSetDecisions, useSetDecision, useSetSpeciesOverride } from '@/hooks/use-decisions'
 import {
+  LIBRARY_DETAIL_KEY,
   useAllLibraryDetails,
   useBuildPhotoThumbnail,
   useImportLibrary,
@@ -46,6 +47,7 @@ import {
   useLibraryDetail,
   useLibraryEvents,
 } from '@/hooks/use-library'
+import { useQueryClient } from '@tanstack/react-query'
 import { buildFragmentFromDetail, computeIqaCropBox } from '@/lib/backend-adapter'
 import type {
   AnalysisProgressEvent,
@@ -106,6 +108,9 @@ const routeIcons: Record<AppRoute, typeof Aperture> = {
 }
 
 const THUMBNAIL_REPAIR_COOLDOWN_MS = 30_000
+// 'missing' 时先尝试 invalidate query(免费),给 SSE 事件丢失场景一个机会;
+// 这段宽限期内仍 missing 才 fallback 调 backend rebuild。
+const THUMBNAIL_INVALIDATE_GRACE_MS = 5_000
 
 const quickFilters: QuickFilter[] = ['select', 'usable', 'record', 'reject', 'no_bird']
 
@@ -1517,12 +1522,24 @@ export default function App() {
   const importLibrary = useImportLibrary()
   const startBatch = useStartBatch()
   const { mutate: rebuildPhotoThumbnail } = useBuildPhotoThumbnail(activeFolderId)
+  const queryClient = useQueryClient()
   const thumbnailRepairingRef = useRef(new Set<string>())
   const thumbnailLastRepairAtRef = useRef(new Map<string, number>())
+  // 'missing' 状态下 5s 宽限期 timer — 给 invalidate 一个机会拿到 stale 但已写入的 thumb_grid，
+  // 5s 后仍 missing 才 fallback 调 backend rebuild
+  const thumbnailMissingTimersRef = useRef(new Map<string, number>())
   // photos ref 给 handleThumbnailLoadStatus 在 'missing' 状态下查 photo.analysisStatus，
   // 用 ref 而不是 useCallback 依赖，避免 photos 变化导致 callback 频繁重建。
   const photosForRepairRef = useRef(workspace.photos)
   photosForRepairRef.current = workspace.photos
+  // unmount 时清掉所有 grace timers
+  useEffect(() => {
+    const timers = thumbnailMissingTimersRef.current
+    return () => {
+      for (const id of timers.values()) window.clearTimeout(id)
+      timers.clear()
+    }
+  }, [])
   // SSE 重连 key：startBatch 成功后 bump，强制 useAnalysisProgress 重建连接。
   // 应对 SSE idle close（v0.1.0 后端 bug）/ 网络抖动 / 老连接卡住等场景，
   // 确保用户点「开始分析」后立刻能看到 pending 数变化。
@@ -1536,32 +1553,58 @@ export default function App() {
     (photoId: string, status: ThumbnailLoadStatus) => {
       if (status === 'loaded') {
         thumbnailRepairingRef.current.delete(photoId)
+        // 已恢复 → 清掉等待中的 grace timer
+        const timer = thumbnailMissingTimersRef.current.get(photoId)
+        if (timer !== undefined) {
+          window.clearTimeout(timer)
+          thumbnailMissingTimersRef.current.delete(photoId)
+        }
         return
       }
       if (status === 'loading') return
-      // 'missing' 信号：thumbGridUrl=null 时 ThumbnailImage 上报。
-      // 仅在 photo 已分析完成（或分析失败）时视为异常并主动重建 —
-      // 分析中 thumb 还没跑完是正常的，等 SSE 事件自然刷新。
-      // 'error' 信号：图片 URL 有但加载 404 / 解码失败 — 任何阶段都重建。
+
+      const triggerBackendRebuild = () => {
+        if (thumbnailRepairingRef.current.has(photoId)) return
+        const now = Date.now()
+        const lastRepairAt = thumbnailLastRepairAtRef.current.get(photoId) ?? 0
+        if (now - lastRepairAt < THUMBNAIL_REPAIR_COOLDOWN_MS) return
+        thumbnailRepairingRef.current.add(photoId)
+        thumbnailLastRepairAtRef.current.set(photoId, now)
+        rebuildPhotoThumbnail(photoId, {
+          onSettled: () => {
+            thumbnailRepairingRef.current.delete(photoId)
+          },
+        })
+      }
+
+      // 'missing'：photo.thumbGridUrl=null 时 ThumbnailImage 上报。
+      // 实际场景中通常是 SSE 事件丢失导致前端 stale（DB 已写入 thumb_grid），
+      // 优先 invalidate query 试着拿最新值；5s 宽限期后仍 missing 才 fallback rebuild。
+      // 仅在 photo 已分析完成（或分析失败）时视为异常 — 分析中 thumb 还没跑完是正常的。
       if (status === 'missing') {
         const photo = photosForRepairRef.current.find((p) => p.id === photoId)
         if (!photo) return
         if (photo.analysisStatus !== 'done' && photo.analysisStatus !== 'failed') return
+        if (thumbnailMissingTimersRef.current.has(photoId)) return
+        // Step 1: 立刻 invalidate library_detail（免费）
+        if (activeFolderId) {
+          queryClient.invalidateQueries({ queryKey: LIBRARY_DETAIL_KEY(activeFolderId) })
+        }
+        // Step 2: 5s 后如果仍 missing，才调 backend rebuild
+        const timerId = window.setTimeout(() => {
+          thumbnailMissingTimersRef.current.delete(photoId)
+          const refreshed = photosForRepairRef.current.find((p) => p.id === photoId)
+          if (refreshed?.thumbGridUrl) return // 已通过 invalidate 恢复
+          triggerBackendRebuild()
+        }, THUMBNAIL_INVALIDATE_GRACE_MS)
+        thumbnailMissingTimersRef.current.set(photoId, timerId)
+        return
       }
-      if (thumbnailRepairingRef.current.has(photoId)) return
-      const now = Date.now()
-      const lastRepairAt = thumbnailLastRepairAtRef.current.get(photoId) ?? 0
-      if (now - lastRepairAt < THUMBNAIL_REPAIR_COOLDOWN_MS) return
 
-      thumbnailRepairingRef.current.add(photoId)
-      thumbnailLastRepairAtRef.current.set(photoId, now)
-      rebuildPhotoThumbnail(photoId, {
-        onSettled: () => {
-          thumbnailRepairingRef.current.delete(photoId)
-        },
-      })
+      // 'error'：图片 URL 有但加载 404 / 解码失败 → 立即 rebuild
+      triggerBackendRebuild()
     },
-    [rebuildPhotoThumbnail],
+    [activeFolderId, queryClient, rebuildPhotoThumbnail],
   )
 
   // 后端 library 列表就绪时：用真 folders 替换 mock seeds，
