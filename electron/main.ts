@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, dialog, net, protocol, session } from 'electron'
+import { app, BrowserWindow, ipcMain, dialog, net, protocol, session, shell } from 'electron'
 import { pathToFileURL } from 'url'
 import { realpath } from 'fs/promises'
 import { join, resolve } from 'path'
@@ -102,6 +102,13 @@ ipcMain.handle('dialog:open-folder', async () => {
   return result.canceled ? null : result.filePaths[0]
 })
 
+// 让用户在 fatal 状态点 banner 直接打开 logs 目录(crash 自查 / 上报)
+ipcMain.handle('open-logs-dir', async () => {
+  const logsDir = join(app.getPath('userData'), 'logs')
+  await shell.openPath(logsDir)
+  return logsDir
+})
+
 // Lifecycle
 app.whenReady().then(async () => {
   const thumbnailsRoot = join(app.getPath('userData'), 'derived', 'thumbnails')
@@ -149,11 +156,45 @@ app.whenReady().then(async () => {
 
   processManager = new ProcessManager()
 
+  // Engine 状态机 IPC：把 process-manager 的内部事件统一翻译成 'engine-status'
+  // payload,renderer 一个订阅就拿到所有事件,不用维护多个 channel。
+  // 状态:
+  //  - ready          已就绪(冷启或重启成功)
+  //  - unhealthy      health check 累积失败,准备重启
+  //  - crashed        子进程 abort/exit,即将重启 (含尝试次数)
+  //  - fatal          重启上限达到 / 启动期失败,需用户介入
+  type EngineStatusPayload =
+    | { kind: 'ready'; url: string }
+    | { kind: 'unhealthy'; consecutiveFailures: number; threshold: number }
+    | { kind: 'crashed'; code: number | null; signal: string | null; restartCount: number; maxRestarts: number }
+    | { kind: 'fatal'; message: string }
+    | { kind: 'cpu-fallback' }
+
+  const sendStatus = (payload: EngineStatusPayload): void => {
+    mainWindow?.webContents.send('engine-status', payload)
+  }
+
   processManager.on('ready', (url: string) => {
+    sendStatus({ kind: 'ready', url })
+    // 兼容老 channel(早期 renderer 还在用)
     mainWindow?.webContents.send('backend-ready', url)
   })
 
+  processManager.on('unhealthy', (info: { consecutiveFailures: number; threshold: number }) => {
+    sendStatus({ kind: 'unhealthy', ...info })
+  })
+
+  processManager.on('crashed', (info: { code: number | null; signal: string | null; restartCount: number; maxRestarts: number }) => {
+    sendStatus({ kind: 'crashed', ...info })
+  })
+
+  // graceful degrade 触发后 emit 一次,UI 持续显示 CPU 降级横幅
+  processManager.on('cpu-fallback', () => {
+    sendStatus({ kind: 'cpu-fallback' })
+  })
+
   processManager.on('error', (msg: string) => {
+    sendStatus({ kind: 'fatal', message: msg })
     mainWindow?.webContents.send('backend-error', msg)
   })
 

@@ -51,6 +51,13 @@ export class ProcessManager extends EventEmitter {
   // 持久化日志根目录（{userData}/logs），lazy 创建
   private readonly logsDir = join(app.getPath('userData'), 'logs')
 
+  // graceful degrade: species 推理设备。auto = 让后端自选(MPS on Mac);
+  // cpu = 显式强制 CPU。崩溃 1 次后下次 spawn 自动切到 cpu — PyTorch MPS
+  // 在多 worker 并发场景会 abort,降级 CPU 慢 ~8× 但绝对稳。一旦切到 CPU,
+  // 本进程生命周期内不会切回 auto(避免反复重启)。
+  private speciesDevice: 'auto' | 'cpu' = 'auto'
+  private readonly cpuFallbackThreshold = 1  // restartCount >= 这个值时切 CPU
+
   getUrl(): string | null {
     return this.url
   }
@@ -143,6 +150,12 @@ export class ProcessManager extends EventEmitter {
       PLUMELENS_API_TOKEN: this.authToken,
     }
 
+    // graceful degrade: 已经决定切 CPU 后,后续每次 spawn 都强制传这个 env。
+    // engine 的 Settings.species_provider 会从 PLUMELENS_SPECIES_PROVIDER 读。
+    if (this.speciesDevice === 'cpu') {
+      env.PLUMELENS_SPECIES_PROVIDER = 'cpu'
+    }
+
     if (isDev) {
       command = 'uv'
       args = ['run', 'python', '-m', 'engine']
@@ -220,12 +233,19 @@ export class ProcessManager extends EventEmitter {
       } catch { /* ignore */ }
       this.engineStderrStream = null
       this.writeElectronLog(`engine exit code=${code} signal=${signal} wasReady=${wasReady}`)
-      if (code !== 0 && code !== null && wasReady) {
-        // 已就绪后崩溃 → 进入重启
+
+      // 退出原因分两种：exit code 非 0(Python 异常退出) 或 signal 非 null(SIGABRT/
+      // SIGSEGV/SIGKILL — 比如 PyTorch MPS 并发崩溃就是 code=null signal='SIGABRT')。
+      // 之前只看 code !== null 把 signal 退出全漏掉,导致 native 崩溃完全不触发重启。
+      const abnormal = (code !== null && code !== 0) || signal !== null
+      if (abnormal && wasReady) {
+        // 已就绪后崩溃 → 进入重启,UI 显示 "正在重连"
+        this.emit('crashed', { code, signal, restartCount: this.restartCount + 1, maxRestarts: this.maxRestarts })
         this.handleCrash()
-      } else if (code !== 0 && code !== null) {
-        // 启动期 fail（端口未广播） → 立即报错
-        this.emit('error', `Engine 启动失败 (exit=${code})`)
+      } else if (abnormal) {
+        // 启动期 fail(端口未广播) → 立即报错,UI 显示致命错误
+        const reason = signal !== null ? `signal=${signal}` : `exit=${code}`
+        this.emit('error', `Engine 启动失败 (${reason})`)
       }
     })
 
@@ -295,6 +315,15 @@ export class ProcessManager extends EventEmitter {
     // this.process 被新 spawn 覆盖，老进程成为孤儿继续吃 RAM。
     this.killCurrentProcess('crash/health-failure restart')
 
+    // graceful degrade: 第二次崩(restartCount 已 >= cpuFallbackThreshold) 切到 CPU。
+    // 0.4.0 已知最常见崩溃源是 PyTorch MPS 多 worker 并发,切 CPU 后绝不再崩。
+    // 一旦切了就不会切回 — 避免反复重启 / 用户继续看到崩溃。
+    if (this.speciesDevice === 'auto' && this.restartCount >= this.cpuFallbackThreshold) {
+      this.speciesDevice = 'cpu'
+      this.writeElectronLog('graceful degrade: switching species inference to CPU')
+      this.emit('cpu-fallback')
+    }
+
     const delays = [2000, 5000, 10000]
     if (this.restartCount < this.maxRestarts) {
       const delay = delays[this.restartCount] ?? 10000
@@ -335,15 +364,19 @@ export class ProcessManager extends EventEmitter {
         const failMsg = `health failure ${consecutiveFailures}/${FAIL_THRESHOLD}: ${(e as Error).message}`
         process.stderr.write(`[engine-health] ${failMsg}\n`)
         this.writeElectronLog(failMsg)
+        // 连续失败累积时,前端 UI 提前看到"后端无响应",别等 60s 才告知用户
+        this.emit('unhealthy', { consecutiveFailures, threshold: FAIL_THRESHOLD })
         if (consecutiveFailures >= FAIL_THRESHOLD) {
           consecutiveFailures = 0
           this.stopHealthCheck()
           this.url = null
           this.writeElectronLog(`engine connected ${FAIL_THRESHOLD} health failures, triggering restart`)
-          this.emit(
-            'error',
-            `Engine 连续 ${FAIL_THRESHOLD} 次健康检查失败，触发重启`,
-          )
+          this.emit('crashed', {
+            code: null,
+            signal: 'HEALTH_FAILURE',
+            restartCount: this.restartCount + 1,
+            maxRestarts: this.maxRestarts,
+          })
           this.handleCrash()
         }
       } finally {
