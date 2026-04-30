@@ -84,9 +84,29 @@ export function ReviewModal({
   const imgH = photo.imageHeight ?? null
   const aspect = imgW && imgH && imgW > 0 && imgH > 0 ? imgW / imgH : null
 
-  const bbox = photo.bestBbox ?? null
-  const pose = photo.bestPose ?? null
-  // AF 覆盖层：Canon 官方语义中，单点 / 扩展 / Zone / Whole area 的呈现不同。
+  // Active bird index（多鸟图切换鸟时驱动 bbox / pose / IQA 裁切跟随变动）。
+  // 默认值是 best detection 的 index；photo 切换时 reset。state 提升到 ReviewModal
+  // 是因为 SpeciesOverrideEditor 改 activeIndex 后，左侧 ReviewImageStage 也要响应。
+  const detections = photo.birdDetections ?? []
+  const bestDetectionIndex = useMemo(() => {
+    const best = detections.find((d) => d.isBest)
+    return best?.index ?? detections[0]?.index ?? 0
+  }, [detections])
+  const [activeBirdIndex, setActiveBirdIndex] = useState<number>(bestDetectionIndex)
+  useEffect(() => {
+    setActiveBirdIndex(bestDetectionIndex)
+  }, [photo.id, bestDetectionIndex])
+
+  const activeBird = useMemo(
+    () => detections.find((d) => d.index === activeBirdIndex) ?? null,
+    [detections, activeBirdIndex],
+  )
+
+  // bbox / pose 优先用 activeBird 的，fallback 到 photo-level 兼容老数据 / 单鸟无 detections 数组场景
+  const bbox = activeBird?.bbox ?? photo.bestBbox ?? null
+  const pose = activeBird?.pose ?? photo.bestPose ?? null
+  // AF 覆盖层是 photo-level（机身只写一份 EXIF AFInfo，不分鸟），切换 activeBird 不影响。
+  // Canon 官方语义中，单点 / 扩展 / Zone / Whole area 的呈现不同。
   // 新数据使用结构化 af_area；旧数据退回 legacy af_point。
   const afOverlay = photo.bestAfArea ?? legacyAfPointToOverlay(photo.bestAfPoint ?? null)
 
@@ -321,7 +341,13 @@ export function ReviewModal({
 
           <CompactKV label={t('selection.metrics.scene')} value={group?.title ?? '--'} />
 
-          <SpeciesOverrideEditor onSetSpeciesOverride={onSetSpeciesOverride} photo={photo} t={t} />
+          <SpeciesOverrideEditor
+            activeBirdIndex={activeBirdIndex}
+            onSetActiveBirdIndex={setActiveBirdIndex}
+            onSetSpeciesOverride={onSetSpeciesOverride}
+            photo={photo}
+            t={t}
+          />
 
           <ExifPanel exif={photo.exif} t={t} />
 
@@ -399,10 +425,14 @@ export function ReviewModal({
 type SpeciesOption = ReturnType<typeof listAllSpecies>[number]
 
 function SpeciesOverrideEditor({
+  activeBirdIndex,
+  onSetActiveBirdIndex,
   onSetSpeciesOverride,
   photo,
   t,
 }: {
+  activeBirdIndex: number
+  onSetActiveBirdIndex: (index: number) => void
   onSetSpeciesOverride: (
     photoId: string,
     birdIndex: number,
@@ -428,22 +458,16 @@ function SpeciesOverrideEditor({
       },
     ]
   }, [photo])
-  const [activeIndex, setActiveIndex] = useState(0)
+  // activeBirdIndex 由 ReviewModal 维护（提升后）— 切换鸟时左侧 bbox/pose/裁切跟随。
+  // 本组件只负责 query 局部 state + 在 photo 切换时清空搜索框。
   const [query, setQuery] = useState('')
   const allSpecies = useMemo(() => listAllSpecies(), [])
 
   useEffect(() => {
-    setActiveIndex(birds[0]?.index ?? 0)
     setQuery('')
   }, [photo.id])
 
-  useEffect(() => {
-    setActiveIndex((current) =>
-      birds.some((bird) => bird.index === current) ? current : (birds[0]?.index ?? 0),
-    )
-  }, [birds])
-
-  const activeBird = birds.find((bird) => bird.index === activeIndex) ?? birds[0] ?? null
+  const activeBird = birds.find((bird) => bird.index === activeBirdIndex) ?? birds[0] ?? null
   const modelOptions = useMemo(() => {
     if (!activeBird) return []
     const byLatin = new Set<string>()
@@ -504,7 +528,7 @@ function SpeciesOverrideEditor({
                 bird.index === activeBird.index && 'species-editor__bird--active',
               )}
               key={`${photo.id}-bird-${bird.index}`}
-              onClick={() => setActiveIndex(bird.index)}
+              onClick={() => onSetActiveBirdIndex(bird.index)}
               type="button"
             >
               {t('selection.speciesEditor.bird')} {bird.index + 1}

@@ -59,6 +59,17 @@ export interface SpeciesCandidate {
 export interface BirdDetectionRecord {
   index: number
   bbox: { x1: number; y1: number; x2: number; y2: number; confidence: number }
+  // 每个 detection 独立的 pose 信息（多鸟图深度复核时切换鸟会用到）。后端
+  // BestDetection.pose / BirdDetectionDetail.pose 的镜像。
+  pose?: {
+    bill: { x: number; y: number; confidence: number }
+    crown: { x: number; y: number; confidence: number }
+    nape: { x: number; y: number; confidence: number }
+    left_eye: { x: number; y: number; confidence: number }
+    right_eye: { x: number; y: number; confidence: number }
+    head_visible: boolean
+    eye_visible: boolean
+  } | null
   speciesName: string | null
   speciesLatinName: string | null
   speciesEnglishName?: string | null

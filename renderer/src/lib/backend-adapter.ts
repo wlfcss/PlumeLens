@@ -369,6 +369,8 @@ function buildBirdDetections(row: PhotoRow): PhotoRecord['birdDetections'] {
     return {
       index: d.index,
       bbox: d.bbox,
+      // detection-level pose（多鸟图深度复核切换鸟时显示对应 detection 的关键点）
+      pose: d.pose ?? null,
       speciesName: useConsensus ? row.group_species! : d.species,
       speciesLatinName: useConsensus ? row.group_species_latin! : d.species_latin,
       speciesCandidates: effectiveCandidates,
