@@ -21,6 +21,7 @@ v3 改造（相比 v2）：
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -290,6 +291,14 @@ class SpeciesClassifier:
         # 设备 + dtype 自动选择
         self.device, self._dtype = self._select_device(device)
 
+        # GPU 后端串行化锁 — 多 worker 并发时(2 lib 同时分析 = 4 thread),
+        # PyTorch MPS 不是 thread-safe:多线程同时往 MPS 提交 Metal command buffer
+        # → AGXG17XFamilyCommandBuffer.commit 触发 MTLReportFailure → abort()
+        # (后端 SIGABRT 崩溃,无 Python traceback,只在 macOS DiagnosticReports 留 ips)。
+        # 加 lock 把 classify 串行化:慢一点(MPS ~60ms/张),但绝不崩。
+        # CUDA 也保险起见走同一把锁;CPU 没 GPU 资源竞争,但 lock 开销 <1µs 可忽略。
+        self._infer_lock = threading.Lock()
+
         # 1) Backbone（HF safetensors）
         backbone_dir = self.deploy_dir / "backbone"
         if not backbone_dir.exists():
@@ -367,37 +376,40 @@ class SpeciesClassifier:
         # 真实推理异常（OOM 等），导致用户看到的 traceback 不是根因。
         tensors: dict[str, object] = {}
         probs: NDArray[np.float32] | None = None
-        try:
-            # 1) preprocess to (1, 3, 480, 480)
-            x = preprocess_for_dinov3(crop, self.image_size)
-            x = x.to(self.device).to(self._dtype)
-            tensors["x"] = x
+        # GPU 推理段串行化 — 见 __init__ 处对 self._infer_lock 的 rationale。
+        # MPS / CUDA / CPU 都走同一把锁:简化 + 防止未来切设备时漏改。
+        with self._infer_lock:
+            try:
+                # 1) preprocess to (1, 3, 480, 480)
+                x = preprocess_for_dinov3(crop, self.image_size)
+                x = x.to(self.device).to(self._dtype)
+                tensors["x"] = x
 
-            # 2) backbone → (1, 2048) feature; cast to fp32 before head
-            feat = self._feature(x).float()
-            tensors["feat"] = feat
+                # 2) backbone → (1, 2048) feature; cast to fp32 before head
+                feat = self._feature(x).float()
+                tensors["feat"] = feat
 
-            # 3) 8 head ensemble — softmax per head, average
-            probs_sum: torch.Tensor | None = None
-            for h in self._heads:
-                logits = h(feat)
-                p = F.softmax(logits, dim=1)
-                probs_sum = p if probs_sum is None else probs_sum + p
-            assert probs_sum is not None
-            tensors["probs_sum"] = probs_sum
-            probs_t = probs_sum / float(len(self._heads))
-            tensors["probs_t"] = probs_t
-            # cpu().numpy() 会数据拷贝出来，之后清 MPS 缓存就安全
-            probs = probs_t[0].cpu().numpy()  # (num_classes,)
-        finally:
-            # 删本地 tensor 引用 → Python 标记可回收 → empty_cache 才能真释放 MPS buffer
-            tensors.clear()
-            if self.device == "mps":
-                torch.mps.synchronize()
-                torch.mps.empty_cache()
-            elif self.device == "cuda":
-                torch.cuda.synchronize()
-                torch.cuda.empty_cache()
+                # 3) 8 head ensemble — softmax per head, average
+                probs_sum: torch.Tensor | None = None
+                for h in self._heads:
+                    logits = h(feat)
+                    p = F.softmax(logits, dim=1)
+                    probs_sum = p if probs_sum is None else probs_sum + p
+                assert probs_sum is not None
+                tensors["probs_sum"] = probs_sum
+                probs_t = probs_sum / float(len(self._heads))
+                tensors["probs_t"] = probs_t
+                # cpu().numpy() 会数据拷贝出来，之后清 MPS 缓存就安全
+                probs = probs_t[0].cpu().numpy()  # (num_classes,)
+            finally:
+                # 删本地 tensor 引用 → Python 标记可回收 → empty_cache 才能真释放 MPS buffer
+                tensors.clear()
+                if self.device == "mps":
+                    torch.mps.synchronize()
+                    torch.mps.empty_cache()
+                elif self.device == "cuda":
+                    torch.cuda.synchronize()
+                    torch.cuda.empty_cache()
 
         if probs is None:
             return []  # 不可达（try 内若异常 finally 后会 raise，到不了这），保险
