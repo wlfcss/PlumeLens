@@ -35,6 +35,17 @@ class DecisionCounts(BaseModel):
     counts: dict[str, int]  # {decision: count}
 
 
+class SpeciesOverrideBBox(BaseModel):
+    """该 detection 当前的原图 bbox（写入 manual species 时记下）— read-time 用 IoU 匹配
+    新一轮 detections，让用户人工标注的归属随鸟的位置稳定，不被 IoU dedup / pipeline_version
+    bump 时 detections 数组重排错配。"""
+
+    x1: float
+    y1: float
+    x2: float
+    y2: float
+
+
 class SpeciesOverrideUpdate(BaseModel):
     """Body for setting or clearing one detected bird's manual species."""
 
@@ -44,6 +55,13 @@ class SpeciesOverrideUpdate(BaseModel):
     )
     canonical_zh: str | None = Field(default=None, description="Canonical Chinese name")
     canonical_en: str | None = Field(default=None, description="Canonical English name")
+    bbox: SpeciesOverrideBBox | None = Field(
+        default=None,
+        description=(
+            "Detection bbox at write-time (原图坐标) — 用于 read-time IoU 匹配新 "
+            "detections，稳定语义。老 client 不传 → bird_index fallback。"
+        ),
+    )
 
 
 class SpeciesOverrideRow(BaseModel):

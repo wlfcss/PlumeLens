@@ -29,11 +29,25 @@ class Decision(StrEnum):
 
 
 class SpeciesOverride(TypedDict):
-    """Manual species override for one detected bird in a photo."""
+    """Manual species override payload (set 调用方传入)。"""
 
     canonical_sci: str
     canonical_zh: str | None
     canonical_en: str | None
+
+
+class SpeciesOverrideRecord(TypedDict):
+    """list_species_overrides 返回的记录 — 含 bird_index + bbox 用于 read-time 匹配。
+
+    bbox 是 (x1, y1, x2, y2) 原图像素坐标（与 detection.bbox 同坐标系）。
+    None 表示老数据（v5 schema 无 bbox 字段），caller 应 fallback 到 bird_index 匹配。
+    """
+
+    bird_index: int
+    canonical_sci: str
+    canonical_zh: str | None
+    canonical_en: str | None
+    bbox: tuple[float, float, float, float] | None
 
 
 def _now_iso() -> str:
@@ -182,10 +196,14 @@ async def set_species_override(
     photo_id: str,
     bird_index: int,
     species: SpeciesOverride | None,
+    *,
+    bbox: tuple[float, float, float, float] | None = None,
 ) -> SpeciesOverride | None:
     """Set or clear a manual species override for one detected bird.
 
-    `bird_index` is the index in analysis_results.result_json.detections.
+    `bird_index` 是写入时 detections 数组的位置（不稳定，pipeline_version bump 后可能错配）。
+    `bbox` 是该 detection 当时的原图像素坐标 (x1, y1, x2, y2)；read-time 用它做 IoU 匹配
+    新一轮 detections，是稳定语义的来源。bbox=None 兼容老调用方（v5 schema 无 bbox 字段）。
     """
     if bird_index < 0:
         msg = f"Invalid bird index: {bird_index}"
@@ -213,14 +231,23 @@ async def set_species_override(
         return None
 
     now = _now_iso()
+    bbox_x1 = bbox[0] if bbox else None
+    bbox_y1 = bbox[1] if bbox else None
+    bbox_x2 = bbox[2] if bbox else None
+    bbox_y2 = bbox[3] if bbox else None
     await db.conn.execute(
         "INSERT INTO photo_species_overrides "
-        "(photo_id, bird_index, canonical_sci, canonical_zh, canonical_en, updated_at) "
-        "VALUES (?, ?, ?, ?, ?, ?) "
+        "(photo_id, bird_index, canonical_sci, canonical_zh, canonical_en, "
+        " bbox_x1, bbox_y1, bbox_x2, bbox_y2, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
         "ON CONFLICT(photo_id, bird_index) DO UPDATE SET "
         "canonical_sci = excluded.canonical_sci, "
         "canonical_zh = excluded.canonical_zh, "
         "canonical_en = excluded.canonical_en, "
+        "bbox_x1 = excluded.bbox_x1, "
+        "bbox_y1 = excluded.bbox_y1, "
+        "bbox_x2 = excluded.bbox_x2, "
+        "bbox_y2 = excluded.bbox_y2, "
         "updated_at = excluded.updated_at",
         (
             photo_id,
@@ -228,6 +255,10 @@ async def set_species_override(
             species["canonical_sci"],
             species.get("canonical_zh"),
             species.get("canonical_en"),
+            bbox_x1,
+            bbox_y1,
+            bbox_x2,
+            bbox_y2,
             now,
         ),
     )
@@ -237,6 +268,7 @@ async def set_species_override(
         photo_id=photo_id,
         bird_index=bird_index,
         canonical_sci=species["canonical_sci"],
+        has_bbox=bbox is not None,
     )
     return species
 
@@ -244,12 +276,17 @@ async def set_species_override(
 async def list_species_overrides(
     db: Database,
     library_id: str,
-) -> dict[str, dict[int, SpeciesOverride]]:
-    """Return all manual species overrides in a library."""
-    out: dict[str, dict[int, SpeciesOverride]] = {}
+) -> dict[str, list[SpeciesOverrideRecord]]:
+    """Return all manual species overrides in a library, grouped by photo_id.
+
+    Each record carries bird_index + bbox（v6 schema 之后写入的会有 bbox；老数据 None）。
+    Caller (library.py) uses bbox 做 IoU 匹配新 detections；老数据 fallback 到 bird_index。
+    """
+    out: dict[str, list[SpeciesOverrideRecord]] = {}
     async with db.conn.execute(
         "SELECT pso.photo_id, pso.bird_index, pso.canonical_sci, "
-        "pso.canonical_zh, pso.canonical_en "
+        "pso.canonical_zh, pso.canonical_en, "
+        "pso.bbox_x1, pso.bbox_y1, pso.bbox_x2, pso.bbox_y2 "
         "FROM photo_species_overrides pso "
         "JOIN photos p ON pso.photo_id = p.id "
         "WHERE p.library_id = ?",
@@ -257,7 +294,17 @@ async def list_species_overrides(
     ) as cur:
         async for row in cur:
             photo_id = str(row["photo_id"])
-            out.setdefault(photo_id, {})[int(row["bird_index"])] = {
+            x1 = row["bbox_x1"]
+            y1 = row["bbox_y1"]
+            x2 = row["bbox_x2"]
+            y2 = row["bbox_y2"]
+            bbox: tuple[float, float, float, float] | None
+            if x1 is not None and y1 is not None and x2 is not None and y2 is not None:
+                bbox = (float(x1), float(y1), float(x2), float(y2))
+            else:
+                bbox = None
+            record: SpeciesOverrideRecord = {
+                "bird_index": int(row["bird_index"]),
                 "canonical_sci": str(row["canonical_sci"]),
                 "canonical_zh": (
                     str(row["canonical_zh"]) if row["canonical_zh"] is not None else None
@@ -265,5 +312,7 @@ async def list_species_overrides(
                 "canonical_en": (
                     str(row["canonical_en"]) if row["canonical_en"] is not None else None
                 ),
+                "bbox": bbox,
             }
+            out.setdefault(photo_id, []).append(record)
     return out

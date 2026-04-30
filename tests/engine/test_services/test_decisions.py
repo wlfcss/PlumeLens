@@ -157,12 +157,59 @@ class TestSpeciesOverrides:
         )
 
         overrides = await list_species_overrides(db_with_photos, "lib-1")
-        assert overrides["photo-0"][1]["canonical_sci"] == "Zosterops simplex"
-        assert overrides["photo-0"][1]["canonical_zh"] == "暗绿绣眼鸟"
+        assert len(overrides["photo-0"]) == 1
+        record = overrides["photo-0"][0]
+        assert record["bird_index"] == 1
+        assert record["canonical_sci"] == "Zosterops simplex"
+        assert record["canonical_zh"] == "暗绿绣眼鸟"
+        assert record["bbox"] is None  # 没传 bbox → 老 schema 行为
 
         await set_species_override(db_with_photos, "photo-0", 1, None)
 
         assert await list_species_overrides(db_with_photos, "lib-1") == {}
+
+    async def test_set_with_bbox_persists_and_returns_in_list(
+        self,
+        db_with_photos: Database,
+    ) -> None:
+        """v6 schema: 写入时带 bbox → list 返回应包含 bbox tuple。"""
+        await set_species_override(
+            db_with_photos,
+            "photo-0",
+            0,
+            {
+                "canonical_sci": "Egretta garzetta",
+                "canonical_zh": "白鹭",
+                "canonical_en": "Little Egret",
+            },
+            bbox=(100.5, 200.0, 300.0, 400.5),
+        )
+        overrides = await list_species_overrides(db_with_photos, "lib-1")
+        record = overrides["photo-0"][0]
+        assert record["bbox"] == (100.5, 200.0, 300.0, 400.5)
+        assert record["canonical_sci"] == "Egretta garzetta"
+
+    async def test_set_overwrites_bbox_on_update(
+        self,
+        db_with_photos: Database,
+    ) -> None:
+        """同一 (photo, bird_index) 二次写入应覆盖 bbox（用户重新分析后再确认时 bbox 会更新）。"""
+        await set_species_override(
+            db_with_photos,
+            "photo-0",
+            0,
+            {"canonical_sci": "Sp.A", "canonical_zh": None, "canonical_en": None},
+            bbox=(0.0, 0.0, 100.0, 100.0),
+        )
+        await set_species_override(
+            db_with_photos,
+            "photo-0",
+            0,
+            {"canonical_sci": "Sp.A", "canonical_zh": None, "canonical_en": None},
+            bbox=(50.0, 50.0, 150.0, 150.0),
+        )
+        overrides = await list_species_overrides(db_with_photos, "lib-1")
+        assert overrides["photo-0"][0]["bbox"] == (50.0, 50.0, 150.0, 150.0)
 
     async def test_species_override_rejects_unknown_photo(
         self,

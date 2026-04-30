@@ -5,7 +5,12 @@
  */
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 
-import { api, type DecisionValue, type SpeciesOverrideValue } from '@/lib/api-client'
+import {
+  api,
+  type DecisionValue,
+  type SpeciesOverrideBBox,
+  type SpeciesOverrideValue,
+} from '@/lib/api-client'
 
 /** Set one photo's decision. Optimistically invalidates library detail. */
 export function useSetDecision(libraryId: string | null | undefined) {
@@ -37,19 +42,24 @@ export function useBatchSetDecisions(libraryId: string | null | undefined) {
   })
 }
 
-/** Set or clear one detected bird's manual species override. */
+/** Set or clear one detected bird's manual species override.
+ *
+ * `bbox` 是该 detection 当前的原图像素坐标，写入时同步上送 — 后端用它做
+ * read-time IoU 匹配，让用户人工标注的归属随鸟稳定。Clear 时 bbox 不传。 */
 export function useSetSpeciesOverride(libraryId: string | null | undefined) {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: ({
       birdIndex,
+      bbox,
       photoId,
       species,
     }: {
       birdIndex: number
+      bbox?: SpeciesOverrideBBox | null
       photoId: string
       species: SpeciesOverrideValue | null
-    }) => api.setSpeciesOverride(photoId, birdIndex, species),
+    }) => api.setSpeciesOverride(photoId, birdIndex, species, bbox),
     onSuccess: () => {
       if (libraryId) {
         qc.invalidateQueries({ queryKey: ['library', libraryId] })

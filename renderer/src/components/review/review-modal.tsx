@@ -43,7 +43,7 @@ import {
   speciesSourceTone,
   type ReviewDetail,
 } from '@/App'
-import type { SpeciesOverrideValue } from '@/lib/api-client'
+import type { SpeciesOverrideBBox, SpeciesOverrideValue } from '@/lib/api-client'
 import { computeIqaCropBox } from '@/lib/backend-adapter'
 import type {
   AfOverlay,
@@ -74,6 +74,7 @@ export function ReviewModal({
     photoId: string,
     birdIndex: number,
     species: SpeciesOverrideValue | null,
+    bbox?: SpeciesOverrideBBox | null,
   ) => void
   onThumbnailLoadStatus: (photoId: string, status: ThumbnailLoadStatus) => void
   photos: PhotoRecord[]
@@ -447,6 +448,7 @@ function SpeciesOverrideEditor({
     photoId: string,
     birdIndex: number,
     species: SpeciesOverrideValue | null,
+    bbox?: SpeciesOverrideBBox | null,
   ) => void
   photo: PhotoRecord
   t: ReturnType<typeof useTranslation>['t']
@@ -563,11 +565,23 @@ function SpeciesOverrideEditor({
         <button
           className="species-editor__confirm"
           onClick={() =>
-            onSetSpeciesOverride(photo.id, activeBird.index, {
-              canonical_sci: activeBird.speciesLatinName!,
-              canonical_zh: activeBird.speciesName ?? null,
-              canonical_en: activeBird.speciesEnglishName ?? null,
-            })
+            onSetSpeciesOverride(
+              photo.id,
+              activeBird.index,
+              {
+                canonical_sci: activeBird.speciesLatinName!,
+                canonical_zh: activeBird.speciesName ?? null,
+                canonical_en: activeBird.speciesEnglishName ?? null,
+              },
+              activeBird.bbox
+                ? {
+                    x1: activeBird.bbox.x1,
+                    y1: activeBird.bbox.y1,
+                    x2: activeBird.bbox.x2,
+                    y2: activeBird.bbox.y2,
+                  }
+                : null,
+            )
           }
           title={t('selection.speciesEditor.confirmModelHint')}
           type="button"
@@ -599,11 +613,23 @@ function SpeciesOverrideEditor({
               )}
               key={`${photo.id}-${activeBird.index}-${option.canonical_sci}`}
               onClick={() => {
-                onSetSpeciesOverride(photo.id, activeBird.index, {
-                  canonical_sci: option.canonical_sci,
-                  canonical_zh: option.canonical_zh,
-                  canonical_en: option.canonical_en,
-                })
+                onSetSpeciesOverride(
+                  photo.id,
+                  activeBird.index,
+                  {
+                    canonical_sci: option.canonical_sci,
+                    canonical_zh: option.canonical_zh,
+                    canonical_en: option.canonical_en,
+                  },
+                  activeBird.bbox
+                    ? {
+                        x1: activeBird.bbox.x1,
+                        y1: activeBird.bbox.y1,
+                        x2: activeBird.bbox.x2,
+                        y2: activeBird.bbox.y2,
+                      }
+                    : null,
+                )
                 setQuery('')
               }}
               type="button"

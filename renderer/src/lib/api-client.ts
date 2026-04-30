@@ -297,6 +297,16 @@ export interface SpeciesOverrideValue {
   canonical_en?: string | null
 }
 
+/** 写入 manual species 时同步上送的 detection bbox（原图像素坐标）— 后端用它做
+    read-time IoU 匹配，让人工标注的归属随鸟稳定，不被 pipeline_version bump 时
+    detections 数组重排错配。老 client 不传 → 后端 fallback 到 bird_index 匹配。 */
+export interface SpeciesOverrideBBox {
+  x1: number
+  y1: number
+  x2: number
+  y2: number
+}
+
 export interface SpeciesOverrideRow {
   photo_id: string
   bird_index: number
@@ -386,6 +396,7 @@ export const api = {
     photoId: string,
     birdIndex: number,
     species: SpeciesOverrideValue | null,
+    bbox?: SpeciesOverrideBBox | null,
   ) =>
     request<SpeciesOverrideRow>(`/decisions/photo/${photoId}/species/${birdIndex}`, {
       method: 'PUT',
@@ -395,6 +406,7 @@ export const api = {
               canonical_sci: species.canonical_sci,
               canonical_zh: species.canonical_zh ?? null,
               canonical_en: species.canonical_en ?? null,
+              bbox: bbox ? { x1: bbox.x1, y1: bbox.y1, x2: bbox.x2, y2: bbox.y2 } : null,
             }
           : { canonical_sci: null },
       ),

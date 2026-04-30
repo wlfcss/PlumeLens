@@ -53,6 +53,7 @@ import type {
   AnalysisProgressEvent,
   DecisionValue,
   LibraryDetail,
+  SpeciesOverrideBBox,
   SpeciesOverrideValue,
 } from '@/lib/api-client'
 
@@ -1769,6 +1770,7 @@ export default function App() {
     photoId: string,
     birdIndex: number,
     species: SpeciesOverrideValue | null,
+    bbox?: SpeciesOverrideBBox | null,
   ) {
     const displayName =
       species?.canonical_zh ?? species?.canonical_en ?? species?.canonical_sci ?? null
@@ -1807,7 +1809,7 @@ export default function App() {
     })
 
     setSpeciesOverrideMutation.mutate(
-      { photoId, birdIndex, species },
+      { photoId, birdIndex, species, bbox: bbox ?? null },
       {
         onError: (err) => {
           console.warn('Failed to persist species override:', err)

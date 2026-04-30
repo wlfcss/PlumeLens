@@ -22,10 +22,15 @@ from engine.api.schemas.library import (
     LibraryStatus,
     LibrarySummary,
     PhotoRow,
+    SpeciesSource,
 )
 from engine.core.config import settings as app_settings
 from engine.core.database import Database
-from engine.services.decisions import SpeciesOverride, list_species_overrides
+from engine.services.decisions import (
+    SpeciesOverride,
+    SpeciesOverrideRecord,
+    list_species_overrides,
+)
 from engine.services.event_bus import (
     publish_library_event,
     subscribe_library_events,
@@ -195,7 +200,112 @@ def _group_span_seconds(photos: list[PhotoRow]) -> float | None:
     return max(values) - min(values)
 
 
-def _apply_effective_species(photo: PhotoRow, name: str, sci: str, source: str) -> None:
+def _iou_tuple(
+    a: tuple[float, float, float, float],
+    b: tuple[float, float, float, float],
+) -> float:
+    """IoU between two (x1, y1, x2, y2) bboxes (原图像素坐标系)。"""
+    inter_x1 = max(a[0], b[0])
+    inter_y1 = max(a[1], b[1])
+    inter_x2 = min(a[2], b[2])
+    inter_y2 = min(a[3], b[3])
+    inter_w = max(0.0, inter_x2 - inter_x1)
+    inter_h = max(0.0, inter_y2 - inter_y1)
+    inter = inter_w * inter_h
+    if inter <= 0:
+        return 0.0
+    area_a = (a[2] - a[0]) * (a[3] - a[1])
+    area_b = (b[2] - b[0]) * (b[3] - b[1])
+    union = area_a + area_b - inter
+    if union <= 0:
+        return 0.0
+    return inter / union
+
+
+# bird_index 不再是稳定 ID（IoU dedup / pipeline_version bump 让 detections 数组重排
+# 会让旧 bird_index 错配到另一只鸟），改为 bbox IoU 匹配。0.3 是宽松阈值 — 用户标注
+# 后再次分析,bbox 微调（不同 letterbox / 阈值）也能匹配上;真正不同的鸟 IoU 通常 < 0.2。
+SPECIES_OVERRIDE_MATCH_IOU = 0.3
+
+
+def _match_overrides_to_detections(
+    detections_raw: list[dict],
+    overrides: list[SpeciesOverrideRecord],
+) -> dict[int, SpeciesOverride]:
+    """对每个 detection 找最匹配的 manual species override。
+
+    匹配策略（按优先级）:
+    1. bbox IoU >= SPECIES_OVERRIDE_MATCH_IOU 的 override（贪心 one-to-one,按
+       conf 隐式 — 实际是按 detection 顺序处理）
+    2. fallback：老数据（bbox=NULL）按 bird_index 直接匹配,但仅在该 detection_index
+       未被 IoU 占用时
+
+    返回 {detection_index: SpeciesOverride}。未匹配的 override silent 忽略（避免
+    错配到其他鸟）。
+    """
+    matched: dict[int, SpeciesOverride] = {}
+    used_overrides: set[int] = set()
+
+    detection_bboxes: list[tuple[float, float, float, float] | None] = []
+    for d in detections_raw:
+        bbox = d.get("bbox") or {}
+        try:
+            detection_bboxes.append(
+                (
+                    float(bbox.get("x1", 0)),
+                    float(bbox.get("y1", 0)),
+                    float(bbox.get("x2", 0)),
+                    float(bbox.get("y2", 0)),
+                )
+            )
+        except Exception:
+            detection_bboxes.append(None)
+
+    # Pass 1: bbox IoU 匹配（贪心 — 对每个 detection 找当前还能用的最高 IoU override）
+    for det_idx, det_bbox in enumerate(detection_bboxes):
+        if det_bbox is None:
+            continue
+        best_iou = 0.0
+        best_override_idx: int | None = None
+        for ov_idx, ov in enumerate(overrides):
+            if ov_idx in used_overrides:
+                continue
+            ov_bbox = ov["bbox"]
+            if ov_bbox is None:
+                continue
+            iou = _iou_tuple(det_bbox, ov_bbox)
+            if iou > best_iou:
+                best_iou = iou
+                best_override_idx = ov_idx
+        if best_iou >= SPECIES_OVERRIDE_MATCH_IOU and best_override_idx is not None:
+            ov = overrides[best_override_idx]
+            matched[det_idx] = {
+                "canonical_sci": ov["canonical_sci"],
+                "canonical_zh": ov["canonical_zh"],
+                "canonical_en": ov["canonical_en"],
+            }
+            used_overrides.add(best_override_idx)
+
+    # Pass 2: 老数据 fallback — bbox=NULL 的 override 按 bird_index 直接匹配,
+    # 但仅在该 detection_index 还没被 IoU 占用时
+    for ov_idx, ov in enumerate(overrides):
+        if ov_idx in used_overrides:
+            continue
+        if ov["bbox"] is not None:
+            continue  # 新数据 + 没匹配上 → silent 忽略,避免错配
+        bi = ov["bird_index"]
+        if 0 <= bi < len(detections_raw) and bi not in matched:
+            matched[bi] = {
+                "canonical_sci": ov["canonical_sci"],
+                "canonical_zh": ov["canonical_zh"],
+                "canonical_en": ov["canonical_en"],
+            }
+            used_overrides.add(ov_idx)
+
+    return matched
+
+
+def _apply_effective_species(photo: PhotoRow, name: str, sci: str, source: SpeciesSource) -> None:
     photo.species = name
     photo.species_latin = sci
     photo.species_source = source
@@ -628,8 +738,9 @@ async def library_detail(request: Request, library_id: str) -> LibraryDetail:
 
         species, latin, manual = _display_species(detection, override)
         # Detection-level species_source（多鸟图混合可见性的关键 — 每个 detection
-        # 独立判断而非按 best detection 一刀切）。优先级：manual > model > model_unconfirmed > none。
-        # group_consensus / conflict 由 _apply_group_species_consensus 在 photo 装配后改写。
+        # 独立判断而非按 best detection 一刀切）。
+        # 优先级：manual > model > model_unconfirmed > none。
+        # group_consensus / conflict 由 _apply_group_species_consensus 在装配后改写。
         head_confirmed = pose is not None and pose["head_visible"]
         if manual:
             detection_source: str = "manual"
@@ -654,9 +765,13 @@ async def library_detail(request: Request, library_id: str) -> LibraryDetail:
 
     def _extract_detection_details(
         result_json: object,
-        overrides: Mapping[int, SpeciesOverride],
+        overrides: list[SpeciesOverrideRecord],
     ) -> tuple[list[BirdDetectionDetail] | None, BestDetection | None]:
-        """Extract all detected birds and apply manual species overrides."""
+        """Extract all detected birds and apply manual species overrides.
+
+        Manual overrides 的匹配按 bbox IoU 做（_match_overrides_to_detections） —
+        bird_index 不再是稳定 ID（详见该 helper 注释）。
+        """
         if not result_json:
             return None, None
         try:
@@ -668,11 +783,12 @@ async def library_detail(request: Request, library_id: str) -> LibraryDetail:
                 range(len(detections_raw)),
                 key=lambda i: _detection_score(detections_raw[i]),
             )
+            matched_overrides = _match_overrides_to_detections(detections_raw, overrides)
             detections = [
                 _build_detection_detail(
                     index=i,
                     detection=d,
-                    override=overrides.get(i),
+                    override=matched_overrides.get(i),
                     is_best=i == best_index,
                 )
                 for i, d in enumerate(detections_raw)
@@ -706,7 +822,7 @@ async def library_detail(request: Request, library_id: str) -> LibraryDetail:
     for r in rows:
         details, best = _extract_detection_details(
             r["result_json"],
-            species_overrides.get(str(r["id"]), {}),
+            species_overrides.get(str(r["id"]), []),
         )
         model_species, model_species_latin = _extract_model_species(r["result_json"])
         effective_species = (
@@ -718,9 +834,10 @@ async def library_detail(request: Request, library_id: str) -> LibraryDetail:
         manual_species = bool(best.manual_species) if best else False
         # photo-level species_source = best detection 的 species_source。
         # 每个 detection 自己的 species_source 已在 _build_detection_detail 计算好
-        # （多鸟图混合可见性的关键：见 best_detection.species_source vs detections[i].species_source）。
+        # （多鸟图混合可见性的关键：见 best_detection.species_source vs
+        # detections[i].species_source）。
         # group_consensus / conflict 由 _apply_group_species_consensus 后续改写。
-        species_source: str = best.species_source if best else "none"
+        species_source: SpeciesSource = best.species_source if best else "none"
         photos.append(
             PhotoRow(
                 id=str(r["id"]),

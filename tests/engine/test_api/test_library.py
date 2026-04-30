@@ -617,3 +617,198 @@ class TestDelete:
         client, _ = real_client
         resp = await client.delete("/library/nope")
         assert resp.status_code == 404
+
+
+# ---------- Pure-function tests for species override matching helpers ----------
+# 这些是 stable manual species 的核心匹配逻辑（v6 schema bbox-based）— 不走 DB,
+# 直接测函数。保护后续 pipeline_version bump 重排 detections 时 manual 标注归属
+# 不会错配到另一只鸟。
+
+
+def _det(index: int, x1: float, y1: float, x2: float, y2: float) -> dict:
+    """detections_raw 里一个 detection 的最小 shape — 只用 bbox 字段。"""
+    return {
+        "index": index,
+        "bbox": {"x1": x1, "y1": y1, "x2": x2, "y2": y2, "confidence": 0.9},
+    }
+
+
+def _ov(
+    bird_index: int,
+    sci: str,
+    bbox: tuple[float, float, float, float] | None,
+) -> dict:
+    """SpeciesOverrideRecord 最小 shape。"""
+    return {
+        "bird_index": bird_index,
+        "canonical_sci": sci,
+        "canonical_zh": None,
+        "canonical_en": None,
+        "bbox": bbox,
+    }
+
+
+class TestMatchOverridesToDetections:
+    """`_match_overrides_to_detections` 的纯函数单元测试。
+
+    保护点：v6 schema 引入 bbox 后,manual species 的归属必须随鸟稳定 —
+    pipeline_version bump 后 detections 数组重排,标注不应错配到另一只鸟。
+    """
+
+    def test_iou_above_threshold_matches(self) -> None:
+        from engine.api.routes.library import _match_overrides_to_detections
+
+        detections = [_det(0, 100, 100, 200, 200)]
+        overrides = [_ov(0, "Sp.A", (100, 100, 200, 200))]  # IoU = 1.0
+
+        matched = _match_overrides_to_detections(detections, overrides)
+
+        assert 0 in matched
+        assert matched[0]["canonical_sci"] == "Sp.A"
+
+    def test_iou_below_threshold_silent_ignores(self) -> None:
+        """新数据(bbox 不为 NULL)未匹配上 → silent 忽略,不 fallback 到 bird_index。
+        这是核心约束 — bird_index 不再可信,宁可丢标注也不错配到另一只鸟。"""
+        from engine.api.routes.library import _match_overrides_to_detections
+
+        # 新轮检测的 bbox 与 override 的 bbox 完全不重叠
+        detections = [_det(0, 0, 0, 100, 100)]
+        overrides = [_ov(0, "Sp.A", (500, 500, 600, 600))]  # IoU = 0
+
+        matched = _match_overrides_to_detections(detections, overrides)
+
+        assert matched == {}, "新数据 bbox 不匹配应 silent 忽略,而非 fallback 到 bird_index"
+
+    def test_bbox_match_wins_over_reordering(self) -> None:
+        """detections 重排后,override 应跟着 bbox 走,不被 bird_index 锚住。
+
+        scenario：
+          v1 detections: [鸟A@左, 鸟B@右]，用户给 bird_index=0 (鸟A) 标了 Sp.A
+          v2 detections: [鸟B@右, 鸟A@左]  ← 顺序反过来
+          预期：override 应该匹配到 v2 的 detection_index=1（鸟A 还在原位），
+                而不是 detection_index=0（鸟B）。
+        """
+        from engine.api.routes.library import _match_overrides_to_detections
+
+        # v2 detections：鸟 B 在 idx=0，鸟 A 在 idx=1
+        detections = [
+            _det(0, 500, 100, 600, 200),  # 鸟 B
+            _det(1, 100, 100, 200, 200),  # 鸟 A（跟 v1 同位置）
+        ]
+        # override 写入时是 v1 — bird_index=0,bbox 在鸟 A 位置
+        overrides = [_ov(0, "Sp.A", (100, 100, 200, 200))]
+
+        matched = _match_overrides_to_detections(detections, overrides)
+
+        assert 1 in matched, "override 应跟 bbox 匹配到鸟 A 的新位置 (idx=1)"
+        assert 0 not in matched, "鸟 B 不应被错配为 Sp.A"
+        assert matched[1]["canonical_sci"] == "Sp.A"
+
+    def test_greedy_one_to_one(self) -> None:
+        """单个 override 只能匹配到一个 detection — 不会重复锚到多只鸟。"""
+        from engine.api.routes.library import _match_overrides_to_detections
+
+        detections = [
+            _det(0, 100, 100, 200, 200),
+            _det(1, 110, 110, 210, 210),  # 跟 idx 0 高度重叠
+        ]
+        overrides = [_ov(0, "Sp.A", (100, 100, 200, 200))]
+
+        matched = _match_overrides_to_detections(detections, overrides)
+
+        # 第一个 detection 占走了 override,第二个 detection 拿不到
+        assert 0 in matched
+        assert 1 not in matched
+        assert len(matched) == 1
+
+    def test_old_data_fallback_by_bird_index(self) -> None:
+        """v5 老数据(bbox=NULL)按 bird_index 直接匹配 — 兼容性。"""
+        from engine.api.routes.library import _match_overrides_to_detections
+
+        detections = [
+            _det(0, 100, 100, 200, 200),
+            _det(1, 500, 500, 600, 600),
+        ]
+        overrides = [_ov(1, "Sp.B", None)]  # bbox=None → 老数据
+
+        matched = _match_overrides_to_detections(detections, overrides)
+
+        assert matched.get(1, {}).get("canonical_sci") == "Sp.B"
+
+    def test_old_data_fallback_out_of_range_silent_ignores(self) -> None:
+        """老数据 bird_index 越界(detections 缩减后)→ silent 忽略,不崩。"""
+        from engine.api.routes.library import _match_overrides_to_detections
+
+        detections = [_det(0, 100, 100, 200, 200)]
+        overrides = [_ov(5, "Sp.X", None)]  # bird_index=5 越界
+
+        matched = _match_overrides_to_detections(detections, overrides)
+
+        assert matched == {}
+
+    def test_old_data_fallback_respects_iou_taken_slot(self) -> None:
+        """新 override 已用 IoU 占走某个 detection_index → 老 override 不再覆盖该 slot。
+
+        scenario：detection 0 + 1，override A (bbox→idx 0)，override B (bird_index=0,bbox=None)。
+        预期：A 占住 idx=0；B 老 fallback 看到 0 已被占,silent 忽略。
+        """
+        from engine.api.routes.library import _match_overrides_to_detections
+
+        detections = [
+            _det(0, 100, 100, 200, 200),
+            _det(1, 500, 500, 600, 600),
+        ]
+        overrides = [
+            _ov(0, "Sp.A", (100, 100, 200, 200)),  # IoU 占 idx 0
+            _ov(0, "Sp.OLD", None),  # 老数据 bird_index=0,但 idx 0 已被占
+        ]
+
+        matched = _match_overrides_to_detections(detections, overrides)
+
+        assert matched[0]["canonical_sci"] == "Sp.A"
+        assert 1 not in matched
+
+    def test_empty_inputs(self) -> None:
+        from engine.api.routes.library import _match_overrides_to_detections
+
+        assert _match_overrides_to_detections([], []) == {}
+        assert _match_overrides_to_detections([_det(0, 0, 0, 100, 100)], []) == {}
+        assert _match_overrides_to_detections([], [_ov(0, "X", None)]) == {}
+
+    def test_detection_missing_bbox_skipped_no_crash(self) -> None:
+        """detection_raw 没有 bbox 字段（早期数据 / 异常 row）→ 不该崩,仅跳过该 detection。"""
+        from engine.api.routes.library import _match_overrides_to_detections
+
+        detections = [{"index": 0}]  # 没 bbox 字段
+        overrides = [_ov(0, "Sp.A", (100, 100, 200, 200))]
+
+        # 不应抛 — 该 detection 被跳过,override 也不会匹配上 (silent)
+        matched = _match_overrides_to_detections(detections, overrides)
+        assert matched == {}
+
+
+class TestIouTuple:
+    """`_iou_tuple` 几何正确性 — 匹配阈值算对了才有意义。"""
+
+    def test_identical_boxes_iou_one(self) -> None:
+        from engine.api.routes.library import _iou_tuple
+
+        assert _iou_tuple((0, 0, 100, 100), (0, 0, 100, 100)) == 1.0
+
+    def test_disjoint_boxes_iou_zero(self) -> None:
+        from engine.api.routes.library import _iou_tuple
+
+        assert _iou_tuple((0, 0, 100, 100), (200, 200, 300, 300)) == 0.0
+
+    def test_half_overlap(self) -> None:
+        from engine.api.routes.library import _iou_tuple
+
+        # 100x100 + 100x100，重叠 50x100；union = 100²+100²-50·100=15000；IoU=5000/15000≈0.333
+        iou = _iou_tuple((0, 0, 100, 100), (50, 0, 150, 100))
+        assert abs(iou - (5000.0 / 15000.0)) < 1e-6
+
+    def test_zero_area_box_no_crash(self) -> None:
+        """退化 box (零面积) → IoU=0,不抛 ZeroDivision。"""
+        from engine.api.routes.library import _iou_tuple
+
+        assert _iou_tuple((10, 10, 10, 10), (0, 0, 100, 100)) == 0.0

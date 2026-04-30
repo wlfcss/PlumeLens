@@ -132,8 +132,11 @@ async def put_photo_species_override(
         if body.canonical_sci is not None and body.canonical_sci.strip()
         else None
     )
+    bbox: tuple[float, float, float, float] | None = (
+        (body.bbox.x1, body.bbox.y1, body.bbox.x2, body.bbox.y2) if body.bbox else None
+    )
     try:
-        saved = await set_species_override(db, photo_id, bird_index, species)
+        saved = await set_species_override(db, photo_id, bird_index, species, bbox=bbox)
     except RuntimeError as e:
         detail = str(e)
         code = 400 if "Invalid bird index" in detail else 404

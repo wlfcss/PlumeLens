@@ -9,7 +9,7 @@ import structlog
 
 logger = structlog.stdlib.get_logger()
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 # SQL 放在模块常量里便于审阅与测试
 _SCHEMA_STATEMENTS: tuple[str, ...] = (
@@ -121,7 +121,11 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
     """,
     "CREATE INDEX IF NOT EXISTS ix_decisions_decision ON photo_decisions(decision);",
     # --- photo_species_overrides：用户对每张照片中每只鸟的人工鸟种覆盖 ---
-    # bird_index 对应 analysis_results.result_json.detections 的数组下标。
+    # 主键 (photo_id, bird_index) — bird_index 是写入时 detections 数组的位置。
+    # 但 bird_index 不是稳定 ID（pipeline_version bump / IoU dedup 后 detections
+    # 数组重排会让旧 bird_index 错配）。read-time 优先用 bbox_x1/y1/x2/y2 与新
+    # detections 做 IoU 匹配（>= IoU 阈值才认为是同一只鸟），bird_index 仅作为
+    # 老数据 fallback。bbox 字段在 v6 schema 加入，老数据为 NULL。
     """
     CREATE TABLE IF NOT EXISTS photo_species_overrides (
         photo_id TEXT NOT NULL,
@@ -129,6 +133,10 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
         canonical_sci TEXT NOT NULL,
         canonical_zh TEXT,
         canonical_en TEXT,
+        bbox_x1 REAL,
+        bbox_y1 REAL,
+        bbox_x2 REAL,
+        bbox_y2 REAL,
         updated_at TEXT NOT NULL,
         PRIMARY KEY (photo_id, bird_index),
         FOREIGN KEY (photo_id) REFERENCES photos(id) ON DELETE CASCADE
@@ -262,6 +270,24 @@ class Database:
                 "DB migrated",
                 from_version=prior_version,
                 changed="photo_decisions.grade_values",
+            )
+        if prior_version < 6:
+            # v6：photo_species_overrides 加 bbox 字段 — 不再用 bird_index 这种
+            # 不稳定下标作为主匹配（IoU dedup / pipeline_version bump 让数组
+            # 重排，旧 bird_index 会错配）。新数据写入时记 bbox，read-time 用
+            # IoU 匹配新 detections；老数据 bbox=NULL，仍 fallback 到 bird_index。
+            for col in ("bbox_x1", "bbox_y1", "bbox_x2", "bbox_y2"):
+                try:
+                    await self._conn.execute(
+                        f"ALTER TABLE photo_species_overrides ADD COLUMN {col} REAL",
+                    )
+                except Exception as e:
+                    if "duplicate column" not in str(e).lower():
+                        raise
+            await logger.ainfo(
+                "DB migrated",
+                from_version=prior_version,
+                added="photo_species_overrides.bbox_*",
             )
 
     async def get_schema_version(self) -> int:
