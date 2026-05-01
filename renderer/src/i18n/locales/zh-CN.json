@@ -24,7 +24,6 @@
     "error": "后端连接失败"
   },
   "engineBanner": {
-    "connecting": "正在连接本地引擎…",
     "reconnecting": "后端正在重启 ({{count}}/{{max}}) — 分析进度会自动恢复，请稍候",
     "reconnectingNoCount": "后端无响应，正在重连 — 分析进度会自动恢复",
     "fatal": "后端多次重启失败，请重启应用",

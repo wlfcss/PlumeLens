@@ -7,12 +7,13 @@ import { useShallow } from '@/stores/ui-store'
 
 /** 全局后端状态横幅 — 跨所有路由顶部显示。
  *
- * 显示条件:
- *  - reconnecting (后端崩溃/重启中) — 红色,告知用户分析进度会自动恢复
- *  - fatal (重启上限达到) — 深红,提示用户重启应用
- *  - degraded (已切到 CPU) — 黄色,告知速度会变慢但更稳
+ * 显示条件(只在 start screen 之外屏看不到 EnginePanel 的"异常"事件时才出现):
+ *  - reconnecting **且已经崩过** — 橙色,告知分析会自动恢复
+ *  - fatal — 红色,提示重启应用 + 查看日志
+ *  - degraded — 黄色,CPU 降级提示
  *
- * ready 状态不显示(避免噪音)。 */
+ * 冷启 / ready 不显示:start screen 底部 EnginePanel 已经有完整状态展示,顶部
+ * banner 重复;选片/羽迹屏冷启用户能看到管线 idle 不会主动操作,无需打扰。 */
 export function EngineStatusBanner(): ReactElement | null {
   const { t } = useTranslation()
   const { state, restartCount, maxRestarts, lastCrash, totalCrashes } = useEngineStore(
@@ -27,17 +28,19 @@ export function EngineStatusBanner(): ReactElement | null {
 
   if (state === 'ready') return null
 
+  // 冷启 reconnecting(从未崩过) 不显示横幅 — 与 start 屏底部 EnginePanel 重复。
+  // 真崩过(lastCrash 非空 或 totalCrashes>0) 才进 banner 流程。
+  if (state === 'reconnecting' && lastCrash === null && totalCrashes === 0) {
+    return null
+  }
+
   const handleOpenLogs = (): void => {
     void window.plumelens?.openLogsDir?.()
   }
 
   if (state === 'reconnecting') {
-    // 区分冷启 vs 真崩溃:lastCrash=null 是冷启中,文案"正在连接";
-    // 有 lastCrash 是真崩溃过,文案"正在重启 (n/max)"。
-    const isColdStart = lastCrash === null && totalCrashes === 0
-    const message = isColdStart
-      ? t('engineBanner.connecting')
-      : restartCount > 0
+    const message =
+      restartCount > 0
         ? t('engineBanner.reconnecting', { count: restartCount, max: maxRestarts })
         : t('engineBanner.reconnectingNoCount')
     return (
@@ -48,19 +51,17 @@ export function EngineStatusBanner(): ReactElement | null {
       >
         <Loader2 className="h-4 w-4 animate-spin" />
         <span>{message}</span>
-        {!isColdStart ? (
-          <span className="engine-banner__hint">
-            {lastCrash?.signal
-              ? t('engineBanner.lastCrash', { signal: lastCrash.signal })
-              : null}
-            {totalCrashes > 1 ? (
-              <>
-                {lastCrash?.signal ? ' · ' : ''}
-                {t('engineBanner.totalCrashes', { count: totalCrashes })}
-              </>
-            ) : null}
-          </span>
-        ) : null}
+        <span className="engine-banner__hint">
+          {lastCrash?.signal
+            ? t('engineBanner.lastCrash', { signal: lastCrash.signal })
+            : null}
+          {totalCrashes > 1 ? (
+            <>
+              {lastCrash?.signal ? ' · ' : ''}
+              {t('engineBanner.totalCrashes', { count: totalCrashes })}
+            </>
+          ) : null}
+        </span>
       </div>
     )
   }

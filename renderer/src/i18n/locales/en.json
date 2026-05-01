@@ -24,7 +24,6 @@
     "error": "Backend error"
   },
   "engineBanner": {
-    "connecting": "Connecting to local engine…",
     "reconnecting": "Engine restarting ({{count}}/{{max}}) — analysis will resume automatically",
     "reconnectingNoCount": "Engine unresponsive, reconnecting — analysis will resume automatically",
     "fatal": "Engine failed to restart. Please relaunch the app.",
