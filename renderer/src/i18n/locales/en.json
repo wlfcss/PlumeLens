@@ -24,13 +24,13 @@
     "error": "Backend error"
   },
   "engineBanner": {
+    "connecting": "Connecting to local engine…",
     "reconnecting": "Engine restarting ({{count}}/{{max}}) — analysis will resume automatically",
     "reconnectingNoCount": "Engine unresponsive, reconnecting — analysis will resume automatically",
     "fatal": "Engine failed to restart. Please relaunch the app.",
     "cpuFallback": "Switched to CPU mode (GPU inference was unstable) — species inference will be slower but reliable",
     "lastCrash": "Last: {{signal}}",
     "totalCrashes": "{{count}} crash(es) total",
-    "logsHint": "Logs: {{path}}",
     "openLogs": "Show logs"
   },
   "start": {

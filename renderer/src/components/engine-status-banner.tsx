@@ -32,8 +32,12 @@ export function EngineStatusBanner(): ReactElement | null {
   }
 
   if (state === 'reconnecting') {
-    const message =
-      restartCount > 0
+    // 区分冷启 vs 真崩溃:lastCrash=null 是冷启中,文案"正在连接";
+    // 有 lastCrash 是真崩溃过,文案"正在重启 (n/max)"。
+    const isColdStart = lastCrash === null && totalCrashes === 0
+    const message = isColdStart
+      ? t('engineBanner.connecting')
+      : restartCount > 0
         ? t('engineBanner.reconnecting', { count: restartCount, max: maxRestarts })
         : t('engineBanner.reconnectingNoCount')
     return (
@@ -44,22 +48,26 @@ export function EngineStatusBanner(): ReactElement | null {
       >
         <Loader2 className="h-4 w-4 animate-spin" />
         <span>{message}</span>
-        <span className="engine-banner__hint">
-          {lastCrash?.signal
-            ? t('engineBanner.lastCrash', { signal: lastCrash.signal })
-            : null}
-          {totalCrashes > 1 ? (
-            <>
-              {lastCrash?.signal ? ' · ' : ''}
-              {t('engineBanner.totalCrashes', { count: totalCrashes })}
-            </>
-          ) : null}
-        </span>
+        {!isColdStart ? (
+          <span className="engine-banner__hint">
+            {lastCrash?.signal
+              ? t('engineBanner.lastCrash', { signal: lastCrash.signal })
+              : null}
+            {totalCrashes > 1 ? (
+              <>
+                {lastCrash?.signal ? ' · ' : ''}
+                {t('engineBanner.totalCrashes', { count: totalCrashes })}
+              </>
+            ) : null}
+          </span>
+        ) : null}
       </div>
     )
   }
 
   if (state === 'fatal') {
+    // dev shell / 测试无 IPC 时按钮 disabled — 避免按了无反应。
+    const canOpenLogs = typeof window !== 'undefined' && Boolean(window.plumelens?.openLogsDir)
     return (
       <div role="alert" aria-live="assertive" className="engine-banner engine-banner--fatal">
         <AlertTriangle className="h-4 w-4" />
@@ -71,6 +79,7 @@ export function EngineStatusBanner(): ReactElement | null {
         </span>
         <button
           className="engine-banner__action"
+          disabled={!canOpenLogs}
           onClick={handleOpenLogs}
           type="button"
         >

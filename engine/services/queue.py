@@ -401,11 +401,40 @@ async def mark_failed_with_retry(
 
     attempts < MAX_ATTEMPTS → FAILED → PENDING（重试）
     attempts >= MAX_ATTEMPTS → FAILED → DEAD（放弃）
+
+    两次 transition 各自 commit。如果第二次抛(并发抢改 / DB busy / 状态机被绕),
+    task 会永久停在 FAILED 永无人接管。这里加 fallback 兜底:第二步异常时直接
+    SQL 强推到目标态(跳过状态机校验,只更新仍 FAILED 的行,避免覆盖被别处改动)。
     """
     task = await transition(db, task_id, TaskStatus.FAILED, error_message=error)
-    if task.attempts < MAX_ATTEMPTS:
-        return await transition(db, task_id, TaskStatus.PENDING)
-    return await transition(db, task_id, TaskStatus.DEAD)
+    next_status = TaskStatus.PENDING if task.attempts < MAX_ATTEMPTS else TaskStatus.DEAD
+    try:
+        return await transition(db, task_id, next_status)
+    except Exception:
+        await logger.aexception(
+            "mark_failed_with_retry: second transition failed, falling back to direct UPDATE",
+            task_id=task_id,
+            target=next_status.value,
+        )
+        # 直接 UPDATE,只在 status 仍是 FAILED 时生效(防止覆盖别处的 transition)
+        if next_status is TaskStatus.PENDING:
+            await db.conn.execute(
+                "UPDATE task_queue SET status = ?, started_at = NULL, completed_at = NULL "
+                "WHERE id = ? AND status = ?",
+                (TaskStatus.PENDING.value, task_id, TaskStatus.FAILED.value),
+            )
+        else:
+            await db.conn.execute(
+                "UPDATE task_queue SET status = ?, completed_at = ? "
+                "WHERE id = ? AND status = ?",
+                (TaskStatus.DEAD.value, _now_iso(), task_id, TaskStatus.FAILED.value),
+            )
+        await db.conn.commit()
+        recovered = await get_task(db, task_id)
+        if recovered is None:
+            msg = f"Task vanished after fallback UPDATE: {task_id}"
+            raise RuntimeError(msg) from None
+        return recovered
 
 
 # ---------------------------------------------------------------------------

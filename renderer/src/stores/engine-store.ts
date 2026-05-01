@@ -50,11 +50,12 @@ interface EngineStore {
 
   // ---- actions ----
   applyStatus: (payload: EngineStatusPayload) => void
-  /** 后端通过 health 端点上报已切到 CPU 时调用 */
-  markCpuFallback: () => void
   reset: () => void
 }
 
+// 初始 'reconnecting' — Electron 冷启 1-2s 期间 engine 还没就绪,banner 显示
+// "正在连接后端"(lastCrash=null 时走这条文案),engine 'ready' 推送后消失。
+// dev shell / 测试环境无 IPC,subscribeEngineStatus 直接把 state 设 'ready' 跳过。
 const INITIAL_STATE = {
   state: 'reconnecting' as EngineState,
   lastCrash: null,
@@ -122,14 +123,6 @@ export const useEngineStore = create<EngineStore>()((set, get) => ({
         break
       }
     }
-  },
-
-  markCpuFallback: () => {
-    set((s) => ({
-      cpuFallback: true,
-      // 如果当前 ready,降级标签即时切到 degraded
-      state: s.state === 'ready' ? 'degraded' : s.state,
-    }))
   },
 
   reset: () => set({ ...INITIAL_STATE }),

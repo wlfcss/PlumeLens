@@ -227,6 +227,46 @@ class TestTransitions:
         assert final.status is TaskStatus.DEAD
         assert final.attempts == MAX_ATTEMPTS
 
+    async def test_mark_failed_with_retry_fallback_when_second_step_fails(
+        self,
+        db_with_photos: Database,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """第二次 transition 抛 → fallback SQL 兜底,task 不卡 FAILED。
+
+        模拟方法:patch transition 让第二次调用抛 RuntimeError(第一次正常)。
+        预期:fallback UPDATE 把 task 推到 PENDING,attempts=1 不丢失。
+        """
+        from engine.services import queue as queue_module
+
+        db = db_with_photos
+        tid = await self._enqueue_one(db)
+        await transition(db, tid, TaskStatus.PROCESSING)
+
+        original_transition = queue_module.transition
+        call_count = {"n": 0}
+
+        async def flaky_transition(db_arg, task_id, to, *, error_message=None):  # type: ignore[no-untyped-def]
+            call_count["n"] += 1
+            # 第 1 次(transition FAILED) 走原实现; 第 2 次(transition PENDING) 故意抛
+            if call_count["n"] == 1:
+                return await original_transition(db_arg, task_id, to, error_message=error_message)
+            msg = "Simulated DB failure on second transition"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr(queue_module, "transition", flaky_transition)
+        result = await mark_failed_with_retry(db, tid, "first failure")
+
+        # fallback 路径生效:task 应在 PENDING(attempts=1 < MAX → retry)
+        assert result.status is TaskStatus.PENDING
+        assert result.attempts == 1
+        assert result.started_at is None  # fallback UPDATE 清了
+        # 直接读 DB 二次确认(避免 result 是缓存值)
+        from_db = await get_task(db, tid)
+        assert from_db is not None
+        assert from_db.status is TaskStatus.PENDING
+        assert from_db.attempts == 1
+
 
 class TestRecovery:
     async def test_recover_processing_to_pending(

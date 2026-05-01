@@ -1,5 +1,6 @@
 import { app, BrowserWindow, ipcMain, dialog, net, protocol, session, shell } from 'electron'
 import { pathToFileURL } from 'url'
+import { mkdirSync } from 'fs'
 import { realpath } from 'fs/promises'
 import { join, resolve } from 'path'
 import { ProcessManager } from './process-manager'
@@ -105,6 +106,11 @@ ipcMain.handle('dialog:open-folder', async () => {
 // 让用户在 fatal 状态点 banner 直接打开 logs 目录(crash 自查 / 上报)
 ipcMain.handle('open-logs-dir', async () => {
   const logsDir = join(app.getPath('userData'), 'logs')
+  // 兜底:用户可能清过 ~/Library/Application Support/plumelens 目录,这里建空 dir
+  // 避免 shell.openPath 返回错误字符串而 banner 看上去"按了无反应"。
+  try {
+    mkdirSync(logsDir, { recursive: true })
+  } catch { /* ignore — openPath 也会报错给 caller */ }
   await shell.openPath(logsDir)
   return logsDir
 })

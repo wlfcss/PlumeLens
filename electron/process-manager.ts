@@ -52,11 +52,17 @@ export class ProcessManager extends EventEmitter {
   private readonly logsDir = join(app.getPath('userData'), 'logs')
 
   // graceful degrade: species 推理设备。auto = 让后端自选(MPS on Mac);
-  // cpu = 显式强制 CPU。崩溃 1 次后下次 spawn 自动切到 cpu — PyTorch MPS
+  // cpu = 显式强制 CPU。累计崩溃 N 次后下次 spawn 自动切到 cpu — PyTorch MPS
   // 在多 worker 并发场景会 abort,降级 CPU 慢 ~8× 但绝对稳。一旦切到 CPU,
   // 本进程生命周期内不会切回 auto(避免反复重启)。
   private speciesDevice: 'auto' | 'cpu' = 'auto'
-  private readonly cpuFallbackThreshold = 1  // restartCount >= 这个值时切 CPU
+  // ⚠ 必须用永不重置的累积计数:restartCount 在 ready 后会清 0(line ~204),
+  // 用它做 fallback 判定永远 < threshold。totalCrashCount 只在 handleCrash 内 ++,
+  // 不被 ready 重置,真实反映"应用启动以来累计崩了 N 次"。
+  private totalCrashCount = 0
+  // 累计崩 >= 这个值时切 CPU。设 2 = 第 1 次给 GPU 一次机会(可能偶发),第 2 次明确是
+  // 系统性问题(MPS 并发 / 资源耗尽),自动降级避免反复打扰用户。
+  private readonly cpuFallbackThreshold = 2
 
   getUrl(): string | null {
     return this.url
@@ -234,6 +240,15 @@ export class ProcessManager extends EventEmitter {
       this.engineStderrStream = null
       this.writeElectronLog(`engine exit code=${code} signal=${signal} wasReady=${wasReady}`)
 
+      // 1) 应用关闭中(cmd-Q / before-quit) — stop() 发 SIGTERM 后 exit 异步到达,
+      //    不该报"崩溃"给 renderer(banner 误闪 + totalCrashes 误增)。
+      if (this.stopped) return
+
+      // 2) 已经在重启流程中(handleCrash 通过 health failure 路径主动 SIGTERM)— exit
+      //    handler 后到不应再次进 handleCrash 重复 ++restartCount + 重叠 setTimeout。
+      //    restartTimer 是"等下次启动"的明确标志。
+      if (this.restartTimer !== null) return
+
       // 退出原因分两种：exit code 非 0(Python 异常退出) 或 signal 非 null(SIGABRT/
       // SIGSEGV/SIGKILL — 比如 PyTorch MPS 并发崩溃就是 code=null signal='SIGABRT')。
       // 之前只看 code !== null 把 signal 退出全漏掉,导致 native 崩溃完全不触发重启。
@@ -315,12 +330,16 @@ export class ProcessManager extends EventEmitter {
     // this.process 被新 spawn 覆盖，老进程成为孤儿继续吃 RAM。
     this.killCurrentProcess('crash/health-failure restart')
 
-    // graceful degrade: 第二次崩(restartCount 已 >= cpuFallbackThreshold) 切到 CPU。
+    // graceful degrade: 累计崩溃达到 cpuFallbackThreshold 后切 CPU。
     // 0.4.0 已知最常见崩溃源是 PyTorch MPS 多 worker 并发,切 CPU 后绝不再崩。
+    // totalCrashCount 永不重置(restartCount 会在 ready 后清 0,不能用)。
     // 一旦切了就不会切回 — 避免反复重启 / 用户继续看到崩溃。
-    if (this.speciesDevice === 'auto' && this.restartCount >= this.cpuFallbackThreshold) {
+    this.totalCrashCount++
+    if (this.speciesDevice === 'auto' && this.totalCrashCount >= this.cpuFallbackThreshold) {
       this.speciesDevice = 'cpu'
-      this.writeElectronLog('graceful degrade: switching species inference to CPU')
+      this.writeElectronLog(
+        `graceful degrade: switching species inference to CPU (totalCrashes=${this.totalCrashCount})`,
+      )
       this.emit('cpu-fallback')
     }
 

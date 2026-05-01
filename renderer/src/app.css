@@ -611,8 +611,13 @@ button:disabled {
   transition: background var(--pl-motion-fast, 120ms) ease;
 }
 
-.engine-banner__action:hover {
+.engine-banner__action:hover:not(:disabled) {
   background: color-mix(in srgb, currentColor 18%, transparent);
+}
+
+.engine-banner__action:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
 .start-screen,
