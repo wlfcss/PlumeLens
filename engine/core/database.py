@@ -72,12 +72,9 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
     """,
     "CREATE INDEX IF NOT EXISTS ix_photos_library ON photos(library_id, created_at);",
     "CREATE INDEX IF NOT EXISTS ix_photos_hash ON photos(file_hash);",
-    # v8: 羽迹按省聚合查询用 — partial index 只索引有 GPS 的照片
-    """
-    CREATE INDEX IF NOT EXISTS ix_photos_province
-        ON photos(library_id, province)
-        WHERE province IS NOT NULL;
-    """,
+    # 注意：ix_photos_province (province 索引) 只能在 v8 migration 里建,
+    # 不能放进 _SCHEMA_STATEMENTS — v7→v8 升级路径上 ALTER TABLE ADD COLUMN
+    # province 还没跑,这里 CREATE INDEX 会报 "no such column: province"。
     # --- analysis_results：每张照片的分析结果（按 pipeline_version 区分） ---
     """
     CREATE TABLE IF NOT EXISTS analysis_results (

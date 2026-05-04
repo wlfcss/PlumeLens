@@ -112,6 +112,11 @@ export function ArchiveGeoMap({ onOpenPhoto }: ArchiveGeoMapProps): ReactElement
     level === 'city' ? activeCity : null,
   )
 
+  // 防 race:用户快速点击省 A → 省 B,A 的 lazy load promise 后到时不能覆盖 B 的状态。
+  // 用 generation counter:每次发起 load 自增,resolve 时检查是否仍是最新一次发起;
+  // 不是就 silently 丢弃 — 不动 state 也不关 loading overlay(让 B 那次自己关)。
+  const loadGenRef = useRef(0)
+
   // 初始化 ECharts + 注册中国地图
   useEffect(() => {
     if (!containerRef.current) return
@@ -377,7 +382,11 @@ export function ArchiveGeoMap({ onOpenPhoto }: ArchiveGeoMapProps): ReactElement
         if (!adcode) return
         setProvinceLoading(true)
         const targetName = p.name
+        const myGen = ++loadGenRef.current
         loadProvinceGeoJSON(adcode).then((json) => {
+          // 已被更新的 click 取代(用户连点不同省份)— 静默丢弃,
+          // 不重置 loading(让最新那次自己结束),不动 province/level 状态
+          if (myGen !== loadGenRef.current) return
           setProvinceLoading(false)
           if (!json) return
           setProvinceGeoJSON(json)

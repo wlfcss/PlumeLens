@@ -125,16 +125,24 @@ def _split_components(display_name: str) -> dict[str, str | None]:
     if out["province"] is None:
         for suf in province_suffixes:
             idx = s.find(suf)
-            if 0 < idx <= 6:  # 省名 ≤ 6 字符
+            # 省名前缀长度上限 6 字符:覆盖 "新疆维吾尔自治区"(前缀 "新疆维吾尔"=5)
+            # / "黔西南布依族苗族自治州"等。
+            if 0 < idx <= 6:
                 out["province"] = s[: idx + len(suf)]
                 s = s[idx + len(suf):]
+                # 港澳特别行政区:与直辖市一样,province == city(没有"市"分级)。
+                # 不显式回写 city → 二级地图 SQL `WHERE province=? AND city IS NOT NULL`
+                # 永远 0 命中,香港/澳门点击后看不到任何下钻数据(同直辖市 bug)。
+                if suf == "特别行政区":
+                    out["city"] = out["province"]
                 break
-    # city — 直辖市分支已经回写过 out["city"] = province,这里守卫别覆盖
+    # city — 直辖市/特别行政区分支已经回写过 out["city"] = province,这里守卫别覆盖
     if out["city"] is None:
         city_suffixes = ["市", "自治州", "盟", "地区"]
         for suf in city_suffixes:
             idx = s.find(suf)
-            if 0 < idx <= 8:
+            # 8 字符上限覆盖 "黔西南布依族苗族自治州"(前缀 8)/"西双版纳傣族自治州"等
+            if 0 < idx <= 10:
                 out["city"] = s[: idx + len(suf)]
                 s = s[idx + len(suf):]
                 break
@@ -159,9 +167,15 @@ async def backfill_one(
     photo_id: str,
     exif_json: str | None,
     lang: str = "zh-CN",
+    *,
+    commit: bool = True,
 ) -> bool:
     """对一张照片执行 reverse geocoding 并写回。返回 True = 成功填充,
-    False = 无 GPS / 查询失败(都不重试)。"""
+    False = 无 GPS / 查询失败(都不重试)。
+
+    commit=False 时只 execute 不 commit — 调用方批量处理后统一 commit
+    (减少千张照片 ×千次 fsync 的 I/O 开销 + 写锁占用时间)。
+    """
     coords = _parse_gps_from_exif(exif_json)
     if coords is None:
         return False
@@ -182,7 +196,8 @@ async def backfill_one(
             photo_id,
         ),
     )
-    await db.conn.commit()
+    if commit:
+        await db.conn.commit()
     return True
 
 
@@ -197,12 +212,19 @@ async def backfill_library_locations(
     reverse_geocoding 写回。Provider chain 自动 fallback,链路全失败时该照片
     保持 NULL,下次启动可重试(只要 country 仍 NULL)。"""
     conn = db.conn
+    # 关键预过滤:exif_json LIKE '%GPSInfo%' — 只挑 EXIF 里真有 GPSInfo 字段的照片。
+    # 老逻辑只看 `country IS NULL AND exif_json IS NOT NULL`,会把 photos 表里
+    # 全部"没 GPS 但有 EXIF"的照片每次启动都重扫一遍 → 解析失败 → skipped += 1,
+    # 大库可能数千张照片永远在 backfill 队列里空跑。LIKE 用 substring 匹配开销 O(n) 但
+    # 比每张照片 json.loads + GPSInfo 字典查找快得多,而且 GPSInfo 字符串在 exif_json
+    # 中出现 = 必有这个字段(不会假阳性,因为字段名固定)。
     async with conn.execute(
         "SELECT id, exif_json FROM photos "
-        "WHERE library_id = ? AND country IS NULL AND exif_json IS NOT NULL",
+        "WHERE library_id = ? AND country IS NULL "
+        "AND exif_json IS NOT NULL AND exif_json LIKE '%GPSInfo%'",
         (library_id,),
     ) as cur:
-        rows = await cur.fetchall()
+        rows = list(await cur.fetchall())  # 实化成 list 才能 len()/enumerate 二次遍历
 
     if not rows:
         return {"total": 0, "filled": 0, "skipped": 0}
@@ -210,20 +232,31 @@ async def backfill_library_locations(
     filled = 0
     skipped = 0
     total = len(rows)
+    pending_writes = 0
+    # batch commit:每 batch_size 张才 commit 一次 — 减少 千次 fsync + 长时间持有写锁
+    # (WAL 模式下 writer 持锁期间 reader 可读但其他 writer 全部阻塞)。
     for i, row in enumerate(rows):
         try:
-            ok = await backfill_one(db, str(row["id"]), row["exif_json"])
+            ok = await backfill_one(db, str(row["id"]), row["exif_json"], commit=False)
             if ok:
                 filled += 1
+                pending_writes += 1
             else:
                 skipped += 1
         except Exception:
             logger.exception("Location backfill failed for photo", photo_id=str(row["id"]))
             skipped += 1
-        # 进度回调(每 batch_size 张通知一次,避免 SSE 太频)
-        if progress_cb and (i + 1) % batch_size == 0:
-            with contextlib.suppress(Exception):
-                await progress_cb(library_id, i + 1, total)
+        # batch commit 触发:每 batch_size 张落盘 + 进度回调
+        if (i + 1) % batch_size == 0:
+            if pending_writes > 0:
+                await conn.commit()
+                pending_writes = 0
+            if progress_cb:
+                with contextlib.suppress(Exception):
+                    await progress_cb(library_id, i + 1, total)
+    # 最终残余批 commit + 进度
+    if pending_writes > 0:
+        await conn.commit()
     if progress_cb:
         with contextlib.suppress(Exception):
             await progress_cb(library_id, total, total)

@@ -35,6 +35,21 @@ logger = structlog.stdlib.get_logger()
 TIMEOUT_SEC = 2.5
 USER_AGENT = "PlumeLens/0.4.0 (rev-geocoding)"
 CACHE_MAX = 1024
+# 离线兜底距离上限(经度差^2 + 纬度差^2 加权,单位约等于度^2)。
+# nearest city 超过这个距离就返回 None — 避免南极坐标落到非洲城市这种荒诞结果。
+# 1.0 度^2 ≈ 110km^2,合理:GeoNames cities1000 在大部分人居区域密度 < 100km。
+_OFFLINE_MAX_DIST_DEG2 = 1.0
+
+
+def _is_valid_coord(lat: float, lon: float) -> bool:
+    """挡掉 NaN/Inf/越界/(0,0) Null Island — 损坏 EXIF 常见伪造值,污染 cache 即误。"""
+    import math
+    if not (math.isfinite(lat) and math.isfinite(lon)):
+        return False
+    if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
+        return False
+    # (0,0) 是 EXIF DMS 全 0 的产物(损坏的 GPS),实际海面无意义
+    return not (abs(lat) < 0.001 and abs(lon) < 0.001)
 
 
 class GeocodeResult(TypedDict):
@@ -161,7 +176,10 @@ async def _provider_tencent(lat: float, lon: float, lang: str) -> GeocodeResult 
     return GeocodeResult(display_name=str(formatted_zh), source="tencent", lat=lat, lon=lon)
 
 
-# Nominatim 1 req/s 限制:全局节流,避免被封
+# Nominatim 1 req/s 限制:全局节流,避免被封。
+# 关键:lock 必须覆盖整个 HTTP 请求(含 await asyncio.to_thread),
+# 这样多个并发 caller 真正会被串行化为 1 req/s。之前 lock 只覆盖时间戳记账,
+# HTTP 在 lock 外并发执行 → 50 个 concurrent caller 会同时发 50 个 HTTP 请求被封。
 _nominatim_lock = asyncio.Lock()
 _nominatim_last_ts = 0.0
 
@@ -169,12 +187,6 @@ _nominatim_last_ts = 0.0
 async def _provider_nominatim(lat: float, lon: float, lang: str) -> GeocodeResult | None:
     """Nominatim (OpenStreetMap) — 无需 key,但国内访问可能慢/失败。"""
     global _nominatim_last_ts
-    async with _nominatim_lock:
-        elapsed = time.monotonic() - _nominatim_last_ts
-        if elapsed < 1.1:
-            await asyncio.sleep(1.1 - elapsed)
-        _nominatim_last_ts = time.monotonic()
-
     params = urllib.parse.urlencode({
         "format": "json",
         "lat": f"{lat:.6f}",
@@ -184,7 +196,13 @@ async def _provider_nominatim(lat: float, lon: float, lang: str) -> GeocodeResul
         "accept-language": lang,
     })
     url = f"https://nominatim.openstreetmap.org/reverse?{params}"
-    data = await asyncio.to_thread(_http_get_json, url)
+    # lock 覆盖整个: 节流等待 + HTTP 调用 + 时间戳更新 — 真正全局 1 req/s
+    async with _nominatim_lock:
+        elapsed = time.monotonic() - _nominatim_last_ts
+        if elapsed < 1.1:
+            await asyncio.sleep(1.1 - elapsed)
+        data = await asyncio.to_thread(_http_get_json, url)
+        _nominatim_last_ts = time.monotonic()
     if not data or "display_name" not in data:
         return None
     return GeocodeResult(
@@ -238,14 +256,19 @@ async def _provider_offline(lat: float, lon: float, lang: str) -> GeocodeResult 
         return None
     coords, meta = _offline_data
 
-    def _query() -> int:
+    def _query() -> tuple[int, float]:
         # Equirectangular distance with cosine longitude correction — 只为找 nearest
         # neighbor,不需要精确大圆距离;城市间间距通常 > 1km,误差可忽略。
         d_lat = coords[:, 0] - lat
         d_lon = (coords[:, 1] - lon) * np.cos(np.radians(lat))
-        return int(np.argmin(d_lat * d_lat + d_lon * d_lon))
+        sq = d_lat * d_lat + d_lon * d_lon
+        i = int(np.argmin(sq))
+        return i, float(sq[i])
 
-    idx = await asyncio.to_thread(_query)
+    idx, dist_sq = await asyncio.to_thread(_query)
+    # 距离过大 → nearest city 还是离照片极远(比如南极坐标找到非洲城市) — 没价值
+    if dist_sq > _OFFLINE_MAX_DIST_DEG2:
+        return None
     entry = meta[idx]
     parts = [
         str(entry.get(k, "")).strip()
@@ -276,6 +299,9 @@ _CHAIN: tuple[Callable[..., Any], ...] = (
 
 async def reverse(lat: float, lon: float, lang: str = "zh-CN") -> GeocodeResult | None:
     """按 chain 顺序尝试,第一个成功的 provider 胜出。所有失败返回 None。"""
+    # 输入校验 — NaN/Inf/越界/(0,0) 直接拒绝,不浪费 provider 配额也不污染 cache
+    if not _is_valid_coord(lat, lon):
+        return None
     key = _cache_key(lat, lon, lang)
     cached = _cache_get(key)
     if cached is not _MISS:

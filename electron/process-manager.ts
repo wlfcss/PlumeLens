@@ -47,8 +47,6 @@ export class ProcessManager extends EventEmitter {
   // 关停标志：stop() 设为 true，handleCrash 与 setTimeout 都会检查，
   // 防止应用关闭中残留的 setTimeout 触发 spawn 出孤儿 engine。
   private stopped = false
-  // 当前启动的 engine stderr 落盘流；spawn 时新建，子进程 exit 时关闭
-  private engineStderrStream: WriteStream | null = null
   // 持久化日志根目录（{userData}/logs），lazy 创建
   private readonly logsDir = join(app.getPath('userData'), 'logs')
 
@@ -139,9 +137,11 @@ export class ProcessManager extends EventEmitter {
   async start(): Promise<void> {
     const isDev = !app.isPackaged
 
-    // 持久化日志：本次 spawn 一个新 engine.stderr.log（保留最近 10 个）
+    // 持久化日志：本次 spawn 一个新 engine.stderr.log（保留最近 10 个）。
+    // 用闭包局部变量而不是 class field — 防止 restart() 时新 spawn 覆盖
+    // 老 spawn 的 stream ref,导致老 proc exit 写到错误的文件。
     this.pruneOldStderrLogs()
-    this.engineStderrStream = this.openStderrLog()
+    const stderrStream: WriteStream | null = this.openStderrLog()
 
     let command: string
     let args: string[]
@@ -204,17 +204,21 @@ export class ProcessManager extends EventEmitter {
     // transformers / pyarrow 内部 spawn 的 helper 进程）。否则 SIGTERM 只杀主进程，
     // helper（如 multiprocessing resource_tracker）会成为孤儿继续吃 RAM。
     this.writeElectronLog(`spawn engine: cmd=${command} cwd=${cwd} dev=${isDev}`)
-    this.process = spawn(command, args, {
+    // 闭包局部 proc — 关键防 restart 竞态:老 proc exit handler 闭包到自己的 proc,
+    // 触发时检查 `this.process !== proc` 就能判断"是否已被新 spawn 替换",
+    // 防止老 proc 的 exit 把新 spawn 的 url/state 给清掉(误报 fatal banner)。
+    const proc = spawn(command, args, {
       cwd,
       env,
       stdio: ['pipe', 'pipe', 'pipe'],
       detached: true,
     })
+    this.process = proc
 
     let pendingUrl: string | null = null
     const handleChunk = (data: Buffer): void => {
       // 1. 完整复制到持久化文件（崩溃时唯一可查的 raw stderr / stdout）
-      this.engineStderrStream?.write(data)
+      stderrStream?.write(data)
       // 2. 解析 PORT/READY 协议
       const text = data.toString()
       // PLUMELENS_PORT N（uvicorn.run 之前 print）：先记下 URL，但还没 listen
@@ -245,21 +249,29 @@ export class ProcessManager extends EventEmitter {
       }
     }
 
-    this.process.stdout?.on('data', handleChunk)
-    this.process.stderr?.on('data', handleChunk)
+    proc.stdout?.on('data', handleChunk)
+    proc.stderr?.on('data', handleChunk)
 
-    this.process.on('exit', (code, signal) => {
+    proc.on('exit', (code, signal) => {
+      // 总是关掉本次 spawn 自己的 stream — 不论是不是当前 active proc
+      try {
+        stderrStream?.write(
+          `\n# === engine exit @ ${new Date().toISOString()} code=${code} signal=${signal} ===\n`,
+        )
+        stderrStream?.end()
+      } catch { /* ignore */ }
+
+      // 关键防竞态:如果 this.process 已被 restart() 换成新 proc,这次 exit 是
+      // 老 proc 的迟到事件,别去清新 proc 的 url/health/etc。早返回即可。
+      if (this.process !== proc) {
+        this.writeElectronLog(`stale engine exit ignored (replaced) code=${code} signal=${signal}`)
+        return
+      }
+
       this.stopHealthCheck()
       const wasReady = this.url !== null
       this.url = null
-      // 关闭本次 spawn 的 stderr 流；下次 start() 会新开
-      try {
-        this.engineStderrStream?.write(
-          `\n# === engine exit @ ${new Date().toISOString()} code=${code} signal=${signal} wasReady=${wasReady} ===\n`,
-        )
-        this.engineStderrStream?.end()
-      } catch { /* ignore */ }
-      this.engineStderrStream = null
+      this.process = null
       this.writeElectronLog(`engine exit code=${code} signal=${signal} wasReady=${wasReady}`)
 
       // 1) 应用关闭中(cmd-Q / before-quit) — stop() 发 SIGTERM 后 exit 异步到达,
@@ -286,8 +298,16 @@ export class ProcessManager extends EventEmitter {
       }
     })
 
-    this.process.on('error', (err) => {
+    proc.on('error', (err) => {
       this.writeElectronLog(`engine spawn error: ${err.message}`)
+      // ENOENT(binary 不存在) / EACCES 之类 — 'error' 触发后 'exit' 不一定到。
+      // 必须主动清状态:否则 this.process 还指向僵死引用,下次 start() 跳过 logsDir
+      // 设置等小问题倒不致命,但 stopHealthCheck 必须做(否则 health interval 仍跑)。
+      if (this.process === proc) {
+        this.process = null
+        this.url = null
+        this.stopHealthCheck()
+      }
       this.emit('error', `Engine spawn 失败: ${err.message}`)
     })
   }
@@ -356,7 +376,7 @@ export class ProcessManager extends EventEmitter {
       // 兜底：直接信号主 PID
       try { proc.kill('SIGTERM') } catch { /* ignore */ }
     }
-    setTimeout(() => {
+    const killTimer = setTimeout(() => {
       if (!proc.killed && proc.exitCode === null) {
         const sigkillMsg = `engine pgid=${pid} did not exit in 3s, SIGKILL`
         process.stderr.write(`[engine-pm] ${sigkillMsg}\n`)
@@ -368,6 +388,10 @@ export class ProcessManager extends EventEmitter {
         }
       }
     }, 3000)
+    // proc 在 3s 内自己优雅退了就立刻清 timer — 防止极端情况下 pid 已被 OS
+    // 回收(macOS 几乎不会 3s 内回收,但 Linux 容器场景可能)然后 SIGKILL 命中无关进程。
+    // proc.once 用单次监听,与主 'exit' handler 共存不冲突。
+    proc.once('exit', () => clearTimeout(killTimer))
   }
 
   private handleCrash(): void {
