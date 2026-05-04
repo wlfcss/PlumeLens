@@ -187,9 +187,14 @@ async def ensure_thumbnails_for_photo(
 
     Returns:
         ThumbnailPaths if built or already present; None if the source file is missing.
+
+    JPG→RAW companion fallback:与 analyzer 一致 — 主文件解码失败(broken data stream
+    / truncated 等 PIL OSError)且有 companion RAW pair 时,自动用 companion 重生。
+    避免选片页对坏 JPG 永远空缩略图(虽然 pipeline 会 fallback 成功,但 thumbnail
+    层之前没复用这个 fallback)。
     """
     async with db.conn.execute(
-        "SELECT file_path, thumb_grid, thumb_preview FROM photos WHERE id = ?",
+        "SELECT file_path, companion_path, thumb_grid, thumb_preview FROM photos WHERE id = ?",
         (photo_id,),
     ) as cur:
         row = await cur.fetchone()
@@ -198,6 +203,8 @@ async def ensure_thumbnails_for_photo(
         raise RuntimeError(msg)
 
     source = Path(str(row["file_path"]))
+    companion_raw = row["companion_path"]
+    companion = Path(str(companion_raw)) if companion_raw else None
     grid_rel = row["thumb_grid"]
     preview_rel = row["thumb_preview"]
 
@@ -211,7 +218,26 @@ async def ensure_thumbnails_for_photo(
         logger.warning("Source missing, cannot build thumbnails", photo_id=photo_id)
         return None
 
-    paths = await generate_thumbnails(source, photo_id, cache_root)
+    try:
+        paths = await generate_thumbnails(source, photo_id, cache_root)
+    except (OSError, ValueError) as e:
+        # 文件级损坏 → 试 companion RAW(扩展名是 RAW 才走,走的是 rawpy 的另一条路径,
+        # 跟坏 JPG 完全独立)。companion 存在性已经在 ALTER TABLE 时校验过(scanner 维护)。
+        if companion is None or not companion.exists():  # noqa: ASYNC240
+            raise
+        await logger.awarning(
+            "Thumbnail failed on primary, trying companion fallback",
+            photo_id=photo_id,
+            primary=str(source),
+            companion=str(companion),
+            error=str(e)[:120],
+        )
+        paths = await generate_thumbnails(companion, photo_id, cache_root)
+        await logger.ainfo(
+            "Companion thumbnail fallback succeeded",
+            photo_id=photo_id,
+            companion=str(companion),
+        )
 
     # 存相对路径（便于 cache_root 整体迁移）
     grid_rel_str = f"grid/{photo_id}.jpg"

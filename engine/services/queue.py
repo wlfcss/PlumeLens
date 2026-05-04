@@ -44,6 +44,24 @@ _LEGAL_TRANSITIONS: dict[TaskStatus, set[TaskStatus]] = {
 
 MAX_ATTEMPTS: int = 3
 
+# 永久性失败 patterns — 文件本身坏了/格式不支持/不存在,重试也救不回来。
+# 命中即跳过 retry 直接 DEAD,避免浪费 ~1s × MAX_ATTEMPTS 跑同一坏文件。
+# 反例:模型 abort、MPS 错误、网络 timeout — 这些可能是瞬态,该走 retry。
+_PERMANENT_FAILURE_PATTERNS: tuple[str, ...] = (
+    "broken data stream",            # PIL: JPEG 数据流损坏
+    "image file is truncated",       # PIL: 文件被截断(也可能瞬态,但实测都是真坏)
+    "cannot identify image file",    # PIL: UnidentifiedImageError
+    "Unsupported image format",      # 我们自己抛的(扩展名不在白名单)
+    "File not found on disk",        # analyzer 的 FileNotFoundError 包装
+)
+
+
+def is_permanent_failure(error: str | None) -> bool:
+    """识别永久性失败(文件级,不依赖运行环境) — 用于 mark_failed_with_retry 短路。"""
+    if not error:
+        return False
+    return any(p in error for p in _PERMANENT_FAILURE_PATTERNS)
+
 
 class IllegalTransitionError(Exception):
     """Attempted transition violates the state machine."""
@@ -399,15 +417,31 @@ async def mark_failed_with_retry(
 ) -> Task:
     """Shorthand: mark FAILED, then auto-requeue to PENDING or DEAD.
 
-    attempts < MAX_ATTEMPTS → FAILED → PENDING（重试）
-    attempts >= MAX_ATTEMPTS → FAILED → DEAD（放弃）
+    attempts < MAX_ATTEMPTS 且非永久性失败 → FAILED → PENDING（重试）
+    attempts >= MAX_ATTEMPTS 或 永久性文件级失败 → FAILED → DEAD（放弃)
+
+    永久性失败短路:坏 JPG / 截断文件 / 不支持格式 / 文件不存在,这些重试也救不回来,
+    立刻 DEAD 避免浪费 ~1s × MAX_ATTEMPTS 跑同一坏文件(实测一张坏 JPG 重试 3 次共
+    340ms-1s,大库里几张坏文件会拖慢整体进度)。
 
     两次 transition 各自 commit。如果第二次抛(并发抢改 / DB busy / 状态机被绕),
     task 会永久停在 FAILED 永无人接管。这里加 fallback 兜底:第二步异常时直接
     SQL 强推到目标态(跳过状态机校验,只更新仍 FAILED 的行,避免覆盖被别处改动)。
     """
     task = await transition(db, task_id, TaskStatus.FAILED, error_message=error)
-    next_status = TaskStatus.PENDING if task.attempts < MAX_ATTEMPTS else TaskStatus.DEAD
+    permanent = is_permanent_failure(error)
+    next_status = (
+        TaskStatus.DEAD
+        if permanent or task.attempts >= MAX_ATTEMPTS
+        else TaskStatus.PENDING
+    )
+    if permanent:
+        await logger.ainfo(
+            "Task marked DEAD on permanent failure (no retry)",
+            task_id=task_id,
+            attempts=task.attempts,
+            error=error[:120],
+        )
     try:
         return await transition(db, task_id, next_status)
     except Exception:

@@ -227,6 +227,44 @@ class TestTransitions:
         assert final.status is TaskStatus.DEAD
         assert final.attempts == MAX_ATTEMPTS
 
+    async def test_mark_failed_with_retry_permanent_failure_short_circuits(
+        self,
+        db_with_photos: Database,
+    ) -> None:
+        """坏 JPG / truncated / 格式不支持 等永久性失败 → 第一次就 DEAD,不重试。
+
+        防回归:实测一张坏 JPG 会被 retry 3 次浪费 ~1s,大库里几十张坏文件会拖慢
+        整体进度。permanent failure 应该一次性进 DEAD。
+        """
+        db = db_with_photos
+        # 测各种已知 broken patterns — 每个 case 用不同 photo 避免 task 复用
+        # fixture 只有 photo-0/1/2,5 个 case 复用同一组(每个 case 一定是新 task,
+        # 因为前一个已 DEAD,DEAD 是 terminal,enqueue_photos 会建新 task)。
+        cases = [
+            ("photo-0", "broken data stream when reading image file"),
+            ("photo-1", "image file is truncated (5 bytes not processed)"),
+            ("photo-2", "cannot identify image file '/foo/x.jpg'"),
+            ("photo-0", "Unsupported image format: .heic"),
+            ("photo-1", "File not found on disk: /missing.jpg"),
+        ]
+        for photo_id, err in cases:
+            await enqueue_photos(db, "lib-1", [photo_id])
+            tasks = await list_tasks(db, library_id="lib-1", status=TaskStatus.PENDING)
+            tid = next(t.id for t in tasks if t.photo_id == photo_id)
+            await transition(db, tid, TaskStatus.PROCESSING)
+            result = await mark_failed_with_retry(db, tid, err)
+            assert result.status is TaskStatus.DEAD, f"should DEAD: {err!r}"
+            assert result.attempts == 1, f"should not retry: {err!r}"
+
+        # 反向:transient 错误(模型崩、网络超时)应仍走 retry
+        await enqueue_photos(db, "lib-1", ["photo-2"])
+        tasks = await list_tasks(db, library_id="lib-1", status=TaskStatus.PENDING)
+        tid = next(t.id for t in tasks if t.photo_id == "photo-2")
+        await transition(db, tid, TaskStatus.PROCESSING)
+        result = await mark_failed_with_retry(db, tid, "MPS abort: device error")
+        assert result.status is TaskStatus.PENDING
+        assert result.attempts == 1
+
     async def test_mark_failed_with_retry_fallback_when_second_step_fails(
         self,
         db_with_photos: Database,
