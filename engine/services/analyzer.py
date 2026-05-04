@@ -98,11 +98,14 @@ async def analyze_photo(
     )
     try:
         result = await pipeline.analyze(file_path, photo_id=photo_id)
-    except Exception as e:
-        # 主文件读取失败 — 常见场景是 JPG 写卡未完成 / 拷贝错误,文件头合法但
-        # 数据流损坏(PIL 抛 OSError "broken data stream")。Canon 等相机是 RAW + JPG
-        # 双路独立写卡,JPG 坏不代表 RAW 坏,值得用 companion 重试一次。
-        # 注意:companion 仍读不出才真 fail(两个文件都坏几乎不可能,除非 SD 卡损坏)。
+    except (OSError, ValueError) as e:
+        # 仅在"读图阶段错误"时 fallback 到 companion(RAW)。覆盖范围:
+        #   - PIL OSError "broken data stream" / "image file is truncated"
+        #   - PIL UnidentifiedImageError(继承 OSError)
+        #   - rawpy LibRawIOError(继承 OSError)
+        #   - 我们自己的 ValueError("Unsupported image format")
+        # 不 fallback:模型 abort / MPS GPU 错误 / 内存爆 / 算法异常 — 这些跟主/同伴
+        # 文件无关,fallback 也是浪费,直接 raise 让 task_queue 记 DEAD。
         if companion_path is None or not companion_path.exists():  # noqa: ASYNC240
             raise
         await logger.awarning(

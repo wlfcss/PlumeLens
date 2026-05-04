@@ -35,28 +35,6 @@ async def _db(request: Request) -> Database:
     return db
 
 
-def _extract_species_from_result(result_json: str | None) -> str | None:
-    """从 analysis_results.result_json 取 best detection 的 species 拉丁名。
-    无识别 / 字段缺失返回 None。"""
-    if not result_json:
-        return None
-    try:
-        data = json.loads(result_json)
-    except Exception:
-        return None
-    detections = data.get("detections")
-    if not isinstance(detections, list) or not detections:
-        return None
-    # best detection: 取 detections[0](已按分数排序)或 is_best=True 的
-    best = next((d for d in detections if d.get("is_best")), detections[0])
-    candidates = best.get("species_candidates")
-    if isinstance(candidates, list) and candidates:
-        latin = candidates[0].get("canonical_sci")
-        if latin:
-            return str(latin)
-    return None
-
-
 # ---------------------------------------------------------------------------
 # Schemas
 # ---------------------------------------------------------------------------
@@ -106,12 +84,17 @@ class GeoSummary(BaseModel):
 # ---------------------------------------------------------------------------
 @router.get("/geo/summary", response_model=GeoSummary)
 async def geo_summary(request: Request) -> GeoSummary:
-    """整体地理解析进度 — 羽迹页面顶部进度条用。"""
+    """整体地理解析进度 — 羽迹页面顶部进度条用。
+
+    pending 必须只计"有 GPS 但还没 backfill"的,不能把"有 EXIF 但无 GPS"
+    的也算 pending,否则进度条永远显示 X/Y 不消失。只能从 exif_json 里精确判
+    GPSInfo 是否存在(SQL LIKE 兜底,无法 100% 精确但近似可用)。
+    """
     db = await _db(request)
     async with db.conn.execute(
         "SELECT "
         "  COUNT(*) AS total, "
-        "  SUM(CASE WHEN exif_json IS NOT NULL THEN 1 ELSE 0 END) AS has_exif, "
+        "  SUM(CASE WHEN exif_json LIKE '%GPSInfo%' THEN 1 ELSE 0 END) AS has_gps, "
         "  SUM(CASE WHEN country IS NOT NULL THEN 1 ELSE 0 END) AS resolved "
         "FROM photos",
     ) as cur:
@@ -119,17 +102,14 @@ async def geo_summary(request: Request) -> GeoSummary:
     if row is None:
         return GeoSummary(total_with_gps=0, resolved=0, pending=0, photos_without_gps=0)
     total = int(row["total"] or 0)
-    has_exif = int(row["has_exif"] or 0)
+    has_gps = int(row["has_gps"] or 0)
     resolved = int(row["resolved"] or 0)
-    # GPS 与 EXIF 强相关 — 但不严格(EXIF 可能存在但无 GPS)。这里近似:has_exif 中
-    # 减去 已 resolved + 真无 GPS 的(我们不能精确知道)。简化:total_with_gps ≈ resolved
-    # + pending,resolved 最准。下面 pending 保守用 has_exif - resolved 作上限估计。
-    pending = max(0, has_exif - resolved)
+    pending = max(0, has_gps - resolved)
     return GeoSummary(
-        total_with_gps=resolved + pending,
+        total_with_gps=has_gps,
         resolved=resolved,
         pending=pending,
-        photos_without_gps=total - has_exif,
+        photos_without_gps=total - has_gps,
     )
 
 
@@ -264,9 +244,11 @@ async def geo_spots(
                 "lon": lon,
                 "place": row["place"],
                 "photos": [],
+                "photo_total": 0,  # 真实总数(独立于 photos 列表的 cap)
                 "species_set": set(),
             },
         )
+        bucket["photo_total"] = int(bucket["photo_total"]) + 1
         species_latin = row["species"]
         if species_latin:
             bucket["species_set"].add(str(species_latin))
@@ -308,9 +290,11 @@ async def geo_spots(
             lat=b["lat"],
             lon=b["lon"],
             place=b["place"],
-            photo_count=len(b["photos"]),
+            # 真实总数(可能 > max_photos_per_spot,bucket["photos"] 列表只截断展示);
+            # 前端 tooltip 显示总数,弹卡片缩略图列表显示截断后的样本。
+            photo_count=int(b["photo_total"]),
             species_count=len(b["species_set"]),
             photos=b["photos"],
         )
-        for b in sorted(spots.values(), key=lambda x: -len(x["photos"]))
+        for b in sorted(spots.values(), key=lambda x: -int(x["photo_total"]))
     ]

@@ -304,18 +304,29 @@ export class ProcessManager extends EventEmitter {
   }
 
   /** 显式重启 engine — 用户改 settings(key 注入)后调,让新 env var 生效。
-   * 与 stop() 不同:复位 stopped flag,清掉老 url,然后 spawn 新进程。 */
+   * 与 stop() 不同:复位 stopped flag,清掉老 url,然后 spawn 新进程。
+   * In-flight guard:用户连点保存 → 多次 IPC 触发 restart;第一次还在 await
+   * start() 期间,第二次进来会杀掉刚 spawn 的 procB,触发 procB 的 exit handler
+   * 走 abnormal && !wasReady 路径 emit('error') → UI 假性 fatal banner。
+   * 用 _restartInFlight 串行化:第二次直接 return,不重叠。 */
+  private _restartInFlight = false
   async restart(): Promise<void> {
-    this.stopHealthCheck()
-    if (this.restartTimer) {
-      clearTimeout(this.restartTimer)
-      this.restartTimer = null
+    if (this._restartInFlight) return
+    this._restartInFlight = true
+    try {
+      this.stopHealthCheck()
+      if (this.restartTimer) {
+        clearTimeout(this.restartTimer)
+        this.restartTimer = null
+      }
+      this.killCurrentProcess('settings changed, restart')
+      this.url = null
+      this.stopped = false
+      this.restartCount = 0
+      await this.start()
+    } finally {
+      this._restartInFlight = false
     }
-    this.killCurrentProcess('settings changed, restart')
-    this.url = null
-    this.stopped = false
-    this.restartCount = 0
-    await this.start()
   }
 
   /**

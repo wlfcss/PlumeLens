@@ -633,6 +633,12 @@ async def library_detail(request: Request, library_id: str) -> LibraryDetail:
     if summary is None:
         raise HTTPException(status_code=404, detail="Library not found")
 
+    # task_queue 一张 photo 可能存在多行(老的 dead/failed/completed + 新的 pending),
+    # 直接 LEFT JOIN 会让 photos 出现重复。挑最新一行(rowid 最大)子查询:
+    #   - photo 在 task 里没记录 → tq.* 全 NULL → analysis_status 走 done(若有 result)
+    #     或 pending(无 result)的 fallback,不影响正确性
+    #   - photo 有多行 task → 取最新那行的 status/error_message,
+    #     更准确反映"用户最近一次 batch 的结果"
     async with db.conn.execute(
         "SELECT p.id, p.file_path, p.file_name, p.format, p.width, p.height, "
         "p.thumb_grid, p.thumb_preview, p.created_at, p.file_mtime, p.exif_json, "
@@ -644,7 +650,9 @@ async def library_detail(request: Request, library_id: str) -> LibraryDetail:
         "FROM photos p "
         "LEFT JOIN analysis_results ar ON ar.photo_id = p.id AND ar.is_active = 1 "
         "LEFT JOIN photo_decisions pd ON pd.photo_id = p.id "
-        "LEFT JOIN task_queue tq ON tq.photo_id = p.id "
+        "LEFT JOIN task_queue tq ON tq.rowid = ("
+        "    SELECT MAX(rowid) FROM task_queue WHERE photo_id = p.id"
+        ") "
         "WHERE p.library_id = ? "
         "ORDER BY p.file_mtime ASC",
         (library_id,),

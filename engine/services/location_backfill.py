@@ -116,6 +116,10 @@ def _split_components(display_name: str) -> dict[str, str | None]:
     for muni in direct_municipalities:
         if s.startswith(muni):
             out["province"] = muni
+            # 直辖市:province 与 city 同名(高德/百度返回的"北京市朝阳区..."不会再出
+            # "市"后缀)。若不在此处显式回写 city,二级地图 SQL 按 province 查 city
+            # 永远 0 命中,北京/上海/天津/重庆 4 个直辖市点击后都看不到下钻数据。
+            out["city"] = muni
             s = s[len(muni):]
             break
     if out["province"] is None:
@@ -125,14 +129,15 @@ def _split_components(display_name: str) -> dict[str, str | None]:
                 out["province"] = s[: idx + len(suf)]
                 s = s[idx + len(suf):]
                 break
-    # city
-    city_suffixes = ["市", "自治州", "盟", "地区"]
-    for suf in city_suffixes:
-        idx = s.find(suf)
-        if 0 < idx <= 8:
-            out["city"] = s[: idx + len(suf)]
-            s = s[idx + len(suf):]
-            break
+    # city — 直辖市分支已经回写过 out["city"] = province,这里守卫别覆盖
+    if out["city"] is None:
+        city_suffixes = ["市", "自治州", "盟", "地区"]
+        for suf in city_suffixes:
+            idx = s.find(suf)
+            if 0 < idx <= 8:
+                out["city"] = s[: idx + len(suf)]
+                s = s[idx + len(suf):]
+                break
     # district
     district_suffixes = ["区", "县", "旗", "自治县"]
     for suf in district_suffixes:
