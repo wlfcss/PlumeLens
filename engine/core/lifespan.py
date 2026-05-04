@@ -60,6 +60,22 @@ async def _resume_pending_workers(app: FastAPI, db: Database) -> None:
         )
 
 
+async def _backfill_locations(db: Database) -> None:
+    """启动后台:把所有有 GPS 但 country IS NULL 的照片调 reverse_geocoding 写回。
+    幂等 — 已填充的跳过。reverse_geocoding 走 services/geocoder 的 provider chain,
+    在线失败也会 fallback offline。本任务可能耗时几分钟到几十分钟(取决于 amap
+    qps + 总数),整个 backfill 期间应用功能不受影响,羽迹页面会渐进显示数据。
+    """
+    try:
+        from engine.services.location_backfill import backfill_all_libraries
+        await asyncio.sleep(2)  # 等 lifespan 其他启动步骤(scene grouping/refresh thumb 等)先跑完
+        await backfill_all_libraries(db)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.exception("Location backfill task failed")
+
+
 async def _sweep_stuck_tasks(db: Database) -> None:
     """周期性扫 PROCESSING 超时 task,强制 fail 让队列推进。
 
@@ -248,6 +264,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     # Background：周期性把卡死 (PROCESSING > 5min) 的 task 标记 failed,让队列继续推进
     sweep_task = asyncio.create_task(_sweep_stuck_tasks(db))
 
+    # Background：reverse geocoding 全库 backfill(GPS → 省市区地名),
+    # 羽迹三级地图聚合用。一次性后台扫,完成后该 library 所有有 GPS 的照片都填充好。
+    geocode_task = asyncio.create_task(_backfill_locations(db))
+
     # Print ready signal for Electron process manager to parse
     print("PLUMELENS_READY", file=sys.stderr, flush=True)
 
@@ -256,12 +276,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     # Shutdown
     refresh_task.cancel()
     sweep_task.cancel()
+    geocode_task.cancel()
     import contextlib
 
     with contextlib.suppress(asyncio.CancelledError, Exception):
         await refresh_task
     with contextlib.suppress(asyncio.CancelledError, Exception):
         await sweep_task
+    with contextlib.suppress(asyncio.CancelledError, Exception):
+        await geocode_task
     app.state.pipeline.close()
     await app.state.db.close()
     await logger.ainfo("PlumeLens Engine shutting down")

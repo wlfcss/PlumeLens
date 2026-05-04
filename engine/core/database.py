@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 from pathlib import Path
 
 import aiosqlite
@@ -9,7 +10,7 @@ import structlog
 
 logger = structlog.stdlib.get_logger()
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 # SQL 放在模块常量里便于审阅与测试
 _SCHEMA_STATEMENTS: tuple[str, ...] = (
@@ -56,6 +57,14 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
         companion_path TEXT,             -- 同伴文件绝对路径,无 pair 时 NULL
         companion_format TEXT,           -- 同伴文件大写格式名(CR3/NEF/ARW/JPG...)
         companion_size INTEGER,          -- 同伴文件字节数(UI 显示+导出确认)
+        -- v8: GPS reverse geocoding 持久化(羽迹三级地图聚合用)。photos 表里
+        -- 这 5 列是从 exif.GPSInfo 解析后调 reverse_geocoding 填的;无 GPS 时全 NULL。
+        -- lifespan 启动期 backfill_locations 后台扫一遍补全。
+        country TEXT,                    -- "中国" / "United States" / ...
+        province TEXT,                   -- "江苏省" / "California"  (admin1)
+        city TEXT,                       -- "苏州市" / "San Francisco" (admin2)
+        district TEXT,                   -- "姑苏区" / "Mission" (admin3 / 市辖区)
+        place TEXT,                      -- POI 名称: "太湖湿地公园" / 街道地址 / 完整 display_name
         created_at TEXT NOT NULL,
         library_id TEXT NOT NULL,
         FOREIGN KEY (library_id) REFERENCES libraries(id) ON DELETE CASCADE
@@ -63,6 +72,12 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
     """,
     "CREATE INDEX IF NOT EXISTS ix_photos_library ON photos(library_id, created_at);",
     "CREATE INDEX IF NOT EXISTS ix_photos_hash ON photos(file_hash);",
+    # v8: 羽迹按省聚合查询用 — partial index 只索引有 GPS 的照片
+    """
+    CREATE INDEX IF NOT EXISTS ix_photos_province
+        ON photos(library_id, province)
+        WHERE province IS NOT NULL;
+    """,
     # --- analysis_results：每张照片的分析结果（按 pipeline_version 区分） ---
     """
     CREATE TABLE IF NOT EXISTS analysis_results (
@@ -318,6 +333,29 @@ class Database:
                 "DB migrated",
                 from_version=prior_version,
                 added="photos.companion_*",
+            )
+        if prior_version < 8:
+            # v8：photos 加 country/province/city/district/place 五列(reverse
+            # geocoding 持久化)。羽迹页面三级地图聚合用 province / city,
+            # 三级 marker 弹卡用 place。lifespan 启动期 backfill 后台填充。
+            for col in ("country", "province", "city", "district", "place"):
+                try:
+                    await self._conn.execute(
+                        f"ALTER TABLE photos ADD COLUMN {col} TEXT",
+                    )
+                except Exception as e:
+                    if "duplicate column" not in str(e).lower():
+                        raise
+            # 索引 province 加快"羽迹按省聚合"查询
+            with contextlib.suppress(Exception):
+                await self._conn.execute(
+                    "CREATE INDEX IF NOT EXISTS ix_photos_province "
+                    "ON photos(library_id, province) WHERE province IS NOT NULL",
+                )
+            await logger.ainfo(
+                "DB migrated",
+                from_version=prior_version,
+                added="photos.{country,province,city,district,place}",
             )
 
     async def get_schema_version(self) -> int:

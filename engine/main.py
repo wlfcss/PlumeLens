@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 from starlette.responses import Response
 
 from engine.api.routes.analysis import router as analysis_router
+from engine.api.routes.archive import router as archive_router
 from engine.api.routes.decisions import router as decisions_router
 from engine.api.routes.geocoder import router as geocoder_router
 from engine.api.routes.health import router as health_router
@@ -70,6 +71,7 @@ def create_app() -> FastAPI:
     application.include_router(analysis_router)
     application.include_router(decisions_router)
     application.include_router(geocoder_router)
+    application.include_router(archive_router)
     return application
 
 
