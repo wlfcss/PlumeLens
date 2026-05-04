@@ -23,6 +23,27 @@
     "connected": "本地引擎就绪",
     "error": "后端连接失败"
   },
+  "settings": {
+    "title": "设置",
+    "save": "保存",
+    "saving": "保存中…",
+    "saveHint": "保存后会重启后端引擎让新配置生效",
+    "savedRestarted": "已保存，后端正在重启…",
+    "geocoding": {
+      "title": "地理信息提供商",
+      "hint": "用于把照片 GPS 坐标解析为地名（如「江苏省苏州市姑苏区」）。任填一个即可，未填时退回 OpenStreetMap 在线服务和离线城市数据库。",
+      "amapLabel": "高德地图 API Key（Web 服务）",
+      "amapHint": "在高德开放平台 → 我的应用 → 创建应用「Web 服务」类型",
+      "baiduLabel": "百度地图 AK（服务端）",
+      "baiduHint": "在百度开放平台 → 应用管理 → 创建应用「服务端」类型",
+      "tencentLabel": "腾讯地图 Key",
+      "tencentHint": "在腾讯位置服务 → 控制台 → 创建 Key"
+    },
+    "about": {
+      "title": "关于",
+      "version": "版本"
+    }
+  },
   "engineBanner": {
     "reconnecting": "后端正在重启 ({{count}}/{{max}}) — 分析进度会自动恢复，请稍候",
     "reconnectingNoCount": "后端无响应，正在重连 — 分析进度会自动恢复",

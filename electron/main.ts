@@ -1,7 +1,7 @@
 import { app, BrowserWindow, ipcMain, dialog, net, protocol, session, shell } from 'electron'
 import { spawn } from 'child_process'
 import { pathToFileURL } from 'url'
-import { existsSync, mkdirSync } from 'fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
 import { realpath } from 'fs/promises'
 import { homedir } from 'os'
 import { join, resolve } from 'path'
@@ -197,6 +197,62 @@ ipcMain.handle('open-in-editor', async (_event, args: { tool: EditorTool; path: 
     process.stderr.write(`[main] open-in-editor failed: ${(err as Error).message}\n`)
     return { ok: false, reason: 'spawn_failed' as const }
   }
+})
+
+// 用户设置(reverse geocoding API keys 等)— 持久化到 userData/settings.json。
+// process-manager 启动 engine 时读这个文件注入 env var,所以保存后必须重启 engine
+// 才能生效。前端在保存后 invoke restart-engine。
+type UserSettings = {
+  amapKey?: string
+  baiduAk?: string
+  tencentKey?: string
+}
+
+function userSettingsPath(): string {
+  return join(app.getPath('userData'), 'settings.json')
+}
+
+function readUserSettings(): UserSettings {
+  const path = userSettingsPath()
+  if (!existsSync(path)) return {}
+  try {
+    return JSON.parse(readFileSync(path, 'utf-8')) as UserSettings
+  } catch (err) {
+    process.stderr.write(`[main] settings.json parse failed: ${(err as Error).message}\n`)
+    return {}
+  }
+}
+
+function writeUserSettings(settings: UserSettings): void {
+  const path = userSettingsPath()
+  // 先确保 userData 目录存在(应用首次启动 / 数据被清后)
+  try { mkdirSync(app.getPath('userData'), { recursive: true }) } catch { /* ignore */ }
+  writeFileSync(path, JSON.stringify(settings, null, 2), 'utf-8')
+}
+
+ipcMain.handle('get-user-settings', () => {
+  return readUserSettings()
+})
+
+ipcMain.handle('save-user-settings', (_event, partial: UserSettings) => {
+  // merge: 只更新传入字段,空字符串视为"清掉这个 key"
+  const current = readUserSettings()
+  const merged: UserSettings = { ...current }
+  for (const [key, value] of Object.entries(partial) as [keyof UserSettings, string][]) {
+    if (value === undefined) continue
+    if (value === '') delete merged[key]
+    else merged[key] = value
+  }
+  writeUserSettings(merged)
+  return merged
+})
+
+// 重启 engine — settings 修改后调,让新 key 生效
+ipcMain.handle('restart-engine', async () => {
+  if (processManager) {
+    await processManager.restart()
+  }
+  return true
 })
 
 // 让用户在 fatal 状态点 banner 直接打开 logs 目录(crash 自查 / 上报)

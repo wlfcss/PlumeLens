@@ -23,6 +23,27 @@
     "connected": "Engine ready",
     "error": "Backend error"
   },
+  "settings": {
+    "title": "Settings",
+    "save": "Save",
+    "saving": "Saving…",
+    "saveHint": "The engine will restart so new keys take effect",
+    "savedRestarted": "Saved. Engine restarting…",
+    "geocoding": {
+      "title": "Geocoding providers",
+      "hint": "Used to resolve photo GPS coordinates to place names. Fill any one — falls back to OpenStreetMap online and offline city DB.",
+      "amapLabel": "Amap API Key (Web service)",
+      "amapHint": "Amap console → My apps → Create app, type \"Web service\"",
+      "baiduLabel": "Baidu Maps AK (server)",
+      "baiduHint": "Baidu console → Apps → Create app, type \"server\"",
+      "tencentLabel": "Tencent Maps Key",
+      "tencentHint": "Tencent location service console → Create key"
+    },
+    "about": {
+      "title": "About",
+      "version": "Version"
+    }
+  },
   "engineBanner": {
     "reconnecting": "Engine restarting ({{count}}/{{max}}) — analysis will resume automatically",
     "reconnectingNoCount": "Engine unresponsive, reconnecting — analysis will resume automatically",

@@ -31,6 +31,18 @@ interface PlumeLensAPI {
     tool: 'topaz' | 'photoshop',
     path: string,
   ): Promise<{ ok: true; app: string } | { ok: false; reason: string }>
+  /** 读用户设置(API keys 等),持久化在 userData/settings.json */
+  getUserSettings(): Promise<UserSettings>
+  /** 保存设置 — 空字符串视为清除该 key;merge 不动未传入字段 */
+  saveUserSettings(partial: UserSettings): Promise<UserSettings>
+  /** 重启 engine — settings 改后调让新 key 注入生效 */
+  restartEngine(): Promise<boolean>
+}
+
+export interface UserSettings {
+  amapKey?: string
+  baiduAk?: string
+  tencentKey?: string
 }
 
 declare global {

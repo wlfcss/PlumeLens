@@ -2805,7 +2805,8 @@ button:disabled {
 .review-panel,
 .species-photo-panel,
 .compare-panel,
-.export-drawer {
+.export-drawer,
+.settings-panel {
   overflow: hidden;
   border: 1px solid var(--pl-border-1);
   border-radius: var(--pl-radius-lg);
@@ -2814,6 +2815,145 @@ button:disabled {
     0 28px 92px rgba(0, 0, 0, 0.62),
     inset 0 1px 0 rgba(255, 255, 255, 0.035);
   animation: pl-modal-in var(--pl-motion-slow) var(--pl-ease-soft) both;
+}
+
+/* 设置面板 — 600px 宽,垂直滚动,顶部 + 内容 + 底部三段 */
+.settings-panel {
+  width: 640px;
+  max-width: calc(100vw - 80px);
+  max-height: calc(100vh - 80px);
+  display: flex;
+  flex-direction: column;
+}
+
+.settings-panel__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 22px 28px 14px;
+  border-bottom: 1px solid var(--pl-border-1);
+}
+
+.settings-panel__head h2 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+}
+
+.settings-section {
+  padding: 22px 28px;
+  border-bottom: 1px solid var(--pl-border-1);
+  overflow-y: auto;
+}
+
+.settings-section:last-of-type {
+  border-bottom: none;
+}
+
+.settings-section__title {
+  margin: 0 0 6px;
+  font-size: 13px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--pl-fg-2);
+}
+
+.settings-section__hint {
+  margin: 0 0 16px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--pl-fg-2);
+}
+
+.settings-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 14px;
+}
+
+.settings-field:last-child {
+  margin-bottom: 0;
+}
+
+.settings-field__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.settings-field__label {
+  font-size: 12px;
+  color: var(--pl-fg-1);
+}
+
+.settings-field__toggle {
+  background: transparent;
+  border: none;
+  color: var(--pl-fg-2);
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 4px;
+}
+
+.settings-field__toggle:hover {
+  color: var(--pl-fg-0);
+  background: color-mix(in srgb, currentColor 8%, transparent);
+}
+
+.settings-field__input {
+  width: 100%;
+  padding: 8px 10px;
+  font-size: 13px;
+  font-family: var(--pl-mono, monospace);
+  background: var(--pl-bg-0);
+  color: var(--pl-fg-0);
+  border: 1px solid var(--pl-border-1);
+  border-radius: 6px;
+  outline: none;
+  transition: border-color var(--pl-motion-fast, 120ms) ease;
+}
+
+.settings-field__input:focus {
+  border-color: color-mix(in srgb, currentColor 40%, transparent);
+}
+
+.settings-about {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 13px;
+}
+
+.settings-about__label {
+  color: var(--pl-fg-2);
+}
+
+.settings-about__value {
+  color: var(--pl-fg-0);
+  font-family: var(--pl-mono, monospace);
+}
+
+.settings-panel__foot {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 16px 28px;
+  border-top: 1px solid var(--pl-border-1);
+  background: color-mix(in srgb, var(--pl-bg-0) 70%, transparent);
+}
+
+.settings-panel__hint,
+.settings-panel__saved {
+  flex: 1;
+  font-size: 11px;
+  color: var(--pl-fg-2);
+}
+
+.settings-panel__saved {
+  color: #84cc16;
 }
 
 .species-photo-panel {

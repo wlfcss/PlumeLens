@@ -25,6 +25,19 @@ contextBridge.exposeInMainWorld('plumelens', {
   /** 启动期探测的外部编辑器(Topaz/Photoshop)解析名;null = 未安装。 */
   listEditors: (): Promise<{ topaz: string | null; photoshop: string | null }> =>
     ipcRenderer.invoke('list-editors'),
+  /** 读 userData/settings.json — 外部地理 API keys 等用户配置 */
+  getUserSettings: (): Promise<{
+    amapKey?: string
+    baiduAk?: string
+    tencentKey?: string
+  }> => ipcRenderer.invoke('get-user-settings'),
+  /** 保存 settings.json — 字段空字符串视为清除该 key,merge 不动其他字段 */
+  saveUserSettings: (
+    partial: { amapKey?: string; baiduAk?: string; tencentKey?: string },
+  ): Promise<{ amapKey?: string; baiduAk?: string; tencentKey?: string }> =>
+    ipcRenderer.invoke('save-user-settings', partial),
+  /** 重启 engine 子进程 — settings 改后调使新 env 注入生效 */
+  restartEngine: (): Promise<boolean> => ipcRenderer.invoke('restart-engine'),
   /** 用指定外部编辑器打开文件(macOS spawn `open -a`)。 */
   openInEditor: (
     tool: 'topaz' | 'photoshop',

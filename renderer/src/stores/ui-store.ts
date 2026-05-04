@@ -24,6 +24,7 @@ interface UIState {
   inspectorOpen: boolean
   compareOpen: boolean
   exportOpen: boolean
+  settingsOpen: boolean
   reportExpanded: boolean
   setRoute: (route: AppRoute) => void
   setArchiveTab: (tab: ArchiveTab) => void
@@ -39,6 +40,7 @@ interface UIState {
   setInspectorOpen: (open: boolean) => void
   setCompareOpen: (open: boolean) => void
   setExportOpen: (open: boolean) => void
+  setSettingsOpen: (open: boolean) => void
   toggleReportExpanded: () => void
   toggleComparePhotoId: (photoId: string) => void
   clearCompare: () => void
@@ -59,6 +61,7 @@ export const useUIStore = create<UIState>()((set) => ({
   inspectorOpen: true,
   compareOpen: false,
   exportOpen: false,
+  settingsOpen: false,
   reportExpanded: false,
   setRoute: (route) => set({ route }),
   setArchiveTab: (archiveTab) => set({ archiveTab }),
@@ -87,6 +90,7 @@ export const useUIStore = create<UIState>()((set) => ({
   setInspectorOpen: (inspectorOpen) => set({ inspectorOpen }),
   setCompareOpen: (compareOpen) => set({ compareOpen }),
   setExportOpen: (exportOpen) => set({ exportOpen }),
+  setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
   toggleReportExpanded: () => set((state) => ({ reportExpanded: !state.reportExpanded })),
   toggleComparePhotoId: (photoId) =>
     set((state) => ({

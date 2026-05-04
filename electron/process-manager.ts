@@ -303,6 +303,21 @@ export class ProcessManager extends EventEmitter {
     this.url = null
   }
 
+  /** 显式重启 engine — 用户改 settings(key 注入)后调,让新 env var 生效。
+   * 与 stop() 不同:复位 stopped flag,清掉老 url,然后 spawn 新进程。 */
+  async restart(): Promise<void> {
+    this.stopHealthCheck()
+    if (this.restartTimer) {
+      clearTimeout(this.restartTimer)
+      this.restartTimer = null
+    }
+    this.killCurrentProcess('settings changed, restart')
+    this.url = null
+    this.stopped = false
+    this.restartCount = 0
+    await this.start()
+  }
+
   /**
    * 强杀当前 engine 子进程（如有），释放引用。
    * 关键：在 handleCrash() 重启前必须调用，否则老进程会成为孤儿，

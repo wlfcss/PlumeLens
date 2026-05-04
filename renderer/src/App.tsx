@@ -35,6 +35,7 @@ import { useTranslation } from 'react-i18next'
 
 import { EngineStatusBanner } from '@/components/engine-status-banner'
 import { ReviewModal } from '@/components/review/review-modal'
+import { SettingsModal } from '@/components/settings-modal'
 import { ThumbnailImage, type ThumbnailLoadStatus } from '@/components/thumbnail-image'
 import { useAnalysisProgress, useStartBatch } from '@/hooks/use-analysis'
 import { useBackendHealth } from '@/hooks/use-backend'
@@ -1407,6 +1408,7 @@ export default function App() {
     setReviewPhotoId,
     setCompareOpen,
     setExportOpen,
+    setSettingsOpen,
     toggleComparePhotoId,
     clearCompare,
   } = useUIStore(
@@ -1436,6 +1438,7 @@ export default function App() {
       setReviewPhotoId: state.setReviewPhotoId,
       setCompareOpen: state.setCompareOpen,
       setExportOpen: state.setExportOpen,
+      setSettingsOpen: state.setSettingsOpen,
       toggleComparePhotoId: state.toggleComparePhotoId,
       clearCompare: state.clearCompare,
     })),
@@ -1915,6 +1918,7 @@ export default function App() {
     <AppShell
       onNavigate={handleNavigate}
       onOpenExport={() => setExportOpen(true)}
+      onOpenSettings={() => setSettingsOpen(true)}
       onSearchChange={setSearchQuery}
       route={route}
       searchQuery={searchQuery}
@@ -2018,6 +2022,7 @@ function AppShell({
   children,
   onNavigate,
   onOpenExport,
+  onOpenSettings,
   onSearchChange,
   route,
   searchQuery,
@@ -2026,6 +2031,7 @@ function AppShell({
   children: ReactNode
   onNavigate: (route: AppRoute) => void
   onOpenExport: () => void
+  onOpenSettings: () => void
   onSearchChange: (value: string) => void
   route: AppRoute
   searchQuery: string
@@ -2076,7 +2082,7 @@ function AppShell({
           <IconButton label={t('common.export')} onClick={onOpenExport}>
             <Download className="h-4 w-4" />
           </IconButton>
-          <IconButton label={t('common.settings')}>
+          <IconButton label={t('common.settings')} onClick={onOpenSettings}>
             <Settings2 className="h-4 w-4" />
           </IconButton>
           {/* 引擎状态在左下角 status bar 已有完整展示，此处不重复 */}
@@ -2085,6 +2091,7 @@ function AppShell({
 
       <EngineStatusBanner />
       <div className="app-body">{children}</div>
+      <SettingsModal />
     </div>
   )
 }
