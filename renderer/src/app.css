@@ -694,6 +694,26 @@ button:disabled {
   gap: 10px;
 }
 
+/* 信息抽屉的"用 Topaz/PS 打开"区块 — 紧凑分组 + 当前编辑目标提示 */
+.inspector-editors {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 0 6px;
+  border-top: 1px solid color-mix(in srgb, currentColor 8%, transparent);
+}
+
+.inspector-editors__hint {
+  font-size: 11px;
+  color: color-mix(in srgb, currentColor 55%, transparent);
+}
+
+.inspector-editors__row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .start-copy .action-row {
   margin-top: 28px;
 }

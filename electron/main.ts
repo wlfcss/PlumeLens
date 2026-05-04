@@ -1,7 +1,9 @@
 import { app, BrowserWindow, ipcMain, dialog, net, protocol, session, shell } from 'electron'
+import { spawn } from 'child_process'
 import { pathToFileURL } from 'url'
-import { mkdirSync } from 'fs'
+import { existsSync, mkdirSync } from 'fs'
 import { realpath } from 'fs/promises'
+import { homedir } from 'os'
 import { join, resolve } from 'path'
 import { ProcessManager } from './process-manager'
 
@@ -103,6 +105,92 @@ ipcMain.handle('dialog:open-folder', async () => {
   return result.canceled ? null : result.filePaths[0]
 })
 
+// 外部编辑器集成 — 信息抽屉 / 复核屏 "用 Topaz/PS 打开"
+//
+// 探测策略:macOS 应用安装在 /Applications/{Name}.app 或 ~/Applications/{Name}.app。
+// 启动期一次性扫描,缓存结果。卸载/安装通常需要重启应用才能感知 — 简单可接受。
+//
+// 启动方式:macOS spawn `open -a "AppName" filePath` — 比 shell.openPath 精准
+// (后者只用默认应用,RAW 默认会被预览/Photos 打开)。
+type EditorTool = 'topaz' | 'photoshop'
+
+interface EditorEntry {
+  /** macOS LaunchServices 识别的应用名(/Applications/{name}.app) */
+  appNames: string[]
+  /** 探测到的实际应用文件名(用于 open -a 启动);null = 未安装 */
+  resolved: string | null
+}
+
+const EDITOR_REGISTRY: Record<EditorTool, EditorEntry> = {
+  topaz: {
+    // Topaz 各产品(Photo AI/Sharpen AI/DeNoise AI/Gigapixel)同时存在时优先 Photo AI(综合)
+    appNames: ['Topaz Photo AI', 'Topaz Sharpen AI', 'Topaz DeNoise AI', 'Topaz Gigapixel AI'],
+    resolved: null,
+  },
+  photoshop: {
+    // 探测最近几年版本顺序;装多个版本时挑最新
+    appNames: [
+      'Adobe Photoshop 2026',
+      'Adobe Photoshop 2025',
+      'Adobe Photoshop 2024',
+      'Adobe Photoshop 2023',
+      'Adobe Photoshop',
+    ],
+    resolved: null,
+  },
+}
+
+function resolveEditors(): void {
+  const roots = ['/Applications', join(homedir(), 'Applications')]
+  for (const tool of Object.keys(EDITOR_REGISTRY) as EditorTool[]) {
+    const entry = EDITOR_REGISTRY[tool]
+    for (const name of entry.appNames) {
+      const found = roots.some((root) => existsSync(join(root, `${name}.app`)))
+      if (found) {
+        entry.resolved = name
+        break
+      }
+    }
+  }
+  process.stderr.write(
+    `[main] editors detected: ${JSON.stringify(
+      Object.fromEntries(
+        Object.entries(EDITOR_REGISTRY).map(([k, v]) => [k, v.resolved]),
+      ),
+    )}\n`,
+  )
+}
+
+ipcMain.handle('list-editors', () => {
+  return {
+    topaz: EDITOR_REGISTRY.topaz.resolved,
+    photoshop: EDITOR_REGISTRY.photoshop.resolved,
+  }
+})
+
+ipcMain.handle('open-in-editor', async (_event, args: { tool: EditorTool; path: string }) => {
+  const { tool, path: filePath } = args
+  const entry = EDITOR_REGISTRY[tool]
+  if (!entry || !entry.resolved) {
+    return { ok: false, reason: 'not_installed' as const }
+  }
+  if (!filePath || !existsSync(filePath)) {
+    return { ok: false, reason: 'file_missing' as const }
+  }
+  // detached + unref 让外部编辑器跟主进程脱钩,关闭鉴翎不会拖死编辑器
+  try {
+    const child = spawn('open', ['-a', entry.resolved, filePath], {
+      detached: true,
+      stdio: 'ignore',
+    })
+    child.unref()
+    return { ok: true, app: entry.resolved }
+  } catch (err) {
+    process.stderr.write(`[main] open-in-editor failed: ${(err as Error).message}\n`)
+    return { ok: false, reason: 'spawn_failed' as const }
+  }
+})
+
 // 让用户在 fatal 状态点 banner 直接打开 logs 目录(crash 自查 / 上报)
 ipcMain.handle('open-logs-dir', async () => {
   const logsDir = join(app.getPath('userData'), 'logs')
@@ -129,6 +217,7 @@ app.whenReady().then(async () => {
   } catch { /* dir 不存在,后续按需 realpath 单文件时会触发创建 */ }
   process.stderr.write(`[main] userData=${app.getPath('userData')}\n`)
   process.stderr.write(`[main] thumbnailsRoot=${thumbnailsRoot}\n`)
+  resolveEditors()
   protocol.handle('plumelens', async (request) => {
     const url = new URL(request.url)
     if (url.host !== 'thumb') {

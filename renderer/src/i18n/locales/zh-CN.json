@@ -238,6 +238,13 @@
       "idleTitle": "先选中一张照片",
       "idleBody": "这里会显示当前照片的分数、姿态、物种和问题标签，帮助你少开一次完整复核"
     },
+    "editor": {
+      "label": "外部编辑",
+      "targetRaw": "打开 {{format}} 原片",
+      "targetMain": "打开主文件",
+      "openInTopaz": "Topaz",
+      "openInPhotoshop": "Photoshop"
+    },
     "review": {
       "label": "深度复核",
       "scoreBreakdown": "评分拆解",

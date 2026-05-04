@@ -24,6 +24,13 @@ interface PlumeLensAPI {
   onBackendError(cb: (msg: string) => void): void
   /** 订阅 engine 状态变化(ready/unhealthy/crashed/fatal)。返回 unsubscribe。 */
   onEngineStatus(cb: (payload: EngineStatusPayload) => void): () => void
+  /** 启动期探测的外部编辑器解析名;null = 未安装,UI 应隐藏对应按钮。 */
+  listEditors(): Promise<{ topaz: string | null; photoshop: string | null }>
+  /** 用指定外部编辑器打开文件。失败时 reason: not_installed/file_missing/spawn_failed。 */
+  openInEditor(
+    tool: 'topaz' | 'photoshop',
+    path: string,
+  ): Promise<{ ok: true; app: string } | { ok: false; reason: string }>
 }
 
 declare global {

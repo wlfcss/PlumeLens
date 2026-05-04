@@ -22,6 +22,15 @@ contextBridge.exposeInMainWorld('plumelens', {
   openFolder: (): Promise<string | null> => ipcRenderer.invoke('dialog:open-folder'),
   /** 打开 logs 目录 — 用户在 fatal 状态点 banner 触发,Finder/Explorer 弹窗。 */
   openLogsDir: (): Promise<string> => ipcRenderer.invoke('open-logs-dir'),
+  /** 启动期探测的外部编辑器(Topaz/Photoshop)解析名;null = 未安装。 */
+  listEditors: (): Promise<{ topaz: string | null; photoshop: string | null }> =>
+    ipcRenderer.invoke('list-editors'),
+  /** 用指定外部编辑器打开文件(macOS spawn `open -a`)。 */
+  openInEditor: (
+    tool: 'topaz' | 'photoshop',
+    path: string,
+  ): Promise<{ ok: true; app: string } | { ok: false; reason: string }> =>
+    ipcRenderer.invoke('open-in-editor', { tool, path }),
   onBackendReady: (cb: (url: string) => void): void => {
     ipcRenderer.on('backend-ready', (_event, url: string) => cb(url))
   },

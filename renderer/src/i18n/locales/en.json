@@ -238,6 +238,13 @@
       "idleTitle": "Pick a frame first",
       "idleBody": "The inspector keeps score, pose, species, and problem tags one glance away so you can avoid opening the full review panel every time."
     },
+    "editor": {
+      "label": "Open in editor",
+      "targetRaw": "Open {{format}} raw",
+      "targetMain": "Open main file",
+      "openInTopaz": "Topaz",
+      "openInPhotoshop": "Photoshop"
+    },
     "review": {
       "label": "Deep review",
       "scoreBreakdown": "Score breakdown",

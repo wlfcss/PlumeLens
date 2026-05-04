@@ -1,6 +1,7 @@
 import {
   Aperture,
   ArrowRight,
+  Brush,
   Check,
   Clock3,
   Download,
@@ -15,6 +16,7 @@ import {
   Shield,
   Sparkles,
   Trophy,
+  Wand2,
   Waypoints,
   X,
 } from 'lucide-react'
@@ -2854,6 +2856,78 @@ function PhotoTile({
   )
 }
 
+/** 启动期外部编辑器探测 — IPC 调一次缓存,UI 据此显示/隐藏对应按钮。 */
+function useExternalEditors(): { topaz: string | null; photoshop: string | null } {
+  const [editors, setEditors] = useState<{ topaz: string | null; photoshop: string | null }>({
+    topaz: null,
+    photoshop: null,
+  })
+  useEffect(() => {
+    let cancelled = false
+    void window.plumelens?.listEditors?.().then((result) => {
+      if (cancelled) return
+      setEditors(result)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+  return editors
+}
+
+/** 编辑入口:Topaz / Photoshop "用 X 打开"。优先 RAW 同伴,无 RAW 用主文件。 */
+function ExternalEditorActions({
+  photo,
+  t,
+}: {
+  photo: PhotoRecord
+  t: ReturnType<typeof useTranslation>['t']
+}) {
+  const editors = useExternalEditors()
+  // 优先 RAW 同伴(用户编辑通常想要原始数据);无 RAW 时用主 entry(JPG)
+  const targetPath = photo.companionPath ?? photo.filePath ?? null
+  if (!targetPath) return null
+  if (!editors.topaz && !editors.photoshop) return null
+
+  const openIn = (tool: 'topaz' | 'photoshop') => {
+    void window.plumelens?.openInEditor?.(tool, targetPath)
+  }
+  const targetLabel = photo.companionPath
+    ? t('selection.editor.targetRaw', { format: photo.companionFormat ?? 'RAW' })
+    : t('selection.editor.targetMain')
+  return (
+    <div className="inspector-editors">
+      <span className="inspector-editors__hint">
+        {t('selection.editor.label')} · {targetLabel}
+      </span>
+      <div className="inspector-editors__row">
+        {editors.topaz ? (
+          <button
+            className="button-ghost button-compact"
+            onClick={() => openIn('topaz')}
+            title={editors.topaz}
+            type="button"
+          >
+            <Wand2 className="h-4 w-4" />
+            {t('selection.editor.openInTopaz')}
+          </button>
+        ) : null}
+        {editors.photoshop ? (
+          <button
+            className="button-ghost button-compact"
+            onClick={() => openIn('photoshop')}
+            title={editors.photoshop}
+            type="button"
+          >
+            <Brush className="h-4 w-4" />
+            {t('selection.editor.openInPhotoshop')}
+          </button>
+        ) : null}
+      </div>
+    </div>
+  )
+}
+
 function InspectorPanel({
   onOpenReview,
   onSetDecision,
@@ -2912,6 +2986,7 @@ function InspectorPanel({
             <StatRow label={t('selection.metrics.birdCount')} value={photo.birdCount} />
           </div>
           <TagCluster photo={photo} t={t} />
+          <ExternalEditorActions photo={photo} t={t} />
           <div className="inspector-actions">
             <button
               className="button-primary"

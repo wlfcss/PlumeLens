@@ -119,6 +119,9 @@ export interface PhotoRecord {
   folderId: string
   groupId: string
   fileName: string
+  /** 主 entry 的绝对磁盘路径。前端用于"用 Topaz/PS 打开"等外部应用集成。
+   *  mock 数据不填(测试场景);真后端走 backend-adapter 从 row.file_path 透传。 */
+  filePath?: string
   shotAt: string
   camera: string
   lens: string

@@ -284,6 +284,7 @@ export function buildPhotoRecordFromRow(
     folderId,
     groupId,
     fileName: row.file_name,
+    filePath: row.file_path,
     shotAt: row.shot_at,
     camera: cameraFallback,
     lens: lensFallback,
