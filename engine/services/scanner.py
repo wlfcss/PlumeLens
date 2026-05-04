@@ -955,26 +955,9 @@ async def scan_library(
                     report.errors.append((path_key, f"companion update failed: {e}"))
 
     await conn.commit()
-    # 入库后增量做一次 companion 反向清理:之前是 pair 主 entry、现在 RAW 同伴消失
-    # → companion_* 应清掉。本轮 scan 已经把仍然存在的 pair 写对了,但如果用户刚
-    # 删掉某个 RAW,主 JPG 的 file size/mtime 没变 → file_unchanged=true,但 companion
-    # 也没变化(prev_comp=path, comp=path)→ companion_unchanged=true → 不会进 UPDATE。
-    # 这里用 fs ground truth 兜底:对所有处理过的 path,如果 companion_map 是 None
-    # 但 DB 里 companion_path 还指向已不存在的文件,清掉。
-    paths_with_no_companion = [
-        p for p, c in companion_map.items() if c is None and p in existing
-    ]
-    if paths_with_no_companion:
-        for path_key in paths_with_no_companion:
-            prev = existing.get(path_key)
-            if prev and prev[3] is not None:
-                # DB 里有 companion_path,但本轮 fs 扫描下这个 path 不再 pair → 清掉
-                await conn.execute(
-                    "UPDATE photos SET companion_path = NULL, companion_format = NULL, "
-                    "companion_size = NULL WHERE file_path = ?",
-                    (path_key,),
-                )
-        await conn.commit()
+    # NOTE: companion 删除场景(用户刚删了 RAW)已在主循环"仅 companion 变化"分支
+    # 处理 — prev_comp=str(cr3) vs comp_path=None → companion_unchanged=False → UPDATE
+    # 走 NULL 写入。无需额外的 end-of-scan cleanup。
     await logger.ainfo(
         "Library scan completed",
         library_id=library_id,

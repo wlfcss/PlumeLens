@@ -560,8 +560,9 @@ class TestBackfillCompanion:
             ("lib-test",),
         ) as cur:
             rows = await cur.fetchall()
-        # CR3 行: companion 仍 NULL(_resolve_pairs 把 IMAGE 选为主)
-        # JPG 行: companion = CR3 path
+        # 显式契约:backfill 不删 RAW 老 photo 行(怕丢 v6 决策/物种标注),
+        # 所以两行仍并存。UI 重复显示是已知 limitation,有专门的迁移再处理。
+        assert len(rows) == 2
         by_path = {str(r["file_path"]): r["companion_path"] for r in rows}
-        assert by_path[str(jpg)] == str(cr3)
-        assert by_path[str(cr3)] is None
+        assert by_path[str(jpg)] == str(cr3)  # JPG 行: companion = CR3 path
+        assert by_path[str(cr3)] is None  # CR3 行: companion 仍 NULL
