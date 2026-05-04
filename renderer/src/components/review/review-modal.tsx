@@ -936,8 +936,13 @@ function ReviewImageStage({
         )
       }
     }
-    // AF 覆盖层：按 Canon 官方 AF area 语义渲染。
-    // point = 单点；expanded/zone/whole_area = 区域框 + 实际合焦点。
+    // AF 覆盖层：按 Canon 官方 AF area 语义两层渲染。
+    // - 蓝色 .af-area 框 = 用户/相机指定的对焦区域(zone/whole_area/expanded)
+    // - 底层 .af-point--passive: points 中"激活但未命中"的对焦点 — 灰白细边
+    //   无光晕,密集排列也不会因 box-shadow 叠加产生"中心特别亮"的假象
+    // - 顶层 .af-point--focused: 实际合焦命中的点 — 红色发光。多点合焦(zone 模式
+    //   下常见 6+ 点同时命中)走 --focused-dense 弱光晕变体,叠加效应可控
+    // - kind === 'point' (单点 AF) → 直接画一个大尺寸 focused
     if (afOverlay) {
       const areaBounds = afOverlay.kind !== 'point' ? afOverlay.bounds : undefined
       if (areaBounds) {
@@ -959,20 +964,49 @@ function ReviewImageStage({
         }
       }
 
-      const focusPoints =
-        afOverlay.focused_points && afOverlay.focused_points.length > 0
-          ? afOverlay.focused_points
-          : afOverlay.points && afOverlay.points.length > 0
-            ? afOverlay.points
-            : [afOverlay.center]
+      const focused = afOverlay.focused_points ?? []
+      const all = afOverlay.points ?? []
+      // 用 index 作 key 区分 passive vs focused;legacy fallback 无 index 时用坐标
+      const keyOf = (pt: { index?: number; x: number; y: number }): string =>
+        pt.index !== undefined ? `i:${pt.index}` : `xy:${pt.x.toFixed(1)},${pt.y.toFixed(1)}`
+      const focusedKeys = new Set(focused.map(keyOf))
+      const passive = all.filter((pt) => !focusedKeys.has(keyOf(pt)))
+      const isMini = afOverlay.kind !== 'point'
+      // 多点合焦时用弱光晕变体,避免密集网格 box-shadow 叠加
+      const focusedDense = focused.length >= 4
 
-      for (const [index, point] of focusPoints.entries()) {
+      // 底层:激活但未命中的对焦点(passive,无光晕)
+      for (const [index, point] of passive.entries()) {
         const p = toLocalPoint(point.x, point.y)
         if (!p) continue
         overlays.push(
           <span
-            className={cn('af-point', afOverlay.kind !== 'point' && 'af-point--mini')}
-            key={`af-point-${index}`}
+            className={cn('af-point', 'af-point--passive', isMini && 'af-point--mini')}
+            key={`af-passive-${index}`}
+            style={{ left: `${p.left}%`, top: `${p.top}%` }}
+            title="可用对焦点"
+          />,
+        )
+      }
+
+      // 顶层:实际合焦命中的点(focused,红色发光)
+      const focusedToDraw =
+        focused.length > 0
+          ? focused
+          : passive.length > 0
+            ? [] // 没合焦信息且有 passive → 不再 fallback 到 center,避免重复显示
+            : [afOverlay.center] // 极端 fallback:三组都空,至少画中心
+      for (const [index, point] of focusedToDraw.entries()) {
+        const p = toLocalPoint(point.x, point.y)
+        if (!p) continue
+        overlays.push(
+          <span
+            className={cn(
+              'af-point',
+              focusedDense ? 'af-point--focused-dense' : 'af-point--focused',
+              isMini && 'af-point--mini',
+            )}
+            key={`af-focused-${index}`}
             style={{ left: `${p.left}%`, top: `${p.top}%` }}
             title={afOverlay.kind === 'point' ? '对焦点' : '合焦点'}
           />,

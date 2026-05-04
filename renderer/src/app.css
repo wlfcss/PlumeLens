@@ -3248,20 +3248,17 @@ button:disabled {
 }
 
 /* AF 点：参考相机回放显示，合焦点用红色小方框，区域 AF 另画蓝色区域框。 */
+/* af-point 基类:仅定位 + transition,具体视觉由 --passive / --focused / --focused-dense
+   变体决定(两层渲染:passive 底层,focused 顶层)。--mini 控制尺寸(zone 模式 13×13)。 */
 .af-point {
   position: absolute;
   width: 24px;
   height: 24px;
   margin-left: -12px;
   margin-top: -12px;
-  border: 1.5px solid rgba(255, 70, 76, 0.96);
   border-radius: 2px;
-  background: rgba(255, 70, 76, 0.06);
   pointer-events: auto;
   cursor: help;
-  box-shadow:
-    0 0 0 1px rgba(0, 0, 0, 0.72),
-    0 0 10px rgba(255, 70, 76, 0.26);
   transition:
     background-color var(--pl-motion-fast) var(--pl-ease),
     border-color var(--pl-motion-fast) var(--pl-ease),
@@ -3269,12 +3266,50 @@ button:disabled {
     transform var(--pl-motion-fast) var(--pl-ease);
 }
 
-.af-point:hover {
+/* Passive: 区域内"激活但未命中"的对焦点 — 灰白细边,无光晕。
+   密集排列(zone AF 30+ 点)时不再因 box-shadow 叠加产生"中心特别亮"假象。 */
+.af-point--passive {
+  border: 1px solid rgba(255, 255, 255, 0.36);
+  background: transparent;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.55);
+}
+
+.af-point--passive:hover {
+  border-color: rgba(255, 255, 255, 0.72);
+  background: rgba(255, 255, 255, 0.04);
+  transform: scale(1.08);
+}
+
+/* Focused (单点或少量合焦): 红色强发光,中心十字 — 真正的"对焦点" */
+.af-point--focused {
+  border: 1.5px solid rgba(255, 70, 76, 0.96);
   background: rgba(255, 70, 76, 0.12);
   box-shadow:
     0 0 0 1px rgba(0, 0, 0, 0.72),
-    0 0 14px rgba(255, 70, 76, 0.38);
+    0 0 10px rgba(255, 70, 76, 0.45);
+}
+
+.af-point--focused:hover {
+  background: rgba(255, 70, 76, 0.2);
+  box-shadow:
+    0 0 0 1px rgba(0, 0, 0, 0.72),
+    0 0 14px rgba(255, 70, 76, 0.55);
   transform: scale(1.08);
+}
+
+/* Focused-dense (多点合焦,zone 模式常见 6+ 点同时命中): 弱光晕变体,
+   box-shadow 半径降到 3px,叠加 8 个邻居也只是中等加强,不再夸张。 */
+.af-point--focused-dense {
+  border: 1.25px solid rgba(255, 70, 76, 0.92);
+  background: rgba(255, 70, 76, 0.18);
+  box-shadow:
+    0 0 0 1px rgba(0, 0, 0, 0.6),
+    0 0 3px rgba(255, 70, 76, 0.3);
+}
+
+.af-point--focused-dense:hover {
+  background: rgba(255, 70, 76, 0.28);
+  transform: scale(1.12);
 }
 
 .af-point--mini {
@@ -3282,19 +3317,19 @@ button:disabled {
   height: 13px;
   margin-left: -6.5px;
   margin-top: -6.5px;
-  border-width: 1.25px;
-  background: rgba(255, 70, 76, 0.08);
+  border-width: 1px;
 }
 
-/* 中心十字 */
-.af-point::before,
-.af-point::after {
+/* 中心十字 — 只给单点 focused 大尺寸用,passive / dense / mini 都不画。
+   mini 13×13 放不下,dense 多点叠加视觉乱,passive 不该突出。 */
+.af-point--focused:not(.af-point--mini)::before,
+.af-point--focused:not(.af-point--mini)::after {
   content: '';
   position: absolute;
   background: rgba(255, 70, 76, 0.96);
 }
 
-.af-point::before {
+.af-point--focused:not(.af-point--mini)::before {
   /* 横线 */
   left: 50%;
   top: 50%;
@@ -3303,23 +3338,13 @@ button:disabled {
   margin-left: -4px;
 }
 
-.af-point::after {
+.af-point--focused:not(.af-point--mini)::after {
   /* 竖线 */
   left: 50%;
   top: 50%;
   width: 1px;
   height: 8px;
   margin-top: -4px;
-}
-
-.af-point--mini::before,
-.af-point--mini::after {
-  display: none;
-}
-
-.af-point--mini::before,
-.af-point--mini::after {
-  content: none;
 }
 
 /* 复核工具栏：toggle 行（Nothing UI 极简 checkbox） */
