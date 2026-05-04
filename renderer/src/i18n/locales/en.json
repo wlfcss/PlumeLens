@@ -311,7 +311,16 @@
       "lens": "Lens",
       "time": "Time",
       "location": "Location",
-      "openInMaps": "Open in Maps"
+      "openInMaps": "Open in Maps",
+      "place": "Place",
+      "geocodingFrom": "Source",
+      "geocodingSource": {
+        "amap": "Amap",
+        "baidu": "Baidu Maps",
+        "tencent": "Tencent Maps",
+        "nominatim": "OpenStreetMap",
+        "offline": "Offline (nearest city)"
+      }
     },
     "empty": {
       "title": "No folders ready yet",

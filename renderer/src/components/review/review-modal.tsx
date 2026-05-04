@@ -44,6 +44,7 @@ import {
   type ReviewDetail,
 } from '@/App'
 import type { SpeciesOverrideBBox, SpeciesOverrideValue } from '@/lib/api-client'
+import { useReverseGeocode } from '@/hooks/use-geocoding'
 import { computeIqaCropBox } from '@/lib/backend-adapter'
 import type {
   AfOverlay,
@@ -1293,22 +1294,49 @@ function ExifPanel({
         <CompactKV label={t('selection.exif.camera')} value={camera} />
         <CompactKV label={t('selection.exif.lens')} value={lens} />
         <CompactKV label={t('selection.exif.time')} value={dt} />
-        {gps ? (
-          <div className="compact-kv">
-            <span className="compact-kv__label">{t('selection.exif.location')}</span>
-            <a
-              className="compact-kv__value compact-kv__value--link"
-              href={`https://maps.apple.com/?ll=${gps.lat},${gps.lon}&z=15`}
-              rel="noopener noreferrer"
-              target="_blank"
-              title={t('selection.exif.openInMaps')}
-            >
-              {formatGpsCoords(gps)}
-            </a>
-          </div>
-        ) : null}
+        {gps ? <GpsRows gps={gps} t={t} /> : null}
       </div>
     </div>
+  )
+}
+
+/** GPS 行:坐标(可点 Apple Maps) + reverse geocoding 解析的地名 */
+function GpsRows({
+  gps,
+  t,
+}: {
+  gps: { lat: number; lon: number; alt: number | null }
+  t: ReturnType<typeof useTranslation>['t']
+}) {
+  const geo = useReverseGeocode(gps.lat, gps.lon)
+  // source 决定 tooltip 文案 — 离线兜底要明确告诉用户(地名可能不准/精度低)
+  const sourceLabel = geo.data?.source ? t(`selection.exif.geocodingSource.${geo.data.source}`) : ''
+  return (
+    <>
+      <div className="compact-kv">
+        <span className="compact-kv__label">{t('selection.exif.location')}</span>
+        <a
+          className="compact-kv__value compact-kv__value--link"
+          href={`https://maps.apple.com/?ll=${gps.lat},${gps.lon}&z=15`}
+          rel="noopener noreferrer"
+          target="_blank"
+          title={t('selection.exif.openInMaps')}
+        >
+          {formatGpsCoords(gps)}
+        </a>
+      </div>
+      {geo.data?.display_name ? (
+        <div className="compact-kv compact-kv--multiline">
+          <span className="compact-kv__label">{t('selection.exif.place')}</span>
+          <span
+            className="compact-kv__value compact-kv__value--multiline"
+            title={sourceLabel ? `${t('selection.exif.geocodingFrom')}: ${sourceLabel}` : undefined}
+          >
+            {geo.data.display_name}
+          </span>
+        </div>
+      ) : null}
+    </>
   )
 }
 

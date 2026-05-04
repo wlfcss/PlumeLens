@@ -311,7 +311,16 @@
       "lens": "镜头",
       "time": "时间",
       "location": "拍摄地",
-      "openInMaps": "在地图中打开"
+      "openInMaps": "在地图中打开",
+      "place": "地点",
+      "geocodingFrom": "数据来源",
+      "geocodingSource": {
+        "amap": "高德地图",
+        "baidu": "百度地图",
+        "tencent": "腾讯地图",
+        "nominatim": "OpenStreetMap",
+        "offline": "离线（最近城市）"
+      }
     },
     "empty": {
       "title": "还没有可处理的文件夹",

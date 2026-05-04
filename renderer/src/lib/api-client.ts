@@ -431,4 +431,18 @@ export const api = {
     request<DecisionRow[]>(`/decisions/library/${libraryId}`),
   libraryDecisionCounts: (libraryId: string) =>
     request<DecisionCountsResponse>(`/decisions/library/${libraryId}/counts`),
+
+  // Reverse geocoding — provider chain(amap → baidu → tencent → nominatim → offline),
+  // 后端按可用 key 自动选,前端只看 display_name + source 标识即可。
+  reverseGeocode: (lat: number, lon: number, lang = 'zh-CN') =>
+    request<ReverseGeocodeResponse>(
+      `/geocoding/reverse?lat=${lat}&lon=${lon}&lang=${encodeURIComponent(lang)}`,
+    ),
+}
+
+export interface ReverseGeocodeResponse {
+  display_name: string | null
+  source: 'amap' | 'baidu' | 'tencent' | 'nominatim' | 'offline' | null
+  lat: number
+  lon: number
 }

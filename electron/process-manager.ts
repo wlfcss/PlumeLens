@@ -6,6 +6,7 @@ import {
   createWriteStream,
   existsSync,
   mkdirSync,
+  readFileSync,
   readdirSync,
   renameSync,
   statSync,
@@ -160,6 +161,27 @@ export class ProcessManager extends EventEmitter {
     // engine 的 Settings.species_provider 会从 PLUMELENS_SPECIES_PROVIDER 读。
     if (this.speciesDevice === 'cpu') {
       env.PLUMELENS_SPECIES_PROVIDER = 'cpu'
+    }
+
+    // 用户自带的 reverse geocoding API keys — 从 userData/settings.json 读,注入 env
+    // 给后端 geocoder chain 使用(amap → baidu → tencent → nominatim → offline)。
+    // v1 用户在 Finder 编辑 ~/Library/Application Support/plumelens/settings.json 加:
+    //   {"amapKey": "xxx", "baiduAk": "yyy", "tencentKey": "zzz"}
+    // v2 加 settings UI 让用户填表。失败/不存在静默忽略,不影响启动。
+    try {
+      const settingsPath = join(app.getPath('userData'), 'settings.json')
+      if (existsSync(settingsPath)) {
+        const userSettings = JSON.parse(readFileSync(settingsPath, 'utf-8')) as {
+          amapKey?: string
+          baiduAk?: string
+          tencentKey?: string
+        }
+        if (userSettings.amapKey) env.PLUMELENS_AMAP_KEY = userSettings.amapKey
+        if (userSettings.baiduAk) env.PLUMELENS_BAIDU_AK = userSettings.baiduAk
+        if (userSettings.tencentKey) env.PLUMELENS_TENCENT_KEY = userSettings.tencentKey
+      }
+    } catch (err) {
+      this.writeElectronLog(`failed to read user settings.json: ${(err as Error).message}`)
     }
 
     if (isDev) {

@@ -3747,6 +3747,20 @@ button:disabled {
   border-bottom-color: currentColor;
 }
 
+/* 长地址(reverse geocoding 结果)允许换行,而不是被 ellipsis 截断 */
+.compact-kv--multiline {
+  align-items: flex-start;
+}
+
+.compact-kv__value--multiline {
+  text-align: right;
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+  line-height: 1.4;
+  word-break: break-word;
+}
+
 /* 物种候选：紧凑列表 */
 .species-candidates--compact {
   display: flex;

@@ -85,6 +85,9 @@ datas: list[tuple[str, str]] = [
         includes=["**/*.json", "**/*.txt"],
         excludes=["**/test/**", "**/tests/**", "**/testing/**", "**/__pycache__/**"],
     ),
+    # GeoNames cities1000.npz — reverse geocoding 离线兜底数据(~2.7 MB,
+    # 168K 条城市/区县,自动从 services/geocoder.py 通过 _MEIPASS 加载)
+    (str(ENGINE_ROOT / "data" / "cities1000.npz"), "engine/data"),
 ]
 
 a = Analysis(
