@@ -141,6 +141,9 @@
       "bird": "有鸟",
       "no_bird": "无鸟"
     },
+    "companion": {
+      "tile": "+{{format}}"
+    },
     "sort": {
       "score": "综合评分",
       "shot_at": "拍摄时间",
@@ -257,7 +260,9 @@
       "shortcuts": {
         "grade": "评级",
         "nav": "切换/关闭"
-      }
+      },
+      "companion": "RAW 同伴",
+      "companionValue": "{{format}} · {{size}}"
     },
     "reviewReasons": {
       "no_bird": "当前帧没有检测到有效鸟主体，更适合直接淘汰或保留为空片记录",

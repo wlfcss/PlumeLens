@@ -340,6 +340,9 @@ export function buildPhotoRecordFromRow(
     bestPose: row.best_detection?.pose ?? null,
     bestAfPoint: extractAfPoint(row.exif),
     bestAfArea: extractAfArea(row.exif),
+    companionPath: row.companion_path ?? null,
+    companionFormat: row.companion_format ?? null,
+    companionSize: row.companion_size ?? null,
   }
 }
 

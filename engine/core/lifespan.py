@@ -133,6 +133,16 @@ async def _refresh_all_thumbnails(db: Database) -> None:
                         "Startup EXIF refresh failed",
                         library_id=library_id,
                     )
+                # Step 4: 补 v6 → v7 升级后老库的 companion_*(JPG/RAW pair 同伴信息)。
+                # 轻量,只 stat 不读 EXIF。已有 companion 字段的行不动。
+                try:
+                    from engine.services.scanner import backfill_companion_for_library
+                    await backfill_companion_for_library(db, library_id)
+                except Exception:
+                    logger.exception(
+                        "Startup companion backfill failed",
+                        library_id=library_id,
+                    )
             except Exception as e:
                 logger.warning(
                     "Startup library refresh failed",

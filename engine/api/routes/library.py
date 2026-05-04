@@ -621,7 +621,7 @@ async def library_detail(request: Request, library_id: str) -> LibraryDetail:
     async with db.conn.execute(
         "SELECT p.id, p.file_path, p.file_name, p.format, p.width, p.height, "
         "p.thumb_grid, p.thumb_preview, p.created_at, p.file_mtime, p.exif_json, "
-        "p.scene_id, "
+        "p.scene_id, p.companion_path, p.companion_format, p.companion_size, "
         "ar.pipeline_version, ar.grade, ar.quality_score, ar.bird_count, ar.species, "
         "ar.result_json, "
         "pd.decision "
@@ -849,6 +849,15 @@ async def library_detail(request: Request, library_id: str) -> LibraryDetail:
                 thumb_grid=(str(r["thumb_grid"]) if r["thumb_grid"] is not None else None),
                 thumb_preview=(
                     str(r["thumb_preview"]) if r["thumb_preview"] is not None else None
+                ),
+                companion_path=(
+                    str(r["companion_path"]) if r["companion_path"] is not None else None
+                ),
+                companion_format=(
+                    str(r["companion_format"]) if r["companion_format"] is not None else None
+                ),
+                companion_size=(
+                    int(r["companion_size"]) if r["companion_size"] is not None else None
                 ),
                 created_at=str(r["created_at"]),
                 shot_at=_resolve_shot_at(r),

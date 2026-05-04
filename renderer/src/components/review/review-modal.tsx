@@ -354,6 +354,16 @@ export function ReviewModal({
 
           <CompactKV label={t('selection.metrics.scene')} value={group?.title ?? '--'} />
 
+          {photo.companionFormat && photo.companionPath ? (
+            <CompactKV
+              label={t('selection.review.companion')}
+              value={t('selection.review.companionValue', {
+                format: photo.companionFormat,
+                size: formatBytes(photo.companionSize ?? 0),
+              })}
+            />
+          ) : null}
+
           <SpeciesOverrideEditor
             activeBirdIndex={activeBirdIndex}
             onSetActiveBirdIndex={setActiveBirdIndex}
@@ -1143,6 +1153,14 @@ function CompactStat({
       <span className="compact-stat__value">{value}</span>
     </div>
   )
+}
+
+/** 字节数 → 人读字符串(MB / GB)。RAW 文件常 30-100 MB,误差 ±0.1 可接受。 */
+function formatBytes(bytes: number): string {
+  if (bytes <= 0) return '--'
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`
+  return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`
 }
 
 /** 紧凑 key-value：单行，标签灰、值白 */

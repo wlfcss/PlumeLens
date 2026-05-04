@@ -141,6 +141,9 @@
       "bird": "Bird",
       "no_bird": "No bird"
     },
+    "companion": {
+      "tile": "+{{format}}"
+    },
     "sort": {
       "score": "Score",
       "shot_at": "Shot time",
@@ -257,7 +260,9 @@
       "shortcuts": {
         "grade": "Grade",
         "nav": "Navigate/close"
-      }
+      },
+      "companion": "RAW companion",
+      "companionValue": "{{format}} · {{size}}"
     },
     "reviewReasons": {
       "no_bird": "No valid bird subject was detected in this frame, so it is better treated as a reject or a record-only frame.",

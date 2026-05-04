@@ -2810,6 +2810,12 @@ function PhotoTile({
           {photo.isNewSpecies ? (
             <StatusPill label={t('selection.quickFilters.new_species')} tone="accent" />
           ) : null}
+          {photo.companionFormat ? (
+            <StatusPill
+              label={t('selection.companion.tile', { format: photo.companionFormat })}
+              tone="muted"
+            />
+          ) : null}
         </span>
         <span className="photo-preview__bottom">
           <span>

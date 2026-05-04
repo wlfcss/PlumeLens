@@ -181,6 +181,11 @@ export interface PhotoRecord {
   // 对焦点（原图坐标系，Canon AFInfo MakerNote 解析得到）
   bestAfPoint?: { x: number; y: number } | null
   bestAfArea?: AfOverlay | null
+  // JPG/RAW 同名 pair 的同伴文件信息（scanner v7+ 识别）。无 pair 时全 null。
+  // 主 entry 走 fileName,companion 不入单独 photo,UI 在卡片右下角显示 "+CR3" 等。
+  companionPath?: string | null
+  companionFormat?: string | null  // CR3 / NEF / ARW / JPG ...
+  companionSize?: number | null    // 字节数
 }
 
 export interface SpeciesRecord {

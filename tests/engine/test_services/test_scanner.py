@@ -14,6 +14,8 @@ from engine.services.scanner import (
     _extract_exif,
     _parse_canon_afinfo2,
     _probe_image_meta,
+    _resolve_pairs,
+    backfill_companion_for_library,
     backfill_hashes,
     scan_library,
 )
@@ -334,3 +336,232 @@ class TestBackfillHashes:
         count = await backfill_hashes(db, "lib-test")
         # 文件消失不报错，只是 hash 仍为 NULL
         assert count == 0
+
+
+def _touch(path: Path, content: bytes = b"x") -> None:
+    """写一个有内容的占位文件 — _resolve_pairs 只 stat,不解码,所以无需是合法图片。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(content)
+
+
+class TestPairResolution:
+    """`_resolve_pairs` — JPG/RAW 同名 pair 识别。覆盖典型相机输出场景。"""
+
+    def test_jpg_raw_pair_picks_image_as_primary(self, tmp_path: Path) -> None:
+        jpg = tmp_path / "IMG_001.JPG"
+        cr3 = tmp_path / "IMG_001.CR3"
+        _touch(jpg)
+        _touch(cr3, b"raw" * 1000)
+        primaries, comp = _resolve_pairs([jpg, cr3])
+        # JPG 作主 entry,CR3 作 companion
+        assert primaries == [jpg]
+        info = comp[str(jpg)]
+        assert info is not None
+        assert info.path == cr3
+        assert info.format == "CR3"
+        assert info.size == len(b"raw" * 1000)
+
+    def test_raw_only_no_companion(self, tmp_path: Path) -> None:
+        cr3 = tmp_path / "IMG_002.CR3"
+        _touch(cr3)
+        primaries, comp = _resolve_pairs([cr3])
+        # 只有 RAW → RAW 作主,无 companion
+        assert primaries == [cr3]
+        assert comp[str(cr3)] is None
+
+    def test_jpg_only_no_companion(self, tmp_path: Path) -> None:
+        jpg = tmp_path / "IMG_003.jpg"
+        _touch(jpg)
+        primaries, comp = _resolve_pairs([jpg])
+        assert primaries == [jpg]
+        assert comp[str(jpg)] is None
+
+    def test_case_insensitive_stem_match(self, tmp_path: Path) -> None:
+        """相机有时输出 IMG_001.JPG + img_001.cr3 或 .jpg + .CR3 大小写混合。
+        stem 比较应忽略大小写。"""
+        jpg = tmp_path / "IMG_004.JPG"
+        cr3 = tmp_path / "img_004.CR3"  # 注意 stem 大小写不同
+        _touch(jpg)
+        _touch(cr3)
+        primaries, comp = _resolve_pairs([jpg, cr3])
+        assert len(primaries) == 1
+        assert comp[str(primaries[0])] is not None
+
+    def test_multiple_jpgs_no_pair(self, tmp_path: Path) -> None:
+        """同 stem 多 JPG(IMG.jpg + IMG_small.jpg 复制错命名)→ 不识别 pair,各自独立。"""
+        jpg1 = tmp_path / "IMG_005.jpg"
+        jpg2 = tmp_path / "IMG_005.jpeg"  # 同 stem,不同 ext
+        cr3 = tmp_path / "IMG_005.CR3"
+        _touch(jpg1)
+        _touch(jpg2)
+        _touch(cr3)
+        primaries, comp = _resolve_pairs([jpg1, jpg2, cr3])
+        # 多 IMAGE → 不识别 pair,3 个文件各自独立 entry
+        assert sorted(primaries) == sorted([jpg1, jpg2, cr3])
+        for p in primaries:
+            assert comp[str(p)] is None
+
+    def test_different_dirs_same_stem_not_paired(self, tmp_path: Path) -> None:
+        """跨目录同 stem 不该误识别为 pair。"""
+        d1 = tmp_path / "day1"
+        d2 = tmp_path / "day2"
+        jpg = d1 / "IMG_006.JPG"
+        cr3 = d2 / "IMG_006.CR3"
+        _touch(jpg)
+        _touch(cr3)
+        primaries, comp = _resolve_pairs([jpg, cr3])
+        # 不同目录不 pair
+        assert sorted(primaries) == sorted([jpg, cr3])
+        assert comp[str(jpg)] is None
+        assert comp[str(cr3)] is None
+
+    def test_mixed_pair_and_solo(self, tmp_path: Path) -> None:
+        """常见用户场景:有的照片 RAW+JPG,有的只 JPG。"""
+        pair_jpg = tmp_path / "IMG_007.JPG"
+        pair_cr3 = tmp_path / "IMG_007.CR3"
+        solo_jpg = tmp_path / "IMG_008.JPG"
+        _touch(pair_jpg)
+        _touch(pair_cr3)
+        _touch(solo_jpg)
+        primaries, comp = _resolve_pairs([pair_jpg, pair_cr3, solo_jpg])
+        # 主 entry: pair 的 JPG + solo JPG
+        assert sorted(primaries) == sorted([pair_jpg, solo_jpg])
+        assert comp[str(pair_jpg)] is not None
+        assert comp[str(solo_jpg)] is None
+
+
+class TestScanLibraryWithCompanion:
+    """scan_library 端到端 — companion 字段写入 + change 检测。"""
+
+    async def test_pair_inserts_one_row_with_companion(
+        self,
+        db: Database,
+        tmp_path: Path,
+    ) -> None:
+        root = tmp_path / "lib"
+        jpg = root / "IMG_010.JPG"
+        cr3 = root / "IMG_010.CR3"
+        _make_jpeg(jpg)
+        _touch(cr3, b"raw" * 100)
+
+        report = await scan_library(db, "lib-test", root)
+        assert report.added == 1  # 关键:只入 1 行,RAW 不再独立
+
+        async with db.conn.execute(
+            "SELECT file_path, companion_path, companion_format, companion_size "
+            "FROM photos WHERE library_id = ?",
+            ("lib-test",),
+        ) as cur:
+            row = await cur.fetchone()
+        assert row is not None
+        assert row["file_path"] == str(jpg)  # JPG 作主
+        assert row["companion_path"] == str(cr3)
+        assert row["companion_format"] == "CR3"
+        assert row["companion_size"] == len(b"raw" * 100)
+
+    async def test_companion_added_later_updates_main_row(
+        self,
+        db: Database,
+        tmp_path: Path,
+    ) -> None:
+        """先扫到 JPG,后导入 RAW → 第二次 scan 应把 companion 字段补上,不动 file_hash。"""
+        root = tmp_path / "lib"
+        jpg = root / "IMG_011.JPG"
+        _make_jpeg(jpg)
+        await scan_library(db, "lib-test", root)
+        await backfill_hashes(db, "lib-test")  # 让 hash 有值,后面验它没被清
+
+        # 后导入 RAW
+        cr3 = root / "IMG_011.CR3"
+        _touch(cr3, b"raw")
+        report = await scan_library(db, "lib-test", root)
+        assert report.updated == 1
+        assert report.added == 0
+
+        async with db.conn.execute(
+            "SELECT companion_path, companion_format, file_hash FROM photos "
+            "WHERE library_id = ?",
+            ("lib-test",),
+        ) as cur:
+            row = await cur.fetchone()
+        assert row is not None
+        assert row["companion_path"] == str(cr3)
+        assert row["companion_format"] == "CR3"
+        assert row["file_hash"] is not None  # 主文件没动,hash 应保留
+
+    async def test_companion_removed_clears_fields(
+        self,
+        db: Database,
+        tmp_path: Path,
+    ) -> None:
+        """RAW 同伴被删 → 第二次 scan 应清掉 companion_*,主 entry 保留。"""
+        root = tmp_path / "lib"
+        jpg = root / "IMG_012.JPG"
+        cr3 = root / "IMG_012.CR3"
+        _make_jpeg(jpg)
+        _touch(cr3)
+        await scan_library(db, "lib-test", root)
+
+        cr3.unlink()
+        await scan_library(db, "lib-test", root)
+
+        async with db.conn.execute(
+            "SELECT companion_path, companion_format, companion_size FROM photos "
+            "WHERE library_id = ?",
+            ("lib-test",),
+        ) as cur:
+            row = await cur.fetchone()
+        assert row is not None
+        assert row["companion_path"] is None
+        assert row["companion_format"] is None
+        assert row["companion_size"] is None
+
+
+class TestBackfillCompanion:
+    """`backfill_companion_for_library` — v6→v7 升级后的老库一次性补 companion 字段。"""
+
+    async def test_backfills_existing_pair(
+        self,
+        db: Database,
+        tmp_path: Path,
+    ) -> None:
+        """模拟老库:DB 有两行(JPG + CR3 各自一行,companion=NULL,这是 v6 行为)。
+        backfill 后:JPG 行得到 companion_path 指向 CR3。
+        注意:不删 CR3 photo 行(怕丢决策/物种标注),只补主 entry 的字段。"""
+        root = tmp_path / "lib"
+        jpg = root / "IMG_020.JPG"
+        cr3 = root / "IMG_020.CR3"
+        _make_jpeg(jpg)
+        _touch(cr3, b"raw")
+        # 模拟 v6 行为:两个文件各自独立入 photos
+        for p in (jpg, cr3):
+            await db.conn.execute(
+                "INSERT INTO photos (id, file_path, file_name, file_size, file_mtime, "
+                "format, created_at, library_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    f"photo-{p.suffix}",
+                    str(p),
+                    p.name,
+                    p.stat().st_size,
+                    "2026-01-01",
+                    p.suffix.lstrip(".").upper(),
+                    "2026-01-01",
+                    "lib-test",
+                ),
+            )
+        await db.conn.commit()
+
+        updated = await backfill_companion_for_library(db, "lib-test")
+        assert updated == 1  # 只 JPG 主 entry 被更新
+
+        async with db.conn.execute(
+            "SELECT file_path, companion_path FROM photos WHERE library_id = ? "
+            "ORDER BY file_path",
+            ("lib-test",),
+        ) as cur:
+            rows = await cur.fetchall()
+        # CR3 行: companion 仍 NULL(_resolve_pairs 把 IMAGE 选为主)
+        # JPG 行: companion = CR3 path
+        by_path = {str(r["file_path"]): r["companion_path"] for r in rows}
+        assert by_path[str(jpg)] == str(cr3)
+        assert by_path[str(cr3)] is None

@@ -127,6 +127,11 @@ class PhotoRow(BaseModel):
     height: int | None
     thumb_grid: str | None
     thumb_preview: str | None
+    # JPG/RAW 同名 pair 的 RAW 同伴文件信息(scanner v7 起识别)。无 pair 时全 None。
+    # 主 entry 走 file_path,companion 不入 photos 单独 entry,避免重复分析/重复决策。
+    companion_path: str | None = None
+    companion_format: str | None = None
+    companion_size: int | None = None
     created_at: str
     # 拍摄时间 ISO8601，优先级：EXIF DateTimeOriginal > file_mtime > created_at；
     # 用于前端按时间窗口分组（连拍/同场景照片聚合）

@@ -9,7 +9,7 @@ import structlog
 
 logger = structlog.stdlib.get_logger()
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 # SQL 放在模块常量里便于审阅与测试
 _SCHEMA_STATEMENTS: tuple[str, ...] = (
@@ -49,6 +49,13 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
         thumb_grid TEXT,
         thumb_preview TEXT,
         scene_id INTEGER,                -- 场景分组 id（同 library 内部，从 0 起）
+        -- v7：JPG/RAW 同名 pair 的同伴文件信息(主 entry 走 file_path,companion 不入
+        -- photos 单独 entry,只在主 entry 里记。导出 RAW / UI 显示 +RAW 标签用)。
+        -- pair 检测规则: 同目录 + 同 stem + 一个 IMAGE_EXTENSIONS + 一个 RAW_EXTENSIONS。
+        -- 主 entry 优先 IMAGE(JPG 等,跑管线快);仅有 RAW 时主就是 RAW,companion=NULL。
+        companion_path TEXT,             -- 同伴文件绝对路径,无 pair 时 NULL
+        companion_format TEXT,           -- 同伴文件大写格式名(CR3/NEF/ARW/JPG...)
+        companion_size INTEGER,          -- 同伴文件字节数(UI 显示+导出确认)
         created_at TEXT NOT NULL,
         library_id TEXT NOT NULL,
         FOREIGN KEY (library_id) REFERENCES libraries(id) ON DELETE CASCADE
@@ -288,6 +295,29 @@ class Database:
                 "DB migrated",
                 from_version=prior_version,
                 added="photo_species_overrides.bbox_*",
+            )
+        if prior_version < 7:
+            # v7：photos 加 companion_path/format/size 三列。JPG/RAW 同名 pair 主
+            # entry(优先 IMAGE,无 IMAGE 才 RAW)记 companion 同伴文件信息,RAW 同伴
+            # 不入 photos 单独 entry — 避免一对照片被分析两次/各打一次决策。
+            # 老数据列默认 NULL → 启动期 backfill_companion(scanner) 扫一次填充,
+            # 之后 scan_library 每次都维护。
+            for col, ctype in (
+                ("companion_path", "TEXT"),
+                ("companion_format", "TEXT"),
+                ("companion_size", "INTEGER"),
+            ):
+                try:
+                    await self._conn.execute(
+                        f"ALTER TABLE photos ADD COLUMN {col} {ctype}",
+                    )
+                except Exception as e:
+                    if "duplicate column" not in str(e).lower():
+                        raise
+            await logger.ainfo(
+                "DB migrated",
+                from_version=prior_version,
+                added="photos.companion_*",
             )
 
     async def get_schema_version(self) -> int:

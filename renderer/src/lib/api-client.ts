@@ -203,6 +203,11 @@ export interface PhotoRow {
   height: number | null
   thumb_grid: string | null
   thumb_preview: string | null
+  // JPG/RAW 同名 pair 的 RAW 同伴文件信息(scanner v7+)。无 pair 时全 null。
+  // UI 在卡片 / 复核屏显示 "+CR3 25 MB" 让用户知道还有原片可导出。
+  companion_path?: string | null
+  companion_format?: string | null
+  companion_size?: number | null
   created_at: string
   shot_at: string  // ISO8601 拍摄时间（EXIF DateTimeOriginal 优先）
   scene_id: number | null  // 场景分组 id

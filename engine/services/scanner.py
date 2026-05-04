@@ -751,6 +751,67 @@ def _walk_supported_files(root: Path, recursive: bool) -> list[Path]:
     return sorted(candidates)
 
 
+class _CompanionInfo:
+    """同伴文件元数据(scanner 内部用,不暴露给 service 外)。"""
+
+    __slots__ = ("path", "format", "size")
+
+    def __init__(self, path: Path, fmt: str, size: int) -> None:
+        self.path = path
+        self.format = fmt
+        self.size = size
+
+
+def _resolve_pairs(
+    files: list[Path],
+) -> tuple[list[Path], dict[str, _CompanionInfo | None]]:
+    """识别 (目录, stem) 同名的 IMAGE+RAW pair,返回 (主 entry 列表, 主路径→同伴 map)。
+
+    规则:
+    - 同 (parent, stem.lower()) 下,恰好 1 个 IMAGE_EXTENSIONS + 1 个 RAW_EXTENSIONS:
+      → IMAGE 作主 entry,RAW 作 companion(用户偏好 JPG 跑管线快)。
+    - 同 stem 多 IMAGE 或多 RAW(罕见,可能用户有 small.jpg + IMG.jpg + IMG.cr3):
+      → 不识别 pair,所有文件各自独立 INSERT(保持现有行为,避免误吞用户文件)。
+    - 同 stem 仅 IMAGE 或仅 RAW: → 该文件独立,无 companion。
+
+    主 entry 列表保持稳定排序(便于 scan_library 顺序消费)。同伴 map 的 key 是主
+    entry 的字符串路径,value 为 None 表示无同伴。
+    """
+    by_stem: dict[tuple[Path, str], list[Path]] = {}
+    for p in files:
+        key = (p.parent, p.stem.lower())
+        by_stem.setdefault(key, []).append(p)
+
+    primaries: list[Path] = []
+    companions: dict[str, _CompanionInfo | None] = {}
+
+    for paths in by_stem.values():
+        images = [p for p in paths if p.suffix.lower() in IMAGE_EXTENSIONS]
+        raws = [p for p in paths if p.suffix.lower() in RAW_EXTENSIONS]
+        if len(images) == 1 and len(raws) == 1:
+            # 明确 pair
+            primary = images[0]
+            raw = raws[0]
+            try:
+                raw_size = raw.stat().st_size
+            except OSError:
+                raw_size = 0
+            primaries.append(primary)
+            companions[str(primary)] = _CompanionInfo(
+                path=raw,
+                fmt=raw.suffix.lower().lstrip(".").upper(),
+                size=raw_size,
+            )
+        else:
+            # 不识别 pair,每个文件独立入库
+            for p in paths:
+                primaries.append(p)
+                companions[str(p)] = None
+
+    primaries.sort()
+    return primaries, companions
+
+
 class ScanReport:
     """Summary returned from `scan_library`."""
 
@@ -788,9 +849,10 @@ async def scan_library(
     report = ScanReport()
     conn = db.conn
 
-    existing: dict[str, tuple[str, int, str]] = {}
+    existing: dict[str, tuple[str, int, str, str | None]] = {}
     async with conn.execute(
-        "SELECT id, file_path, file_size, file_mtime FROM photos WHERE library_id = ?",
+        "SELECT id, file_path, file_size, file_mtime, companion_path "
+        "FROM photos WHERE library_id = ?",
         (library_id,),
     ) as cur:
         async for row in cur:
@@ -798,9 +860,11 @@ async def scan_library(
                 str(row["id"]),
                 int(row["file_size"]),
                 str(row["file_mtime"]),
+                str(row["companion_path"]) if row["companion_path"] is not None else None,
             )
 
-    files = _walk_supported_files(root, recursive=recursive)
+    raw_files = _walk_supported_files(root, recursive=recursive)
+    files, companion_map = _resolve_pairs(raw_files)
     now = _now_iso()
 
     for path in files:
@@ -812,6 +876,10 @@ async def scan_library(
 
         path_key = str(path)
         prev = existing.get(path_key)
+        comp = companion_map.get(path_key)
+        comp_path = str(comp.path) if comp else None
+        comp_format = comp.format if comp else None
+        comp_size = comp.size if comp else None
 
         if prev is None:
             meta = _probe_image_meta(path)
@@ -820,8 +888,9 @@ async def scan_library(
                 await conn.execute(
                     "INSERT INTO photos (id, file_path, file_name, file_size, "
                     "file_mtime, format, width, height, exif_json, "
+                    "companion_path, companion_format, companion_size, "
                     "created_at, library_id) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         photo_id,
                         path_key,
@@ -832,6 +901,9 @@ async def scan_library(
                         meta.get("width"),
                         meta.get("height"),
                         meta.get("exif_json"),
+                        comp_path,
+                        comp_format,
+                        comp_size,
                         now,
                         library_id,
                     ),
@@ -840,30 +912,69 @@ async def scan_library(
             except Exception as e:
                 report.errors.append((path_key, f"insert failed: {e}"))
         else:
-            _prev_id, prev_size, prev_mtime = prev
-            if prev_size == size and prev_mtime == mtime:
+            _prev_id, prev_size, prev_mtime, prev_comp = prev
+            file_unchanged = prev_size == size and prev_mtime == mtime
+            companion_unchanged = prev_comp == comp_path
+            if file_unchanged and companion_unchanged:
                 report.unchanged += 1
                 continue
-            meta = _probe_image_meta(path)
-            try:
-                await conn.execute(
-                    "UPDATE photos SET file_size = ?, file_mtime = ?, "
-                    "file_hash = NULL, width = ?, height = ?, "
-                    "exif_json = ? WHERE file_path = ?",
-                    (
-                        size,
-                        mtime,
-                        meta.get("width"),
-                        meta.get("height"),
-                        meta.get("exif_json"),
-                        path_key,
-                    ),
-                )
-                report.updated += 1
-            except Exception as e:
-                report.errors.append((path_key, f"update failed: {e}"))
+            # 主文件变了 → 重读 meta + 清 hash;否则只更新 companion 字段
+            if not file_unchanged:
+                meta = _probe_image_meta(path)
+                try:
+                    await conn.execute(
+                        "UPDATE photos SET file_size = ?, file_mtime = ?, "
+                        "file_hash = NULL, width = ?, height = ?, exif_json = ?, "
+                        "companion_path = ?, companion_format = ?, companion_size = ? "
+                        "WHERE file_path = ?",
+                        (
+                            size,
+                            mtime,
+                            meta.get("width"),
+                            meta.get("height"),
+                            meta.get("exif_json"),
+                            comp_path,
+                            comp_format,
+                            comp_size,
+                            path_key,
+                        ),
+                    )
+                    report.updated += 1
+                except Exception as e:
+                    report.errors.append((path_key, f"update failed: {e}"))
+            else:
+                # 仅 companion 变化(用户后导入 RAW / 删了 RAW)→ 不重读 meta、不清 hash
+                try:
+                    await conn.execute(
+                        "UPDATE photos SET companion_path = ?, companion_format = ?, "
+                        "companion_size = ? WHERE file_path = ?",
+                        (comp_path, comp_format, comp_size, path_key),
+                    )
+                    report.updated += 1
+                except Exception as e:
+                    report.errors.append((path_key, f"companion update failed: {e}"))
 
     await conn.commit()
+    # 入库后增量做一次 companion 反向清理:之前是 pair 主 entry、现在 RAW 同伴消失
+    # → companion_* 应清掉。本轮 scan 已经把仍然存在的 pair 写对了,但如果用户刚
+    # 删掉某个 RAW,主 JPG 的 file size/mtime 没变 → file_unchanged=true,但 companion
+    # 也没变化(prev_comp=path, comp=path)→ companion_unchanged=true → 不会进 UPDATE。
+    # 这里用 fs ground truth 兜底:对所有处理过的 path,如果 companion_map 是 None
+    # 但 DB 里 companion_path 还指向已不存在的文件,清掉。
+    paths_with_no_companion = [
+        p for p, c in companion_map.items() if c is None and p in existing
+    ]
+    if paths_with_no_companion:
+        for path_key in paths_with_no_companion:
+            prev = existing.get(path_key)
+            if prev and prev[3] is not None:
+                # DB 里有 companion_path,但本轮 fs 扫描下这个 path 不再 pair → 清掉
+                await conn.execute(
+                    "UPDATE photos SET companion_path = NULL, companion_format = NULL, "
+                    "companion_size = NULL WHERE file_path = ?",
+                    (path_key,),
+                )
+        await conn.commit()
     await logger.ainfo(
         "Library scan completed",
         library_id=library_id,
@@ -874,6 +985,57 @@ async def scan_library(
         error_count=len(report.errors),
     )
     return report
+
+
+async def backfill_companion_for_library(db: Database, library_id: str) -> int:
+    """v6 → v7 升级后老库的 companion_* 字段补全(轻量,只 stat 不读 EXIF)。
+
+    思路:把老库 photos 表中所有 file_path 拿出来,按 (parent, stem) 重新分组识别 pair,
+    给主 entry 写 companion_*。本函数不入新行(只更新老 photos),也不删孤儿 RAW
+    photo(老库可能 RAW + JPG 都各自入库了 — 删 RAW photo 会丢用户的决策/物种标注)。
+
+    适合在 lifespan 启动时跑一次。后续正常 scan_library 会自动维护。
+
+    Returns: 成功更新 companion 字段的 photo 行数。
+    """
+    conn = db.conn
+    async with conn.execute(
+        "SELECT file_path, companion_path FROM photos WHERE library_id = ?",
+        (library_id,),
+    ) as cur:
+        rows = await cur.fetchall()
+
+    paths = [Path(str(r["file_path"])) for r in rows]
+    existing_companion = {str(r["file_path"]): r["companion_path"] for r in rows}
+    if not paths:
+        return 0
+
+    # 仅把 fs 上仍存在的 file 纳入 pair 识别(消失文件不参与,避免错误关联)
+    alive_paths = [p for p in paths if p.exists()]
+    _primaries, companion_map = _resolve_pairs(alive_paths)
+
+    updated = 0
+    for path_str, comp in companion_map.items():
+        prev = existing_companion.get(path_str)
+        new_comp_path = str(comp.path) if comp else None
+        if prev == new_comp_path:
+            continue
+        new_format = comp.format if comp else None
+        new_size = comp.size if comp else None
+        await conn.execute(
+            "UPDATE photos SET companion_path = ?, companion_format = ?, "
+            "companion_size = ? WHERE file_path = ?",
+            (new_comp_path, new_format, new_size, path_str),
+        )
+        updated += 1
+    if updated > 0:
+        await conn.commit()
+        await logger.ainfo(
+            "Companion backfill done",
+            library_id=library_id,
+            updated=updated,
+        )
+    return updated
 
 
 async def backfill_hashes(db: Database, library_id: str, batch_size: int = 50) -> int:
