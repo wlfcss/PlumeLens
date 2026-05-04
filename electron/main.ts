@@ -123,8 +123,16 @@ interface EditorEntry {
 
 const EDITOR_REGISTRY: Record<EditorTool, EditorEntry> = {
   topaz: {
-    // Topaz 各产品(Photo AI/Sharpen AI/DeNoise AI/Gigapixel)同时存在时优先 Photo AI(综合)
-    appNames: ['Topaz Photo AI', 'Topaz Sharpen AI', 'Topaz DeNoise AI', 'Topaz Gigapixel AI'],
+    // Topaz 2024 年统一改名去掉 "AI" 后缀(Topaz Photo AI → Topaz Photo)。
+    // 探测优先新名,fallback 到老名 + 单功能产品(用户可能装多个)。
+    appNames: [
+      'Topaz Photo',          // 现行综合产品(2024+)
+      'Topaz Photo AI',       // 老综合产品名(2022-2023)
+      'Topaz Sharpen AI',     // 单功能,锐化
+      'Topaz DeNoise AI',     // 单功能,降噪
+      'Topaz Gigapixel AI',   // 单功能,放大
+      'Topaz Gigapixel',      // 改名后的 Gigapixel
+    ],
     resolved: null,
   },
   photoshop: {
