@@ -407,6 +407,20 @@
         "qinghaiTibet": "青藏"
       }
     },
+    "geo": {
+      "country": "中国",
+      "tooltipSpecies": "鸟种 {{count}}",
+      "tooltipPhotos": "照片 {{count}}",
+      "noData": "暂无数据",
+      "legendMore": "多",
+      "legendNone": "少",
+      "statProvinces": "{{count}} 个省份有照片",
+      "loadingProvince": "加载省级地图中…",
+      "backfillProgress": "解析地理位置 {{resolved}}/{{total}}…",
+      "unmapped": "{{count}} 张照片缺少 GPS，未在地图中展示",
+      "allMapped": "所有 GPS 照片均已上图",
+      "unknownPlace": "未命名拍摄点"
+    },
     "species": {
       "photoCount": "照片数",
       "bestScore": "最佳分",

@@ -2544,6 +2544,207 @@ button:disabled {
   margin-top: 22px;
 }
 
+/* echarts 模式:全宽,不再有右侧 photo panel */
+.archive-map-layout--echarts {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.archive-geo {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.archive-geo__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.archive-geo__crumbs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.archive-geo__crumb-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.archive-geo__crumb {
+  background: transparent;
+  border: none;
+  padding: 4px 8px;
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.7);
+  cursor: pointer;
+  border-radius: 4px;
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.archive-geo__crumb:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.06);
+  color: #fff;
+}
+
+.archive-geo__crumb:disabled,
+.archive-geo__crumb--active {
+  color: #84e09d;
+  cursor: default;
+}
+
+.archive-geo__indicators {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.6);
+}
+
+.archive-geo__progress {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #fdba74;
+}
+
+.archive-geo__stat {
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.archive-geo__canvas {
+  position: relative;
+  width: 100%;
+  height: 540px;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #050908;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.archive-geo__chart {
+  width: 100%;
+  height: 100%;
+}
+
+.archive-geo__overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(2px);
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.75);
+}
+
+.archive-geo__note {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.45);
+  margin: 0;
+}
+
+/* 三级 spot 详情弹卡 */
+.archive-geo__spot-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.7);
+  backdrop-filter: blur(8px);
+  animation: pl-surface-in var(--pl-motion-base, 180ms) ease both;
+}
+
+.archive-geo__spot-card {
+  width: min(720px, calc(100vw - 60px));
+  max-height: calc(100vh - 80px);
+  background: var(--pl-bg-1);
+  border: 1px solid var(--pl-border-1);
+  border-radius: var(--pl-radius-lg);
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.6);
+  padding: 22px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  overflow-y: auto;
+  animation: pl-modal-in var(--pl-motion-slow, 280ms) ease both;
+}
+
+.archive-geo__spot-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.archive-geo__spot-head strong {
+  font-size: 15px;
+}
+
+.archive-geo__spot-head small {
+  margin-left: auto;
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.5);
+  font-family: var(--pl-mono, monospace);
+}
+
+.archive-geo__spot-meta {
+  display: flex;
+  gap: 16px;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.archive-geo__spot-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 10px;
+}
+
+.archive-geo__spot-thumb {
+  position: relative;
+  aspect-ratio: 4 / 3;
+  border: none;
+  border-radius: 6px;
+  overflow: hidden;
+  cursor: pointer;
+  background: rgba(255, 255, 255, 0.04);
+  padding: 0;
+  transition: transform 160ms ease;
+}
+
+.archive-geo__spot-thumb:hover {
+  transform: scale(1.03);
+}
+
+.archive-geo__spot-thumb-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.archive-geo__spot-thumb-meta {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  padding: 6px 8px;
+  background: linear-gradient(transparent, rgba(0, 0, 0, 0.85));
+  color: #fff;
+  font-size: 10px;
+  text-align: left;
+}
+
 .china-map-card,
 .map-photo-panel {
   position: relative;

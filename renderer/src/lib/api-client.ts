@@ -438,6 +438,56 @@ export const api = {
     request<ReverseGeocodeResponse>(
       `/geocoding/reverse?lat=${lat}&lon=${lon}&lang=${encodeURIComponent(lang)}`,
     ),
+
+  // 羽迹三级地图聚合 — 后端 SQL 聚合,前端按需 lazy load 各级 GeoJSON
+  geoSummary: () => request<GeoSummary>('/archive/geo/summary'),
+  geoProvinces: () => request<GeoProvinceRow[]>('/archive/geo/provinces'),
+  geoCities: (province: string) =>
+    request<GeoCityRow[]>(
+      `/archive/geo/cities?province=${encodeURIComponent(province)}`,
+    ),
+  geoSpots: (province: string, city: string) =>
+    request<GeoSpot[]>(
+      `/archive/geo/spots?province=${encodeURIComponent(province)}&city=${encodeURIComponent(city)}`,
+    ),
+}
+
+export interface GeoSummary {
+  total_with_gps: number
+  resolved: number
+  pending: number
+  photos_without_gps: number
+}
+
+export interface GeoProvinceRow {
+  province: string
+  photo_count: number
+  species_count: number
+}
+
+export interface GeoCityRow {
+  city: string
+  photo_count: number
+  species_count: number
+}
+
+export interface GeoSpotPhoto {
+  photo_id: string
+  file_name: string
+  species_latin: string | null
+  species_zh: string | null
+  thumb_grid: string | null
+  grade: string | null
+  quality_score: number | null
+}
+
+export interface GeoSpot {
+  lat: number
+  lon: number
+  place: string | null
+  photo_count: number
+  species_count: number
+  photos: GeoSpotPhoto[]
 }
 
 export interface ReverseGeocodeResponse {

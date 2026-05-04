@@ -58,5 +58,8 @@
     "typescript-eslint": "^8.0.0",
     "vitest": "^3.0.0",
     "zustand": "^5.0.0"
+  },
+  "dependencies": {
+    "echarts": "^6.0.0"
   }
 }

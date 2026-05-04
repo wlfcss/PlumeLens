@@ -9,7 +9,6 @@ import {
   FolderOpen,
   FolderSearch2,
   LibraryBig,
-  MapPin,
   RefreshCw,
   Search,
   Settings2,
@@ -33,6 +32,7 @@ import {
 } from 'react'
 import { useTranslation } from 'react-i18next'
 
+import { ArchiveGeoMap } from '@/components/archive-geo-map'
 import { EngineStatusBanner } from '@/components/engine-status-banner'
 import { ReviewModal } from '@/components/review/review-modal'
 import { SettingsModal } from '@/components/settings-modal'
@@ -3095,7 +3095,6 @@ function ArchiveScreen({
   onSetArchiveTab: (tab: ArchiveTab) => void
   t: ReturnType<typeof useTranslation>['t']
 }) {
-  const [selectedMapPinId, setSelectedMapPinId] = useState<string | null>(null)
   const [collectionFilter, setCollectionFilter] = useState<SpeciesCollectionFilter>('all')
   const [speciesPhotosOpen, setSpeciesPhotosOpen] = useState(false)
   const activeSpeciesWiki = useMemo(
@@ -3124,28 +3123,6 @@ function ArchiveScreen({
     }
     return archiveSpecies
   }, [archiveSpecies, collectionFilter])
-  const mapPins = useMemo(
-    () => buildArchiveMapPins(archivePhotos, archiveSpecies),
-    [archivePhotos, archiveSpecies],
-  )
-  const unmappedPhotoCount = useMemo(
-    () =>
-      new Set(
-        archivePhotos
-          .filter((photo) => {
-            const gps = extractPhotoGps(photo.exif)
-            return !gps || !gpsToChinaMapPoint(gps.lat, gps.lon)
-          })
-          .map((photo) => photo.id),
-      ).size,
-    [archivePhotos],
-  )
-  const selectedMapPin =
-    mapPins.find((pin) => pin.id === selectedMapPinId) ??
-    mapPins.find((pin) => pin.speciesId === activeSpecies?.id) ??
-    mapPins[0] ??
-    null
-  const mapSpeciesCount = new Set(mapPins.map((pin) => pin.speciesId)).size
   const collectionGroups = useMemo(() => {
     return buildSpeciesCollectionGroups(filteredArchiveSpecies)
   }, [filteredArchiveSpecies])
@@ -3263,99 +3240,16 @@ function ArchiveScreen({
             ) : null}
           </div>
         ) : (
-          <div className="archive-map-layout">
+          <div className="archive-map-layout archive-map-layout--echarts">
             <section className="china-map-card">
               <div className="china-map-card__heading">
                 <div>
                   <SectionLabel label={t('archive.map.label')} />
                   <h2>{t('archive.map.title')}</h2>
                 </div>
-                <span>{t('archive.map.locatedSpecies', { count: mapSpeciesCount })}</span>
               </div>
-              <div className="china-map-canvas" aria-label={t('archive.map.title')}>
-                <svg className="china-map-svg" viewBox="0 0 640 460" aria-hidden="true">
-                  <path
-                    className="china-map-svg__land"
-                    d="M95 158 L142 117 L218 102 L270 62 L350 88 L418 70 L520 120 L560 196 L521 258 L544 326 L478 379 L384 364 L320 410 L242 370 L154 388 L104 324 L122 244 Z"
-                  />
-                  <path
-                    className="china-map-svg__inner"
-                    d="M164 142 L230 132 L296 96 M320 116 L354 352 M214 186 L512 206 M170 276 L486 306 M274 244 L194 360 M410 120 L472 342"
-                  />
-                </svg>
-                {chinaMapRegions.map((region) => (
-                  <span
-                    className="map-region-label"
-                    key={region.id}
-                    style={{ left: `${region.x}%`, top: `${region.y}%` }}
-                  >
-                    {t(region.labelKey)}
-                  </span>
-                ))}
-                {mapPins.map((pin) => (
-                  <button
-                    className={cn(
-                      'map-pin',
-                      selectedMapPin?.id === pin.id && 'map-pin--active',
-                    )}
-                    key={pin.id}
-                    onClick={() => {
-                      setSelectedMapPinId(pin.id)
-                      onSelectSpecies(pin.speciesId)
-                    }}
-                    style={{ left: `${pin.x}%`, top: `${pin.y}%` }}
-                    type="button"
-                  >
-                    <MapPin className="h-4 w-4" />
-                    <span>{pin.photos.length}</span>
-                  </button>
-                ))}
-              </div>
-              <p className="archive-map-note">
-                {unmappedPhotoCount > 0
-                  ? t('archive.map.unlocated', { count: unmappedPhotoCount })
-                  : t('archive.map.allLocated')}
-              </p>
+              <ArchiveGeoMap onOpenPhoto={onOpenReview} />
             </section>
-
-            <aside className="map-photo-panel">
-              <SectionLabel label={t('archive.map.detailLabel')} />
-              {selectedMapPin ? (
-                <>
-                  <div className="map-photo-panel__heading">
-                    <strong>{selectedMapPin.speciesName}</strong>
-                    <small>
-                      {t(selectedMapPin.regionLabelKey)} · {selectedMapPin.latinName}
-                    </small>
-                  </div>
-                  <div className="map-photo-list selection-scroll">
-                    {selectedMapPin.photos.map((photo) => (
-                      <button
-                        className="map-photo-card"
-                        key={photo.id}
-                        onClick={() => onOpenReview(photo.id)}
-                        style={{
-                          backgroundImage: photo.placeholderGradient ?? photo.previewGradient,
-                        }}
-                        type="button"
-                      >
-                        <ThumbnailImage
-                          alt={photo.fileName}
-                          className="map-photo-card__image"
-                          src={photo.thumbGridUrl}
-                        />
-                        <span>
-                          <strong>{photo.fileName}</strong>
-                          <small>{formatScore(photo.finalScore)}</small>
-                        </span>
-                      </button>
-                    ))}
-                  </div>
-                </>
-              ) : (
-                <p className="archive-map-empty">{t('archive.map.empty')}</p>
-              )}
-            </aside>
           </div>
         )}
       </section>

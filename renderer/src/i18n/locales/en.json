@@ -407,6 +407,20 @@
         "qinghaiTibet": "Qinghai-Tibet"
       }
     },
+    "geo": {
+      "country": "China",
+      "tooltipSpecies": "{{count}} species",
+      "tooltipPhotos": "{{count}} photos",
+      "noData": "No data",
+      "legendMore": "More",
+      "legendNone": "None",
+      "statProvinces": "{{count}} provinces with photos",
+      "loadingProvince": "Loading provincial map…",
+      "backfillProgress": "Resolving locations {{resolved}}/{{total}}…",
+      "unmapped": "{{count}} photos lack GPS and are hidden from the map",
+      "allMapped": "All GPS photos placed on the map",
+      "unknownPlace": "Unnamed location"
+    },
     "species": {
       "photoCount": "Photo count",
       "bestScore": "Best score",
