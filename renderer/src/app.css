@@ -2620,7 +2620,12 @@ button:disabled {
 .archive-geo__canvas {
   position: relative;
   width: 100%;
-  height: 540px;
+  /* 自适应高度:小窗口走 min-height 540 兜底,大窗口随 viewport 撑满。
+     400px 估算 = screen padding(42+56) + heading(~80) + metric-strip(~80) +
+     card heading(~80) + canvas top margin/padding(~62)。低于估算时 min-height
+     胜出,高于时 calc 胜出 — 不需要 JS 监听 resize,纯 CSS 跟随 window 变化。 */
+  min-height: 540px;
+  height: calc(100vh - 400px);
   border-radius: 8px;
   overflow: hidden;
   background: #050908;
