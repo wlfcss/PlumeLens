@@ -2801,7 +2801,13 @@ function PhotoTile({
           src={photo.thumbGridUrl}
         />
         <span className="photo-preview__top">
-          {photo.analysisStatus === 'pending' || photo.analysisStatus === 'running' ? (
+          {photo.analysisStatus === 'failed' ? (
+            <StatusPill
+              label={t('selection.analysisStatus.failed')}
+              title={photo.analysisError ?? undefined}
+              tone="accent"
+            />
+          ) : photo.analysisStatus === 'pending' || photo.analysisStatus === 'running' ? (
             <StatusPill
               label={t(`selection.analysisStatus.${photo.analysisStatus}`)}
               tone="muted"
@@ -3859,8 +3865,20 @@ function StatRow({
   )
 }
 
-function StatusPill({ label, tone = 'neutral' }: { label: string; tone?: Tone }) {
-  return <span className={cn('status-pill', `status-pill--${tone}`)}>{label}</span>
+function StatusPill({
+  label,
+  tone = 'neutral',
+  title,
+}: {
+  label: string
+  tone?: Tone
+  title?: string
+}) {
+  return (
+    <span className={cn('status-pill', `status-pill--${tone}`)} title={title}>
+      {label}
+    </span>
+  )
 }
 
 function StatusDot({ tone = 'neutral' }: { tone?: Tone }) {

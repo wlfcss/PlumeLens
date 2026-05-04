@@ -624,10 +624,12 @@ async def library_detail(request: Request, library_id: str) -> LibraryDetail:
         "p.scene_id, p.companion_path, p.companion_format, p.companion_size, "
         "ar.pipeline_version, ar.grade, ar.quality_score, ar.bird_count, ar.species, "
         "ar.result_json, "
-        "pd.decision "
+        "pd.decision, "
+        "tq.status AS task_status, tq.error_message AS task_error "
         "FROM photos p "
         "LEFT JOIN analysis_results ar ON ar.photo_id = p.id AND ar.is_active = 1 "
         "LEFT JOIN photo_decisions pd ON pd.photo_id = p.id "
+        "LEFT JOIN task_queue tq ON tq.photo_id = p.id "
         "WHERE p.library_id = ? "
         "ORDER BY p.file_mtime ASC",
         (library_id,),
@@ -838,6 +840,26 @@ async def library_detail(request: Request, library_id: str) -> LibraryDetail:
         # detections[i].species_source）。
         # group_consensus / conflict 由 _apply_group_species_consensus 后续改写。
         species_source: SpeciesSource = best.species_source if best else "none"
+        # 分析任务状态映射:
+        # - 已有 active analysis_results → done(无视 task 状态,因为 task 可能在后续 retrigger
+        #   时被新建,但只要 analysis_results 仍 active 就是有效结果)
+        # - 否则 task DEAD/FAILED → failed(图损坏 / 模型报错,attempts 已用尽)
+        # - 否则 → pending(包含 task 不存在 / pending / processing / paused)
+        has_result = r["pipeline_version"] is not None
+        task_status_raw = (
+            str(r["task_status"]) if r["task_status"] is not None else None
+        )
+        if has_result:
+            analysis_status = "done"
+        elif task_status_raw in ("dead", "failed"):
+            analysis_status = "failed"
+        else:
+            analysis_status = "pending"
+        analysis_error = (
+            str(r["task_error"])
+            if (analysis_status == "failed" and r["task_error"] is not None)
+            else None
+        )
         photos.append(
             PhotoRow(
                 id=str(r["id"]),
@@ -877,6 +899,8 @@ async def library_detail(request: Request, library_id: str) -> LibraryDetail:
                 model_species=model_species,
                 model_species_latin=model_species_latin,
                 decision=(str(r["decision"]) if r["decision"] is not None else None),
+                analysis_status=analysis_status,
+                analysis_error=analysis_error,
                 exif=_parse_exif(r["exif_json"]),
                 best_detection=best,
                 detections=details,

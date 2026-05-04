@@ -85,7 +85,7 @@
       "pending": "Pending",
       "running": "Running",
       "done": "Done",
-      "failed": "Failed"
+      "failed": "Analysis failed"
     },
     "sidebar": {
       "label": "Folder navigation",

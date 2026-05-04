@@ -163,6 +163,12 @@ class PhotoRow(BaseModel):
     species_conflict: bool = False
     # Manual layer：人工评级覆盖；null 表示使用系统自动 grade。
     decision: str | None = None
+    # 分析任务状态(从 task_queue join)。done = 有 active analysis_results,
+    # failed = task DEAD/FAILED(图损坏 / 模型错误,attempts 用尽),pending = 排队中或
+    # 处理中或还没 enqueue。UI 用此区分"失败"与"等待"——前者明确告诉用户文件有问题。
+    analysis_status: str = "pending"
+    # 失败原因(task_queue.error_message),仅在 analysis_status=failed 时有意义
+    analysis_error: str | None = None
     # 完整 EXIF（whitelist 字段：相机/镜头/快门/光圈/ISO/焦距/...）
     exif: dict[str, Any] | None = None
     # 最佳鸟的检测细节（深度复核要画 bbox / 关键点）

@@ -85,7 +85,7 @@
       "pending": "待分析",
       "running": "分析中",
       "done": "已完成",
-      "failed": "失败"
+      "failed": "分析失败"
     },
     "sidebar": {
       "label": "文件夹导航",

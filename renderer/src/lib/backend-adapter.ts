@@ -322,7 +322,10 @@ export function buildPhotoRecordFromRow(
     semanticScore: bestQuality?.clipiqa ?? row.quality_score,
     technicalScore: bestQuality?.hyperiqa ?? row.quality_score,
     poseScore: null,
-    analysisStatus: isAnalyzed ? 'done' : 'pending',
+    // 后端 analysis_status 已在 SQL JOIN task_queue 后给出权威映射(done/failed/pending);
+    // 老 PhotoRow 没这个字段时回落到 isAnalyzed 派生(向后兼容)。
+    analysisStatus: row.analysis_status ?? (isAnalyzed ? 'done' : 'pending'),
+    analysisError: row.analysis_error ?? null,
     poseTags: [],
     problemTags: deriveProblemTags(row),
     sceneTag: 'record_shot',
