@@ -90,7 +90,10 @@ export function ThumbnailImage({
       alt={alt}
       className={className}
       decoding="async"
-      loading="lazy"
+      // 不用 loading="lazy" — grid 缩略图体积小(平均 ~15KB,全库 282 张总共 5MB),
+      // lazy 会让滚动后总有 100-300ms"渐变占位"窗口,UX 差。eager 一次性请求,
+      // main 进程的 plumelens:// 协议并发处理(libuv 4 worker thread + cached realpath
+      // root),实测可在 1-2s 内全部就位。preview 大图仍是按需点开 review 时单张加载。
       onError={() => {
         if (photoId) onStatusChange?.(photoId, 'error')
         if (attempt >= MAX_RETRY_ATTEMPTS || retryTimerRef.current !== null) return

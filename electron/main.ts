@@ -118,6 +118,15 @@ ipcMain.handle('open-logs-dir', async () => {
 // Lifecycle
 app.whenReady().then(async () => {
   const thumbnailsRoot = join(app.getPath('userData'), 'derived', 'thumbnails')
+  const rootResolved = resolve(thumbnailsRoot)
+  // 启动期一次性算 realpath(thumbnailsRoot) — userData 目录在应用运行期间不会变,
+  // 之前每个 plumelens:// 请求都重新 realpath 这个根,大量并发缩略图加载时会让
+  // main process 的 fs worker 排队。先尝试 realpath,thumbnailsRoot 不存在时
+  // (首次启动 / 数据被清)用 rootResolved 兜底,等首次 ensure_dir 后下次启动再算对。
+  let realRootCache: string = rootResolved
+  try {
+    realRootCache = await realpath(thumbnailsRoot)
+  } catch { /* dir 不存在,后续按需 realpath 单文件时会触发创建 */ }
   process.stderr.write(`[main] userData=${app.getPath('userData')}\n`)
   process.stderr.write(`[main] thumbnailsRoot=${thumbnailsRoot}\n`)
   protocol.handle('plumelens', async (request) => {
@@ -143,15 +152,14 @@ app.whenReady().then(async () => {
     const filePath = join(thumbnailsRoot, rel)
     // path.resolve 后必须仍在 thumbnailsRoot 之内（防普通 path traversal）
     const resolved = resolve(filePath)
-    const rootResolved = resolve(thumbnailsRoot)
     if (!resolved.startsWith(rootResolved + '/') && resolved !== rootResolved) {
       return new Response('Forbidden (escape)', { status: 403 })
     }
     try {
-      // realpath 再确认真实落点，防止 thumbnailsRoot 内的 symlink 指向外部文件。
-      const realRoot = await realpath(thumbnailsRoot)
+      // realpath 单文件确认真实落点(防 thumbnailsRoot 内 symlink 逃逸);
+      // root 用启动期缓存的 realRootCache,无需每次重算。
       const realFile = await realpath(resolved)
-      if (!realFile.startsWith(realRoot + '/') && realFile !== realRoot) {
+      if (!realFile.startsWith(realRootCache + '/') && realFile !== realRootCache) {
         return new Response('Forbidden (symlink escape)', { status: 403 })
       }
       return await net.fetch(pathToFileURL(realFile).toString())
