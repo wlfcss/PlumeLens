@@ -87,6 +87,13 @@
       "done": "Done",
       "failed": "Analysis failed"
     },
+    "analysisError": {
+      "broken_image": "Image data stream is corrupt (possibly an interrupted card write or copy)",
+      "invalid_image": "File is not a recognizable image",
+      "file_missing": "Source file no longer exists",
+      "timeout": "Analysis timed out (pipeline stuck)",
+      "unknown": "Analysis failed; see logs for details"
+    },
     "sidebar": {
       "label": "Folder navigation",
       "title": "Working set",
@@ -302,7 +309,9 @@
       "focalLength": "Focal length",
       "camera": "Camera",
       "lens": "Lens",
-      "time": "Time"
+      "time": "Time",
+      "location": "Location",
+      "openInMaps": "Open in Maps"
     },
     "empty": {
       "title": "No folders ready yet",

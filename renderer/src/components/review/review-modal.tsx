@@ -1264,6 +1264,7 @@ function ExifPanel({
   })()
   const lens = fmt('LensModel')
   const dt = fmt('DateTimeOriginal') !== '--' ? fmt('DateTimeOriginal') : fmt('DateTime')
+  const gps = extractGpsCoords(exif)
 
   return (
     <div className="exif-panel">
@@ -1292,7 +1293,63 @@ function ExifPanel({
         <CompactKV label={t('selection.exif.camera')} value={camera} />
         <CompactKV label={t('selection.exif.lens')} value={lens} />
         <CompactKV label={t('selection.exif.time')} value={dt} />
+        {gps ? (
+          <div className="compact-kv">
+            <span className="compact-kv__label">{t('selection.exif.location')}</span>
+            <a
+              className="compact-kv__value compact-kv__value--link"
+              href={`https://maps.apple.com/?ll=${gps.lat},${gps.lon}&z=15`}
+              rel="noopener noreferrer"
+              target="_blank"
+              title={t('selection.exif.openInMaps')}
+            >
+              {formatGpsCoords(gps)}
+            </a>
+          </div>
+        ) : null}
       </div>
     </div>
   )
+}
+
+/** 从 EXIF 抽 GPS 坐标。返回十进制度(WGS84),不可解析返回 null。 */
+function extractGpsCoords(
+  exif: Record<string, unknown>,
+): { lat: number; lon: number; alt: number | null } | null {
+  // 后端 scanner._extract_exif 把 GPSInfo 子目录展开为 dict (含 GPSLatitudeRef/
+  // GPSLatitude/GPSLongitudeRef/GPSLongitude/GPSAltitude...);GPSLatitude 是 [度,分,秒]
+  // 三元组(都是 number)。
+  const gps = exif['GPSInfo']
+  if (!gps || typeof gps !== 'object') return null
+  const g = gps as Record<string, unknown>
+  const lat = dmsToDecimal(g['GPSLatitude'], g['GPSLatitudeRef'])
+  const lon = dmsToDecimal(g['GPSLongitude'], g['GPSLongitudeRef'])
+  if (lat === null || lon === null) return null
+  let alt: number | null = null
+  const a = g['GPSAltitude']
+  if (typeof a === 'number' && Number.isFinite(a)) {
+    // GPSAltitudeRef: 0 = 海平面以上,1 = 海平面以下(很罕见)
+    alt = g['GPSAltitudeRef'] === 1 ? -a : a
+  }
+  return { lat, lon, alt }
+}
+
+function dmsToDecimal(dms: unknown, ref: unknown): number | null {
+  if (!Array.isArray(dms) || dms.length < 3) return null
+  const [d, m, s] = dms
+  if (typeof d !== 'number' || typeof m !== 'number' || typeof s !== 'number') return null
+  let value = d + m / 60 + s / 3600
+  if (!Number.isFinite(value)) return null
+  // S(South) / W(West) → 负值
+  if (ref === 'S' || ref === 'W') value = -value
+  return value
+}
+
+function formatGpsCoords(gps: { lat: number; lon: number; alt: number | null }): string {
+  const latStr = `${Math.abs(gps.lat).toFixed(5)}°${gps.lat >= 0 ? 'N' : 'S'}`
+  const lonStr = `${Math.abs(gps.lon).toFixed(5)}°${gps.lon >= 0 ? 'E' : 'W'}`
+  if (gps.alt !== null) {
+    return `${latStr}, ${lonStr} · ${Math.round(gps.alt)} m`
+  }
+  return `${latStr}, ${lonStr}`
 }

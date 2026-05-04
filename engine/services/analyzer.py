@@ -60,7 +60,7 @@ async def analyze_photo(
         raise RuntimeError(msg)
 
     async with db.conn.execute(
-        "SELECT file_path FROM photos WHERE id = ?",
+        "SELECT file_path, companion_path FROM photos WHERE id = ?",
         (photo_id,),
     ) as cur:
         row = await cur.fetchone()
@@ -68,6 +68,8 @@ async def analyze_photo(
         msg = f"Photo not found: {photo_id}"
         raise RuntimeError(msg)
     file_path = Path(str(row["file_path"]))
+    companion_raw = row["companion_path"]
+    companion_path = Path(str(companion_raw)) if companion_raw else None
 
     current_version = pipeline.pipeline_version
 
@@ -94,7 +96,28 @@ async def analyze_photo(
         pipeline_version=current_version,
         force_rerun=force_rerun,
     )
-    result = await pipeline.analyze(file_path, photo_id=photo_id)
+    try:
+        result = await pipeline.analyze(file_path, photo_id=photo_id)
+    except Exception as e:
+        # 主文件读取失败 — 常见场景是 JPG 写卡未完成 / 拷贝错误,文件头合法但
+        # 数据流损坏(PIL 抛 OSError "broken data stream")。Canon 等相机是 RAW + JPG
+        # 双路独立写卡,JPG 坏不代表 RAW 坏,值得用 companion 重试一次。
+        # 注意:companion 仍读不出才真 fail(两个文件都坏几乎不可能,除非 SD 卡损坏)。
+        if companion_path is None or not companion_path.exists():  # noqa: ASYNC240
+            raise
+        await logger.awarning(
+            "Pipeline failed on primary, trying companion fallback",
+            photo_id=photo_id,
+            primary=str(file_path),
+            companion=str(companion_path),
+            error=str(e),
+        )
+        result = await pipeline.analyze(companion_path, photo_id=photo_id)
+        await logger.ainfo(
+            "Companion fallback succeeded",
+            photo_id=photo_id,
+            companion=str(companion_path),
+        )
 
     await store_result(db, photo_id, result)
 

@@ -158,8 +158,10 @@ export interface PhotoRecord {
   technicalScore: number | null
   poseScore: number | null
   analysisStatus: AnalysisStatus
-  /** 分析失败的具体错误消息(如 "broken data stream when reading image file")。
-   *  仅在 analysisStatus === 'failed' 时有意义,UI 在卡片 tooltip / 复核屏显示。 */
+  /** 失败原因的语义 code(broken_image / invalid_image / file_missing / timeout / unknown),
+   *  前端按 locale 查 i18n 显示。仅在 analysisStatus === 'failed' 时有意义。 */
+  analysisErrorCode?: string | null
+  /** 原始错误消息(英文 PIL/rawpy),没匹配上 code 时 fallback 显示。 */
   analysisError?: string | null
   poseTags: PoseTagId[]
   problemTags: ProblemTagId[]

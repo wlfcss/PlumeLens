@@ -238,7 +238,10 @@ export interface PhotoRow {
   // 分析任务状态:done / failed / pending (前端按此显示"已分析" / "分析失败" / "等待分析")
   // failed 包含 task DEAD(attempts 用尽,通常是图损坏/读取失败)
   analysis_status?: 'done' | 'failed' | 'pending'
-  analysis_error?: string | null  // failed 时的具体错误(如 "broken data stream")
+  // 失败原因的语义 code,前端用于 i18n 映射:broken_image / invalid_image / file_missing
+  // / timeout / unknown。仅在 analysis_status=failed 时有意义。
+  analysis_error_code?: string | null
+  analysis_error?: string | null  // 原始错误消息(英文 PIL/rawpy 输出),fallback 显示用
   exif: Record<string, unknown> | null  // EXIF whitelist 字段 + structured AF metadata
   best_detection: BestDetection | null  // 深度复核需要画 bbox / 关键点
   detections: BirdDetectionDetail[] | null

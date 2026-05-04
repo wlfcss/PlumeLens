@@ -325,6 +325,7 @@ export function buildPhotoRecordFromRow(
     // 后端 analysis_status 已在 SQL JOIN task_queue 后给出权威映射(done/failed/pending);
     // 老 PhotoRow 没这个字段时回落到 isAnalyzed 派生(向后兼容)。
     analysisStatus: row.analysis_status ?? (isAnalyzed ? 'done' : 'pending'),
+    analysisErrorCode: row.analysis_error_code ?? null,
     analysisError: row.analysis_error ?? null,
     poseTags: [],
     problemTags: deriveProblemTags(row),

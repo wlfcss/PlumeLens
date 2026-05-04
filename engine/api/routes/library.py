@@ -52,6 +52,21 @@ def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def _classify_analysis_error(error_msg: str) -> str:
+    """把底层错误消息(英文,来自 PIL/rawpy/sweeper)归类为产品语义 code,
+    供前端按 locale i18n 显示用户能看懂的文案。"""
+    msg = error_msg.lower()
+    if "broken data stream" in msg or "image file is truncated" in msg:
+        return "broken_image"
+    if "cannot identify image" in msg or "unidentifiedimageerror" in msg:
+        return "invalid_image"
+    if "no such file" in msg or "file not found" in msg:
+        return "file_missing"
+    if "stuck in processing" in msg:
+        return "timeout"
+    return "unknown"
+
+
 async def _backfill_then_thumbnails(db: Database, library_id: str) -> None:
     """阶段 2/3/4：补 SHA-256 + 生成缩略图 + 跑场景分组。"""
     await backfill_hashes(db, library_id)
@@ -855,11 +870,11 @@ async def library_detail(request: Request, library_id: str) -> LibraryDetail:
             analysis_status = "failed"
         else:
             analysis_status = "pending"
-        analysis_error = (
-            str(r["task_error"])
-            if (analysis_status == "failed" and r["task_error"] is not None)
-            else None
-        )
+        analysis_error: str | None = None
+        analysis_error_code: str | None = None
+        if analysis_status == "failed" and r["task_error"] is not None:
+            analysis_error = str(r["task_error"])
+            analysis_error_code = _classify_analysis_error(analysis_error)
         photos.append(
             PhotoRow(
                 id=str(r["id"]),
@@ -900,6 +915,7 @@ async def library_detail(request: Request, library_id: str) -> LibraryDetail:
                 model_species_latin=model_species_latin,
                 decision=(str(r["decision"]) if r["decision"] is not None else None),
                 analysis_status=analysis_status,
+                analysis_error_code=analysis_error_code,
                 analysis_error=analysis_error,
                 exif=_parse_exif(r["exif_json"]),
                 best_detection=best,

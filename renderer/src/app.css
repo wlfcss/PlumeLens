@@ -3735,6 +3735,18 @@ button:disabled {
   white-space: nowrap;
 }
 
+/* GPS 坐标作为可点击链接(Apple Maps) — 与普通 value 视觉一致 + hover 高亮 */
+.compact-kv__value--link {
+  text-decoration: none;
+  border-bottom: 1px dashed color-mix(in srgb, currentColor 35%, transparent);
+  cursor: pointer;
+  transition: border-color var(--pl-motion-fast, 120ms) ease;
+}
+
+.compact-kv__value--link:hover {
+  border-bottom-color: currentColor;
+}
+
 /* 物种候选：紧凑列表 */
 .species-candidates--compact {
   display: flex;

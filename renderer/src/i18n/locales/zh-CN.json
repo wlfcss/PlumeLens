@@ -87,6 +87,13 @@
       "done": "已完成",
       "failed": "分析失败"
     },
+    "analysisError": {
+      "broken_image": "图像数据流损坏（可能是写卡未完成或拷贝错误）",
+      "invalid_image": "无法识别为图像文件",
+      "file_missing": "源文件已不存在",
+      "timeout": "分析超时（管线卡住）",
+      "unknown": "分析失败，详见日志"
+    },
     "sidebar": {
       "label": "文件夹导航",
       "title": "当前工作集",
@@ -302,7 +309,9 @@
       "focalLength": "焦距",
       "camera": "机身",
       "lens": "镜头",
-      "time": "时间"
+      "time": "时间",
+      "location": "拍摄地",
+      "openInMaps": "在地图中打开"
     },
     "empty": {
       "title": "还没有可处理的文件夹",

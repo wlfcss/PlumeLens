@@ -715,6 +715,23 @@ function decisionTone(decision: SelectionDecision): Tone {
   return 'muted'
 }
 
+/** 把后端 analysisErrorCode 翻译成本地化 tooltip;没匹配上的 code 退回到原始
+ *  英文 error message;啥都没有时退回到通用"分析失败"文案。 */
+function analysisErrorTooltip(
+  photo: PhotoRecord,
+  t: ReturnType<typeof useTranslation>['t'],
+): string | undefined {
+  const code = photo.analysisErrorCode
+  if (code) {
+    const key = `selection.analysisError.${code}`
+    const translated = t(key)
+    // i18next 没找到 key 会原样返回 key 字符串 — 此时 fallback 到 raw error
+    if (translated !== key) return translated
+  }
+  if (photo.analysisError) return photo.analysisError
+  return t('selection.analysisError.unknown')
+}
+
 function analysisTone(status: AnalysisStatus): Tone {
   if (status === 'done') return 'success'
   if (status === 'running') return 'warning'
@@ -2804,7 +2821,7 @@ function PhotoTile({
           {photo.analysisStatus === 'failed' ? (
             <StatusPill
               label={t('selection.analysisStatus.failed')}
-              title={photo.analysisError ?? undefined}
+              title={analysisErrorTooltip(photo, t)}
               tone="accent"
             />
           ) : photo.analysisStatus === 'pending' || photo.analysisStatus === 'running' ? (

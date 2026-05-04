@@ -167,7 +167,10 @@ class PhotoRow(BaseModel):
     # failed = task DEAD/FAILED(图损坏 / 模型错误,attempts 用尽),pending = 排队中或
     # 处理中或还没 enqueue。UI 用此区分"失败"与"等待"——前者明确告诉用户文件有问题。
     analysis_status: str = "pending"
-    # 失败原因(task_queue.error_message),仅在 analysis_status=failed 时有意义
+    # 失败原因的语义 code(供前端 i18n 映射): broken_image / invalid_image /
+    # file_missing / timeout / unknown。仅在 analysis_status=failed 时有意义。
+    analysis_error_code: str | None = None
+    # 原始 error message(英文,来自底层库如 PIL),前端 fallback 显示用。
     analysis_error: str | None = None
     # 完整 EXIF（whitelist 字段：相机/镜头/快门/光圈/ISO/焦距/...）
     exif: dict[str, Any] | None = None
