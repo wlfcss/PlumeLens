@@ -1,5 +1,6 @@
 import {
   Aperture,
+  ArrowLeft,
   ArrowRight,
   Brush,
   Check,
@@ -9,6 +10,7 @@ import {
   FolderOpen,
   FolderSearch2,
   LibraryBig,
+  PencilLine,
   RefreshCw,
   Search,
   Settings2,
@@ -28,6 +30,7 @@ import {
   useRef,
   useState,
   type CSSProperties,
+  type MouseEvent as ReactMouseEvent,
   type ReactNode,
 } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -48,16 +51,19 @@ import {
   useLibraries,
   useLibraryDetail,
   useLibraryEvents,
+  useUpdateLibrary,
 } from '@/hooks/use-library'
 import { useQueryClient } from '@tanstack/react-query'
 import { buildFragmentFromDetail } from '@/lib/backend-adapter'
 import type {
   AnalysisProgressEvent,
   DecisionValue,
+  ExportLibraryResponse,
   LibraryDetail,
   SpeciesOverrideBBox,
   SpeciesOverrideValue,
 } from '@/lib/api-client'
+import { api } from '@/lib/api-client'
 
 type AnalysisProgressEventLite = AnalysisProgressEvent
 import {
@@ -91,6 +97,7 @@ import { subscribeEngineStatus, useEngineStore } from '@/stores/engine-store'
 type Tone = 'neutral' | 'warning' | 'accent' | 'success' | 'muted'
 type SortMode = 'score' | 'shot_at' | 'name'
 type PhotoCategory = PhotoGrade | 'no_bird'
+type ExportLayout = 'merged' | 'by_grade'
 
 type FolderSummary = {
   newSpeciesCount: number
@@ -98,6 +105,44 @@ type FolderSummary = {
   noBirdCount: number
   speciesCount: number
   gradeCounts: Record<PhotoGrade, number>
+}
+
+type ExportSourceSnapshot = {
+  folder: FolderRecord
+  photos: PhotoRecord[]
+  summary: FolderSummary
+}
+
+type ExportSession = {
+  id: string
+  folderId: string
+  initialSource: ExportSourceSnapshot
+}
+
+type ExportOptionsSnapshot = {
+  grades: PhotoGrade[]
+  min: number | null
+  max: number | null
+  layout: ExportLayout
+  targetDir: string
+}
+
+type FolderContextMenuState = {
+  folder: FolderRecord
+  x: number
+  y: number
+} | null
+
+const FOLDER_CONTEXT_MENU_WIDTH = 188
+const FOLDER_CONTEXT_MENU_HEIGHT = 48
+
+const EMPTY_PHOTOS: PhotoRecord[] = []
+const EMPTY_FOLDER_SUMMARY: FolderSummary = {
+  newSpeciesCount: 0,
+  birdPhotoCount: 0,
+  noBirdCount: 0,
+  speciesCount: 0,
+  gradeCounts: { reject: 0, record: 0, usable: 0, select: 0 },
 }
 
 export type ReviewDetail = {
@@ -112,15 +157,15 @@ const routeIcons: Record<AppRoute, typeof Aperture> = {
 }
 
 const THUMBNAIL_REPAIR_COOLDOWN_MS = 30_000
-// 'missing' 时先尝试 invalidate query(免费),给 SSE 事件丢失场景一个机会;
-// 这段宽限期内仍 missing 才 fallback 调 backend rebuild。
-const THUMBNAIL_INVALIDATE_GRACE_MS = 5_000
+const THUMBNAIL_REPAIR_MAX_CONCURRENT = 4
+// 可见卡片已经分析完成但 thumb_grid 仍为空时,把它当作交互优先补图任务。
+// 仍先给 query/SSE 一个很短窗口,避免和后台 thumbnail batch 完全撞车。
+const THUMBNAIL_MISSING_REPAIR_DELAY_MS = 600
 
 const quickFilters: QuickFilter[] = ['select', 'usable', 'record', 'reject', 'no_bird']
 
 const archiveTabs: ArchiveTab[] = ['species', 'map']
-type SpeciesCollectionFilter = 'all' | 'collected' | 'locked'
-const speciesCollectionFilters: SpeciesCollectionFilter[] = ['all', 'collected', 'locked']
+type SpeciesCollectionFilter = 'all' | 'collected' | SpeciesCollectionGroupId
 const viewModes: ViewMode[] = ['grouped', 'flat']
 const sortModes: SortMode[] = ['score', 'shot_at', 'name']
 const speciesCatalog = listAllSpecies()
@@ -429,6 +474,21 @@ function sortPhotos(photos: PhotoRecord[], sortBy: SortMode): PhotoRecord[] {
     if (gradeDiff !== 0) return gradeDiff
     return (right.finalScore ?? -1) - (left.finalScore ?? -1)
   })
+}
+
+export function buildGroupStartMsMap(
+  photos: Array<Pick<PhotoRecord, 'groupId' | 'shotAt'>>,
+): Map<string, number> {
+  const starts = new Map<string, number>()
+  for (const photo of photos) {
+    const ts = Date.parse(photo.shotAt)
+    if (!Number.isFinite(ts)) continue
+    const current = starts.get(photo.groupId)
+    if (current === undefined || ts < current) {
+      starts.set(photo.groupId, ts)
+    }
+  }
+  return starts
 }
 
 function statusTone(status: FolderStatus): Tone {
@@ -1215,10 +1275,9 @@ const chinaMapRegions: Array<{
   },
 ]
 
-const chinaMapRegionById = new Map<
-  MapRegionId,
-  (typeof chinaMapRegions)[number]
->(chinaMapRegions.map((region) => [region.id, region] as const))
+const chinaMapRegionById = new Map<MapRegionId, (typeof chinaMapRegions)[number]>(
+  chinaMapRegions.map((region) => [region.id, region] as const),
+)
 
 function gpsScalarToNumber(value: unknown): number | null {
   if (typeof value === 'number') return Number.isFinite(value) ? value : null
@@ -1381,6 +1440,8 @@ export default function App() {
     photos: [],
     species: [],
   }))
+  const [exportSessions, setExportSessions] = useState<ExportSession[]>([])
+  const [folderContextMenu, setFolderContextMenu] = useState<FolderContextMenuState>(null)
 
   const {
     route,
@@ -1395,7 +1456,6 @@ export default function App() {
     comparePhotoIds,
     reviewPhotoId,
     compareOpen,
-    exportOpen,
     setRoute,
     setArchiveTab,
     setActiveFolderId,
@@ -1407,7 +1467,6 @@ export default function App() {
     setFocusedPhotoId,
     setReviewPhotoId,
     setCompareOpen,
-    setExportOpen,
     setSettingsOpen,
     toggleComparePhotoId,
     clearCompare,
@@ -1425,7 +1484,6 @@ export default function App() {
       comparePhotoIds: state.comparePhotoIds,
       reviewPhotoId: state.reviewPhotoId,
       compareOpen: state.compareOpen,
-      exportOpen: state.exportOpen,
       setRoute: state.setRoute,
       setArchiveTab: state.setArchiveTab,
       setActiveFolderId: state.setActiveFolderId,
@@ -1437,7 +1495,6 @@ export default function App() {
       setFocusedPhotoId: state.setFocusedPhotoId,
       setReviewPhotoId: state.setReviewPhotoId,
       setCompareOpen: state.setCompareOpen,
-      setExportOpen: state.setExportOpen,
       setSettingsOpen: state.setSettingsOpen,
       toggleComparePhotoId: state.toggleComparePhotoId,
       clearCompare: state.clearCompare,
@@ -1462,10 +1519,92 @@ export default function App() {
   const visibleFolders = workspace.folders.filter((folder) =>
     matchesQuery([folder.displayName, folder.parentPath, folder.rootPath], deferredSearch),
   )
+  const openFolderContextMenu = useCallback(
+    (folder: FolderRecord, event: ReactMouseEvent<HTMLElement>) => {
+      event.preventDefault()
+      event.stopPropagation()
+      const maxX = window.innerWidth - FOLDER_CONTEXT_MENU_WIDTH - 8
+      const maxY = window.innerHeight - FOLDER_CONTEXT_MENU_HEIGHT - 8
+      setFolderContextMenu({
+        folder,
+        x: Math.max(8, Math.min(event.clientX, maxX)),
+        y: Math.max(8, Math.min(event.clientY, maxY)),
+      })
+    },
+    [],
+  )
+  const closeFolderContextMenu = useCallback(() => setFolderContextMenu(null), [])
+  const openFolderInFinder = useCallback(async (folder: FolderRecord) => {
+    setFolderContextMenu(null)
+    try {
+      const result = await window.plumelens?.openPathInFinder?.(folder.rootPath)
+      if (result && !result.ok) {
+        console.warn('Failed to open folder in Finder:', result.reason)
+      }
+    } catch (err) {
+      console.warn('Failed to open folder in Finder:', err)
+    }
+  }, [])
+  const photosByFolder = useMemo(() => {
+    const byFolder = new Map<string, PhotoRecord[]>()
+    for (const photo of workspace.photos) {
+      const bucket = byFolder.get(photo.folderId)
+      if (bucket) bucket.push(photo)
+      else byFolder.set(photo.folderId, [photo])
+    }
+    return byFolder
+  }, [workspace.photos])
+  const summariesByFolder = useMemo(() => {
+    const byFolder = new Map<string, FolderSummary>()
+    for (const [folderId, photos] of photosByFolder) {
+      byFolder.set(folderId, buildFolderSummary(photos))
+    }
+    return byFolder
+  }, [photosByFolder])
   const activeFolder =
     workspace.folders.find((folder) => folder.id === activeFolderId) ?? visibleFolders[0] ?? null
-  const activeFolderPhotos = workspace.photos.filter((photo) => photo.folderId === activeFolder?.id)
-  const activeFolderSummary = buildFolderSummary(activeFolderPhotos)
+  const activeFolderPhotos = activeFolder
+    ? (photosByFolder.get(activeFolder.id) ?? EMPTY_PHOTOS)
+    : EMPTY_PHOTOS
+  const activeFolderSummary = activeFolder
+    ? (summariesByFolder.get(activeFolder.id) ?? EMPTY_FOLDER_SUMMARY)
+    : EMPTY_FOLDER_SUMMARY
+  const openExportForActiveFolder = useCallback(() => {
+    if (!activeFolder) return
+    setExportSessions((current) => [
+      ...current,
+      {
+        id: `${activeFolder.id}-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        folderId: activeFolder.id,
+        initialSource: {
+          folder: activeFolder,
+          photos: activeFolderPhotos,
+          summary: activeFolderSummary,
+        },
+      },
+    ])
+  }, [activeFolder, activeFolderPhotos, activeFolderSummary])
+  const closeExportSession = useCallback((sessionId: string) => {
+    setExportSessions((current) => current.filter((session) => session.id !== sessionId))
+  }, [])
+  const getExportSource = useCallback(
+    (session: ExportSession): ExportSourceSnapshot => {
+      const folder =
+        workspace.folders.find((item) => item.id === session.folderId) ??
+        session.initialSource.folder
+      const folderStillExists = workspace.folders.some((item) => item.id === session.folderId)
+      if (!folderStillExists) {
+        return session.initialSource
+      }
+      const folderPhotos = photosByFolder.get(session.folderId) ?? EMPTY_PHOTOS
+      return {
+        folder,
+        photos: folderPhotos,
+        summary: summariesByFolder.get(session.folderId) ?? EMPTY_FOLDER_SUMMARY,
+      }
+    },
+    [photosByFolder, summariesByFolder, workspace.folders],
+  )
   const filteredSelectionPhotos = sortPhotos(
     activeFolderPhotos.filter(
       (photo) =>
@@ -1474,6 +1613,7 @@ export default function App() {
     ),
     activeSort,
   )
+  const groupStartMs = buildGroupStartMsMap(activeFolderPhotos)
 
   const folderGroups = workspace.groups
     .filter((group) => group.folderId === activeFolder?.id)
@@ -1483,15 +1623,12 @@ export default function App() {
     }))
     .filter((entry) => entry.photos.length > 0)
     .toSorted((left, right) => {
-      // 组间排序与组内排序口径一致：先看"组的最佳档位"（精选 > 可用 > 记录 > 淘汰），
-      // 同档位再比"组的最佳分数"。group.photos[0] 因为已经经过 sortPhotos 档位优先排序，
-      // 所以就是组内最佳那张。
-      const lp = left.photos[0]
-      const rp = right.photos[0]
-      const lRank = lp ? GRADE_RANK[effectivePhotoGrade(lp)] : -1
-      const rRank = rp ? GRADE_RANK[effectivePhotoGrade(rp)] : -1
-      if (lRank !== rRank) return rRank - lRank
-      return (rp?.finalScore ?? -1) - (lp?.finalScore ?? -1)
+      // 组视图始终按组起始拍摄时间倒序；不复用 entry.photos[0]，
+      // 避免组内照片排序/筛选改变组与组之间的位置。
+      const leftStart = groupStartMs.get(left.group.id) ?? Number.NEGATIVE_INFINITY
+      const rightStart = groupStartMs.get(right.group.id) ?? Number.NEGATIVE_INFINITY
+      if (leftStart !== rightStart) return rightStart - leftStart
+      return left.group.id.localeCompare(right.group.id)
     })
 
   const flatSelectionPhotos =
@@ -1523,7 +1660,9 @@ export default function App() {
 
   const archivePhotos = sortPhotos(
     workspace.photos.filter(
-      (photo) => isArchiveEligiblePhoto(photo) && matchesQuery(archivePhotoSearchParts(photo), deferredSearch),
+      (photo) =>
+        isArchiveEligiblePhoto(photo) &&
+        matchesQuery(archivePhotoSearchParts(photo), deferredSearch),
     ),
     'score',
   )
@@ -1543,26 +1682,57 @@ export default function App() {
   const { data: activeDetail } = useLibraryDetail(activeFolderId)
   useLibraryEvents(activeFolderId, Boolean(activeFolderId))
   const importLibrary = useImportLibrary()
+  const { mutateAsync: updateLibraryDisplayName } = useUpdateLibrary()
   const startBatch = useStartBatch()
   const { mutate: rebuildPhotoThumbnail } = useBuildPhotoThumbnail(activeFolderId)
   const queryClient = useQueryClient()
   const thumbnailRepairingRef = useRef(new Set<string>())
+  const thumbnailRepairQueueRef = useRef<string[]>([])
+  const thumbnailRepairActiveCountRef = useRef(0)
   const thumbnailLastRepairAtRef = useRef(new Map<string, number>())
-  // 'missing' 状态下 5s 宽限期 timer — 给 invalidate 一个机会拿到 stale 但已写入的 thumb_grid，
-  // 5s 后仍 missing 才 fallback 调 backend rebuild
+  // 'missing' 状态下的短延迟 timer — 给 invalidate 一个机会拿到 stale 但已写入的
+  // thumb_grid；仍 missing 就补当前可见照片,不要等后台全库队列扫到它。
   const thumbnailMissingTimersRef = useRef(new Map<string, number>())
   // photos ref 给 handleThumbnailLoadStatus 在 'missing' 状态下查 photo.analysisStatus，
   // 用 ref 而不是 useCallback 依赖，避免 photos 变化导致 callback 频繁重建。
   const photosForRepairRef = useRef(workspace.photos)
   photosForRepairRef.current = workspace.photos
-  // unmount 时清掉所有 grace timers
+  // unmount 时清掉所有待执行的缩略图修复任务
   useEffect(() => {
     const timers = thumbnailMissingTimersRef.current
     return () => {
       for (const id of timers.values()) window.clearTimeout(id)
       timers.clear()
+      thumbnailRepairQueueRef.current = []
+      thumbnailRepairingRef.current.clear()
+      thumbnailRepairActiveCountRef.current = 0
     }
   }, [])
+
+  const drainThumbnailRepairQueue = useCallback(() => {
+    while (thumbnailRepairActiveCountRef.current < THUMBNAIL_REPAIR_MAX_CONCURRENT) {
+      const nextPhotoId = thumbnailRepairQueueRef.current.shift()
+      if (!nextPhotoId) return
+
+      const currentPhoto = photosForRepairRef.current.find((photo) => photo.id === nextPhotoId)
+      if (currentPhoto?.thumbGridUrl || !thumbnailRepairingRef.current.has(nextPhotoId)) {
+        thumbnailRepairingRef.current.delete(nextPhotoId)
+        continue
+      }
+
+      thumbnailRepairActiveCountRef.current += 1
+      rebuildPhotoThumbnail(nextPhotoId, {
+        onSettled: () => {
+          thumbnailRepairActiveCountRef.current = Math.max(
+            0,
+            thumbnailRepairActiveCountRef.current - 1,
+          )
+          thumbnailRepairingRef.current.delete(nextPhotoId)
+          drainThumbnailRepairQueue()
+        },
+      })
+    }
+  }, [rebuildPhotoThumbnail])
 
   // 引擎状态订阅 — 只在 App mount 时挂一次,IPC 推送通过 zustand store 全局可见。
   useEffect(() => {
@@ -1589,6 +1759,9 @@ export default function App() {
     (photoId: string, status: ThumbnailLoadStatus) => {
       if (status === 'loaded') {
         thumbnailRepairingRef.current.delete(photoId)
+        thumbnailRepairQueueRef.current = thumbnailRepairQueueRef.current.filter(
+          (queuedPhotoId) => queuedPhotoId !== photoId,
+        )
         // 已恢复 → 清掉等待中的 grace timer
         const timer = thumbnailMissingTimersRef.current.get(photoId)
         if (timer !== undefined) {
@@ -1599,23 +1772,20 @@ export default function App() {
       }
       if (status === 'loading') return
 
-      const triggerBackendRebuild = () => {
+      const enqueueBackendRebuild = () => {
         if (thumbnailRepairingRef.current.has(photoId)) return
         const now = Date.now()
         const lastRepairAt = thumbnailLastRepairAtRef.current.get(photoId) ?? 0
         if (now - lastRepairAt < THUMBNAIL_REPAIR_COOLDOWN_MS) return
         thumbnailRepairingRef.current.add(photoId)
         thumbnailLastRepairAtRef.current.set(photoId, now)
-        rebuildPhotoThumbnail(photoId, {
-          onSettled: () => {
-            thumbnailRepairingRef.current.delete(photoId)
-          },
-        })
+        thumbnailRepairQueueRef.current.push(photoId)
+        drainThumbnailRepairQueue()
       }
 
       // 'missing'：photo.thumbGridUrl=null 时 ThumbnailImage 上报。
       // 实际场景中通常是 SSE 事件丢失导致前端 stale（DB 已写入 thumb_grid），
-      // 优先 invalidate query 试着拿最新值；5s 宽限期后仍 missing 才 fallback rebuild。
+      // 优先 invalidate query 试着拿最新值；短延迟后仍 missing 就按可见图优先 rebuild。
       // 仅在 photo 已分析完成（或分析失败）时视为异常 — 分析中 thumb 还没跑完是正常的。
       if (status === 'missing') {
         const photo = photosForRepairRef.current.find((p) => p.id === photoId)
@@ -1626,21 +1796,21 @@ export default function App() {
         if (activeFolderId) {
           queryClient.invalidateQueries({ queryKey: LIBRARY_DETAIL_KEY(activeFolderId) })
         }
-        // Step 2: 5s 后如果仍 missing，才调 backend rebuild
+        // Step 2: 很短延迟后如果仍 missing，调 backend rebuild
         const timerId = window.setTimeout(() => {
           thumbnailMissingTimersRef.current.delete(photoId)
           const refreshed = photosForRepairRef.current.find((p) => p.id === photoId)
           if (refreshed?.thumbGridUrl) return // 已通过 invalidate 恢复
-          triggerBackendRebuild()
-        }, THUMBNAIL_INVALIDATE_GRACE_MS)
+          enqueueBackendRebuild()
+        }, THUMBNAIL_MISSING_REPAIR_DELAY_MS)
         thumbnailMissingTimersRef.current.set(photoId, timerId)
         return
       }
 
       // 'error'：图片 URL 有但加载 404 / 解码失败 → 立即 rebuild
-      triggerBackendRebuild()
+      enqueueBackendRebuild()
     },
-    [activeFolderId, queryClient, rebuildPhotoThumbnail],
+    [activeFolderId, drainThumbnailRepairQueue, queryClient],
   )
 
   // 后端 library 列表就绪时：用真 folders 替换 mock seeds，
@@ -1680,7 +1850,7 @@ export default function App() {
       allDetails
         .map(
           (d) =>
-            `${d.library.id}:${d.library.status}:${d.library.last_scanned_at ?? ''}:${d.library.last_analyzed_at ?? ''}:${d.photos.length}:${d.library.analyzed_count}:${libraryDetailContentHash(d)}`,
+            `${d.library.id}:${d.library.display_name}:${d.library.status}:${d.library.last_scanned_at ?? ''}:${d.library.last_analyzed_at ?? ''}:${d.photos.length}:${d.library.analyzed_count}:${libraryDetailContentHash(d)}`,
         )
         .join('|'),
     [allDetails],
@@ -1690,7 +1860,7 @@ export default function App() {
   // useEffect 唯一依赖，allDetails 通过闭包读最新值。避免引用变化触发死循环。
   useEffect(() => {
     if (allDetails.length === 0) return
-    const fragments = allDetails.map(buildFragmentFromDetail)
+    const fragments = allDetails.map((detail) => buildFragmentFromDetail(detail, t))
     const realFolderIdsInDetails = new Set(fragments.map((f) => f.folder.id))
     setWorkspace((current) => ({
       folders: current.folders.map((f) => {
@@ -1707,12 +1877,12 @@ export default function App() {
       ],
       species: [],
     }))
-  }, [allDetailsKey])
+  }, [allDetailsKey, t])
 
   // 单 library detail 就绪（active folder 切换时优先级更高，立即注入）
   useEffect(() => {
     if (!activeDetail) return
-    const fragment = buildFragmentFromDetail(activeDetail)
+    const fragment = buildFragmentFromDetail(activeDetail, t)
     setWorkspace((current) => ({
       ...current,
       folders: current.folders.map((f) => (f.id === fragment.folder.id ? fragment.folder : f)),
@@ -1725,7 +1895,7 @@ export default function App() {
         ...fragment.groups,
       ],
     }))
-  }, [activeDetail])
+  }, [activeDetail, t])
 
   async function handleChooseFolder() {
     const path = await window.plumelens?.openFolder?.()
@@ -1750,6 +1920,19 @@ export default function App() {
       setActiveFolderId(imported.folders[0]?.id ?? null)
     }
   }
+
+  const handleRenameFolder = useCallback(
+    async (folderId: string, displayName: string) => {
+      const updated = await updateLibraryDisplayName({ libraryId: folderId, displayName })
+      setWorkspace((current) => ({
+        ...current,
+        folders: current.folders.map((folder) =>
+          folder.id === updated.id ? { ...folder, displayName: updated.display_name } : folder,
+        ),
+      }))
+    },
+    [updateLibraryDisplayName],
+  )
 
   async function handleStartAnalysis() {
     if (!activeFolderId) return
@@ -1861,7 +2044,7 @@ export default function App() {
   }
 
   useEffect(() => {
-    if (route !== 'selection' || reviewPhotoId !== null || compareOpen || exportOpen) return
+    if (route !== 'selection' || reviewPhotoId !== null || compareOpen) return
     if (!focusedPhotoId || !flatSelectionPhotos.some((photo) => photo.id === focusedPhotoId)) return
 
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -1873,7 +2056,7 @@ export default function App() {
 
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [compareOpen, exportOpen, flatSelectionPhotos, focusedPhotoId, reviewPhotoId, route])
+  }, [compareOpen, flatSelectionPhotos, focusedPhotoId, reviewPhotoId, route])
 
   function handleOpenCompare() {
     if (comparePhotos.length >= 2) {
@@ -1917,7 +2100,7 @@ export default function App() {
   return (
     <AppShell
       onNavigate={handleNavigate}
-      onOpenExport={() => setExportOpen(true)}
+      onOpenExport={openExportForActiveFolder}
       onOpenSettings={() => setSettingsOpen(true)}
       onSearchChange={setSearchQuery}
       route={route}
@@ -1940,9 +2123,11 @@ export default function App() {
           folderPhotos={activeFolderPhotos}
           folders={visibleFolders}
           onThumbnailLoadStatus={handleThumbnailLoadStatus}
+          onOpenFolderContextMenu={openFolderContextMenu}
           onOpenCompare={handleOpenCompare}
-          onOpenExport={() => setExportOpen(true)}
+          onOpenExport={openExportForActiveFolder}
           onOpenReview={handleOpenReview}
+          onRenameFolder={handleRenameFolder}
           onSelectFolder={handleSelectFolder}
           onSetDecision={handleSetDecision}
           onStartAnalysis={handleStartAnalysis}
@@ -1976,6 +2161,7 @@ export default function App() {
           isReady={isReady}
           onChooseFolder={handleChooseFolder}
           onContinueLatest={() => handleNavigate('selection')}
+          onOpenFolderContextMenu={openFolderContextMenu}
           onOpenFolder={handleSelectFolder}
           t={t}
         />
@@ -2005,16 +2191,75 @@ export default function App() {
         />
       ) : null}
 
-      {exportOpen ? (
-        <ExportDrawer
-          activeFolder={activeFolder}
-          photos={activeFolderPhotos}
-          onClose={() => setExportOpen(false)}
-          summary={activeFolderSummary}
-          t={t}
-        />
+      {exportSessions.length > 0 ? (
+        <div className="export-session-stack">
+          {exportSessions.map((session) => (
+            <ExportDrawer
+              key={session.id}
+              onClose={() => closeExportSession(session.id)}
+              source={getExportSource(session)}
+              t={t}
+            />
+          ))}
+        </div>
       ) : null}
+
+      <FolderContextMenu
+        menu={folderContextMenu}
+        onClose={closeFolderContextMenu}
+        onOpenFolder={openFolderInFinder}
+        t={t}
+      />
     </AppShell>
+  )
+}
+
+function FolderContextMenu({
+  menu,
+  onClose,
+  onOpenFolder,
+  t,
+}: {
+  menu: FolderContextMenuState
+  onClose: () => void
+  onOpenFolder: (folder: FolderRecord) => void
+  t: ReturnType<typeof useTranslation>['t']
+}) {
+  useEffect(() => {
+    if (!menu) return
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onClose()
+    }
+    const handleClick = () => onClose()
+    const handleScroll = () => onClose()
+
+    window.addEventListener('keydown', handleKeyDown)
+    window.addEventListener('click', handleClick)
+    window.addEventListener('scroll', handleScroll, true)
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown)
+      window.removeEventListener('click', handleClick)
+      window.removeEventListener('scroll', handleScroll, true)
+    }
+  }, [menu, onClose])
+
+  if (!menu) return null
+
+  return (
+    <div
+      className="folder-context-menu"
+      onContextMenu={(event) => event.preventDefault()}
+      onMouseDown={(event) => event.stopPropagation()}
+      role="menu"
+      style={{ left: menu.x, top: menu.y }}
+      aria-label={t('selection.folderMenu.label')}
+    >
+      <button onClick={() => onOpenFolder(menu.folder)} role="menuitem" type="button">
+        <FolderOpen className="h-4 w-4" />
+        <span>{t('selection.folderMenu.openInFinder')}</span>
+      </button>
+    </div>
   )
 }
 
@@ -2103,6 +2348,7 @@ function StartScreen({
   isReady,
   onChooseFolder,
   onContinueLatest,
+  onOpenFolderContextMenu,
   onOpenFolder,
   t,
 }: {
@@ -2112,13 +2358,13 @@ function StartScreen({
   isReady: boolean
   onChooseFolder: () => void
   onContinueLatest: () => void
+  onOpenFolderContextMenu: (folder: FolderRecord, event: ReactMouseEvent<HTMLElement>) => void
   onOpenFolder: (folderId: string) => void
   t: ReturnType<typeof useTranslation>['t']
 }) {
   const recentFolders = folders.toSorted((left, right) =>
     right.lastOpenedAt.localeCompare(left.lastOpenedAt),
   )
-  const pipelineModels = backendData?.pipeline?.models
   const hasRecentFolders = recentFolders.length > 0
 
   return (
@@ -2174,6 +2420,7 @@ function StartScreen({
                 <button
                   className="folder-line"
                   key={folder.id}
+                  onContextMenu={(event) => onOpenFolderContextMenu(folder, event)}
                   onClick={() => onOpenFolder(folder.id)}
                   type="button"
                 >
@@ -2189,7 +2436,7 @@ function StartScreen({
         </section>
       ) : null}
       <EnginePanel
-        detectorReady={Boolean(pipelineModels?.yolo?.loaded)}
+        backendData={backendData}
         isError={isError}
         isReady={isReady}
         t={t}
@@ -2198,44 +2445,253 @@ function StartScreen({
   )
 }
 
+type BackendHealthData = ReturnType<typeof useBackendHealth>['data']
+type PipelineModels = NonNullable<BackendHealthData>['pipeline']['models']
+type PipelineModelState = PipelineModels[string]
+type PipelineDevice = 'cpu' | 'gpu' | 'mps' | 'mixed' | 'unknown'
+type PipelineRuntime = {
+  device: PipelineDevice
+  deviceLabelKey: string
+  providerLabel: string
+}
+
+type PipelineStatusItemModel = {
+  key: string
+  label: string
+  loading: boolean
+  runtime: PipelineRuntime | null
+  tone: Tone
+  value: string
+}
+
+export function pipelineRuntimeFromProvider(provider?: string | null): PipelineRuntime {
+  const normalized = provider?.toLowerCase() ?? ''
+
+  if (!normalized) {
+    return {
+      device: 'unknown',
+      deviceLabelKey: 'start.device.detecting',
+      providerLabel: '--',
+    }
+  }
+
+  if (normalized.includes('mps')) {
+    return {
+      device: 'mps',
+      deviceLabelKey: 'start.device.mps',
+      providerLabel: 'MPS',
+    }
+  }
+
+  if (normalized.includes('cuda')) {
+    return {
+      device: 'gpu',
+      deviceLabelKey: 'start.device.gpu',
+      providerLabel: 'CUDA',
+    }
+  }
+
+  if (normalized.includes('coreml')) {
+    return {
+      device: 'gpu',
+      deviceLabelKey: 'start.device.gpu',
+      providerLabel: 'CoreML',
+    }
+  }
+
+  if (normalized.includes('cpu')) {
+    return {
+      device: 'cpu',
+      deviceLabelKey: 'start.device.cpu',
+      providerLabel: normalized.includes('torch') ? 'Torch CPU' : 'CPU',
+    }
+  }
+
+  return {
+    device: 'unknown',
+    deviceLabelKey: 'start.device.unknown',
+    providerLabel: provider ?? '--',
+  }
+}
+
+function mergePipelineRuntimes(models: Array<PipelineModelState | undefined>): PipelineRuntime {
+  const runtimes = models
+    .filter((model): model is PipelineModelState => Boolean(model?.provider))
+    .map((model) => pipelineRuntimeFromProvider(model.provider))
+
+  if (runtimes.length === 0) {
+    return pipelineRuntimeFromProvider()
+  }
+
+  const providerLabels = Array.from(new Set(runtimes.map((runtime) => runtime.providerLabel)))
+  const devices = Array.from(new Set(runtimes.map((runtime) => runtime.device)))
+  const device = devices.length === 1 ? devices[0] : 'mixed'
+
+  return {
+    device,
+    deviceLabelKey: device === 'mixed' ? 'start.device.mixed' : runtimes[0].deviceLabelKey,
+    providerLabel: providerLabels.join(' + '),
+  }
+}
+
+function getPipelineModel(models: PipelineModels | undefined, key: string) {
+  return models?.[key]
+}
+
+function runtimeSummaryLabel(items: PipelineStatusItemModel[], t: ReturnType<typeof useTranslation>['t']) {
+  const providers = Array.from(
+    new Set(
+      items
+        .map((item) => item.runtime?.providerLabel)
+        .filter((label): label is string => Boolean(label && label !== '--')),
+    ),
+  )
+
+  return providers.length > 0 ? providers.join(' · ') : t('start.runtime.localOnly')
+}
+
 function EnginePanel({
-  detectorReady,
+  backendData,
   isError,
   isReady,
   t,
 }: {
-  detectorReady: boolean
+  backendData: BackendHealthData
   isError: boolean
   isReady: boolean
   t: ReturnType<typeof useTranslation>['t']
 }) {
-  const statusToneValue: Tone = isReady ? 'success' : isError ? 'accent' : 'warning'
-  const pipelineItems = [
-    {
-      label: t('start.status.engine'),
-      tone: statusToneValue,
-      value: isReady ? t('start.status.ready') : t('start.status.pending'),
+  const pipeline = backendData?.pipeline
+  const models = pipeline?.models
+  const isInitializing = !backendData && !isError
+  const isPipelineReady = Boolean(pipeline?.ready)
+  const statusToneValue: Tone = isError ? 'accent' : isPipelineReady ? 'success' : 'warning'
+  const yoloModel = getPipelineModel(models, 'yolo')
+  const poseModel = getPipelineModel(models, 'bird_visibility')
+  const clipiqaModel = getPipelineModel(models, 'clipiqa')
+  const hyperiqaModel = getPipelineModel(models, 'hyperiqa')
+  const speciesModel = getPipelineModel(models, 'dinov3_species_v3')
+
+  const modelValue = useCallback(
+    (loaded: boolean) => {
+      if (isError) return t('start.status.error')
+      if (isInitializing) return t('start.status.loading')
+      return loaded ? t('start.status.ready') : t('start.status.pending')
     },
-    {
-      label: t('start.status.detector'),
-      tone: detectorReady ? 'success' : 'warning',
-      value: detectorReady ? t('start.status.ready') : t('start.status.pending'),
+    [isError, isInitializing, t],
+  )
+
+  const modelTone = useCallback(
+    (loaded: boolean): Tone => {
+      if (isError) return 'accent'
+      if (isInitializing) return 'warning'
+      return loaded ? 'success' : 'warning'
     },
-    {
-      label: t('start.status.species'),
-      tone: 'success',
-      value: t('start.status.ready'),
-    },
-  ] satisfies Array<{ label: string; tone: Tone; value: string }>
+    [isError, isInitializing],
+  )
+
+  const detectorReady = Boolean(yoloModel?.loaded || pipeline?.ready)
+  const qualityReady = Boolean(
+    pipeline?.quality_available || (clipiqaModel?.loaded && hyperiqaModel?.loaded),
+  )
+  const poseReady = Boolean(pipeline?.pose_available || poseModel?.loaded)
+  const speciesReady = Boolean(pipeline?.species_available || speciesModel?.loaded)
+
+  const pipelineItems = useMemo(
+    () =>
+      [
+        {
+          key: 'engine',
+          label: t('start.status.engine'),
+          loading: isInitializing,
+          runtime: null,
+          tone: statusToneValue,
+          value: isError
+            ? t('start.status.error')
+            : isReady
+              ? isPipelineReady
+                ? t('start.status.ready')
+                : t('start.status.loading')
+              : t('start.status.loading'),
+        },
+        {
+          key: 'detector',
+          label: t('start.status.detector'),
+          loading: isInitializing,
+          runtime: pipelineRuntimeFromProvider(yoloModel?.provider),
+          tone: modelTone(detectorReady),
+          value: modelValue(detectorReady),
+        },
+        {
+          key: 'quality',
+          label: t('start.status.quality'),
+          loading: isInitializing,
+          runtime: mergePipelineRuntimes([clipiqaModel, hyperiqaModel]),
+          tone: modelTone(qualityReady),
+          value: modelValue(qualityReady),
+        },
+        {
+          key: 'pose',
+          label: t('start.status.pose'),
+          loading: isInitializing,
+          runtime: pipelineRuntimeFromProvider(poseModel?.provider),
+          tone: modelTone(poseReady),
+          value: modelValue(poseReady),
+        },
+        {
+          key: 'species',
+          label: t('start.status.species'),
+          loading: isInitializing,
+          runtime: pipelineRuntimeFromProvider(speciesModel?.provider),
+          tone: modelTone(speciesReady),
+          value: modelValue(speciesReady),
+        },
+      ] satisfies PipelineStatusItemModel[],
+    [
+      clipiqaModel,
+      detectorReady,
+      hyperiqaModel,
+      isError,
+      isInitializing,
+      isPipelineReady,
+      isReady,
+      modelTone,
+      modelValue,
+      poseModel,
+      poseReady,
+      qualityReady,
+      speciesModel,
+      speciesReady,
+      statusToneValue,
+      t,
+      yoloModel,
+    ],
+  )
+
+  const summaryValue = isError
+    ? t('status.error')
+    : isPipelineReady
+      ? t('status.connected')
+      : t('start.status.loading')
+  const runtimeNote = isError
+    ? t('start.runtime.unavailable')
+    : isInitializing
+      ? t('start.runtime.initializing')
+      : runtimeSummaryLabel(pipelineItems, t)
 
   return (
-    <aside className="pipeline-bar">
+    <aside className={cn('pipeline-bar', isInitializing && 'pipeline-bar--loading')}>
       <div className="pipeline-bar__summary">
         <StatusDot tone={statusToneValue} />
         <span>{t('start.pipelineState')}</span>
-        <strong>
-          {isReady ? t('status.connected') : isError ? t('status.error') : t('status.connecting')}
-        </strong>
+        <strong>{summaryValue}</strong>
+        {isInitializing ? (
+          <span className="pipeline-bar__loader" aria-hidden="true">
+            <i />
+            <i />
+            <i />
+          </span>
+        ) : null}
       </div>
 
       <div className="pipeline-bar__items">
@@ -2244,21 +2700,46 @@ function EnginePanel({
             key={item.label}
             label={item.label}
             tone={item.tone}
+            t={t}
             value={item.value}
+            loading={item.loading}
+            runtime={item.runtime}
           />
         ))}
       </div>
 
-      <div className="pipeline-bar__note">{t('start.localOnly')}</div>
+      <div className="pipeline-bar__note">{runtimeNote}</div>
     </aside>
   )
 }
 
-function PipelineStatusItem({ label, tone, value }: { label: string; tone: Tone; value: string }) {
+function PipelineStatusItem({
+  label,
+  loading,
+  runtime,
+  t,
+  tone,
+  value,
+}: {
+  label: string
+  loading: boolean
+  runtime: PipelineRuntime | null
+  t: ReturnType<typeof useTranslation>['t']
+  tone: Tone
+  value: string
+}) {
   return (
-    <div className="pipeline-bar__item">
+    <div className={cn('pipeline-bar__item', loading && 'pipeline-bar__item--loading')}>
       <small>{label}</small>
       <strong>{value}</strong>
+      {runtime ? (
+        <span
+          className={cn('pipeline-device', `pipeline-device--${runtime.device}`)}
+          title={runtime.providerLabel}
+        >
+          {t(runtime.deviceLabelKey)}
+        </span>
+      ) : null}
       <StatusDot tone={tone} />
     </div>
   )
@@ -2301,7 +2782,9 @@ function SelectionScreen({
   folders,
   onOpenCompare,
   onOpenExport,
+  onOpenFolderContextMenu,
   onOpenReview,
+  onRenameFolder,
   onSelectFolder,
   onSetDecision,
   onStartAnalysis,
@@ -2332,7 +2815,9 @@ function SelectionScreen({
   folders: FolderRecord[]
   onOpenCompare: () => void
   onOpenExport: () => void
+  onOpenFolderContextMenu: (folder: FolderRecord, event: ReactMouseEvent<HTMLElement>) => void
   onOpenReview: (photoId: string) => void
+  onRenameFolder: (folderId: string, displayName: string) => Promise<void>
   onSelectFolder: (folderId: string) => void
   onSetDecision: (photoId: string, decision: SelectionDecision) => void
   onStartAnalysis: () => void
@@ -2368,6 +2853,7 @@ function SelectionScreen({
       <FolderRail
         activeFolderId={activeFolder.id}
         folders={folders}
+        onOpenFolderContextMenu={onOpenFolderContextMenu}
         onSelectFolder={onSelectFolder}
         t={t}
         workspace={workspace}
@@ -2378,6 +2864,7 @@ function SelectionScreen({
           activeFolder={activeFolder}
           analysisStarting={analysisStarting}
           onOpenExport={onOpenExport}
+          onRenameFolder={onRenameFolder}
           onStartAnalysis={onStartAnalysis}
           progressEvent={progressEvent}
           t={t}
@@ -2440,12 +2927,14 @@ function SelectionScreen({
 function FolderRail({
   activeFolderId,
   folders,
+  onOpenFolderContextMenu,
   onSelectFolder,
   t,
   workspace,
 }: {
   activeFolderId: string | null
   folders: FolderRecord[]
+  onOpenFolderContextMenu: (folder: FolderRecord, event: ReactMouseEvent<HTMLElement>) => void
   onSelectFolder: (folderId: string) => void
   t: ReturnType<typeof useTranslation>['t']
   workspace: WorkspaceSnapshot
@@ -2486,6 +2975,7 @@ function FolderRail({
                     folder.id === activeFolderId && 'folder-rail-item--active',
                   )}
                   key={folder.id}
+                  onContextMenu={(event) => onOpenFolderContextMenu(folder, event)}
                   onClick={() => onSelectFolder(folder.id)}
                   type="button"
                 >
@@ -2512,6 +3002,7 @@ function FolderTopline({
   activeFolder,
   analysisStarting,
   onOpenExport,
+  onRenameFolder,
   onStartAnalysis,
   progressEvent,
   t,
@@ -2519,10 +3010,15 @@ function FolderTopline({
   activeFolder: FolderRecord
   analysisStarting: boolean
   onOpenExport: () => void
+  onRenameFolder: (folderId: string, displayName: string) => Promise<void>
   onStartAnalysis: () => void
   progressEvent: AnalysisProgressEventLite | null
   t: ReturnType<typeof useTranslation>['t']
 }) {
+  const [aliasDraft, setAliasDraft] = useState(activeFolder.displayName)
+  const [aliasEditing, setAliasEditing] = useState(false)
+  const [aliasSaving, setAliasSaving] = useState(false)
+  const [aliasError, setAliasError] = useState<string | null>(null)
   // 是否正在跑：pending/processing 还有任务
   const running = progressEvent ? progressEvent.pending + progressEvent.processing > 0 : false
   const hasProgress = progressEvent !== null && progressEvent.total > 0
@@ -2530,12 +3026,118 @@ function FolderTopline({
     ? Math.min(1, progressEvent.completed / Math.max(progressEvent.total, 1))
     : 0
   const progressLabel = hasProgress ? `${progressEvent.completed} / ${progressEvent.total}` : null
+  useEffect(() => {
+    if (!aliasEditing) {
+      setAliasDraft(activeFolder.displayName)
+      setAliasError(null)
+    }
+  }, [activeFolder.displayName, activeFolder.id, aliasEditing])
+
+  const startAliasEditing = () => {
+    setAliasDraft(activeFolder.displayName)
+    setAliasError(null)
+    setAliasEditing(true)
+  }
+
+  const cancelAliasEditing = () => {
+    setAliasDraft(activeFolder.displayName)
+    setAliasError(null)
+    setAliasEditing(false)
+  }
+
+  const submitAlias = async () => {
+    const trimmed = aliasDraft.trim()
+    if (!trimmed) {
+      setAliasError(t('selection.folderHeader.aliasEmpty'))
+      return
+    }
+    if (trimmed === activeFolder.displayName) {
+      setAliasEditing(false)
+      return
+    }
+    setAliasSaving(true)
+    setAliasError(null)
+    try {
+      await onRenameFolder(activeFolder.id, trimmed)
+      setAliasEditing(false)
+    } catch (err) {
+      console.warn('Failed to update library display name:', err)
+      setAliasError(t('selection.folderHeader.aliasFailed'))
+    } finally {
+      setAliasSaving(false)
+    }
+  }
 
   return (
     <header className="folder-topline">
-      <div>
+      <div className="folder-heading-main">
         <SectionLabel label={t('selection.currentFolder')} />
-        <h1>{activeFolder.displayName}</h1>
+        {aliasEditing ? (
+          <form
+            className="folder-alias-form"
+            onSubmit={(event) => {
+              event.preventDefault()
+              void submitAlias()
+            }}
+          >
+            <input
+              aria-invalid={Boolean(aliasError)}
+              aria-label={t('selection.folderHeader.alias')}
+              autoFocus
+              className="folder-alias-input"
+              disabled={aliasSaving}
+              maxLength={120}
+              onChange={(event) => setAliasDraft(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Escape') {
+                  event.preventDefault()
+                  cancelAliasEditing()
+                }
+              }}
+              placeholder={t('selection.folderHeader.aliasPlaceholder')}
+              value={aliasDraft}
+            />
+            <button
+              aria-label={t('selection.folderHeader.saveAlias')}
+              className="icon-button folder-alias-button"
+              disabled={aliasSaving}
+              type="submit"
+            >
+              {aliasSaving ? (
+                <RefreshCw className="h-4 w-4 animate-spin" />
+              ) : (
+                <Check className="h-4 w-4" />
+              )}
+            </button>
+            <button
+              aria-label={t('selection.folderHeader.cancelAlias')}
+              className="icon-button folder-alias-button"
+              disabled={aliasSaving}
+              onClick={cancelAliasEditing}
+              type="button"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </form>
+        ) : (
+          <div className="folder-title-row">
+            <h1>{activeFolder.displayName}</h1>
+            <button
+              aria-label={t('selection.folderHeader.editAlias')}
+              className="icon-button folder-alias-button"
+              onClick={startAliasEditing}
+              title={t('selection.folderHeader.editAlias')}
+              type="button"
+            >
+              <PencilLine className="h-4 w-4" />
+            </button>
+          </div>
+        )}
+        {aliasError ? (
+          <span className="folder-alias-error" role="alert">
+            {aliasError}
+          </span>
+        ) : null}
         <p>{activeFolder.rootPath}</p>
       </div>
       <div className="folder-actions">
@@ -2914,13 +3516,30 @@ function ExternalEditorActions({
   t: ReturnType<typeof useTranslation>['t']
 }) {
   const editors = useExternalEditors()
+  const [editorError, setEditorError] = useState<string | null>(null)
   // 优先 RAW 同伴(用户编辑通常想要原始数据);无 RAW 时用主 entry(JPG)
   const targetPath = photo.companionPath ?? photo.filePath ?? null
+  useEffect(() => {
+    setEditorError(null)
+  }, [photo.id, targetPath])
   if (!targetPath) return null
   if (!editors.topaz && !editors.photoshop) return null
 
-  const openIn = (tool: 'topaz' | 'photoshop') => {
-    void window.plumelens?.openInEditor?.(tool, targetPath)
+  const openIn = async (tool: 'topaz' | 'photoshop') => {
+    setEditorError(null)
+    const opener = window.plumelens?.openInEditor
+    if (!opener) {
+      setEditorError(t('selection.editor.error.spawn_failed'))
+      return
+    }
+    try {
+      const result = await opener(tool, targetPath)
+      if (!result.ok) {
+        setEditorError(t(`selection.editor.error.${result.reason}`))
+      }
+    } catch {
+      setEditorError(t('selection.editor.error.spawn_failed'))
+    }
   }
   const targetLabel = photo.companionPath
     ? t('selection.editor.targetRaw', { format: photo.companionFormat ?? 'RAW' })
@@ -2934,7 +3553,7 @@ function ExternalEditorActions({
         {editors.topaz ? (
           <button
             className="button-ghost button-compact"
-            onClick={() => openIn('topaz')}
+            onClick={() => void openIn('topaz')}
             title={editors.topaz}
             type="button"
           >
@@ -2945,7 +3564,7 @@ function ExternalEditorActions({
         {editors.photoshop ? (
           <button
             className="button-ghost button-compact"
-            onClick={() => openIn('photoshop')}
+            onClick={() => void openIn('photoshop')}
             title={editors.photoshop}
             type="button"
           >
@@ -2954,6 +3573,11 @@ function ExternalEditorActions({
           </button>
         ) : null}
       </div>
+      {editorError ? (
+        <span className="inspector-editors__error" role="alert">
+          {editorError}
+        </span>
+      ) : null}
     </div>
   )
 }
@@ -3107,6 +3731,32 @@ function ArchiveScreen({
   const collectionGroupStats = useMemo(() => {
     return buildSpeciesCollectionGroups(archiveSpecies)
   }, [archiveSpecies])
+  const archiveMetricFilters = useMemo(
+    () => [
+      {
+        id: 'collected' as const,
+        label: t('archive.summary.collected'),
+        signal: t('archive.summarySignals.collected'),
+        tone: 'success' as Tone,
+        value: collectedSpeciesCount,
+      },
+      {
+        id: 'all' as const,
+        label: t('archive.summary.species'),
+        signal: t('archive.summarySignals.species'),
+        tone: 'neutral' as Tone,
+        value: archiveSpecies.length,
+      },
+      ...collectionGroupStats.map((group) => ({
+        id: group.id,
+        label: t(`archive.collection.groups.${group.id}`),
+        signal: t(`archive.summarySignals.${group.id}`),
+        tone: speciesCollectionGroupTone(group.id),
+        value: formatRatio(group.litCount, group.species.length),
+      })),
+    ],
+    [archiveSpecies.length, collectedSpeciesCount, collectionGroupStats, t],
+  )
   const activeSpeciesPhotos = useMemo(() => {
     if (!activeSpecies) return []
     return archivePhotos.filter((photo) => photoMatchesSpecies(photo, activeSpecies))
@@ -3118,8 +3768,8 @@ function ArchiveScreen({
     if (collectionFilter === 'collected') {
       return archiveSpecies.filter((species) => species.collected)
     }
-    if (collectionFilter === 'locked') {
-      return archiveSpecies.filter((species) => !species.collected)
+    if (collectionFilter !== 'all') {
+      return archiveSpecies.filter((species) => speciesCollectionGroupId(species) === collectionFilter)
     }
     return archiveSpecies
   }, [archiveSpecies, collectionFilter])
@@ -3128,8 +3778,13 @@ function ArchiveScreen({
   }, [filteredArchiveSpecies])
 
   return (
-    <main className="archive-screen selection-scroll">
-      <section className="archive-main">
+    <main
+      className={cn(
+        'archive-screen selection-scroll',
+        archiveTab === 'map' && 'archive-screen--map',
+      )}
+    >
+      <section className={cn('archive-main', archiveTab === 'map' && 'archive-main--map')}>
         <div className="archive-heading">
           <div>
             <SectionLabel label={t('archive.label')} />
@@ -3149,39 +3804,26 @@ function ArchiveScreen({
           </div>
         </div>
 
-        <section className="metric-strip metric-strip--archive">
-          <MetricCell
-            label={t('archive.summary.collected')}
-            tone="success"
-            value={collectedSpeciesCount}
-          />
-          <MetricCell label={t('archive.summary.species')} value={archiveSpecies.length} />
-          {collectionGroupStats.map((group) => (
-            <MetricCell
-              key={group.id}
-              label={t(`archive.collection.groups.${group.id}`)}
-              tone={speciesCollectionGroupTone(group.id)}
-              value={formatRatio(group.litCount, group.species.length)}
-            />
-          ))}
-        </section>
+        {archiveTab === 'species' ? (
+          <section className="metric-strip metric-strip--archive">
+            {archiveMetricFilters.map((item) => (
+              <ArchiveMetricCell
+                active={collectionFilter === item.id}
+                filterId={item.id}
+                key={item.id}
+                label={item.label}
+                onClick={() => setCollectionFilter(item.id)}
+                signal={item.signal}
+                t={t}
+                tone={item.tone}
+                value={item.value}
+              />
+            ))}
+          </section>
+        ) : null}
 
         {archiveTab === 'species' ? (
           <div className="collection-board">
-            <div className="collection-toolbar">
-              <div className="mini-segment mini-segment--compact">
-                {speciesCollectionFilters.map((filter) => (
-                  <button
-                    className={cn(collectionFilter === filter && 'is-active')}
-                    key={filter}
-                    onClick={() => setCollectionFilter(filter)}
-                    type="button"
-                  >
-                    {t(`archive.collection.filters.${filter}`)}
-                  </button>
-                ))}
-              </div>
-            </div>
             {collectionGroups.map((group) => {
               const litCount = group.species.filter((species) => species.collected).length
               return (
@@ -3254,97 +3896,99 @@ function ArchiveScreen({
         )}
       </section>
 
-      <aside
-        className={cn(
-          'archive-detail',
-          activeSpecies && 'archive-detail--species',
-          activeSpecies && `archive-detail--art-${activeSpeciesArtworkAspect}`,
-          activeSpecies && !activeSpeciesImageUrl && 'archive-detail--empty',
-        )}
-        style={
-          activeSpecies
-            ? speciesArtworkStyle(activeSpeciesImageUrl, activeSpecies.coverGradient)
-            : undefined
-        }
-      >
-        {activeSpecies ? (
-          (() => {
-            const wiki = activeSpeciesWiki
-            const extract = wiki?.zh_extract ?? t('archive.detail.noChineseExtract')
-            const sourceUrl = wiki?.zh_url ?? null
-            return (
-              <div className="archive-detail__content">
-                <div className="archive-detail__heading">
-                  <SectionLabel label={t('archive.detail.label')} />
-                  <h2>{activeSpecies.name}</h2>
-                  <small>{activeSpecies.latinName}</small>
-                  <StatusPill
-                    label={
-                      activeSpecies.collected
-                        ? t('archive.collection.collected')
-                        : t('archive.collection.locked')
-                    }
-                    tone={activeSpecies.collected ? 'success' : 'muted'}
-                  />
-                </div>
-                <div className="archive-detail__body">
-                  <p className="archive-detail__extract">{extract}</p>
-                  {sourceUrl ? (
-                    <a
-                      className="archive-detail__source"
-                      href={sourceUrl}
-                      target="_blank"
-                      rel="noreferrer"
-                    >
-                      {t('archive.detail.source')}
-                    </a>
-                  ) : null}
-                  <div className="stat-stack">
-                    <StatRow
-                      label={t('archive.species.photoCount')}
-                      onValueClick={
-                        activeSpeciesPhotos.length > 0
-                          ? () => setSpeciesPhotosOpen(true)
-                          : undefined
+      {archiveTab === 'species' ? (
+        <aside
+          className={cn(
+            'archive-detail',
+            activeSpecies && 'archive-detail--species',
+            activeSpecies && `archive-detail--art-${activeSpeciesArtworkAspect}`,
+            activeSpecies && !activeSpeciesImageUrl && 'archive-detail--empty',
+          )}
+          style={
+            activeSpecies
+              ? speciesArtworkStyle(activeSpeciesImageUrl, activeSpecies.coverGradient)
+              : undefined
+          }
+        >
+          {activeSpecies ? (
+            (() => {
+              const wiki = activeSpeciesWiki
+              const extract = wiki?.zh_extract ?? t('archive.detail.noChineseExtract')
+              const sourceUrl = wiki?.zh_url ?? null
+              return (
+                <div className="archive-detail__content">
+                  <div className="archive-detail__heading">
+                    <SectionLabel label={t('archive.detail.label')} />
+                    <h2>{activeSpecies.name}</h2>
+                    <small>{activeSpecies.latinName}</small>
+                    <StatusPill
+                      label={
+                        activeSpecies.collected
+                          ? t('archive.collection.collected')
+                          : t('archive.collection.locked')
                       }
-                      valueAriaLabel={t('archive.species.openPhotos', {
-                        count: activeSpeciesPhotos.length,
-                        species: activeSpecies.name,
-                      })}
-                      value={activeSpecies.photoCount}
-                    />
-                    <StatRow
-                      label={t('archive.species.firstSeen')}
-                      value={
-                        activeSpecies.firstSeenAt ? activeSpecies.firstSeenAt.slice(0, 10) : '--'
-                      }
-                    />
-                    <StatRow
-                      label={t('archive.species.lastSeen')}
-                      value={
-                        activeSpecies.lastSeenAt ? activeSpecies.lastSeenAt.slice(0, 10) : '--'
-                      }
-                    />
-                    <StatRow
-                      label={t('archive.species.bestScore')}
-                      value={formatScore(activeSpecies.bestScore)}
-                    />
-                    <StatRow
-                      label={t('archive.species.rarity')}
-                      value={activeSpecies.protectLevel ?? activeSpecies.iucn ?? '--'}
+                      tone={activeSpecies.collected ? 'success' : 'muted'}
                     />
                   </div>
+                  <div className="archive-detail__body">
+                    <p className="archive-detail__extract">{extract}</p>
+                    {sourceUrl ? (
+                      <a
+                        className="archive-detail__source"
+                        href={sourceUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        {t('archive.detail.source')}
+                      </a>
+                    ) : null}
+                    <div className="stat-stack">
+                      <StatRow
+                        label={t('archive.species.photoCount')}
+                        onValueClick={
+                          activeSpeciesPhotos.length > 0
+                            ? () => setSpeciesPhotosOpen(true)
+                            : undefined
+                        }
+                        valueAriaLabel={t('archive.species.openPhotos', {
+                          count: activeSpeciesPhotos.length,
+                          species: activeSpecies.name,
+                        })}
+                        value={activeSpecies.photoCount}
+                      />
+                      <StatRow
+                        label={t('archive.species.firstSeen')}
+                        value={
+                          activeSpecies.firstSeenAt ? activeSpecies.firstSeenAt.slice(0, 10) : '--'
+                        }
+                      />
+                      <StatRow
+                        label={t('archive.species.lastSeen')}
+                        value={
+                          activeSpecies.lastSeenAt ? activeSpecies.lastSeenAt.slice(0, 10) : '--'
+                        }
+                      />
+                      <StatRow
+                        label={t('archive.species.bestScore')}
+                        value={formatScore(activeSpecies.bestScore)}
+                      />
+                      <StatRow
+                        label={t('archive.species.rarity')}
+                        value={activeSpecies.protectLevel ?? activeSpecies.iucn ?? '--'}
+                      />
+                    </div>
+                  </div>
                 </div>
-              </div>
-            )
-          })()
-        ) : (
-          <div className="archive-detail__empty">
-            <SectionLabel label={t('archive.detail.label')} />
-            <p>{t('archive.detail.empty')}</p>
-          </div>
-        )}
-      </aside>
+              )
+            })()
+          ) : (
+            <div className="archive-detail__empty">
+              <SectionLabel label={t('archive.detail.label')} />
+              <p>{t('archive.detail.empty')}</p>
+            </div>
+          )}
+        </aside>
+      ) : null}
       {speciesPhotosOpen && activeSpecies ? (
         <SpeciesPhotosModal
           onClose={() => setSpeciesPhotosOpen(false)}
@@ -3463,7 +4107,6 @@ function SpeciesPhotosModal({
   )
 }
 
-
 function CompareModal({
   onClose,
   onKeepBestOne,
@@ -3544,31 +4187,58 @@ function CompareModal({
 }
 
 function ExportDrawer({
-  activeFolder,
-  photos,
   onClose,
-  summary,
+  source,
   t,
 }: {
-  activeFolder: FolderRecord | null
-  photos: PhotoRecord[]
   onClose: () => void
-  summary: FolderSummary
+  source: ExportSourceSnapshot
   t: ReturnType<typeof useTranslation>['t']
 }) {
   const [grades, setGrades] = useState<PhotoGrade[]>(['select', 'usable', 'record'])
   const [minScore, setMinScore] = useState('')
   const [maxScore, setMaxScore] = useState('')
+  const [layout, setLayout] = useState<ExportLayout>('merged')
+  const [targetDir, setTargetDir] = useState('')
+  const [collapsed, setCollapsed] = useState(false)
+  const [status, setStatus] = useState<'idle' | 'running' | 'success' | 'error'>('idle')
+  const [result, setResult] = useState<ExportLibraryResponse | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [lockedSource, setLockedSource] = useState<ExportSourceSnapshot | null>(null)
+  const [lockedOptions, setLockedOptions] = useState<ExportOptionsSnapshot | null>(null)
+
+  const sourceFolder = lockedSource?.folder ?? source.folder
+  const sourcePhotos = lockedSource?.photos ?? source.photos
+  const sourceSummary = lockedSource?.summary ?? source.summary
 
   const min = minScore.trim() === '' ? null : Number(minScore)
   const max = maxScore.trim() === '' ? null : Number(maxScore)
-  const exportPhotos = photos.filter((photo) => {
-    if (!grades.includes(effectivePhotoGrade(photo))) return false
-    const score = photo.finalScore === null ? null : photo.finalScore * 100
-    if (score !== null && min !== null && Number.isFinite(min) && score < min) return false
-    if (score !== null && max !== null && Number.isFinite(max) && score > max) return false
-    return true
-  })
+  const activeOptions = lockedOptions ?? { grades, min, max, layout, targetDir }
+  const controlsLocked = lockedOptions !== null
+  const exportPhotos = useMemo(() => {
+    const activeGrades = new Set(activeOptions.grades)
+    return sourcePhotos.filter((photo) => {
+      if (!activeGrades.has(effectivePhotoGrade(photo))) return false
+      const score = photo.finalScore === null ? null : photo.finalScore * 100
+      if (
+        score !== null &&
+        activeOptions.min !== null &&
+        Number.isFinite(activeOptions.min) &&
+        score < activeOptions.min
+      ) {
+        return false
+      }
+      if (
+        score !== null &&
+        activeOptions.max !== null &&
+        Number.isFinite(activeOptions.max) &&
+        score > activeOptions.max
+      ) {
+        return false
+      }
+      return true
+    })
+  }, [activeOptions.grades, activeOptions.max, activeOptions.min, sourcePhotos])
 
   const toggleGrade = (grade: PhotoGrade) => {
     setGrades((current) =>
@@ -3576,95 +4246,320 @@ function ExportDrawer({
     )
   }
 
+  const chooseTargetDir = async () => {
+    if (controlsLocked) return
+    const selected = await window.plumelens?.selectExportDirectory?.()
+    if (selected) {
+      setTargetDir(selected)
+      setResult(null)
+      setError(null)
+      if (status !== 'running') setStatus('idle')
+    }
+  }
+
+  const startExport = async () => {
+    if (!sourceFolder || !targetDir || status === 'running') return
+    const exportOptions = {
+      grades: [...grades],
+      min: min !== null && Number.isFinite(min) ? min : null,
+      max: max !== null && Number.isFinite(max) ? max : null,
+      layout,
+      targetDir,
+    }
+    const exportSource = {
+      folder: sourceFolder,
+      photos: sourcePhotos,
+      summary: sourceSummary,
+    }
+    setLockedSource(exportSource)
+    setLockedOptions(exportOptions)
+    setStatus('running')
+    setCollapsed(true)
+    setResult(null)
+    setError(null)
+    try {
+      const response = await api.exportLibrary(exportSource.folder.id, {
+        target_dir: exportOptions.targetDir,
+        grades: exportOptions.grades,
+        min_score: exportOptions.min,
+        max_score: exportOptions.max,
+        include_companions: true,
+        layout: exportOptions.layout,
+        preserve_structure: true,
+        include_manifest: true,
+      })
+      setResult(response)
+      setStatus('success')
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+      setStatus('error')
+    }
+  }
+
+  const closePanel = () => {
+    if (status !== 'running') onClose()
+  }
+  const canStart = Boolean(
+    sourceFolder && targetDir && exportPhotos.length > 0 && status === 'idle' && !controlsLocked,
+  )
+  const statusText =
+    status === 'running'
+      ? t('export.status.running')
+      : status === 'success'
+        ? t('export.status.success')
+        : status === 'error'
+          ? t('export.status.error')
+          : t('export.status.ready')
+
+  if (collapsed) {
+    return (
+      <aside className="export-sidecar export-sidecar--collapsed" aria-label={t('export.label')}>
+        <button
+          className="export-sidecar__collapsed-main"
+          onClick={() => setCollapsed(false)}
+          type="button"
+        >
+          {status === 'running' ? (
+            <RefreshCw className="h-4 w-4 animate-spin" />
+          ) : status === 'success' ? (
+            <Check className="h-4 w-4" />
+          ) : (
+            <Download className="h-4 w-4" />
+          )}
+          <span>
+            <strong>{statusText}</strong>
+            <small>{t('export.summary.count', { count: exportPhotos.length })}</small>
+          </span>
+        </button>
+        <button
+          aria-label={t('common.expand')}
+          className="icon-button"
+          onClick={() => setCollapsed(false)}
+          type="button"
+        >
+          <ArrowLeft className="h-4 w-4" />
+        </button>
+        {status !== 'running' ? (
+          <button
+            aria-label={t('common.close')}
+            className="icon-button"
+            onClick={onClose}
+            type="button"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        ) : null}
+      </aside>
+    )
+  }
+
   return (
-    <div className="overlay-backdrop overlay-backdrop--bottom">
-      <div className="export-drawer">
+    <aside className="export-sidecar" aria-label={t('export.label')}>
+      <div className="export-sidecar__head">
         <div>
           <SectionLabel label={t('export.label')} />
           <h2>{t('export.title')}</h2>
-          <p>{activeFolder ? `${activeFolder.displayName} · ${activeFolder.rootPath}` : '--'}</p>
+          <p>{sourceFolder ? `${sourceFolder.displayName} · ${sourceFolder.rootPath}` : '--'}</p>
         </div>
+        <div className="export-sidecar__actions">
+          <button
+            aria-label={t('common.collapse')}
+            className="icon-button"
+            onClick={() => setCollapsed(true)}
+            type="button"
+          >
+            <ArrowRight className="h-4 w-4" />
+          </button>
+          <button
+            aria-label={t('common.close')}
+            className="icon-button"
+            disabled={status === 'running'}
+            onClick={closePanel}
+            type="button"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+      </div>
+
+      <div className="export-sidecar__body">
+        <div className="export-target">
+          <SectionLabel label={t('export.target.label')} />
+          <button
+            className="button-ghost export-target__button"
+            disabled={controlsLocked}
+            onClick={chooseTargetDir}
+            type="button"
+          >
+            <FolderOpen className="h-4 w-4" />
+            {activeOptions.targetDir ? t('export.target.change') : t('export.target.choose')}
+          </button>
+          <p title={activeOptions.targetDir || undefined}>
+            {activeOptions.targetDir || t('export.target.empty')}
+          </p>
+        </div>
+
         <div className="export-grid">
           <ExportOption title={t('export.scope.label')} value={t('export.scope.reviewed')} />
-          <ExportOption title={t('export.structure.label')} value={t('export.structure.keep')} />
+          <ExportOption
+            title={t('export.structure.label')}
+            value={
+              activeOptions.layout === 'merged'
+                ? t('export.layout.merged.short')
+                : t('export.layout.byGrade.short')
+            }
+          />
           <ExportOption title={t('export.bundle.label')} value={t('export.bundle.report')} />
         </div>
-        <div className="export-controls">
-          <div className="export-control-block">
-            <SectionLabel label={t('export.scope.manual')} />
-            <div className="export-grade-grid">
-              {(['select', 'usable', 'record', 'reject'] as PhotoGrade[]).map((grade) => (
-                <label className="export-check" key={grade}>
-                  <input
-                    checked={grades.includes(grade)}
-                    onChange={() => toggleGrade(grade)}
-                    type="checkbox"
-                  />
-                  <span>{t(gradeLabelKey(grade))}</span>
-                </label>
-              ))}
-            </div>
-          </div>
-          <div className="export-control-block">
-            <SectionLabel label={t('export.scoreRange.label')} />
-            <div className="export-range">
-              <input
-                inputMode="decimal"
-                max="100"
-                min="0"
-                onChange={(event) => setMinScore(event.target.value)}
-                placeholder={t('export.scoreRange.min')}
-                type="number"
-                value={minScore}
-              />
-              <span>–</span>
-              <input
-                inputMode="decimal"
-                max="100"
-                min="0"
-                onChange={(event) => setMaxScore(event.target.value)}
-                placeholder={t('export.scoreRange.max')}
-                type="number"
-                value={maxScore}
-              />
-            </div>
+
+        <div className="export-control-block">
+          <SectionLabel label={t('export.layout.label')} />
+          <div className="export-layout-grid" role="group" aria-label={t('export.layout.label')}>
+            <button
+              className={cn(
+                'export-layout-button',
+                activeOptions.layout === 'merged' && 'is-active',
+              )}
+              disabled={controlsLocked}
+              onClick={() => setLayout('merged')}
+              type="button"
+            >
+              <FolderOpen className="h-4 w-4" />
+              <span>
+                <strong>{t('export.layout.merged.label')}</strong>
+                <small>{t('export.layout.merged.hint')}</small>
+              </span>
+            </button>
+            <button
+              className={cn(
+                'export-layout-button',
+                activeOptions.layout === 'by_grade' && 'is-active',
+              )}
+              disabled={controlsLocked}
+              onClick={() => setLayout('by_grade')}
+              type="button"
+            >
+              <Trophy className="h-4 w-4" />
+              <span>
+                <strong>{t('export.layout.byGrade.label')}</strong>
+                <small>{t('export.layout.byGrade.hint')}</small>
+              </span>
+            </button>
           </div>
         </div>
+
+        <div className="export-control-block">
+          <SectionLabel label={t('export.scope.manual')} />
+          <div className="export-grade-grid">
+            {(['select', 'usable', 'record', 'reject'] as PhotoGrade[]).map((grade) => (
+              <label className="export-check" key={grade}>
+                <input
+                  checked={activeOptions.grades.includes(grade)}
+                  disabled={controlsLocked}
+                  onChange={() => toggleGrade(grade)}
+                  type="checkbox"
+                />
+                <span>{t(gradeLabelKey(grade))}</span>
+              </label>
+            ))}
+          </div>
+        </div>
+
+        <div className="export-control-block">
+          <SectionLabel label={t('export.scoreRange.label')} />
+          <div className="export-range">
+            <input
+              inputMode="decimal"
+              disabled={controlsLocked}
+              max="100"
+              min="0"
+              onChange={(event) => setMinScore(event.target.value)}
+              placeholder={t('export.scoreRange.min')}
+              type="number"
+              value={minScore}
+            />
+            <span>–</span>
+            <input
+              inputMode="decimal"
+              disabled={controlsLocked}
+              max="100"
+              min="0"
+              onChange={(event) => setMaxScore(event.target.value)}
+              placeholder={t('export.scoreRange.max')}
+              type="number"
+              value={maxScore}
+            />
+          </div>
+        </div>
+
         <div className="metric-strip">
           <MetricCell
             label={t('selection.metrics.selectPhotos')}
             tone="success"
-            value={summary.gradeCounts.select}
+            value={sourceSummary.gradeCounts.select}
           />
           <MetricCell
             label={t('selection.metrics.usablePhotos')}
-            value={summary.gradeCounts.usable}
+            value={sourceSummary.gradeCounts.usable}
           />
           <MetricCell
             label={t('selection.metrics.recordPhotos')}
             tone="warning"
-            value={summary.gradeCounts.record}
+            value={sourceSummary.gradeCounts.record}
           />
           <MetricCell
             label={t('selection.metrics.rejectCount')}
             tone="accent"
-            value={summary.gradeCounts.reject}
+            value={sourceSummary.gradeCounts.reject}
           />
         </div>
+
         <div className="export-result-count">
           {t('export.summary.count', { count: exportPhotos.length })}
         </div>
+
+        <div className={cn('export-status', `export-status--${status}`)}>
+          {status === 'running' ? <RefreshCw className="h-4 w-4 animate-spin" /> : null}
+          {status === 'success' ? <Check className="h-4 w-4" /> : null}
+          {status === 'idle' ? <Clock3 className="h-4 w-4" /> : null}
+          {status === 'error' ? <X className="h-4 w-4" /> : null}
+          <span>{statusText}</span>
+        </div>
+        {result ? (
+          <div className="export-output">
+            <small>{t('export.result.output')}</small>
+            <p title={result.output_dir}>{result.output_dir}</p>
+            <small>
+              {t('export.result.stats', {
+                companions: result.companion_count,
+                exported: result.exported_count,
+                failed: result.failed_count,
+              })}
+            </small>
+          </div>
+        ) : null}
+        {error ? <p className="export-error">{error}</p> : null}
+
         <div className="action-row">
-          <button className="button-primary" type="button">
-            <Download className="h-4 w-4" />
-            {t('export.confirm')}
+          <button
+            className="button-primary"
+            disabled={!canStart}
+            onClick={startExport}
+            type="button"
+          >
+            {status === 'running' ? (
+              <RefreshCw className="h-4 w-4 animate-spin" />
+            ) : (
+              <Download className="h-4 w-4" />
+            )}
+            {status === 'running' ? t('export.status.running') : t('export.confirm')}
           </button>
-          <button className="button-ghost" onClick={onClose} type="button">
-            {t('common.close')}
+          <button className="button-ghost" onClick={() => setCollapsed(true)} type="button">
+            {t('common.collapse')}
           </button>
         </div>
       </div>
-    </div>
+    </aside>
   )
 }
 
@@ -3731,6 +4626,49 @@ function GlyphMatrix({ tone, value }: { tone: Tone; value: number }) {
 
 export function SectionLabel({ label }: { label: string }) {
   return <div className="section-label">{label}</div>
+}
+
+function ArchiveMetricCell({
+  active,
+  filterId,
+  label,
+  onClick,
+  signal,
+  t,
+  tone,
+  value,
+}: {
+  active: boolean
+  filterId: SpeciesCollectionFilter
+  label: string
+  onClick: () => void
+  signal: string
+  t: ReturnType<typeof useTranslation>['t']
+  tone: Tone
+  value: number | string
+}) {
+  return (
+    <button
+      aria-pressed={active}
+      className={cn(
+        'metric-cell',
+        'archive-filter-cell',
+        `archive-filter-cell--${filterId}`,
+        active && 'archive-filter-cell--active',
+      )}
+      onClick={onClick}
+      title={signal}
+      type="button"
+    >
+      <span>{label}</span>
+      <strong>{value}</strong>
+      <i
+        aria-label={t('archive.summarySignalAria', { label, signal })}
+        className={cn('status-dot', 'archive-filter-cell__signal', `status-dot--${tone}`)}
+        role="img"
+      />
+    </button>
+  )
 }
 
 function MetricCell({

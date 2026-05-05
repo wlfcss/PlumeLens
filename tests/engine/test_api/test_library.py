@@ -134,6 +134,37 @@ class TestListAndDetail:
         resp = await client.get("/library/does-not-exist")
         assert resp.status_code == 404
 
+    async def test_update_display_name_persists_to_list_and_detail(self, real_client) -> None:
+        client, tmp = real_client
+        lib_root = tmp / "lib_alias"
+        _make_jpeg(lib_root / "p.jpg")
+        created = await client.post("/library/import", json={"root_path": str(lib_root)})
+        lib_id = created.json()["id"]
+
+        updated = await client.patch(
+            f"/library/{lib_id}",
+            json={"display_name": "  洋湖湿地早晨  "},
+        )
+        assert updated.status_code == 200
+        assert updated.json()["display_name"] == "洋湖湿地早晨"
+
+        libs = (await client.get("/library")).json()
+        assert libs[0]["display_name"] == "洋湖湿地早晨"
+
+        detail = (await client.get(f"/library/{lib_id}")).json()
+        assert detail["library"]["display_name"] == "洋湖湿地早晨"
+
+    async def test_update_display_name_rejects_blank_alias(self, real_client) -> None:
+        client, tmp = real_client
+        lib_root = tmp / "lib_alias_blank"
+        _make_jpeg(lib_root / "p.jpg")
+        created = await client.post("/library/import", json={"root_path": str(lib_root)})
+        lib_id = created.json()["id"]
+
+        updated = await client.patch(f"/library/{lib_id}", json={"display_name": "   "})
+        assert updated.status_code == 400
+        assert updated.json()["detail"] == "Display name cannot be empty"
+
     async def test_detail_applies_manual_species_override_per_bird(self, real_client) -> None:
         client, tmp = real_client
         lib_root = tmp / "lib_species_override"
@@ -407,7 +438,8 @@ class TestListAndDetail:
         # photo-level 由 best（detection 0，quality 高）决定
         assert photo["species_source"] == "model"
         assert photo["best_detection"]["species_source"] == "model"
-        # detection-level：detection 0 head 可见 → model；detection 1 head 不可见 → model_unconfirmed
+        # detection-level：detection 0 head 可见 → model；
+        # detection 1 head 不可见 → model_unconfirmed
         det_by_species = {d["species"]: d for d in photo["detections"]}
         assert det_by_species["白鹭"]["species_source"] == "model"
         assert det_by_species["白鹭"]["is_best"] is True

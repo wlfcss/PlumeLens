@@ -105,13 +105,22 @@ ipcMain.handle('dialog:open-folder', async () => {
   return result.canceled ? null : result.filePaths[0]
 })
 
+ipcMain.handle('dialog:select-export-directory', async () => {
+  if (!mainWindow) return null
+  const result = await dialog.showOpenDialog(mainWindow, {
+    buttonLabel: '选择导出位置',
+    properties: ['openDirectory', 'createDirectory'],
+  })
+  return result.canceled ? null : result.filePaths[0]
+})
+
 // 外部编辑器集成 — 信息抽屉 / 复核屏 "用 Topaz/PS 打开"
 //
 // 探测策略:macOS 应用安装在 /Applications/{Name}.app 或 ~/Applications/{Name}.app。
 // 启动期一次性扫描,缓存结果。卸载/安装通常需要重启应用才能感知 — 简单可接受。
 //
-// 启动方式:macOS spawn `open -a "AppName" filePath` — 比 shell.openPath 精准
-// (后者只用默认应用,RAW 默认会被预览/Photos 打开)。
+// 启动方式:Photoshop 走 macOS `open -a`,Topaz Photo 则走 bundle executable。
+// Topaz 的外部编辑入口对 `open -a` 的 RAW 路径处理不稳定,会退化成 basename。
 type EditorTool = 'topaz' | 'photoshop'
 
 interface EditorEntry {
@@ -119,6 +128,8 @@ interface EditorEntry {
   appNames: string[]
   /** 探测到的实际应用文件名(用于 open -a 启动);null = 未安装 */
   resolved: string | null
+  /** 探测到的 .app 绝对路径;Adobe 系应用常放在 /Applications/AppName/AppName.app */
+  appPath: string | null
 }
 
 const EDITOR_REGISTRY: Record<EditorTool, EditorEntry> = {
@@ -126,14 +137,15 @@ const EDITOR_REGISTRY: Record<EditorTool, EditorEntry> = {
     // Topaz 2024 年统一改名去掉 "AI" 后缀(Topaz Photo AI → Topaz Photo)。
     // 探测优先新名,fallback 到老名 + 单功能产品(用户可能装多个)。
     appNames: [
-      'Topaz Photo',          // 现行综合产品(2024+)
-      'Topaz Photo AI',       // 老综合产品名(2022-2023)
-      'Topaz Sharpen AI',     // 单功能,锐化
-      'Topaz DeNoise AI',     // 单功能,降噪
-      'Topaz Gigapixel AI',   // 单功能,放大
-      'Topaz Gigapixel',      // 改名后的 Gigapixel
+      'Topaz Photo', // 现行综合产品(2024+)
+      'Topaz Photo AI', // 老综合产品名(2022-2023)
+      'Topaz Sharpen AI', // 单功能,锐化
+      'Topaz DeNoise AI', // 单功能,降噪
+      'Topaz Gigapixel AI', // 单功能,放大
+      'Topaz Gigapixel', // 改名后的 Gigapixel
     ],
     resolved: null,
+    appPath: null,
   },
   photoshop: {
     // 探测最近几年版本顺序;装多个版本时挑最新
@@ -145,7 +157,18 @@ const EDITOR_REGISTRY: Record<EditorTool, EditorEntry> = {
       'Adobe Photoshop',
     ],
     resolved: null,
+    appPath: null,
   },
+}
+
+function findEditorAppPath(root: string, name: string): string | null {
+  const candidates = [
+    join(root, `${name}.app`),
+    // Adobe 系应用通常安装为:
+    // /Applications/Adobe Photoshop 2026/Adobe Photoshop 2026.app
+    join(root, name, `${name}.app`),
+  ]
+  return candidates.find((candidate) => existsSync(candidate)) ?? null
 }
 
 function resolveEditors(): void {
@@ -153,9 +176,10 @@ function resolveEditors(): void {
   for (const tool of Object.keys(EDITOR_REGISTRY) as EditorTool[]) {
     const entry = EDITOR_REGISTRY[tool]
     for (const name of entry.appNames) {
-      const found = roots.some((root) => existsSync(join(root, `${name}.app`)))
-      if (found) {
+      const appPath = roots.map((root) => findEditorAppPath(root, name)).find(Boolean) ?? null
+      if (appPath) {
         entry.resolved = name
+        entry.appPath = appPath
         break
       }
     }
@@ -163,10 +187,51 @@ function resolveEditors(): void {
   process.stderr.write(
     `[main] editors detected: ${JSON.stringify(
       Object.fromEntries(
-        Object.entries(EDITOR_REGISTRY).map(([k, v]) => [k, v.resolved]),
+        Object.entries(EDITOR_REGISTRY).map(([k, v]) => [k, v.appPath ?? v.resolved]),
       ),
     )}\n`,
   )
+}
+
+function findEditorExecutablePath(entry: EditorEntry): string | null {
+  if (!entry.appPath || !entry.resolved) return null
+  const executableNames = [entry.resolved]
+  try {
+    const plist = readFileSync(join(entry.appPath, 'Contents', 'Info.plist'), 'utf-8')
+    const match = plist.match(/<key>CFBundleExecutable<\/key>\s*<string>([^<]+)<\/string>/)
+    if (match?.[1] && !executableNames.includes(match[1])) {
+      executableNames.unshift(match[1])
+    }
+  } catch {
+    /* ignore: fallback to resolved app name */
+  }
+  for (const name of executableNames) {
+    const executablePath = join(entry.appPath, 'Contents', 'MacOS', name)
+    if (existsSync(executablePath)) return executablePath
+  }
+  return null
+}
+
+function spawnDetached(command: string, args: string[]): Promise<void> {
+  return new Promise((resolveSpawn, rejectSpawn) => {
+    const child = spawn(command, args, {
+      detached: true,
+      stdio: 'ignore',
+    })
+    let settled = false
+    const settle = (callback: () => void): void => {
+      if (settled) return
+      settled = true
+      callback()
+    }
+    child.once('error', (error) => {
+      settle(() => rejectSpawn(error))
+    })
+    child.once('spawn', () => {
+      child.unref()
+      settle(() => resolveSpawn())
+    })
+  })
 }
 
 ipcMain.handle('list-editors', () => {
@@ -182,21 +247,53 @@ ipcMain.handle('open-in-editor', async (_event, args: { tool: EditorTool; path: 
   if (!entry || !entry.resolved) {
     return { ok: false, reason: 'not_installed' as const }
   }
-  if (!filePath || !existsSync(filePath)) {
+  let canonicalPath: string
+  try {
+    canonicalPath = await realpath(filePath)
+  } catch {
     return { ok: false, reason: 'file_missing' as const }
   }
   // detached + unref 让外部编辑器跟主进程脱钩,关闭鉴翎不会拖死编辑器
   try {
-    const child = spawn('open', ['-a', entry.resolved, filePath], {
-      detached: true,
-      stdio: 'ignore',
-    })
-    child.unref()
+    if (tool === 'topaz') {
+      const executablePath = findEditorExecutablePath(entry)
+      if (executablePath) {
+        const topazArgs = entry.resolved.startsWith('Topaz Photo')
+          ? ['--editor=PlumeLens', canonicalPath]
+          : [canonicalPath]
+        await spawnDetached(executablePath, topazArgs)
+        return { ok: true, app: entry.resolved }
+      }
+    }
+    const appSpecifier = entry.appPath ?? entry.resolved
+    if (!appSpecifier) {
+      return { ok: false, reason: 'app_missing' as const }
+    }
+    await spawnDetached('open', ['-a', appSpecifier, canonicalPath])
     return { ok: true, app: entry.resolved }
   } catch (err) {
     process.stderr.write(`[main] open-in-editor failed: ${(err as Error).message}\n`)
     return { ok: false, reason: 'spawn_failed' as const }
   }
+})
+
+ipcMain.handle('open-path-in-finder', async (_event, targetPath: unknown) => {
+  if (typeof targetPath !== 'string' || targetPath.trim() === '') {
+    return { ok: false, reason: 'invalid_path' as const }
+  }
+
+  let canonicalPath: string
+  try {
+    canonicalPath = await realpath(targetPath)
+  } catch {
+    return { ok: false, reason: 'path_missing' as const }
+  }
+
+  const error = await shell.openPath(canonicalPath)
+  if (error) {
+    return { ok: false, reason: 'open_failed' as const, message: error }
+  }
+  return { ok: true as const }
 })
 
 // 用户设置(reverse geocoding API keys 等)— 持久化到 userData/settings.json。
@@ -226,7 +323,11 @@ function readUserSettings(): UserSettings {
 function writeUserSettings(settings: UserSettings): void {
   const path = userSettingsPath()
   // 先确保 userData 目录存在(应用首次启动 / 数据被清后)
-  try { mkdirSync(app.getPath('userData'), { recursive: true }) } catch { /* ignore */ }
+  try {
+    mkdirSync(app.getPath('userData'), { recursive: true })
+  } catch {
+    /* ignore */
+  }
   writeFileSync(path, JSON.stringify(settings, null, 2), 'utf-8')
 }
 
@@ -262,7 +363,9 @@ ipcMain.handle('open-logs-dir', async () => {
   // 避免 shell.openPath 返回错误字符串而 banner 看上去"按了无反应"。
   try {
     mkdirSync(logsDir, { recursive: true })
-  } catch { /* ignore — openPath 也会报错给 caller */ }
+  } catch {
+    /* ignore — openPath 也会报错给 caller */
+  }
   await shell.openPath(logsDir)
   return logsDir
 })
@@ -278,7 +381,9 @@ app.whenReady().then(async () => {
   let realRootCache: string = rootResolved
   try {
     realRootCache = await realpath(thumbnailsRoot)
-  } catch { /* dir 不存在,后续按需 realpath 单文件时会触发创建 */ }
+  } catch {
+    /* dir 不存在,后续按需 realpath 单文件时会触发创建 */
+  }
   process.stderr.write(`[main] userData=${app.getPath('userData')}\n`)
   process.stderr.write(`[main] thumbnailsRoot=${thumbnailsRoot}\n`)
   resolveEditors()
@@ -333,7 +438,13 @@ app.whenReady().then(async () => {
   type EngineStatusPayload =
     | { kind: 'ready'; url: string }
     | { kind: 'unhealthy'; consecutiveFailures: number; threshold: number }
-    | { kind: 'crashed'; code: number | null; signal: string | null; restartCount: number; maxRestarts: number }
+    | {
+        kind: 'crashed'
+        code: number | null
+        signal: string | null
+        restartCount: number
+        maxRestarts: number
+      }
     | { kind: 'fatal'; message: string }
     | { kind: 'cpu-fallback' }
 
@@ -351,9 +462,17 @@ app.whenReady().then(async () => {
     sendStatus({ kind: 'unhealthy', ...info })
   })
 
-  processManager.on('crashed', (info: { code: number | null; signal: string | null; restartCount: number; maxRestarts: number }) => {
-    sendStatus({ kind: 'crashed', ...info })
-  })
+  processManager.on(
+    'crashed',
+    (info: {
+      code: number | null
+      signal: string | null
+      restartCount: number
+      maxRestarts: number
+    }) => {
+      sendStatus({ kind: 'crashed', ...info })
+    },
+  )
 
   // graceful degrade 触发后 emit 一次,UI 持续显示 CPU 降级横幅
   processManager.on('cpu-fallback', () => {

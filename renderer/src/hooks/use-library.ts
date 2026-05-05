@@ -16,6 +16,7 @@ import {
   type ImportLibraryRequest,
   type LibraryDetail,
   type LibrarySummary,
+  type PhotoThumbnailResponse,
 } from '@/lib/api-client'
 
 export const LIBRARIES_KEY = ['libraries'] as const
@@ -123,6 +124,24 @@ export function useImportLibrary() {
   })
 }
 
+export function useUpdateLibrary() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ libraryId, displayName }: { libraryId: string; displayName: string }) =>
+      api.updateLibrary(libraryId, { display_name: displayName }),
+    onSuccess: (data: LibrarySummary) => {
+      qc.setQueryData<LibrarySummary[] | undefined>(LIBRARIES_KEY, (current) =>
+        current?.map((library) => (library.id === data.id ? data : library)),
+      )
+      qc.setQueryData<LibraryDetail | undefined>(LIBRARY_DETAIL_KEY(data.id), (current) =>
+        current ? { ...current, library: data } : current,
+      )
+      qc.invalidateQueries({ queryKey: LIBRARIES_KEY })
+      qc.invalidateQueries({ queryKey: LIBRARY_DETAIL_KEY(data.id) })
+    },
+  })
+}
+
 export function useDeleteLibrary() {
   const qc = useQueryClient()
   return useMutation({
@@ -148,9 +167,27 @@ export function useBuildPhotoThumbnail(libraryId: string | null | undefined) {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: (photoId: string) => api.buildPhotoThumbnail(photoId),
-    onSuccess: (data) => {
+    onSuccess: (data: PhotoThumbnailResponse) => {
       const targetLibraryId = data.library_id || libraryId
       if (targetLibraryId) {
+        qc.setQueryData<LibraryDetail | undefined>(
+          LIBRARY_DETAIL_KEY(targetLibraryId),
+          (current) => {
+            if (!current || !data.thumb_grid || !data.thumb_preview) return current
+            return {
+              ...current,
+              photos: current.photos.map((photo) =>
+                photo.id === data.photo_id
+                  ? {
+                      ...photo,
+                      thumb_grid: data.thumb_grid,
+                      thumb_preview: data.thumb_preview,
+                    }
+                  : photo,
+              ),
+            }
+          },
+        )
         qc.invalidateQueries({ queryKey: LIBRARY_DETAIL_KEY(targetLibraryId) })
       }
       qc.invalidateQueries({ queryKey: LIBRARIES_KEY })

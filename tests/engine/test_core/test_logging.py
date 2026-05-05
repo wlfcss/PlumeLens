@@ -9,7 +9,6 @@ from pathlib import Path
 
 import pytest
 import structlog
-
 from engine.core.logging import setup_logging
 
 

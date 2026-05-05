@@ -751,6 +751,11 @@ def _walk_supported_files(root: Path, recursive: bool) -> list[Path]:
     return sorted(candidates)
 
 
+def _filter_existing_paths(paths: list[Path]) -> list[Path]:
+    """Return existing paths without doing filesystem work on the event loop."""
+    return [p for p in paths if p.exists()]
+
+
 class _CompanionInfo:
     """同伴文件元数据(scanner 内部用,不暴露给 service 外)。"""
 
@@ -983,6 +988,11 @@ async def backfill_companion_for_library(db: Database, library_id: str) -> int:
     """
     conn = db.conn
     async with conn.execute(
+        "SELECT root_path, recursive FROM libraries WHERE id = ?",
+        (library_id,),
+    ) as cur:
+        library = await cur.fetchone()
+    async with conn.execute(
         "SELECT file_path, companion_path FROM photos WHERE library_id = ?",
         (library_id,),
     ) as cur:
@@ -993,12 +1003,25 @@ async def backfill_companion_for_library(db: Database, library_id: str) -> int:
     if not paths:
         return 0
 
-    # 仅把 fs 上仍存在的 file 纳入 pair 识别(消失文件不参与,避免错误关联)
-    alive_paths = [p for p in paths if p.exists()]
-    _primaries, companion_map = _resolve_pairs(alive_paths)
+    # 优先扫图库目录本身,这样老库即使只保存了 JPG 行,也能发现旁边的 CR3/NEF/ARW。
+    # root 不存在时回落到 DB 已有路径,兼容测试与被移动的图库。
+    fs_paths: list[Path] = []
+    if library is not None:
+        root = Path(str(library["root_path"]))
+        if await asyncio.to_thread(root.exists):
+            fs_paths = await asyncio.to_thread(
+                _walk_supported_files,
+                root,
+                bool(library["recursive"]),
+            )
+    if not fs_paths:
+        fs_paths = await asyncio.to_thread(_filter_existing_paths, paths)
+    _primaries, companion_map = _resolve_pairs(fs_paths)
 
     updated = 0
     for path_str, comp in companion_map.items():
+        if path_str not in existing_companion:
+            continue
         prev = existing_companion.get(path_str)
         new_comp_path = str(comp.path) if comp else None
         if prev == new_comp_path:

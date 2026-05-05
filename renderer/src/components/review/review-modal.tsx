@@ -17,6 +17,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Clock3,
+  Maximize2,
   Search,
   Sparkles,
   Waypoints,
@@ -36,7 +37,6 @@ import {
   formatScore,
   gradeLabelKey,
   legacyAfPointToOverlay,
-  photoReviewReason,
   speciesSourceBadge,
   speciesSourceDetail,
   speciesSourceKind,
@@ -44,7 +44,6 @@ import {
   type ReviewDetail,
 } from '@/App'
 import type { SpeciesOverrideBBox, SpeciesOverrideValue } from '@/lib/api-client'
-import { useReverseGeocode } from '@/hooks/use-geocoding'
 import { computeIqaCropBox } from '@/lib/backend-adapter'
 import type {
   AfOverlay,
@@ -54,6 +53,9 @@ import type {
 } from '@/lib/mock-workspace'
 import { listAllSpecies } from '@/lib/species-wiki'
 import { cn } from '@/lib/utils'
+
+const REVIEW_ZOOM_OPTIONS = [1.5, 2.5, 4] as const
+const DEFAULT_REVIEW_ZOOM = 2.5
 
 export function ReviewModal({
   detail,
@@ -86,6 +88,8 @@ export function ReviewModal({
   const [showBbox, setShowBbox] = useState(true)
   const [showPose, setShowPose] = useState(false)
   const [showAfPoint, setShowAfPoint] = useState(true)
+  const [zoomScale, setZoomScale] = useState<number>(DEFAULT_REVIEW_ZOOM)
+  const [fullscreenOpen, setFullscreenOpen] = useState(false)
 
   const imgW = photo.imageWidth ?? null
   const imgH = photo.imageHeight ?? null
@@ -147,6 +151,14 @@ export function ReviewModal({
         return
       }
 
+      if (fullscreenOpen) {
+        if (event.key === 'Escape') {
+          event.preventDefault()
+          setFullscreenOpen(false)
+        }
+        return
+      }
+
       if (event.key === 'Escape') {
         event.preventDefault()
         onClose()
@@ -191,7 +203,7 @@ export function ReviewModal({
 
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [onAddToCompare, onClose, onSetDecision, photo.id, selectRelativePhoto])
+  }, [fullscreenOpen, onAddToCompare, onClose, onSetDecision, photo.id, selectRelativePhoto])
 
   // IQA 裁切框（与后端 expand_for_iqa 一致：2.5× + 比例约束 + cap + shift）
   const iqaCrop = useMemo(() => {
@@ -291,7 +303,12 @@ export function ReviewModal({
               photoId={photo.id}
               loupeEnabled
               cropRect={null}
+              onOpenFullscreen={() => setFullscreenOpen(true)}
+              onZoomScaleChange={setZoomScale}
+              t={t}
               variant="primary"
+              zoomOptions={REVIEW_ZOOM_OPTIONS}
+              zoomScale={zoomScale}
             />
             <ReviewImageStage
               label={t('selection.review.iqaCrop')}
@@ -309,7 +326,9 @@ export function ReviewModal({
               photoId={photo.id}
               loupeEnabled={false}
               cropRect={iqaCrop}
+              t={t}
               variant="crop"
+              zoomScale={zoomScale}
             />
           </div>
         </div>
@@ -373,9 +392,8 @@ export function ReviewModal({
             t={t}
           />
 
-          <ExifPanel exif={photo.exif} t={t} />
+          <ExifPanel exif={photo.exif} location={photo} t={t} />
 
-          <p className="review-reason">{t(photoReviewReason(photo))}</p>
           <TagCluster photo={photo} t={t} />
 
           <div className="review-shortcuts" aria-label={t('selection.review.shortcutsLabel')}>
@@ -441,6 +459,22 @@ export function ReviewModal({
           photos={photos}
           t={t}
         />
+
+        {fullscreenOpen ? (
+          <ReviewFullscreenViewer
+            aspect={aspect}
+            fallbackGradient={photo.previewGradient}
+            fileName={photo.fileName}
+            imgH={imgH}
+            imgW={imgW}
+            onClose={() => setFullscreenOpen(false)}
+            onZoomScaleChange={setZoomScale}
+            previewSrc={previewSrc}
+            t={t}
+            zoomOptions={REVIEW_ZOOM_OPTIONS}
+            zoomScale={zoomScale}
+          />
+        ) : null}
       </div>
     </div>
   )
@@ -571,8 +605,7 @@ function SpeciesOverrideEditor({
           下，每个 detection 独立判断按钮显隐，不被 photo-level 一刀切。
           老数据 fallback：activeBird.speciesSource undefined 时退回 photo.speciesSource。 */}
       {(activeBird.speciesSource === 'model_unconfirmed' ||
-        (activeBird.speciesSource === undefined &&
-          photo.speciesSource === 'model_unconfirmed')) &&
+        (activeBird.speciesSource === undefined && photo.speciesSource === 'model_unconfirmed')) &&
       !activeBird.manualSpecies &&
       activeBird.speciesLatinName ? (
         <button
@@ -689,13 +722,11 @@ function SpeciesOverrideEditor({
 
 /**
  * 单独的图片舞台组件：
- * - cropRect 为 null → 显示完整原图（支持 loupe 按住放大）
+ * - cropRect 为 null → 显示完整原图（支持点击放大 + 拖动平移）
  * - cropRect 给定 → 用 background-position/size 缩放出该区域（IQA 裁切预览，不做 loupe）
  *
  * Loupe 交互：
- *   mousedown 切到放大模式 → 跟随鼠标平移
- *   mouseup / mouseleave 还原
- *   放大倍数 = 2.5×（与 IQA expand 一致，方便对比）
+ *   第一次点击进入当前倍率放大；拖动时跟随鼠标平移；已放大且未拖动时再次点击退出。
  */
 function ReviewImageStage({
   label,
@@ -711,7 +742,13 @@ function ReviewImageStage({
   photoId,
   loupeEnabled,
   cropRect,
+  onOpenFullscreen,
+  onZoomScaleChange,
+  showHeader = true,
+  t,
   variant,
+  zoomOptions,
+  zoomScale,
 }: {
   label: string
   hint: string
@@ -726,7 +763,13 @@ function ReviewImageStage({
   photoId: string
   loupeEnabled: boolean
   cropRect: { x1: number; y1: number; x2: number; y2: number } | null
-  variant: 'primary' | 'crop'
+  onOpenFullscreen?: () => void
+  onZoomScaleChange?: (scale: number) => void
+  showHeader?: boolean
+  t: ReturnType<typeof useTranslation>['t']
+  variant: 'primary' | 'crop' | 'fullscreen'
+  zoomOptions?: readonly number[]
+  zoomScale: number
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const frameRef = useRef<HTMLDivElement | null>(null)
@@ -739,7 +782,13 @@ function ReviewImageStage({
     xPct: 50,
     yPct: 50,
   })
-  const LOUPE_SCALE = 2.5
+  const pointerStateRef = useRef<{
+    pointerId: number
+    moved: boolean
+    startX: number
+    startY: number
+    wasActive: boolean
+  } | null>(null)
 
   useEffect(() => {
     const element = frameRef.current
@@ -759,29 +808,50 @@ function ReviewImageStage({
     return () => observer.disconnect()
   }, [])
 
-  const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (!loupeEnabled || !previewSrc) return
-    e.preventDefault()
-    const rect = e.currentTarget.getBoundingClientRect()
-    const xPct = ((e.clientX - rect.left) / rect.width) * 100
-    const yPct = ((e.clientY - rect.top) / rect.height) * 100
-    setLoupePos({ xPct, yPct })
-    setLoupeActive(true)
-    e.currentTarget.setPointerCapture(e.pointerId)
-  }
-  const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (!loupeActive) return
-    const rect = e.currentTarget.getBoundingClientRect()
-    const xPct = ((e.clientX - rect.left) / rect.width) * 100
-    const yPct = ((e.clientY - rect.top) / rect.height) * 100
+  useEffect(() => {
+    setLoupeActive(false)
+    setLoupePos({ xPct: 50, yPct: 50 })
+    pointerStateRef.current = null
+  }, [photoId])
+
+  const updateLoupePosition = useCallback((element: HTMLDivElement, clientX: number, clientY: number) => {
+    const rect = element.getBoundingClientRect()
+    const xPct = ((clientX - rect.left) / rect.width) * 100
+    const yPct = ((clientY - rect.top) / rect.height) * 100
     setLoupePos({
       xPct: Math.max(0, Math.min(100, xPct)),
       yPct: Math.max(0, Math.min(100, yPct)),
     })
+  }, [])
+
+  const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!loupeEnabled || !previewSrc) return
+    e.preventDefault()
+    pointerStateRef.current = {
+      pointerId: e.pointerId,
+      moved: false,
+      startX: e.clientX,
+      startY: e.clientY,
+      wasActive: loupeActive,
+    }
+    updateLoupePosition(e.currentTarget, e.clientX, e.clientY)
+    if (!loupeActive) setLoupeActive(true)
+    e.currentTarget.setPointerCapture(e.pointerId)
+  }
+  const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    const state = pointerStateRef.current
+    if (!state || state.pointerId !== e.pointerId || !loupeActive) return
+    if (Math.abs(e.clientX - state.startX) + Math.abs(e.clientY - state.startY) > 4) {
+      state.moved = true
+    }
+    updateLoupePosition(e.currentTarget, e.clientX, e.clientY)
   }
   const handlePointerEnd = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (!loupeActive) return
-    setLoupeActive(false)
+    const state = pointerStateRef.current
+    if (state && state.pointerId === e.pointerId && state.wasActive && !state.moved) {
+      setLoupeActive(false)
+    }
+    pointerStateRef.current = null
     if (e.currentTarget.hasPointerCapture(e.pointerId)) {
       e.currentTarget.releasePointerCapture(e.pointerId)
     }
@@ -842,7 +912,7 @@ function ReviewImageStage({
       return {
         backgroundImage: `url("${previewSrc}")`,
         backgroundPosition: `${loupePos.xPct}% ${loupePos.yPct}%`,
-        backgroundSize: `${LOUPE_SCALE * 100}% auto`,
+        backgroundSize: `${zoomScale * 100}% auto`,
         backgroundRepeat: 'no-repeat',
       }
     }
@@ -852,7 +922,7 @@ function ReviewImageStage({
       backgroundSize: 'contain',
       backgroundRepeat: 'no-repeat',
     }
-  }, [previewSrc, cropRect, imgW, imgH, loupeActive, loupePos.xPct, loupePos.yPct])
+  }, [previewSrc, cropRect, imgW, imgH, loupeActive, loupePos.xPct, loupePos.yPct, zoomScale])
 
   // 计算覆盖层在该 stage 上的相对百分比
   // - 完整图模式：直接 bbox/pose / 原图尺寸
@@ -959,7 +1029,7 @@ function ReviewImageStage({
                 width: `${r.width}%`,
                 height: `${r.height}%`,
               }}
-              title="对焦区域"
+              title={t('selection.review.afArea')}
             />,
           )
         }
@@ -985,7 +1055,7 @@ function ReviewImageStage({
             className={cn('af-point', 'af-point--passive', isMini && 'af-point--mini')}
             key={`af-passive-${index}`}
             style={{ left: `${p.left}%`, top: `${p.top}%` }}
-            title="可用对焦点"
+            title={t('selection.review.afAvailablePoint')}
           />,
         )
       }
@@ -1009,7 +1079,11 @@ function ReviewImageStage({
             )}
             key={`af-focused-${index}`}
             style={{ left: `${p.left}%`, top: `${p.top}%` }}
-            title={afOverlay.kind === 'point' ? '对焦点' : '合焦点'}
+            title={
+              afOverlay.kind === 'point'
+                ? t('selection.review.afPoint')
+                : t('selection.review.afFocusedPoint')
+            }
           />,
         )
       }
@@ -1017,13 +1091,48 @@ function ReviewImageStage({
     return overlays
   }
 
-  return (
-    <div className="review-stage__pane">
-      <div className="review-stage__head">
-        <span className="review-stage__label">{label}</span>
-        <span className="review-stage__hint">{hint}</span>
+  const zoomControls =
+    loupeEnabled && previewSrc && zoomOptions && onZoomScaleChange ? (
+      <div className="review-zoom-control" aria-label={t('selection.review.zoomLabel')}>
+        {zoomOptions.map((option) => (
+          <button
+            aria-label={t('selection.review.zoomScale', { scale: option })}
+            className={cn(option === zoomScale && 'review-zoom-control__item--active')}
+            key={option}
+            onClick={() => onZoomScaleChange(option)}
+            type="button"
+          >
+            {option}×
+          </button>
+        ))}
       </div>
-      <div className="review-image-frame" ref={frameRef}>
+    ) : null
+
+  return (
+    <div className={cn('review-stage__pane', variant === 'fullscreen' && 'review-stage__pane--fullscreen')}>
+      {showHeader ? (
+        <div className="review-stage__head">
+          <span className="review-stage__label">{label}</span>
+          <span className="review-stage__tools">
+            <span className="review-stage__hint">{hint}</span>
+            {zoomControls}
+            {onOpenFullscreen ? (
+              <button
+                aria-label={t('selection.review.fullscreen')}
+                className="review-stage__fullscreen"
+                onClick={onOpenFullscreen}
+                type="button"
+              >
+                <Maximize2 className="h-3.5 w-3.5" />
+              </button>
+            ) : null}
+          </span>
+        </div>
+      ) : null}
+      <div
+        className={cn('review-image-frame', variant === 'fullscreen' && 'review-image-frame--fullscreen')}
+        ref={frameRef}
+      >
         <div
           ref={containerRef}
           className={cn(
@@ -1041,12 +1150,93 @@ function ReviewImageStage({
           onPointerMove={handlePointerMove}
           onPointerUp={handlePointerEnd}
           onPointerCancel={handlePointerEnd}
-          onLostPointerCapture={() => setLoupeActive(false)}
+          onLostPointerCapture={() => {
+            pointerStateRef.current = null
+          }}
           data-photo-id={photoId}
         >
           {!loupeActive ? renderOverlays() : null}
         </div>
       </div>
+    </div>
+  )
+}
+
+function ReviewFullscreenViewer({
+  aspect,
+  fallbackGradient,
+  fileName,
+  imgH,
+  imgW,
+  onClose,
+  onZoomScaleChange,
+  previewSrc,
+  t,
+  zoomOptions,
+  zoomScale,
+}: {
+  aspect: number | null
+  fallbackGradient: string
+  fileName: string
+  imgH: number | null
+  imgW: number | null
+  onClose: () => void
+  onZoomScaleChange: (scale: number) => void
+  previewSrc: string | null
+  t: ReturnType<typeof useTranslation>['t']
+  zoomOptions: readonly number[]
+  zoomScale: number
+}) {
+  return (
+    <div
+      className="review-fullscreen"
+      onPointerDown={(event) => {
+        if (event.target === event.currentTarget) onClose()
+      }}
+    >
+      <div className="review-fullscreen__bar">
+        <div className="review-fullscreen__title">
+          <span>{t('selection.review.fullscreen')}</span>
+          <strong>{fileName}</strong>
+        </div>
+        <div className="review-fullscreen__actions">
+          <div className="review-zoom-control" aria-label={t('selection.review.zoomLabel')}>
+            {zoomOptions.map((option) => (
+              <button
+                aria-label={t('selection.review.zoomScale', { scale: option })}
+                className={cn(option === zoomScale && 'review-zoom-control__item--active')}
+                key={option}
+                onClick={() => onZoomScaleChange(option)}
+                type="button"
+              >
+                {option}×
+              </button>
+            ))}
+          </div>
+          <IconButton ariaKeyShortcuts="Escape" label={t('common.close')} onClick={onClose}>
+            <X className="h-4 w-4" />
+          </IconButton>
+        </div>
+      </div>
+      <ReviewImageStage
+        afOverlay={null}
+        aspect={aspect}
+        bbox={null}
+        cropRect={null}
+        fallbackGradient={fallbackGradient}
+        hint={t('selection.review.fullscreenHint')}
+        imgH={imgH}
+        imgW={imgW}
+        label={fileName}
+        loupeEnabled
+        photoId={`fullscreen-${fileName}`}
+        pose={null}
+        previewSrc={previewSrc}
+        showHeader={false}
+        t={t}
+        variant="fullscreen"
+        zoomScale={zoomScale}
+      />
     </div>
   )
 }
@@ -1129,9 +1319,7 @@ function ScoreHeader({
   const sourceBadge = speciesSourceBadge(photo, t, activeBird)
   const sourceKind = speciesSourceKind(photo, activeBird)
   const speciesName =
-    activeBird?.speciesName ??
-    effectiveSpeciesName(photo) ??
-    t('selection.photo.unidentified')
+    activeBird?.speciesName ?? effectiveSpeciesName(photo) ?? t('selection.photo.unidentified')
   const speciesLatinName = activeBird?.speciesLatinName ?? effectiveSpeciesLatinName(photo)
   // 多鸟图：当前鸟的提示（克制小字，section-label 同级语义）
   const showBirdHint = totalBirds >= 2 && activeBird != null
@@ -1211,9 +1399,11 @@ function CompactKV({ label, value }: { label: string; value: string }) {
 /** EXIF 信息面板（相机 / 镜头 / 曝光参数） */
 function ExifPanel({
   exif,
+  location,
   t,
 }: {
   exif?: Record<string, unknown> | null
+  location: Pick<PhotoRecord, 'country' | 'province' | 'city' | 'district' | 'place'>
   t: ReturnType<typeof useTranslation>['t']
 }) {
   if (!exif) return null
@@ -1294,23 +1484,39 @@ function ExifPanel({
         <CompactKV label={t('selection.exif.camera')} value={camera} />
         <CompactKV label={t('selection.exif.lens')} value={lens} />
         <CompactKV label={t('selection.exif.time')} value={dt} />
-        {gps ? <GpsRows gps={gps} t={t} /> : null}
+        {gps ? <GpsRows gps={gps} location={location} t={t} /> : null}
       </div>
     </div>
   )
 }
 
-/** GPS 行:坐标(可点 Apple Maps) + reverse geocoding 解析的地名 */
+function formatPersistedPlace(
+  location: Pick<PhotoRecord, 'country' | 'province' | 'city' | 'district' | 'place'>,
+): string | null {
+  const parts = [
+    location.place,
+    location.district,
+    location.city,
+    location.province,
+    location.country,
+  ]
+    .map((value) => value?.trim())
+    .filter((value): value is string => Boolean(value))
+  const unique = parts.filter((value, index) => parts.indexOf(value) === index)
+  return unique.length > 0 ? unique.join(' · ') : null
+}
+
+/** GPS 行:坐标(可点 Apple Maps) + 后台 backfill 持久化地名 */
 function GpsRows({
   gps,
+  location,
   t,
 }: {
   gps: { lat: number; lon: number; alt: number | null }
+  location: Pick<PhotoRecord, 'country' | 'province' | 'city' | 'district' | 'place'>
   t: ReturnType<typeof useTranslation>['t']
 }) {
-  const geo = useReverseGeocode(gps.lat, gps.lon)
-  // source 决定 tooltip 文案 — 离线兜底要明确告诉用户(地名可能不准/精度低)
-  const sourceLabel = geo.data?.source ? t(`selection.exif.geocodingSource.${geo.data.source}`) : ''
+  const place = formatPersistedPlace(location)
   return (
     <>
       <div className="compact-kv">
@@ -1325,15 +1531,10 @@ function GpsRows({
           {formatGpsCoords(gps)}
         </a>
       </div>
-      {geo.data?.display_name ? (
+      {place ? (
         <div className="compact-kv compact-kv--multiline">
           <span className="compact-kv__label">{t('selection.exif.place')}</span>
-          <span
-            className="compact-kv__value compact-kv__value--multiline"
-            title={sourceLabel ? `${t('selection.exif.geocodingFrom')}: ${sourceLabel}` : undefined}
-          >
-            {geo.data.display_name}
-          </span>
+          <span className="compact-kv__value compact-kv__value--multiline">{place}</span>
         </div>
       ) : null}
     </>

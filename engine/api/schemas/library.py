@@ -47,6 +47,17 @@ class ImportLibraryRequest(BaseModel):
     recursive: bool = Field(default=True, description="Whether to recurse into subdirectories")
 
 
+class UpdateLibraryRequest(BaseModel):
+    """Request body for PATCH /library/{id}."""
+
+    display_name: str = Field(
+        ...,
+        min_length=1,
+        max_length=120,
+        description="User-facing folder alias used in the UI and export output folder",
+    )
+
+
 class LibrarySummary(BaseModel):
     """A single library entry as returned by GET /library list."""
 
@@ -132,6 +143,11 @@ class PhotoRow(BaseModel):
     companion_path: str | None = None
     companion_format: str | None = None
     companion_size: int | None = None
+    country: str | None = None
+    province: str | None = None
+    city: str | None = None
+    district: str | None = None
+    place: str | None = None
     created_at: str
     # 拍摄时间 ISO8601，优先级：EXIF DateTimeOriginal > file_mtime > created_at；
     # 用于前端按时间窗口分组（连拍/同场景照片聚合）

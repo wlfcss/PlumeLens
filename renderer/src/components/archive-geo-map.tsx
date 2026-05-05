@@ -24,17 +24,12 @@ import {
   GraphicComponent,
 } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
-import { ChevronRight, Loader2, MapPin } from 'lucide-react'
+import { ChevronRight, Loader2, MapPin, X } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react'
 import { useTranslation } from 'react-i18next'
 
-import {
-  useGeoCities,
-  useGeoProvinces,
-  useGeoSpots,
-  useGeoSummary,
-} from '@/hooks/use-archive-geo'
-import type { GeoSpot } from '@/lib/api-client'
+import { useGeoCities, useGeoProvinces, useGeoSpots, useGeoSummary } from '@/hooks/use-archive-geo'
+import type { GeoSpot, GeoSpotPhoto } from '@/lib/api-client'
 import { ThumbnailImage } from '@/components/thumbnail-image'
 import { cn } from '@/lib/utils'
 
@@ -55,9 +50,7 @@ import chinaGeoJSON from '@/data/geojson/china.json'
 
 // 省级 GeoJSON 按需 lazy load(用 vite import.meta.glob)
 // 文件名约定 {adcode}.json (110000.json / 320000.json ...)
-const provinceModules = import.meta.glob<{ default: GeoJSONObject }>(
-  '@/data/geojson/*.json',
-)
+const provinceModules = import.meta.glob<{ default: GeoJSONObject }>('@/data/geojson/[0-9]*.json')
 
 type GeoJSONObject = {
   type: string
@@ -69,6 +62,30 @@ type GeoJSONObject = {
 }
 
 type Level = 'country' | 'province' | 'city'
+type TooltipLine = { label: string; value: string | number }
+type GeoRankItem = {
+  id: string
+  name: string
+  photoCount: number
+  speciesCount: number
+  active: boolean
+  onClick: () => void
+}
+
+const ALL_SPECIES_FILTER = '__all__'
+
+const MAP_PALETTE = {
+  area: '#111111',
+  areaLow: '#151515',
+  areaMid: '#494949',
+  areaHigh: '#f2f2f2',
+  border: 'rgba(255,255,255,0.26)',
+  borderStrong: 'rgba(255,255,255,0.58)',
+  text: '#f4f4f4',
+  muted: 'rgba(244,244,244,0.58)',
+  accent: '#ff3b30',
+  accentSoft: 'rgba(255,59,48,0.26)',
+} as const
 
 // 从 china.json 抽 province name → adcode 映射(一级钻取时根据 name 找 adcode 加载省 GeoJSON)
 const PROVINCE_TO_ADCODE: Map<string, string> = new Map(
@@ -78,12 +95,62 @@ const PROVINCE_TO_ADCODE: Map<string, string> = new Map(
   ]),
 )
 
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+}
+
+function geoTooltip(title: string, lines: TooltipLine[]): string {
+  return [
+    `<div class="archive-geo-tooltip"><strong>${escapeHtml(title)}</strong>`,
+    ...lines.map(
+      (line) =>
+        `<span><em>${escapeHtml(line.label)}</em><b>${escapeHtml(String(line.value))}</b></span>`,
+    ),
+    '</div>',
+  ].join('')
+}
+
+function geoTooltipStyle() {
+  return {
+    backgroundColor: 'rgba(5,5,5,0.96)',
+    borderColor: 'rgba(255,255,255,0.18)',
+    borderWidth: 1,
+    padding: 0,
+    textStyle: { color: MAP_PALETTE.text, fontSize: 12 },
+    extraCssText:
+      'box-shadow:0 18px 48px rgba(0,0,0,.46);backdrop-filter:blur(16px);border-radius:8px;',
+  }
+}
+
+function visualMapOption(max: number, t: ReturnType<typeof useTranslation>['t']) {
+  return {
+    show: false,
+    min: 0,
+    max,
+    inRange: { color: [MAP_PALETTE.areaLow, MAP_PALETTE.areaMid, MAP_PALETTE.areaHigh] },
+    text: [t('archive.geo.legendMore'), t('archive.geo.legendNone')],
+    orient: 'vertical',
+    right: 22,
+    bottom: 22,
+    textStyle: { color: MAP_PALETTE.muted, fontSize: 10 },
+    calculable: false,
+    itemHeight: 92,
+    itemWidth: 6,
+    borderColor: 'rgba(255,255,255,0.2)',
+  }
+}
+
 async function loadProvinceGeoJSON(adcode: string): Promise<GeoJSONObject | null> {
   const key = Object.keys(provinceModules).find((k) => k.endsWith(`/${adcode}.json`))
   if (!key) return null
   try {
     const mod = await provinceModules[key]()
-    return (mod.default ?? (mod as unknown as GeoJSONObject)) ?? null
+    return mod.default ?? (mod as unknown as GeoJSONObject) ?? null
   } catch {
     return null
   }
@@ -117,6 +184,37 @@ export function ArchiveGeoMap({ onOpenPhoto }: ArchiveGeoMapProps): ReactElement
   // 不是就 silently 丢弃 — 不动 state 也不关 loading overlay(让 B 那次自己关)。
   const loadGenRef = useRef(0)
 
+  const openProvince = useCallback((province: string) => {
+    const adcode = PROVINCE_TO_ADCODE.get(province)
+    if (!adcode) return
+    setProvinceLoading(true)
+    const myGen = ++loadGenRef.current
+    void loadProvinceGeoJSON(adcode)
+      .then((json) => {
+        if (myGen !== loadGenRef.current) return
+        setProvinceLoading(false)
+        if (!json) return
+        setProvinceGeoJSON(json)
+        setActiveProvince(province)
+        setActiveCity(null)
+        setSelectedSpot(null)
+        setLevel('province')
+      })
+      .catch(() => {
+        if (myGen === loadGenRef.current) setProvinceLoading(false)
+      })
+  }, [])
+
+  const openCity = useCallback((city: string) => {
+    setActiveCity(city)
+    setSelectedSpot(null)
+    setLevel('city')
+  }, [])
+
+  const openSpot = useCallback((spot: GeoSpot) => {
+    setSelectedSpot(spot)
+  }, [])
+
   // 初始化 ECharts + 注册中国地图
   useEffect(() => {
     if (!containerRef.current) return
@@ -124,10 +222,9 @@ export function ArchiveGeoMap({ onOpenPhoto }: ArchiveGeoMapProps): ReactElement
     chartRef.current = chart
     // echarts.registerMap 的 GeoJSONSourceInput 类型在 6.0 较严格,用
     // unknown → Parameters[1] 兜过去(GeoJSON 数据是第三方,跑通即可)
-    echarts.registerMap(
-      'china',
-      { geoJSON: chinaGeoJSON } as unknown as Parameters<typeof echarts.registerMap>[1],
-    )
+    echarts.registerMap('china', { geoJSON: chinaGeoJSON } as unknown as Parameters<
+      typeof echarts.registerMap
+    >[1])
     const handleResize = () => chart.resize()
     window.addEventListener('resize', handleResize)
     // ResizeObserver 处理父容器尺寸变化(更精确)
@@ -159,45 +256,34 @@ export function ArchiveGeoMap({ onOpenPhoto }: ArchiveGeoMapProps): ReactElement
         backgroundColor: 'transparent',
         tooltip: {
           trigger: 'item',
-          backgroundColor: 'rgba(15,15,15,0.92)',
-          borderColor: 'rgba(255,255,255,0.12)',
-          textStyle: { color: '#eee', fontSize: 12 },
+          ...geoTooltipStyle(),
           formatter: (params: { name: string; data?: { photoCount?: number } }) => {
             const row = data.find((x) => x.province === params.name)
             if (!row) {
-              return `<b>${params.name}</b><br/>${t('archive.geo.noData')}`
+              return geoTooltip(params.name, [{ label: t('archive.geo.noData'), value: '--' }])
             }
-            return `<b>${params.name}</b><br/>${t('archive.geo.tooltipSpecies', { count: row.species_count })}<br/>${t('archive.geo.tooltipPhotos', { count: row.photo_count })}`
+            return geoTooltip(params.name, [
+              { label: t('archive.geo.speciesLabel'), value: row.species_count },
+              { label: t('archive.geo.photosLabel'), value: row.photo_count },
+            ])
           },
         },
-        visualMap: data.length > 0
-          ? {
-              min: 0,
-              max,
-              inRange: { color: ['#0d1f14', '#1f5b34', '#3aa860', '#84e09d'] },
-              text: [t('archive.geo.legendMore'), t('archive.geo.legendNone')],
-              orient: 'vertical',
-              left: 16,
-              bottom: 16,
-              textStyle: { color: 'rgba(255,255,255,0.55)', fontSize: 10 },
-              calculable: false,
-              itemHeight: 80,
-              itemWidth: 8,
-            }
-          : undefined,
+        visualMap: data.length > 0 ? visualMapOption(max, t) : undefined,
         geo: {
           map: 'china',
           roam: true,
           zoom: 1.15,
+          layoutCenter: ['43%', '54%'],
+          layoutSize: '82%',
           scaleLimit: { min: 0.8, max: 5 },
           itemStyle: {
-            areaColor: '#0a1410',
-            borderColor: 'rgba(255,255,255,0.18)',
-            borderWidth: 0.6,
+            areaColor: MAP_PALETTE.area,
+            borderColor: MAP_PALETTE.border,
+            borderWidth: 0.7,
           },
           emphasis: {
-            itemStyle: { areaColor: '#3aa860', borderColor: '#84e09d' },
-            label: { show: true, color: '#fff', fontSize: 11 },
+            itemStyle: { areaColor: '#f5f5f5', borderColor: MAP_PALETTE.accent },
+            label: { show: true, color: '#050505', fontSize: 11, fontWeight: 700 },
           },
           select: { disabled: true },
           label: { show: false },
@@ -223,10 +309,9 @@ export function ArchiveGeoMap({ onOpenPhoto }: ArchiveGeoMapProps): ReactElement
     if (level !== 'province' || !provinceGeoJSON || !chartRef.current) return
     const chart = chartRef.current
     const mapName = `province-${activeProvince}`
-    echarts.registerMap(
-      mapName,
-      { geoJSON: provinceGeoJSON } as unknown as Parameters<typeof echarts.registerMap>[1],
-    )
+    echarts.registerMap(mapName, { geoJSON: provinceGeoJSON } as unknown as Parameters<
+      typeof echarts.registerMap
+    >[1])
     const data = citiesQ.data ?? []
     const max = Math.max(1, ...data.map((c) => c.species_count))
 
@@ -235,45 +320,34 @@ export function ArchiveGeoMap({ onOpenPhoto }: ArchiveGeoMapProps): ReactElement
         backgroundColor: 'transparent',
         tooltip: {
           trigger: 'item',
-          backgroundColor: 'rgba(15,15,15,0.92)',
-          borderColor: 'rgba(255,255,255,0.12)',
-          textStyle: { color: '#eee', fontSize: 12 },
+          ...geoTooltipStyle(),
           formatter: (params: { name: string }) => {
             const row = data.find((x) => x.city === params.name)
             if (!row) {
-              return `<b>${params.name}</b><br/>${t('archive.geo.noData')}`
+              return geoTooltip(params.name, [{ label: t('archive.geo.noData'), value: '--' }])
             }
-            return `<b>${params.name}</b><br/>${t('archive.geo.tooltipSpecies', { count: row.species_count })}<br/>${t('archive.geo.tooltipPhotos', { count: row.photo_count })}`
+            return geoTooltip(params.name, [
+              { label: t('archive.geo.speciesLabel'), value: row.species_count },
+              { label: t('archive.geo.photosLabel'), value: row.photo_count },
+            ])
           },
         },
-        visualMap: data.length > 0
-          ? {
-              min: 0,
-              max,
-              inRange: { color: ['#0d1f14', '#1f5b34', '#3aa860', '#84e09d'] },
-              text: [t('archive.geo.legendMore'), t('archive.geo.legendNone')],
-              orient: 'vertical',
-              left: 16,
-              bottom: 16,
-              textStyle: { color: 'rgba(255,255,255,0.55)', fontSize: 10 },
-              calculable: false,
-              itemHeight: 80,
-              itemWidth: 8,
-            }
-          : undefined,
+        visualMap: data.length > 0 ? visualMapOption(max, t) : undefined,
         geo: {
           map: mapName,
           roam: true,
           zoom: 1.05,
+          layoutCenter: ['43%', '54%'],
+          layoutSize: '84%',
           scaleLimit: { min: 0.8, max: 5 },
           itemStyle: {
-            areaColor: '#0a1410',
-            borderColor: 'rgba(255,255,255,0.22)',
+            areaColor: MAP_PALETTE.area,
+            borderColor: MAP_PALETTE.border,
             borderWidth: 0.7,
           },
           emphasis: {
-            itemStyle: { areaColor: '#3aa860', borderColor: '#84e09d' },
-            label: { show: true, color: '#fff', fontSize: 11 },
+            itemStyle: { areaColor: '#f5f5f5', borderColor: MAP_PALETTE.accent },
+            label: { show: true, color: '#050505', fontSize: 11, fontWeight: 700 },
           },
           select: { disabled: true },
           label: { show: false },
@@ -316,32 +390,35 @@ export function ArchiveGeoMap({ onOpenPhoto }: ArchiveGeoMapProps): ReactElement
         backgroundColor: 'transparent',
         tooltip: {
           trigger: 'item',
-          backgroundColor: 'rgba(15,15,15,0.92)',
-          borderColor: 'rgba(255,255,255,0.12)',
-          textStyle: { color: '#eee', fontSize: 12 },
+          ...geoTooltipStyle(),
           formatter: (params: { data?: { spot?: GeoSpot; name?: string } }) => {
             const spot = params.data?.spot
-            if (!spot) return params.data?.name ?? ''
+            if (!spot) return escapeHtml(params.data?.name ?? '')
             const place = spot.place ?? t('archive.geo.unknownPlace')
-            return `<b>${place}</b><br/>${t('archive.geo.tooltipSpecies', { count: spot.species_count })}<br/>${t('archive.geo.tooltipPhotos', { count: spot.photo_count })}`
+            return geoTooltip(place, [
+              { label: t('archive.geo.speciesLabel'), value: spot.species_count },
+              { label: t('archive.geo.photosLabel'), value: spot.photo_count },
+            ])
           },
         },
         geo: {
           map: mapName,
           roam: true,
           zoom: 1,
+          layoutCenter: ['43%', '54%'],
+          layoutSize: '84%',
           scaleLimit: { min: 0.5, max: 12 },
           itemStyle: {
-            areaColor: '#0a1410',
-            borderColor: 'rgba(255,255,255,0.2)',
+            areaColor: MAP_PALETTE.area,
+            borderColor: MAP_PALETTE.border,
             borderWidth: 0.6,
           },
           emphasis: {
-            itemStyle: { areaColor: '#162a1d', borderColor: 'rgba(255,255,255,0.3)' },
+            itemStyle: { areaColor: '#1c1c1c', borderColor: MAP_PALETTE.borderStrong },
             label: { show: false },
           },
           select: { disabled: true },
-          label: { show: true, color: 'rgba(255,255,255,0.4)', fontSize: 9 },
+          label: { show: true, color: 'rgba(255,255,255,0.34)', fontSize: 9 },
         },
         series: [
           {
@@ -349,11 +426,13 @@ export function ArchiveGeoMap({ onOpenPhoto }: ArchiveGeoMapProps): ReactElement
             coordinateSystem: 'geo',
             symbolSize: (val: number[]) => Math.max(8, Math.min(28, 6 + (val[2] / maxPhotos) * 22)),
             itemStyle: {
-              color: '#84e09d',
-              shadowColor: 'rgba(132,224,157,0.6)',
-              shadowBlur: 12,
+              color: MAP_PALETTE.accent,
+              borderColor: '#fff',
+              borderWidth: 1,
+              shadowColor: MAP_PALETTE.accentSoft,
+              shadowBlur: 14,
             },
-            rippleEffect: { brushType: 'stroke', scale: 2.5 },
+            rippleEffect: { brushType: 'stroke', scale: 2.1, period: 4 },
             data: scatterData,
             zlevel: 2,
           },
@@ -378,42 +457,25 @@ export function ArchiveGeoMap({ onOpenPhoto }: ArchiveGeoMapProps): ReactElement
       }
       // 点省份(一级地图):钻取到二级
       if (level === 'country' && p.name) {
-        const adcode = PROVINCE_TO_ADCODE.get(p.name)
-        if (!adcode) return
-        setProvinceLoading(true)
-        const targetName = p.name
-        const myGen = ++loadGenRef.current
-        loadProvinceGeoJSON(adcode).then((json) => {
-          // 已被更新的 click 取代(用户连点不同省份)— 静默丢弃,
-          // 不重置 loading(让最新那次自己结束),不动 province/level 状态
-          if (myGen !== loadGenRef.current) return
-          setProvinceLoading(false)
-          if (!json) return
-          setProvinceGeoJSON(json)
-          setActiveProvince(targetName)
-          setActiveCity(null)
-          setLevel('province')
-        })
+        openProvince(p.name)
         return
       }
       // 点市(二级地图):钻取到三级
       if (level === 'province' && p.name) {
-        setActiveCity(p.name)
-        setSelectedSpot(null)
-        setLevel('city')
+        openCity(p.name)
         return
       }
       // 点 spot marker(三级):弹卡片
       if (level === 'city' && p.seriesType === 'effectScatter') {
         const spot = p.data?.spot
-        if (spot) setSelectedSpot(spot)
+        if (spot) openSpot(spot)
       }
     }
     chart.on('click', handler)
     return () => {
       chart.off('click', handler)
     }
-  }, [level])
+  }, [level, openCity, openProvince, openSpot])
 
   // ---------------------- 面包屑导航 ----------------------
   const breadcrumbs = useMemo(() => {
@@ -429,26 +491,98 @@ export function ArchiveGeoMap({ onOpenPhoto }: ArchiveGeoMapProps): ReactElement
     return parts
   }, [level, activeProvince, activeCity, t])
 
-  const handleCrumbClick = useCallback(
-    (target: Level) => {
-      if (target === 'country') {
-        setLevel('country')
-        setActiveProvince(null)
-        setActiveCity(null)
-        setSelectedSpot(null)
-      } else if (target === 'province') {
-        setLevel('province')
-        setActiveCity(null)
-        setSelectedSpot(null)
-      }
-    },
-    [],
-  )
+  const handleCrumbClick = useCallback((target: Level) => {
+    if (target === 'country') {
+      setLevel('country')
+      setActiveProvince(null)
+      setActiveCity(null)
+      setSelectedSpot(null)
+    } else if (target === 'province') {
+      setLevel('province')
+      setActiveCity(null)
+      setSelectedSpot(null)
+    }
+  }, [])
 
   const dismissSpot = useCallback(() => setSelectedSpot(null), [])
 
   // 关键 indicator(顶部"X 个省份有照片"展示用)
   const provincesCount = (provincesQ.data ?? []).length
+  const hasSummary = Boolean(summary.data)
+  const mappedCount = summary.data?.resolved ?? 0
+  const pendingCount = summary.data?.pending ?? 0
+  const noGpsCount = summary.data?.photos_without_gps ?? 0
+  const currentTitle = activeCity ?? activeProvince ?? t('archive.geo.country')
+  const childCount =
+    level === 'country'
+      ? provincesCount
+      : level === 'province'
+        ? (citiesQ.data ?? []).length
+        : (spotsQ.data ?? []).length
+  const childCountLabel =
+    level === 'country'
+      ? t('archive.geo.statProvinces', { count: childCount })
+      : level === 'province'
+        ? t('archive.geo.statCities', { count: childCount })
+        : t('archive.geo.statSpots', { count: childCount })
+  const levelLabel = t(`archive.geo.level.${level}`)
+  const rankItems = useMemo<GeoRankItem[]>(() => {
+    if (level === 'country') {
+      return (provincesQ.data ?? [])
+        .toSorted((a, b) => b.photo_count - a.photo_count || b.species_count - a.species_count)
+        .slice(0, 8)
+        .map((province) => ({
+          id: province.province,
+          name: province.province,
+          photoCount: province.photo_count,
+          speciesCount: province.species_count,
+          active: activeProvince === province.province,
+          onClick: () => openProvince(province.province),
+        }))
+    }
+    if (level === 'province') {
+      return (citiesQ.data ?? [])
+        .toSorted((a, b) => b.photo_count - a.photo_count || b.species_count - a.species_count)
+        .slice(0, 8)
+        .map((city) => ({
+          id: city.city,
+          name: city.city,
+          photoCount: city.photo_count,
+          speciesCount: city.species_count,
+          active: activeCity === city.city,
+          onClick: () => openCity(city.city),
+        }))
+    }
+    return (spotsQ.data ?? [])
+      .toSorted((a, b) => b.photo_count - a.photo_count || b.species_count - a.species_count)
+      .slice(0, 8)
+      .map((spot) => {
+        const id = `${spot.lat.toFixed(4)}-${spot.lon.toFixed(4)}`
+        return {
+          id,
+          name: spot.place ?? t('archive.geo.unknownPlace'),
+          photoCount: spot.photo_count,
+          speciesCount: spot.species_count,
+          active:
+            selectedSpot !== null &&
+            selectedSpot.lat.toFixed(4) === spot.lat.toFixed(4) &&
+            selectedSpot.lon.toFixed(4) === spot.lon.toFixed(4),
+          onClick: () => openSpot(spot),
+        }
+      })
+  }, [
+    activeCity,
+    activeProvince,
+    citiesQ.data,
+    level,
+    openCity,
+    openProvince,
+    openSpot,
+    provincesQ.data,
+    selectedSpot,
+    spotsQ.data,
+    t,
+  ])
 
   return (
     <div className="archive-geo">
@@ -472,25 +606,80 @@ export function ArchiveGeoMap({ onOpenPhoto }: ArchiveGeoMapProps): ReactElement
           ))}
         </nav>
         <div className="archive-geo__indicators">
-          {summary.data && summary.data.pending > 0 ? (
-            <span className="archive-geo__progress">
-              <Loader2 className="h-3 w-3 animate-spin" />
-              {t('archive.geo.backfillProgress', {
-                resolved: summary.data.resolved,
-                total: summary.data.resolved + summary.data.pending,
-              })}
-            </span>
-          ) : null}
-          {level === 'country' ? (
-            <span className="archive-geo__stat">
-              {t('archive.geo.statProvinces', { count: provincesCount })}
-            </span>
+          {hasSummary ? (
+            pendingCount > 0 ? (
+              <span className="archive-geo__sync archive-geo__sync--running">
+                <Loader2 className="h-3 w-3 animate-spin" />
+                {t('archive.geo.backfillProgress', {
+                  resolved: mappedCount,
+                  total: mappedCount + pendingCount,
+                })}
+              </span>
+            ) : (
+              <span className="archive-geo__sync">
+                <span aria-hidden="true" />
+                {t('archive.geo.synced')}
+              </span>
+            )
           ) : null}
         </div>
       </div>
 
+      <div className="archive-geo__metrics" aria-label={t('archive.geo.statsLabel')}>
+        <span>
+          <b>{mappedCount}</b>
+          <small>{t('archive.geo.statsMapped')}</small>
+        </span>
+        <span>
+          <b>{pendingCount}</b>
+          <small>{t('archive.geo.statsPending')}</small>
+        </span>
+        <span>
+          <b>{noGpsCount}</b>
+          <small>{t('archive.geo.statsNoGps')}</small>
+        </span>
+      </div>
+
       <div className="archive-geo__canvas">
+        <div className="archive-geo__canvas-hud">
+          <span>{levelLabel}</span>
+          <strong>{currentTitle}</strong>
+          <small>{childCountLabel}</small>
+        </div>
+        <div className="archive-geo__legend" aria-label={t('archive.geo.density')}>
+          <span>{t('archive.geo.density')}</span>
+          <i aria-hidden="true" />
+          <small>{t('archive.geo.legendNone')}</small>
+          <small>{t('archive.geo.legendMore')}</small>
+        </div>
         <div ref={containerRef} className="archive-geo__chart" />
+        <aside className="archive-geo__rank" aria-label={t('archive.geo.hotspots')}>
+          <div className="archive-geo__rank-head">
+            <span>{t('archive.geo.hotspots')}</span>
+            <small>{levelLabel}</small>
+          </div>
+          {rankItems.length > 0 ? (
+            <div className="archive-geo__rank-list">
+              {rankItems.map((item, index) => (
+                <button
+                  className={cn('archive-geo__rank-item', item.active && 'is-active')}
+                  key={item.id}
+                  onClick={item.onClick}
+                  type="button"
+                >
+                  <em>{String(index + 1).padStart(2, '0')}</em>
+                  <span>
+                    <b>{item.name}</b>
+                    <small>{t('archive.geo.rankSpecies', { count: item.speciesCount })}</small>
+                  </span>
+                  <strong>{t('archive.geo.rankPhotos', { count: item.photoCount })}</strong>
+                </button>
+              ))}
+            </div>
+          ) : (
+            <p>{t('archive.geo.rankEmpty')}</p>
+          )}
+        </aside>
         {provinceLoading ? (
           <div className="archive-geo__overlay">
             <Loader2 className="h-5 w-5 animate-spin" />
@@ -507,12 +696,7 @@ export function ArchiveGeoMap({ onOpenPhoto }: ArchiveGeoMapProps): ReactElement
 
       {/* 三级 spot 详情弹卡 */}
       {selectedSpot ? (
-        <SpotDetail
-          spot={selectedSpot}
-          onClose={dismissSpot}
-          onOpenPhoto={onOpenPhoto}
-          t={t}
-        />
+        <SpotDetail spot={selectedSpot} onClose={dismissSpot} onOpenPhoto={onOpenPhoto} t={t} />
       ) : null}
     </div>
   )
@@ -526,6 +710,28 @@ interface SpotDetailProps {
 }
 
 function SpotDetail({ spot, onClose, onOpenPhoto, t }: SpotDetailProps): ReactElement {
+  const [activeSpeciesKey, setActiveSpeciesKey] = useState(ALL_SPECIES_FILTER)
+  const speciesOptions = useMemo(
+    () =>
+      spot.species.map((species) => ({
+        key: geoSpeciesFilterKey(species),
+        name: species.name || species.latin_name || t('archive.geo.unknownSpecies'),
+        photoCount: species.photo_count,
+      })),
+    [spot.species, t],
+  )
+  const activeSpecies = speciesOptions.find((item) => item.key === activeSpeciesKey) ?? null
+  const filteredPhotos = useMemo(() => {
+    if (activeSpeciesKey === ALL_SPECIES_FILTER) return spot.photos
+    return spot.photos.filter((photo) => photoMatchesSpeciesFilter(photo, activeSpeciesKey))
+  }, [activeSpeciesKey, spot.photos])
+
+  useEffect(() => {
+    setActiveSpeciesKey(ALL_SPECIES_FILTER)
+  }, [spot.lat, spot.lon, spot.place])
+
+  const filterTotal = activeSpecies?.photoCount ?? spot.photo_count
+
   return (
     <div className="archive-geo__spot-overlay" onClick={onClose}>
       <div
@@ -534,37 +740,126 @@ function SpotDetail({ spot, onClose, onOpenPhoto, t }: SpotDetailProps): ReactEl
         role="dialog"
         aria-modal="true"
       >
-        <header className="archive-geo__spot-head">
-          <MapPin className="h-4 w-4" />
-          <strong>{spot.place ?? t('archive.geo.unknownPlace')}</strong>
-          <small>
-            {spot.lat.toFixed(5)}°, {spot.lon.toFixed(5)}°
-          </small>
-        </header>
-        <div className="archive-geo__spot-meta">
-          <span>{t('archive.geo.tooltipSpecies', { count: spot.species_count })}</span>
-          <span>{t('archive.geo.tooltipPhotos', { count: spot.photo_count })}</span>
-        </div>
-        <div className="archive-geo__spot-grid">
-          {spot.photos.map((photo) => (
+        <div className="archive-geo__spot-sticky">
+          <header className="archive-geo__spot-head">
+            <div>
+              <MapPin className="h-4 w-4" />
+              <strong>{spot.place ?? t('archive.geo.unknownPlace')}</strong>
+              <small>
+                {spot.lat.toFixed(5)}°, {spot.lon.toFixed(5)}°
+              </small>
+            </div>
             <button
-              key={photo.photo_id}
-              className="archive-geo__spot-thumb"
-              onClick={() => onOpenPhoto?.(photo.photo_id)}
+              aria-label={t('common.close')}
+              className="icon-button"
+              onClick={onClose}
               type="button"
             >
-              <ThumbnailImage
-                alt={photo.file_name}
-                className="archive-geo__spot-thumb-img"
-                src={photo.thumb_grid ? `plumelens://thumb/${photo.thumb_grid}` : null}
-              />
-              <span className="archive-geo__spot-thumb-meta">
-                <small>{photo.species_zh ?? photo.species_latin ?? photo.file_name}</small>
-              </span>
+              <X className="h-4 w-4" />
             </button>
-          ))}
+          </header>
+          <div className="archive-geo__spot-meta">
+            <span>{t('archive.geo.tooltipSpecies', { count: spot.species_count })}</span>
+            <span>{t('archive.geo.tooltipPhotos', { count: spot.photo_count })}</span>
+          </div>
+          <section
+            className="archive-geo__species-filter"
+            aria-label={t('archive.geo.speciesFilter')}
+          >
+            <div className="archive-geo__species-filter-head">
+              <span>{t('archive.geo.speciesFilter')}</span>
+              <small>
+                {t('archive.geo.filteredPhotos', {
+                  shown: filteredPhotos.length,
+                  total: filterTotal,
+                })}
+              </small>
+            </div>
+            <div className="archive-geo__species-filter-list">
+              <button
+                aria-pressed={activeSpeciesKey === ALL_SPECIES_FILTER}
+                className={cn(
+                  'archive-geo__species-filter-item',
+                  activeSpeciesKey === ALL_SPECIES_FILTER && 'is-active',
+                )}
+                onClick={() => setActiveSpeciesKey(ALL_SPECIES_FILTER)}
+                type="button"
+              >
+                <span>{t('archive.geo.allSpecies')}</span>
+                <small>{t('archive.geo.rankPhotos', { count: spot.photo_count })}</small>
+              </button>
+              {speciesOptions.map((item) => (
+                <button
+                  aria-pressed={activeSpeciesKey === item.key}
+                  className={cn(
+                    'archive-geo__species-filter-item',
+                    activeSpeciesKey === item.key && 'is-active',
+                  )}
+                  key={item.key}
+                  onClick={() => setActiveSpeciesKey(item.key)}
+                  type="button"
+                >
+                  <span>{item.name}</span>
+                  <small>{t('archive.geo.rankPhotos', { count: item.photoCount })}</small>
+                </button>
+              ))}
+            </div>
+          </section>
+        </div>
+        <div className="archive-geo__spot-grid" aria-live="polite">
+          {filteredPhotos.length > 0 ? (
+            filteredPhotos.map((photo) => (
+              <button
+                key={photo.photo_id}
+                className="archive-geo__spot-thumb"
+                onClick={() => onOpenPhoto?.(photo.photo_id)}
+                type="button"
+              >
+                <ThumbnailImage
+                  alt={photo.file_name}
+                  className="archive-geo__spot-thumb-img"
+                  loading="lazy"
+                  src={photo.thumb_grid ? `plumelens://thumb/${photo.thumb_grid}` : null}
+                />
+                <span className="archive-geo__spot-thumb-meta">
+                  <small>
+                    {formatSpeciesList(photo.species, t) ??
+                      photo.species_zh ??
+                      photo.species_latin ??
+                      photo.file_name}
+                  </small>
+                </span>
+              </button>
+            ))
+          ) : (
+            <p className="archive-geo__spot-empty">{t('archive.geo.filterEmpty')}</p>
+          )}
         </div>
       </div>
     </div>
   )
+}
+
+function geoSpeciesFilterKey(species: { name: string; latin_name?: string | null }): string {
+  return species.latin_name ? `latin:${species.latin_name}` : `name:${species.name}`
+}
+
+function photoMatchesSpeciesFilter(photo: GeoSpotPhoto, speciesKey: string): boolean {
+  if (speciesKey === ALL_SPECIES_FILTER) return true
+  if (photo.species.some((species) => geoSpeciesFilterKey(species) === speciesKey)) return true
+  if (photo.species_latin && `latin:${photo.species_latin}` === speciesKey) return true
+  if (photo.species_zh && `name:${photo.species_zh}` === speciesKey) return true
+  return false
+}
+
+function formatSpeciesList(
+  species: Array<{ name: string; latin_name?: string | null }> | undefined,
+  t: ReturnType<typeof useTranslation>['t'],
+): string | null {
+  if (!species || species.length === 0) return null
+  const primary = species[0]?.name || species[0]?.latin_name
+  if (!primary) return null
+  return species.length === 1
+    ? primary
+    : t('selection.photo.speciesEtc', { name: primary, count: species.length })
 }

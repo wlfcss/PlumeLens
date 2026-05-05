@@ -16,11 +16,20 @@ API:
 from __future__ import annotations
 
 import json
+import re
+import unicodedata
+from collections import Counter
+from dataclasses import dataclass
+from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
+from engine.api.routes.library import _apply_group_species_consensus, _match_overrides_to_detections
+from engine.api.schemas.library import BestDetection, BirdDetectionDetail, PhotoRow
 from engine.core.database import Database
+from engine.services.decisions import SpeciesOverride, SpeciesOverrideRecord
+from engine.services.gps import parse_gps_from_exif
 
 router = APIRouter(prefix="/archive", tags=["archive"])
 
@@ -38,10 +47,17 @@ async def _db(request: Request) -> Database:
 # ---------------------------------------------------------------------------
 # Schemas
 # ---------------------------------------------------------------------------
+class GeoSpecies(BaseModel):
+    name: str
+    latin_name: str | None = None
+    english_name: str | None = None
+    photo_count: int = 1
+
+
 class GeoProvinceRow(BaseModel):
     province: str
-    photo_count: int       # 该省照片总数
-    species_count: int     # 该省去重后的鸟种数(拉丁名 distinct)
+    photo_count: int  # 该省照片总数
+    species_count: int  # 该省去重后的鸟种数(拉丁名 distinct)
 
 
 class GeoCityRow(BaseModel):
@@ -53,30 +69,448 @@ class GeoCityRow(BaseModel):
 class GeoSpotPhoto(BaseModel):
     photo_id: str
     file_name: str
-    species_latin: str | None
-    species_zh: str | None
+    species: list[GeoSpecies] = Field(default_factory=list)
+    # Back-compat fields for old renderers. New UI reads `species`.
+    species_latin: str | None = None
+    species_zh: str | None = None
     thumb_grid: str | None
     grade: str | None
     quality_score: float | None
 
 
 class GeoSpot(BaseModel):
-    """单个拍摄点(GPS round 到 4 位小数 ≈ 11m,同一点的多张照片聚合)。"""
+    """单个拍摄地点。
+
+    优先按 reverse geocoding 持久化的 place 名聚合,表示一个物理地点
+    (如"洋湖国家湿地公园")有哪些鸟;缺少 place 时才退回 GPS round 到
+    4 位小数(≈ 11m)聚合。
+    """
+
     lat: float
     lon: float
     place: str | None
     photo_count: int
     species_count: int
-    photos: list[GeoSpotPhoto]  # 该点所有照片(限制最多 50 张避免响应过大)
+    species: list[GeoSpecies] = Field(default_factory=list)
+    photos: list[GeoSpotPhoto]  # 该点照片样本(默认最多 500 张,避免响应过大)
 
 
 class GeoSummary(BaseModel):
     """整体进度:有多少照片有 GPS、多少已 backfill 完成。前端用于显示
     "解析地理位置 120/300..." 进度条。"""
-    total_with_gps: int      # 有 GPS 的照片总数
-    resolved: int            # country IS NOT NULL 的(已 backfill)
-    pending: int             # 有 exif 但未填充
-    photos_without_gps: int  # 没 GPS 信息的
+
+    total_with_gps: int  # 有可用经纬度的照片总数
+    resolved: int  # 有可用经纬度且 country IS NOT NULL 的(已 backfill)
+    pending: int  # 有可用经纬度但未填充地名
+    photos_without_gps: int  # 没有可用经纬度的
+
+
+# ---------------------------------------------------------------------------
+# Effective archive species projection
+# ---------------------------------------------------------------------------
+ARCHIVE_GRADES = {"select", "usable", "record"}
+ARCHIVE_SPECIES_SOURCES = {"manual", "model", "group_consensus"}
+
+
+@dataclass
+class _GeoPhoto:
+    library_id: str
+    photo: PhotoRow
+    exif_json: str | None
+    province: str | None
+    city: str | None
+    place: str | None
+    thumb_grid: str | None
+
+
+def _parse_json(raw: object) -> dict[str, Any]:
+    if not raw:
+        return {}
+    try:
+        data = json.loads(str(raw))
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _resolve_shot_at(row: Any) -> str:
+    exif = _parse_json(row["exif_json"])
+    dto = exif.get("DateTimeOriginal")
+    if isinstance(dto, str) and dto:
+        return dto.replace(":", "-", 2).replace(" ", "T")
+    if row["file_mtime"] is not None:
+        return str(row["file_mtime"])
+    return str(row["created_at"])
+
+
+def _detection_score(detection: dict[str, Any]) -> float:
+    quality = detection.get("quality") or {}
+    try:
+        return float(quality.get("combined", -1))
+    except Exception:
+        return -1.0
+
+
+def _display_species(
+    detection: dict[str, Any],
+    override: SpeciesOverride | None,
+) -> tuple[str | None, str | None, str | None, bool]:
+    if override is not None:
+        sci = str(override["canonical_sci"])
+        name = override.get("canonical_zh") or override.get("canonical_en") or sci
+        return str(name), sci, override.get("canonical_en"), True
+
+    if detection.get("species"):
+        direct_latin = detection.get("species_latin")
+        candidates = detection.get("species_candidates") or []
+        latin = direct_latin
+        english = None
+        if candidates:
+            first = candidates[0] or {}
+            latin = latin or first.get("canonical_sci")
+            english = first.get("canonical_en")
+        return (
+            str(detection["species"]),
+            str(latin) if latin else None,
+            str(english) if english else None,
+            False,
+        )
+
+    candidates = detection.get("species_candidates") or []
+    if candidates:
+        first = candidates[0] or {}
+        sci = first.get("canonical_sci")
+        name = first.get("canonical_zh") or first.get("canonical_en") or sci
+        english = first.get("canonical_en")
+        return (
+            str(name) if name else None,
+            str(sci) if sci else None,
+            str(english) if english else None,
+            False,
+        )
+    return None, None, None, False
+
+
+def _build_detection_detail(
+    index: int,
+    detection: dict[str, Any],
+    override: SpeciesOverride | None,
+    is_best: bool,
+) -> BirdDetectionDetail:
+    bbox_d = detection.get("bbox") or {}
+    bbox = {
+        "x1": float(bbox_d.get("x1", 0)),
+        "y1": float(bbox_d.get("y1", 0)),
+        "x2": float(bbox_d.get("x2", 0)),
+        "y2": float(bbox_d.get("y2", 0)),
+        "confidence": float(bbox_d.get("confidence", 0)),
+    }
+    pose: dict[str, Any] | None = None
+    pose_d = detection.get("pose")
+    if isinstance(pose_d, dict):
+
+        def _kp(name: str) -> dict[str, float] | None:
+            kp = pose_d.get(name)
+            if not isinstance(kp, dict):
+                return None
+            return {
+                "x": float(kp.get("x", 0)),
+                "y": float(kp.get("y", 0)),
+                "confidence": float(kp.get("confidence", 0)),
+            }
+
+        kpts = {n: _kp(n) for n in ("bill", "crown", "nape", "left_eye", "right_eye")}
+        if all(kpts.values()):
+            pose = {
+                **kpts,
+                "head_visible": bool(pose_d.get("head_visible", False)),
+                "eye_visible": bool(pose_d.get("eye_visible", False)),
+            }
+
+    species, latin, _english, manual = _display_species(detection, override)
+    if manual:
+        species_source = "manual"
+    elif species:
+        species_source = (
+            "model" if pose is not None and pose["head_visible"] else "model_unconfirmed"
+        )
+    else:
+        species_source = "none"
+
+    return BirdDetectionDetail.model_validate(
+        {
+            "index": index,
+            "bbox": bbox,
+            "pose": pose,
+            "quality": detection.get("quality"),
+            "species": species,
+            "species_latin": latin,
+            "manual_species": manual,
+            "species_source": species_source,
+            "species_candidates": detection.get("species_candidates", []),
+            "is_best": is_best,
+        }
+    )
+
+
+async def _list_overrides_for_photos(
+    db: Database,
+    photo_ids: list[str],
+) -> dict[str, list[SpeciesOverrideRecord]]:
+    out: dict[str, list[SpeciesOverrideRecord]] = {}
+    if not photo_ids:
+        return out
+    chunk_size = 500
+    for start in range(0, len(photo_ids), chunk_size):
+        chunk = photo_ids[start : start + chunk_size]
+        placeholders = ",".join("?" for _ in chunk)
+        async with db.conn.execute(
+            "SELECT photo_id, bird_index, canonical_sci, canonical_zh, canonical_en, "
+            "bbox_x1, bbox_y1, bbox_x2, bbox_y2 "
+            "FROM photo_species_overrides "
+            f"WHERE photo_id IN ({placeholders})",
+            chunk,
+        ) as cur:
+            async for row in cur:
+                x1 = row["bbox_x1"]
+                y1 = row["bbox_y1"]
+                x2 = row["bbox_x2"]
+                y2 = row["bbox_y2"]
+                bbox = (
+                    (float(x1), float(y1), float(x2), float(y2))
+                    if x1 is not None and y1 is not None and x2 is not None and y2 is not None
+                    else None
+                )
+                out.setdefault(str(row["photo_id"]), []).append(
+                    {
+                        "bird_index": int(row["bird_index"]),
+                        "canonical_sci": str(row["canonical_sci"]),
+                        "canonical_zh": (
+                            str(row["canonical_zh"]) if row["canonical_zh"] is not None else None
+                        ),
+                        "canonical_en": (
+                            str(row["canonical_en"]) if row["canonical_en"] is not None else None
+                        ),
+                        "bbox": bbox,
+                    }
+                )
+    return out
+
+
+def _photo_from_row(row: Any, overrides: list[SpeciesOverrideRecord]) -> PhotoRow:
+    result = _parse_json(row["result_json"])
+    detections_raw = result.get("detections") or []
+    if not isinstance(detections_raw, list):
+        detections_raw = []
+    detections = [d for d in detections_raw if isinstance(d, dict)]
+
+    details: list[BirdDetectionDetail] | None = None
+    best: BestDetection | None = None
+    model_species: str | None = None
+    model_species_latin: str | None = None
+    effective_species = str(row["species"]) if row["species"] is not None else None
+    effective_species_latin: str | None = None
+    manual_species = False
+    species_source = "none"
+
+    if detections:
+        best_index = max(
+            range(len(detections)),
+            key=lambda i: _detection_score(detections[i]),
+        )
+        matched = _match_overrides_to_detections(detections, overrides)
+        details = [
+            _build_detection_detail(i, d, matched.get(i), i == best_index)
+            for i, d in enumerate(detections)
+        ]
+        if details:
+            best_detail = details[min(best_index, len(details) - 1)]
+            best = BestDetection.model_validate(best_detail.model_dump())
+            effective_species = best.species or effective_species
+            effective_species_latin = best.species_latin
+            manual_species = bool(best.manual_species)
+            species_source = best.species_source
+        model_name, model_latin, _model_en, _manual = _display_species(detections[best_index], None)
+        model_species = model_name
+        model_species_latin = model_latin
+
+    return PhotoRow(
+        id=str(row["id"]),
+        file_path=str(row["file_path"]),
+        file_name=str(row["file_name"]),
+        format=(str(row["format"]) if row["format"] is not None else None),
+        width=(int(row["width"]) if row["width"] is not None else None),
+        height=(int(row["height"]) if row["height"] is not None else None),
+        thumb_grid=(str(row["thumb_grid"]) if row["thumb_grid"] is not None else None),
+        thumb_preview=(str(row["thumb_preview"]) if row["thumb_preview"] is not None else None),
+        companion_path=(str(row["companion_path"]) if row["companion_path"] is not None else None),
+        companion_format=(
+            str(row["companion_format"]) if row["companion_format"] is not None else None
+        ),
+        companion_size=(int(row["companion_size"]) if row["companion_size"] is not None else None),
+        created_at=str(row["created_at"]),
+        shot_at=_resolve_shot_at(row),
+        scene_id=(int(row["scene_id"]) if row["scene_id"] is not None else None),
+        pipeline_version=(
+            str(row["pipeline_version"]) if row["pipeline_version"] is not None else None
+        ),
+        grade=(str(row["grade"]) if row["grade"] is not None else None),
+        quality_score=(float(row["quality_score"]) if row["quality_score"] is not None else None),
+        bird_count=(int(row["bird_count"]) if row["bird_count"] is not None else None),
+        species=effective_species,
+        species_latin=effective_species_latin,
+        manual_species=manual_species,
+        species_source=species_source,  # type: ignore[arg-type]
+        model_species=model_species,
+        model_species_latin=model_species_latin,
+        decision=(str(row["decision"]) if row["decision"] is not None else None),
+        exif=_parse_json(row["exif_json"]),
+        best_detection=best,
+        detections=details,
+    )
+
+
+async def _load_geo_photos(
+    db: Database,
+    where_sql: str,
+    params: tuple[object, ...] = (),
+) -> list[_GeoPhoto]:
+    async with db.conn.execute(
+        "SELECT p.id, p.library_id, p.file_path, p.file_name, p.format, p.width, p.height, "
+        "p.thumb_grid, p.thumb_preview, p.created_at, p.file_mtime, p.exif_json, "
+        "p.scene_id, p.companion_path, p.companion_format, p.companion_size, "
+        "p.province, p.city, p.place, "
+        "ar.pipeline_version, ar.grade, ar.quality_score, ar.bird_count, ar.species, "
+        "ar.result_json, pd.decision "
+        "FROM photos p "
+        "LEFT JOIN analysis_results ar ON ar.photo_id = p.id AND ar.is_active = 1 "
+        "LEFT JOIN photo_decisions pd ON pd.photo_id = p.id "
+        f"WHERE {where_sql} "
+        "ORDER BY p.library_id, p.file_mtime ASC",
+        params,
+    ) as cur:
+        rows = await cur.fetchall()
+
+    overrides = await _list_overrides_for_photos(db, [str(row["id"]) for row in rows])
+    photos = [
+        _GeoPhoto(
+            library_id=str(row["library_id"]),
+            photo=_photo_from_row(row, overrides.get(str(row["id"]), [])),
+            exif_json=(str(row["exif_json"]) if row["exif_json"] is not None else None),
+            province=(str(row["province"]) if row["province"] is not None else None),
+            city=(str(row["city"]) if row["city"] is not None else None),
+            place=(str(row["place"]) if row["place"] is not None else None),
+            thumb_grid=(str(row["thumb_grid"]) if row["thumb_grid"] is not None else None),
+        )
+        for row in rows
+    ]
+    by_library: dict[str, list[PhotoRow]] = {}
+    for item in photos:
+        by_library.setdefault(item.library_id, []).append(item.photo)
+    for library_photos in by_library.values():
+        _apply_group_species_consensus(library_photos)
+    return photos
+
+
+def _species_from_candidate(
+    candidate: dict[str, Any], fallback_name: str | None
+) -> GeoSpecies | None:
+    latin = candidate.get("canonical_sci")
+    name = candidate.get("canonical_zh") or candidate.get("canonical_en") or fallback_name or latin
+    if not name and not latin:
+        return None
+    return GeoSpecies(
+        name=str(name),
+        latin_name=str(latin) if latin else None,
+        english_name=(str(candidate["canonical_en"]) if candidate.get("canonical_en") else None),
+    )
+
+
+def _archive_species_for_photo(photo: PhotoRow) -> list[GeoSpecies]:
+    grade = photo.decision or photo.grade
+    if (
+        photo.pipeline_version is None
+        or (photo.bird_count or 0) <= 0
+        or grade not in ARCHIVE_GRADES
+    ):
+        return []
+
+    detections = photo.detections or (
+        [] if photo.best_detection is None else [photo.best_detection]
+    )
+    out: list[GeoSpecies] = []
+    seen: set[str] = set()
+    for detection in detections:
+        if detection.species_source not in ARCHIVE_SPECIES_SOURCES:
+            continue
+        species: GeoSpecies | None = None
+        for candidate in detection.species_candidates:
+            if (
+                detection.species_latin
+                and candidate.get("canonical_sci") != detection.species_latin
+            ):
+                continue
+            species = _species_from_candidate(candidate, detection.species)
+            break
+        if species is None and (detection.species or detection.species_latin):
+            species = GeoSpecies(
+                name=detection.species or detection.species_latin or "",
+                latin_name=detection.species_latin,
+            )
+        if species is None:
+            continue
+        key = species.latin_name or f"name:{species.name}"
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(species)
+    return out
+
+
+def _species_key(species: GeoSpecies) -> str:
+    return species.latin_name or f"name:{species.name}"
+
+
+def _species_summary(species_items: list[GeoSpecies]) -> list[GeoSpecies]:
+    counts: Counter[str] = Counter()
+    meta: dict[str, GeoSpecies] = {}
+    for species in species_items:
+        key = _species_key(species)
+        counts[key] += 1
+        meta.setdefault(key, species)
+    return [
+        GeoSpecies(
+            name=meta[key].name,
+            latin_name=meta[key].latin_name,
+            english_name=meta[key].english_name,
+            photo_count=count,
+        )
+        for key, count in sorted(counts.items(), key=lambda item: (-item[1], meta[item[0]].name))
+    ]
+
+
+_PLACE_PUNCT_RE = re.compile(r"[\s,，、;；:：|/\\]+")
+
+
+def _normalize_place_name(place: str | None) -> str | None:
+    """把 provider 返回的 place 规范化成聚合 key。
+
+    同一个物理地点的照片经常有几米到几百米的 GPS 差异,但 reverse
+    geocoding 已经给出相同 POI/地点名。城市层级应表达"这个地点有哪些鸟",
+    所以不能再按坐标网格拆分。这里只做保守规范化:unicode 兼容折叠、
+    去空白和常见分隔符;不做激进截断,避免把同城不同地点误合并。
+    """
+    if place is None:
+        return None
+    normalized = unicodedata.normalize("NFKC", place).strip()
+    if not normalized:
+        return None
+    normalized = _PLACE_PUNCT_RE.sub("", normalized)
+    return normalized or None
+
+
+def _gps_from_exif(exif_json: str | None) -> tuple[float, float] | None:
+    return parse_gps_from_exif(exif_json)
 
 
 # ---------------------------------------------------------------------------
@@ -86,24 +520,28 @@ class GeoSummary(BaseModel):
 async def geo_summary(request: Request) -> GeoSummary:
     """整体地理解析进度 — 羽迹页面顶部进度条用。
 
-    pending 必须只计"有 GPS 但还没 backfill"的,不能把"有 EXIF 但无 GPS"
-    的也算 pending,否则进度条永远显示 X/Y 不消失。只能从 exif_json 里精确判
-    GPSInfo 是否存在(SQL LIKE 兜底,无法 100% 精确但近似可用)。
+    pending 必须只计"有可用经纬度但还没 backfill"的。部分相机会写入空的
+    GPSInfo 容器(GPSVersionID/GPSSatellites 等),但不含 GPSLatitude/GPSLongitude;
+    这些照片要算作无坐标,否则进度条会永远显示 X/Y。
     """
     db = await _db(request)
+    async with db.conn.execute("SELECT COUNT(*) AS total FROM photos") as cur:
+        total_row = await cur.fetchone()
     async with db.conn.execute(
-        "SELECT "
-        "  COUNT(*) AS total, "
-        "  SUM(CASE WHEN exif_json LIKE '%GPSInfo%' THEN 1 ELSE 0 END) AS has_gps, "
-        "  SUM(CASE WHEN country IS NOT NULL THEN 1 ELSE 0 END) AS resolved "
-        "FROM photos",
+        "SELECT exif_json, country FROM photos "
+        "WHERE exif_json LIKE '%GPSLatitude%' OR country IS NOT NULL",
     ) as cur:
-        row = await cur.fetchone()
-    if row is None:
-        return GeoSummary(total_with_gps=0, resolved=0, pending=0, photos_without_gps=0)
-    total = int(row["total"] or 0)
-    has_gps = int(row["has_gps"] or 0)
-    resolved = int(row["resolved"] or 0)
+        rows = await cur.fetchall()
+
+    total = int(total_row["total"] or 0) if total_row is not None else 0
+    has_gps = 0
+    resolved = 0
+    for row in rows:
+        if _gps_from_exif(str(row["exif_json"]) if row["exif_json"] is not None else None) is None:
+            continue
+        has_gps += 1
+        if row["country"] is not None:
+            resolved += 1
     pending = max(0, has_gps - resolved)
     return GeoSummary(
         total_with_gps=has_gps,
@@ -117,37 +555,26 @@ async def geo_summary(request: Request) -> GeoSummary:
 async def geo_provinces(request: Request) -> list[GeoProvinceRow]:
     """一级地图:每个省的照片数 + 鸟种数(去重后)。"""
     db = await _db(request)
-    # 第一步:每个省 + 每个种(latin)→ photo_count。鸟种用 species 字段(简化)
-    # 注意:photos.species 在 v6 detection-level 后已经是 effective species(含 manual
-    # override),可以直接用。此处 species 来自 analysis_results 装配后的列(简化:
-    # 直接 LEFT JOIN ar.species)。
-    async with db.conn.execute(
-        "SELECT p.province, ar.species AS species, COUNT(p.id) AS n "
-        "FROM photos p "
-        "LEFT JOIN analysis_results ar ON ar.photo_id = p.id AND ar.is_active = 1 "
-        "WHERE p.province IS NOT NULL "
-        "GROUP BY p.province, ar.species",
-    ) as cur:
-        rows = await cur.fetchall()
-
-    # 第二步:聚合到省级 — 鸟种 distinct count(种为 None 的不计入物种但计入照片)
-    by_province: dict[str, dict[str, set | int]] = {}
-    for row in rows:
-        prov = str(row["province"])
-        species = row["species"]
-        n = int(row["n"] or 0)
-        bucket = by_province.setdefault(prov, {"species": set(), "photos": 0})
-        bucket["photos"] = int(bucket["photos"]) + n  # type: ignore[operator]
-        if species:
-            bucket["species"].add(str(species))  # type: ignore[union-attr]
+    photos = await _load_geo_photos(db, "p.province IS NOT NULL")
+    by_province: dict[str, dict[str, Any]] = {}
+    for item in photos:
+        if not item.province:
+            continue
+        species = _archive_species_for_photo(item.photo)
+        if not species:
+            continue
+        bucket = by_province.setdefault(item.province, {"species": set(), "photos": 0})
+        bucket["photos"] += 1
+        for entry in species:
+            bucket["species"].add(_species_key(entry))
 
     return [
         GeoProvinceRow(
             province=prov,
-            photo_count=int(b["photos"]),  # type: ignore[arg-type]
-            species_count=len(b["species"]),  # type: ignore[arg-type]
+            photo_count=int(b["photos"]),
+            species_count=len(b["species"]),
         )
-        for prov, b in sorted(by_province.items(), key=lambda x: -int(x[1]["photos"]))  # type: ignore[arg-type]
+        for prov, b in sorted(by_province.items(), key=lambda x: -int(x[1]["photos"]))
     ]
 
 
@@ -158,33 +585,26 @@ async def geo_cities(
 ) -> list[GeoCityRow]:
     """二级地图:某省内每个市的照片数 + 鸟种数。"""
     db = await _db(request)
-    async with db.conn.execute(
-        "SELECT p.city, ar.species AS species, COUNT(p.id) AS n "
-        "FROM photos p "
-        "LEFT JOIN analysis_results ar ON ar.photo_id = p.id AND ar.is_active = 1 "
-        "WHERE p.province = ? AND p.city IS NOT NULL "
-        "GROUP BY p.city, ar.species",
-        (province,),
-    ) as cur:
-        rows = await cur.fetchall()
-
-    by_city: dict[str, dict[str, set | int]] = {}
-    for row in rows:
-        city = str(row["city"])
-        species = row["species"]
-        n = int(row["n"] or 0)
-        bucket = by_city.setdefault(city, {"species": set(), "photos": 0})
-        bucket["photos"] = int(bucket["photos"]) + n  # type: ignore[operator]
-        if species:
-            bucket["species"].add(str(species))  # type: ignore[union-attr]
+    photos = await _load_geo_photos(db, "p.province = ? AND p.city IS NOT NULL", (province,))
+    by_city: dict[str, dict[str, Any]] = {}
+    for item in photos:
+        if not item.city:
+            continue
+        species = _archive_species_for_photo(item.photo)
+        if not species:
+            continue
+        bucket = by_city.setdefault(item.city, {"species": set(), "photos": 0})
+        bucket["photos"] += 1
+        for entry in species:
+            bucket["species"].add(_species_key(entry))
 
     return [
         GeoCityRow(
             city=city,
-            photo_count=int(b["photos"]),  # type: ignore[arg-type]
-            species_count=len(b["species"]),  # type: ignore[arg-type]
+            photo_count=int(b["photos"]),
+            species_count=len(b["species"]),
         )
-        for city, b in sorted(by_city.items(), key=lambda x: -int(x[1]["photos"]))  # type: ignore[arg-type]
+        for city, b in sorted(by_city.items(), key=lambda x: -int(x[1]["photos"]))
     ]
 
 
@@ -193,93 +613,64 @@ async def geo_spots(
     request: Request,
     province: str = Query(...),
     city: str = Query(...),
-    max_photos_per_spot: int = Query(50, ge=1, le=200),
+    max_photos_per_spot: int = Query(500, ge=1, le=1000),
 ) -> list[GeoSpot]:
-    """三级地图:某省某市的所有拍摄点(按 GPS 4位小数 round 聚合)。"""
+    """三级地图:某省某市的所有拍摄地点。
+
+    聚合口径是"物理地点优先":同一个 place 名下的照片合成一个 GeoSpot,
+    用于回答"洋湖国家湿地公园有哪些鸟"。只有 place 缺失时,才按 GPS
+    4 位小数 round 兜底生成临时点位。
+    """
     db = await _db(request)
-    # 拉所有 photo + GPS + analysis 一起,前端聚合到 spot。
-    # GPS 从 exif_json 抽,加 ar.species/ar.grade/ar.quality_score
-    async with db.conn.execute(
-        "SELECT p.id, p.file_name, p.exif_json, p.place, p.thumb_grid, "
-        "  ar.species AS species, ar.grade, ar.quality_score, ar.result_json "
-        "FROM photos p "
-        "LEFT JOIN analysis_results ar ON ar.photo_id = p.id AND ar.is_active = 1 "
-        "WHERE p.province = ? AND p.city = ?",
-        (province, city),
-    ) as cur:
-        rows = await cur.fetchall()
+    photos = await _load_geo_photos(db, "p.province = ? AND p.city = ?", (province, city))
 
-    # 按 (round(lat,4), round(lon,4)) 聚合
-    spots: dict[tuple[float, float], dict] = {}
-    for row in rows:
-        try:
-            exif = json.loads(row["exif_json"] or "{}")
-        except Exception:
+    spots: dict[str, dict[str, Any]] = {}
+    for item in photos:
+        species = _archive_species_for_photo(item.photo)
+        if not species:
             continue
-        gps = exif.get("GPSInfo")
-        if not isinstance(gps, dict):
+        gps = _gps_from_exif(item.exif_json)
+        if gps is None:
             continue
+        lat, lon = gps
 
-        def _to_decimal(dms, ref):
-            if not isinstance(dms, list) or len(dms) < 3:
-                return None
-            try:
-                d, m, s = float(dms[0]), float(dms[1]), float(dms[2])
-            except (TypeError, ValueError):
-                return None
-            value = d + m / 60.0 + s / 3600.0
-            if ref in ("S", "W"):
-                value = -value
-            return value
-
-        lat = _to_decimal(gps.get("GPSLatitude"), gps.get("GPSLatitudeRef"))
-        lon = _to_decimal(gps.get("GPSLongitude"), gps.get("GPSLongitudeRef"))
-        if lat is None or lon is None:
-            continue
-        key = (round(lat, 4), round(lon, 4))
+        place_key = _normalize_place_name(item.place)
+        key = (
+            f"place:{place_key}"
+            if place_key is not None
+            else f"gps:{round(lat, 4):.4f},{round(lon, 4):.4f}"
+        )
         bucket = spots.setdefault(
             key,
             {
-                "lat": lat,
-                "lon": lon,
-                "place": row["place"],
+                "lat_sum": 0.0,
+                "lon_sum": 0.0,
+                "place": item.place,
                 "photos": [],
                 "photo_total": 0,  # 真实总数(独立于 photos 列表的 cap)
-                "species_set": set(),
+                "species": [],
             },
         )
         bucket["photo_total"] = int(bucket["photo_total"]) + 1
-        species_latin = row["species"]
-        if species_latin:
-            bucket["species_set"].add(str(species_latin))
+        bucket["lat_sum"] = float(bucket["lat_sum"]) + lat
+        bucket["lon_sum"] = float(bucket["lon_sum"]) + lon
+        if bucket["place"] is None and item.place is not None:
+            bucket["place"] = item.place
+        bucket["species"].extend(species)
         if len(bucket["photos"]) < max_photos_per_spot:
-            # species_zh 只能从 result_json 翻 candidates[0].name(可能 None)
-            species_zh: str | None = None
-            try:
-                data = json.loads(row["result_json"] or "{}")
-                detections = data.get("detections", [])
-                if detections:
-                    best = next(
-                        (d for d in detections if d.get("is_best")), detections[0]
-                    )
-                    cands = best.get("species_candidates") or []
-                    if cands:
-                        species_zh = cands[0].get("canonical_zh") or cands[0].get(
-                            "canonical_en"
-                        )
-            except Exception:
-                pass
+            primary = species[0] if species else None
             bucket["photos"].append(
                 GeoSpotPhoto(
-                    photo_id=str(row["id"]),
-                    file_name=str(row["file_name"]),
-                    species_latin=str(species_latin) if species_latin else None,
-                    species_zh=species_zh,
-                    thumb_grid=str(row["thumb_grid"]) if row["thumb_grid"] else None,
-                    grade=str(row["grade"]) if row["grade"] else None,
+                    photo_id=item.photo.id,
+                    file_name=item.photo.file_name,
+                    species=species,
+                    species_latin=primary.latin_name if primary else None,
+                    species_zh=primary.name if primary else None,
+                    thumb_grid=item.thumb_grid,
+                    grade=item.photo.decision or item.photo.grade,
                     quality_score=(
-                        float(row["quality_score"])
-                        if row["quality_score"] is not None
+                        float(item.photo.quality_score)
+                        if item.photo.quality_score is not None
                         else None
                     ),
                 )
@@ -287,13 +678,14 @@ async def geo_spots(
 
     return [
         GeoSpot(
-            lat=b["lat"],
-            lon=b["lon"],
+            lat=float(b["lat_sum"]) / max(1, int(b["photo_total"])),
+            lon=float(b["lon_sum"]) / max(1, int(b["photo_total"])),
             place=b["place"],
             # 真实总数(可能 > max_photos_per_spot,bucket["photos"] 列表只截断展示);
             # 前端 tooltip 显示总数,弹卡片缩略图列表显示截断后的样本。
             photo_count=int(b["photo_total"]),
-            species_count=len(b["species_set"]),
+            species_count=len({_species_key(s) for s in b["species"]}),
+            species=_species_summary(b["species"]),
             photos=b["photos"],
         )
         for b in sorted(spots.values(), key=lambda x: -int(x["photo_total"]))

@@ -1,0 +1,144 @@
+name: macOS App Build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: mac-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build macOS arm64 DMG
+    runs-on: macos-15
+    timeout-minutes: 120
+
+    env:
+      PLUMELENS_FORCE_ENGINE_BUILD: '1'
+      MODEL_BUNDLE_URL: ${{ secrets.PLUMELENS_MODELS_URL }}
+      MODEL_RELEASE_TAG: ${{ vars.PLUMELENS_MODELS_RELEASE_TAG }}
+      MODEL_RELEASE_ASSET: ${{ vars.PLUMELENS_MODELS_RELEASE_ASSET || 'plumelens-models-v3.tar.gz' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: |
+          npm ci
+          uv sync --dev
+
+      - name: Restore private model assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          bundle="/tmp/plumelens-models"
+          extract_dir="/tmp/plumelens-models-extract"
+          mkdir -p "$extract_dir"
+
+          if [[ -n "${MODEL_BUNDLE_URL}" ]]; then
+            case "${MODEL_BUNDLE_URL}" in
+              *.zip) bundle="${bundle}.zip" ;;
+              *.tar) bundle="${bundle}.tar" ;;
+              *.tar.gz|*.tgz) bundle="${bundle}.tar.gz" ;;
+              *) bundle="${bundle}.tar.gz" ;;
+            esac
+            curl --fail --location --retry 3 --output "$bundle" "${MODEL_BUNDLE_URL}"
+          elif [[ -n "${MODEL_RELEASE_TAG}" ]]; then
+            bundle="/tmp/${MODEL_RELEASE_ASSET}"
+            gh release download "${MODEL_RELEASE_TAG}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --pattern "${MODEL_RELEASE_ASSET}" \
+              --output "$bundle"
+          else
+            echo "::error::Missing model assets. Set secret PLUMELENS_MODELS_URL, or set repository variables PLUMELENS_MODELS_RELEASE_TAG and PLUMELENS_MODELS_RELEASE_ASSET."
+            exit 1
+          fi
+
+          case "$bundle" in
+            *.zip) ditto -x -k "$bundle" "$extract_dir" ;;
+            *.tar) tar -xf "$bundle" -C "$extract_dir" ;;
+            *.tar.gz|*.tgz) tar -xzf "$bundle" -C "$extract_dir" ;;
+            *) echo "::error::Unsupported model bundle format: $bundle"; exit 1 ;;
+          esac
+
+          if [[ -d "$extract_dir/engine/models" ]]; then
+            rsync -a "$extract_dir/engine/models/" engine/models/
+          elif [[ -d "$extract_dir/models" ]]; then
+            rsync -a "$extract_dir/models/" engine/models/
+          else
+            rsync -a "$extract_dir/" engine/models/
+          fi
+
+          rm -rf "$bundle" "$extract_dir"
+
+      - name: Validate packaged model assets
+        run: |
+          set -euo pipefail
+
+          required=(
+            "engine/models/yolo26l-bird-det.onnx"
+            "engine/models/bird_visibility.onnx"
+            "engine/models/clipiqa_plus.onnx"
+            "engine/models/hyperiqa.onnx"
+            "engine/models/bird_visibility_config.json"
+            "engine/models/species/backbone/config.json"
+            "engine/models/species/backbone/model.safetensors"
+            "engine/models/species/canonical_extended.parquet"
+            "engine/models/species/species_list_1301.parquet"
+            "engine/models/species_wiki.parquet"
+          )
+          for seed in 42 123 456 789 999 1024 2024 31337; do
+            required+=("engine/models/species/heads/seed${seed}.pt")
+          done
+
+          missing=0
+          for file in "${required[@]}"; do
+            if [[ ! -s "$file" ]]; then
+              echo "::error::Missing required model asset: $file"
+              missing=1
+            fi
+          done
+          exit "$missing"
+
+      - name: Build macOS DMG
+        run: npm run dist:mac
+
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PlumeLens-macOS-arm64-${{ github.sha }}
+          path: release/PlumeLens-*-arm64.dmg
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Publish tagged release asset
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          dmg="$(ls release/PlumeLens-*-arm64.dmg | head -n 1)"
+          gh release view "$tag" >/dev/null 2>&1 || \
+            gh release create "$tag" --title "$tag" --notes "PlumeLens $tag"
+          gh release upload "$tag" "$dmg" --clobber

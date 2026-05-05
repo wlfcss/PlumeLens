@@ -23,6 +23,7 @@ from engine.api.schemas.library import (
     LibrarySummary,
     PhotoRow,
     SpeciesSource,
+    UpdateLibraryRequest,
 )
 from engine.core.config import settings as app_settings
 from engine.core.database import Database
@@ -143,6 +144,8 @@ GROUP_SPECIES_MAX_CONFLICT_TOP1_CONF = 0.70
 
 
 def _clamp01(value: object, default: float = 0.0) -> float:
+    if not isinstance(value, (int, float, str)):
+        return default
     try:
         number = float(value)
     except Exception:
@@ -430,9 +433,7 @@ def _apply_group_species_consensus(photos: list[PhotoRow]) -> None:
             0.99,
             max(
                 0.0,
-                0.45 * winner_share
-                + 0.35 * support_ratio
-                + 0.20 * min(1.0, margin * 2.0),
+                0.45 * winner_share + 0.35 * support_ratio + 0.20 * min(1.0, margin * 2.0),
             ),
         )
 
@@ -625,6 +626,41 @@ async def import_library(
     return summary
 
 
+@router.patch("/{library_id}", response_model=LibrarySummary)
+async def update_library(
+    request: Request,
+    library_id: str,
+    body: UpdateLibraryRequest,
+) -> LibrarySummary:
+    """PATCH /library/{id} — update user-facing folder alias.
+
+    The alias is stored in libraries.display_name, which is also the name used by
+    export output folders and manifest metadata.
+    """
+    db = await _db(request)
+    display_name = body.display_name.strip()
+    if not display_name:
+        raise HTTPException(status_code=400, detail="Display name cannot be empty")
+
+    summary = await _fetch_library_summary(db, library_id)
+    if summary is None:
+        raise HTTPException(status_code=404, detail="Library not found")
+
+    await db.conn.execute(
+        "UPDATE libraries SET display_name = ? WHERE id = ?",
+        (display_name, library_id),
+    )
+    await db.conn.commit()
+    updated = await _fetch_library_summary(db, library_id)
+    assert updated is not None
+    publish_library_event(
+        library_id,
+        "library_updated",
+        {"display_name": updated.display_name},
+    )
+    return updated
+
+
 @router.get("/{library_id}", response_model=LibraryDetail)
 async def library_detail(request: Request, library_id: str) -> LibraryDetail:
     """GET /library/{id} — summary + photos."""
@@ -643,6 +679,7 @@ async def library_detail(request: Request, library_id: str) -> LibraryDetail:
         "SELECT p.id, p.file_path, p.file_name, p.format, p.width, p.height, "
         "p.thumb_grid, p.thumb_preview, p.created_at, p.file_mtime, p.exif_json, "
         "p.scene_id, p.companion_path, p.companion_format, p.companion_size, "
+        "p.country, p.province, p.city, p.district, p.place, "
         "ar.pipeline_version, ar.grade, ar.quality_score, ar.bird_count, ar.species, "
         "ar.result_json, "
         "pd.decision, "
@@ -869,9 +906,7 @@ async def library_detail(request: Request, library_id: str) -> LibraryDetail:
         # - 否则 task DEAD/FAILED → failed(图损坏 / 模型报错,attempts 已用尽)
         # - 否则 → pending(包含 task 不存在 / pending / processing / paused)
         has_result = r["pipeline_version"] is not None
-        task_status_raw = (
-            str(r["task_status"]) if r["task_status"] is not None else None
-        )
+        task_status_raw = str(r["task_status"]) if r["task_status"] is not None else None
         if has_result:
             analysis_status = "done"
         elif task_status_raw in ("dead", "failed"):
@@ -892,9 +927,7 @@ async def library_detail(request: Request, library_id: str) -> LibraryDetail:
                 width=(int(r["width"]) if r["width"] is not None else None),
                 height=(int(r["height"]) if r["height"] is not None else None),
                 thumb_grid=(str(r["thumb_grid"]) if r["thumb_grid"] is not None else None),
-                thumb_preview=(
-                    str(r["thumb_preview"]) if r["thumb_preview"] is not None else None
-                ),
+                thumb_preview=(str(r["thumb_preview"]) if r["thumb_preview"] is not None else None),
                 companion_path=(
                     str(r["companion_path"]) if r["companion_path"] is not None else None
                 ),
@@ -904,6 +937,11 @@ async def library_detail(request: Request, library_id: str) -> LibraryDetail:
                 companion_size=(
                     int(r["companion_size"]) if r["companion_size"] is not None else None
                 ),
+                country=(str(r["country"]) if r["country"] is not None else None),
+                province=(str(r["province"]) if r["province"] is not None else None),
+                city=(str(r["city"]) if r["city"] is not None else None),
+                district=(str(r["district"]) if r["district"] is not None else None),
+                place=(str(r["place"]) if r["place"] is not None else None),
                 created_at=str(r["created_at"]),
                 shot_at=_resolve_shot_at(r),
                 scene_id=(int(r["scene_id"]) if r["scene_id"] is not None else None),

@@ -79,13 +79,7 @@ export interface BirdDetectionRecord {
   // 每个 detection 独立的 species_source（多鸟图混合可见性的关键 — 后端 v6 schema）。
   // 羽迹聚合按 detection 维度，head 不可见的 detection（speciesSource ===
   // 'model_unconfirmed'）不进羽迹，直到用户在深度复核确认。
-  speciesSource?:
-    | 'none'
-    | 'model'
-    | 'model_unconfirmed'
-    | 'manual'
-    | 'group_consensus'
-    | 'conflict'
+  speciesSource?: 'none' | 'model' | 'model_unconfirmed' | 'manual' | 'group_consensus' | 'conflict'
 }
 
 export interface AfOverlayPoint {
@@ -131,13 +125,7 @@ export interface PhotoRecord {
   manualSpecies?: boolean
   // model_unconfirmed: head 不可见但模型给了识别 → "不全 · 待审"，不进羽迹，
   // 用户在深度复核确认后升级为 manual。group consensus 可覆盖为 group_consensus。
-  speciesSource?:
-    | 'none'
-    | 'model'
-    | 'model_unconfirmed'
-    | 'manual'
-    | 'group_consensus'
-    | 'conflict'
+  speciesSource?: 'none' | 'model' | 'model_unconfirmed' | 'manual' | 'group_consensus' | 'conflict'
   modelSpeciesName?: string | null
   modelSpeciesLatinName?: string | null
   groupSpeciesName?: string | null
@@ -192,8 +180,13 @@ export interface PhotoRecord {
   // JPG/RAW 同名 pair 的同伴文件信息（scanner v7+ 识别）。无 pair 时全 null。
   // 主 entry 走 fileName,companion 不入单独 photo,UI 在卡片右下角显示 "+CR3" 等。
   companionPath?: string | null
-  companionFormat?: string | null  // CR3 / NEF / ARW / JPG ...
-  companionSize?: number | null    // 字节数
+  companionFormat?: string | null // CR3 / NEF / ARW / JPG ...
+  companionSize?: number | null // 字节数
+  country?: string | null
+  province?: string | null
+  city?: string | null
+  district?: string | null
+  place?: string | null
 }
 
 export interface SpeciesRecord {

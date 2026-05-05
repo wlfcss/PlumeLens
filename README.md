@@ -15,7 +15,9 @@
 - "model_unconfirmed"待审：head 不可见仍跑识别但标待审，用户在深度复核确认才进羽迹
 - 顶层路由 `开始 / 选片 / 羽迹`：选片工作流 + 长期物种沉淀
 - "羽迹"模块：1535 种物种墙 + 保护等级分组 + 物种详情（中文百科 + 时间线 + 地理分布）
-- 多维度筛选 / 排序 / 分组 / 对比 / 深度复核
+- 多维度筛选 / 排序 / 分组 / 对比 / 深度复核（倍率选择 + 全屏查看）
+- 真实导出：支持多文件夹并行导出、合并导出（文件夹 / 照片）、按评级分类（文件夹 / 评级 / 照片）、JPG + RAW 同伴文件、中文报告/清单
+- 文件夹别名：可在界面修改，导出目录与报告使用别名；最近文件夹 / 选片侧栏支持在 Finder 中打开
 - 支持 RAW 格式（CR2/CR3/NEF/ARW 等）
 - 批量分析支持暂停 / 恢复 / 断点续跑
 
@@ -42,12 +44,12 @@
 
 ### 分级阈值（综合分 0-1）
 
-| 分级 | 分数范围 | 含义 |
-|---|---|---|
-| 淘汰 (reject) | < 0.45 | 画质不可接受 |
-| 记录 (record) | 0.45 – 0.60 | 仅供记录 |
-| 可用 (usable) | 0.60 – 0.75 | 可使用 |
-| 精选 (select) | ≥ 0.75 | 最佳作品 |
+| 分级          | 分数范围    | 含义         |
+| ------------- | ----------- | ------------ |
+| 淘汰 (reject) | < 0.45      | 画质不可接受 |
+| 记录 (record) | 0.45 – 0.60 | 仅供记录     |
+| 可用 (usable) | 0.60 – 0.75 | 可使用       |
+| 精选 (select) | ≥ 0.75      | 最佳作品     |
 
 完整模型清单与指标见 [engine/models/README.md](engine/models/README.md)。
 
@@ -55,14 +57,14 @@
 
 ## 技术架构
 
-| 层 | 选型 |
-|---|---|
-| 桌面外壳 | Electron 35 + 主进程子进程守护 + 一次性 token 安全边界 |
-| 前端 | React 19 + TypeScript + Tailwind CSS v4 + shadcn/ui + i18next + TanStack Query + Zustand |
-| 后端 | Python 3.11 + FastAPI + uvicorn + structlog |
-| 推理 | onnxruntime（YOLO / pose / IQA） + torch + transformers（DINOv3 species） |
-| 存储 | SQLite WAL 模式 + `~/Library/Application Support/PlumeLens/`（packaged）/ `~/.plumelens/`（dev） |
-| 通信 | localhost HTTP（动态端口，仅绑 127.0.0.1） + SSE 事件总线（library-scoped） |
+| 层       | 选型                                                                                             |
+| -------- | ------------------------------------------------------------------------------------------------ |
+| 桌面外壳 | Electron 35 + 主进程子进程守护 + 一次性 token 安全边界                                           |
+| 前端     | React 19 + TypeScript + Tailwind CSS v4 + shadcn/ui + i18next + TanStack Query + Zustand         |
+| 后端     | Python 3.11 + FastAPI + uvicorn + structlog                                                      |
+| 推理     | onnxruntime（YOLO / pose / IQA） + torch + transformers（DINOv3 species）                        |
+| 存储     | SQLite WAL 模式 + `~/Library/Application Support/PlumeLens/`（packaged）/ `~/.plumelens/`（dev） |
+| 通信     | localhost HTTP（动态端口，仅绑 127.0.0.1） + SSE 事件总线（library-scoped）                      |
 
 **关键架构原则**：
 
@@ -110,6 +112,20 @@ npm run build
 npm run dist:mac                      # → release/PlumeLens-x.y.z-arm64.dmg
 ```
 
+### GitHub Actions
+
+当前只保留 macOS arm64 自动构建流程：`.github/workflows/mac-build.yml`。
+
+- 触发：push 到 `main`、`v*` tag、手动 workflow dispatch
+- 产物：Actions artifact 中的 `release/PlumeLens-*-arm64.dmg`
+- tag 构建：自动创建/更新同名 GitHub Release asset
+- Windows / Linux / eval 自动流程暂时停用
+
+完整 DMG 依赖未入 git 的模型资产。远端构建需配置其一：
+
+- secret `PLUMELENS_MODELS_URL`：指向 `.tar.gz` / `.zip` 模型包
+- repo variables `PLUMELENS_MODELS_RELEASE_TAG` + `PLUMELENS_MODELS_RELEASE_ASSET`：从本仓库 Release 下载模型包
+
 更多命令与开发约束（commit 风格 / 兼容性矩阵 / 安全约束 / 测试策略）见仓库内开发文档。
 
 ---
@@ -121,8 +137,11 @@ npm run dist:mac                      # → release/PlumeLens-x.y.z-arm64.dmg
 - ✅ 后端：scanner / thumbnail / cache / analyzer / queue / decisions / scene_grouper + event_bus + 全部 API 路由
 - ✅ 数据：SQLite WAL + 双指纹（path+mtime → SHA-256）+ pipeline_version 缓存键
 - ✅ 物种百科本地化：1535 种元数据 + 中文 Wikipedia 介绍 + Wikimedia Commons 摄影封面
+- ✅ 导出：右侧浮窗多任务并行、可收起、JPG/RAW 同伴复制、中文 manifest、别名目录、目标目录安全校验
+- ✅ 羽迹地理分布：反地理编码后台持久化、按物理地点聚合、ECharts 三级地图、地点内鸟种筛选
+- ✅ 运行状态：启动动画 + CPU/GPU/MPS/Mixed 推理设备展示
 - ✅ macOS arm64 打包：PyInstaller + electron-builder dmg 全链路通过
-- ✅ 测试：~187 后端 pytest + 12 前端 vitest + 8 个 Playwright E2E
+- ✅ 测试：246 后端 pytest + 15 前端 vitest + 26 个 Playwright E2E 用例
 - 🟡 App.tsx 仍在按 pages/components 拆分中
 - 🟡 Windows 打包尚未验证
 - 🟡 AF 对焦点 Canon 区域 / Nikon / Sony 完整解析待校准

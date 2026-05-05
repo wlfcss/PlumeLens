@@ -74,6 +74,19 @@
     "pipelineReadiness": "管线就绪度",
     "pipelineState": "管线状态",
     "monitor": "本地筛片监视器",
+    "runtime": {
+      "initializing": "正在探测本地推理设备",
+      "localOnly": "本地推理",
+      "unavailable": "等待后端恢复"
+    },
+    "device": {
+      "cpu": "CPU",
+      "gpu": "GPU",
+      "mps": "MPS",
+      "mixed": "混合",
+      "unknown": "未知",
+      "detecting": "探测"
+    },
     "heroSignals": {
       "local": "本地计算",
       "workflow": "文件夹优先",
@@ -82,10 +95,13 @@
     "status": {
       "engine": "引擎",
       "detector": "检测",
+      "quality": "画质",
       "pose": "姿态",
       "species": "物种",
       "ready": "已就绪",
       "pending": "准备中",
+      "loading": "加载中",
+      "error": "异常",
       "training": "即将接入"
     }
   },
@@ -131,7 +147,18 @@
       "starting": "启动中…",
       "analyzingProgress": "分析中 {{progress}}",
       "analyzedProgress": "已分析 {{progress}}",
-      "analyzingPercent": "分析中… {{percent}}%"
+      "analyzingPercent": "分析中… {{percent}}%",
+      "alias": "文件夹别名",
+      "editAlias": "编辑文件夹别名",
+      "saveAlias": "保存文件夹别名",
+      "cancelAlias": "取消编辑别名",
+      "aliasPlaceholder": "输入文件夹别名",
+      "aliasEmpty": "别名不能为空",
+      "aliasFailed": "别名保存失败"
+    },
+    "folderMenu": {
+      "label": "文件夹操作",
+      "openInFinder": "在 Finder 中打开"
     },
     "report": {
       "label": "文件夹报告",
@@ -187,7 +214,11 @@
     "group": {
       "photos": "张照片",
       "bestScore": "组内最高",
-      "keepBest": "保留最佳 1 张"
+      "keepBest": "保留最佳 1 张",
+      "pendingTitle": "{{time}} · 待分组",
+      "singleTitle": "场景 #{{scene}} · {{time}}",
+      "countTitle": "场景 #{{scene}} · {{time}} · {{count}} 张",
+      "durationTitle": "场景 #{{scene}} · {{time}} · {{count}} 张 · {{minutes}} 分钟"
     },
     "grade": {
       "reject": "淘汰",
@@ -246,7 +277,9 @@
       "frameLabel": "帧",
       "speciesTimes": "{{name}} × {{count}}",
       "speciesPlus": "{{a}} + {{b}}",
-      "speciesEtc": "{{name}} 等 {{count}} 种"
+      "speciesEtc": "{{name}} 等 {{count}} 种",
+      "analysisCaption": "{{species}} · {{grade}} · 分数 {{score}}",
+      "pendingCaption": "等待分析"
     },
     "actions": {
       "select": "精选",
@@ -271,7 +304,13 @@
       "targetRaw": "打开 {{format}} 原片",
       "targetMain": "打开主文件",
       "openInTopaz": "Topaz",
-      "openInPhotoshop": "Photoshop"
+      "openInPhotoshop": "Photoshop",
+      "error": {
+        "not_installed": "未检测到外部编辑器",
+        "file_missing": "目标文件已不存在",
+        "app_missing": "编辑器启动文件不存在",
+        "spawn_failed": "启动外部编辑器失败"
+      }
     },
     "review": {
       "label": "深度复核",
@@ -281,14 +320,22 @@
       "previous": "上一张",
       "next": "下一张",
       "original": "原图",
-      "originalHint": "按住放大 · 拖动平移",
+      "originalHint": "点击放大 · 拖动平移",
       "iqaCrop": "IQA 裁切 · 2.5×",
       "cropHint": "画质评分依据",
       "cropNeedsSubject": "需先识别",
+      "zoomLabel": "放大倍率",
+      "zoomScale": "{{scale}} 倍放大",
+      "fullscreen": "全屏查看",
+      "fullscreenHint": "点击放大 · 拖动平移 · Esc 退出",
       "toggleBbox": "检测框",
       "togglePose": "姿态点",
       "toggleAfPoint": "对焦区域/合焦点",
       "afPointUnknown": " · 未识别",
+      "afArea": "对焦区域",
+      "afAvailablePoint": "可用对焦点",
+      "afPoint": "对焦点",
+      "afFocusedPoint": "合焦点",
       "filmstripLabel": "复核照片缩略图",
       "shortcutsLabel": "复核快捷键",
       "activeBirdHint": "共 {{total}} 只 · 当前 鸟 {{current}}",
@@ -330,6 +377,8 @@
       "focalLength": "焦距",
       "camera": "机身",
       "lens": "镜头",
+      "unknownCamera": "未知机身",
+      "unknownLens": "未知镜头",
       "time": "时间",
       "location": "拍摄地",
       "openInMaps": "在地图中打开",
@@ -356,6 +405,16 @@
       "collected": "已点亮",
       "species": "图鉴总数",
       "protected": "保护物种"
+    },
+    "summarySignalAria": "{{label}}：{{signal}}",
+    "summarySignals": {
+      "collected": "绿色表示已点亮物种，可点击筛选已点亮",
+      "species": "灰色表示完整图鉴范围，可点击查看全部",
+      "protected1": "红色表示最高保护优先级，可点击筛选国家一级保护",
+      "protected2": "金色表示保护优先级，可点击筛选国家二级保护",
+      "threatened": "红色表示受胁或近危关注物种，可点击筛选",
+      "regular": "灰色表示中国常规物种，可点击筛选",
+      "modelExtra": "紫色表示模型扩展名录，可点击筛选国外观赏种"
     },
     "tabs": {
       "species": "物种",
@@ -409,12 +468,36 @@
     },
     "geo": {
       "country": "中国",
+      "speciesLabel": "鸟种",
+      "photosLabel": "照片",
       "tooltipSpecies": "鸟种 {{count}}",
       "tooltipPhotos": "照片 {{count}}",
       "noData": "暂无数据",
       "legendMore": "多",
       "legendNone": "少",
+      "synced": "地理索引已同步",
+      "statsLabel": "地理统计",
+      "statsMapped": "已上图",
+      "statsPending": "待解析",
+      "statsNoGps": "无坐标",
       "statProvinces": "{{count}} 个省份有照片",
+      "statCities": "{{count}} 个城市有照片",
+      "statSpots": "{{count}} 个拍摄点",
+      "density": "鸟种密度",
+      "hotspots": "热区排行",
+      "rankSpecies": "{{count}} 种",
+      "rankPhotos": "{{count}} 张",
+      "rankEmpty": "暂无可上图数据",
+      "speciesFilter": "鸟种筛选",
+      "allSpecies": "全部鸟种",
+      "filteredPhotos": "显示 {{shown}} / {{total}} 张",
+      "filterEmpty": "当前鸟种暂无可展示照片",
+      "unknownSpecies": "未知鸟种",
+      "level": {
+        "country": "全国图层",
+        "province": "省级图层",
+        "city": "城市图层"
+      },
       "loadingProvince": "加载省级地图中…",
       "backfillProgress": "解析地理位置 {{resolved}}/{{total}}…",
       "unmapped": "{{count}} 张照片缺少 GPS，未在地图中展示",
@@ -442,6 +525,22 @@
     "label": "导出",
     "title": "准备出片",
     "confirm": "开始导出",
+    "target": {
+      "label": "导出位置",
+      "choose": "选择位置",
+      "change": "更换位置",
+      "empty": "请选择一个源图库之外的文件夹"
+    },
+    "status": {
+      "ready": "等待导出",
+      "running": "正在导出",
+      "success": "导出完成",
+      "error": "导出失败"
+    },
+    "result": {
+      "output": "输出目录",
+      "stats": "已导出 {{exported}} 张，附带 {{companions}} 个同伴文件，失败 {{failed}} 张"
+    },
     "scope": {
       "label": "导出范围",
       "reviewed": "精选、可用、记录",
@@ -456,9 +555,22 @@
       "label": "目录结构",
       "keep": "保留原始目录结构"
     },
+    "layout": {
+      "label": "导出方式",
+      "merged": {
+        "label": "合并导出",
+        "short": "文件夹 / 照片",
+        "hint": "保持当前文件夹结构，不额外插入评级目录"
+      },
+      "byGrade": {
+        "label": "按评级分类",
+        "short": "文件夹 / 评级 / 照片",
+        "hint": "在每个文件夹下按精选、可用、记录分开"
+      }
+    },
     "bundle": {
       "label": "附带内容",
-      "report": "包含报告与清单"
+      "report": "包含中文报告与清单"
     },
     "summary": {
       "label": "导出摘要",

@@ -10,7 +10,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-
 from engine.core.config import Settings
 from engine.pipeline.manager import PipelineManager
 

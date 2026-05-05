@@ -48,11 +48,11 @@ MAX_ATTEMPTS: int = 3
 # 命中即跳过 retry 直接 DEAD,避免浪费 ~1s × MAX_ATTEMPTS 跑同一坏文件。
 # 反例:模型 abort、MPS 错误、网络 timeout — 这些可能是瞬态,该走 retry。
 _PERMANENT_FAILURE_PATTERNS: tuple[str, ...] = (
-    "broken data stream",            # PIL: JPEG 数据流损坏
-    "image file is truncated",       # PIL: 文件被截断(也可能瞬态,但实测都是真坏)
-    "cannot identify image file",    # PIL: UnidentifiedImageError
-    "Unsupported image format",      # 我们自己抛的(扩展名不在白名单)
-    "File not found on disk",        # analyzer 的 FileNotFoundError 包装
+    "broken data stream",  # PIL: JPEG 数据流损坏
+    "image file is truncated",  # PIL: 文件被截断(也可能瞬态,但实测都是真坏)
+    "cannot identify image file",  # PIL: UnidentifiedImageError
+    "Unsupported image format",  # 我们自己抛的(扩展名不在白名单)
+    "File not found on disk",  # analyzer 的 FileNotFoundError 包装
 )
 
 
@@ -299,39 +299,34 @@ async def get_task(db: Database, task_id: str) -> Task | None:
 async def pick_next(db: Database, library_id: str | None = None) -> Task | None:
     """Atomically pick the highest-priority pending task and mark it PROCESSING.
 
-    同一 SQLite 连接下通过 BEGIN IMMEDIATE + UPDATE ... WHERE status='pending' 保证原子。
+    单条 UPDATE ... WHERE id=(SELECT ...) RETURNING 保证领取和状态切换原子。
     返回被选中的 task（已切到 PROCESSING）；无待办时返回 None。
     """
     conn = db.conn
 
-    # 选最高优先级 + 最早入队的 pending
-    if library_id is None:
-        select_sql = (
-            "SELECT id FROM task_queue WHERE status = 'pending' "
-            "ORDER BY priority DESC, created_at ASC LIMIT 1"
-        )
-        select_params: tuple = ()
-    else:
-        select_sql = (
-            "SELECT id FROM task_queue WHERE status = 'pending' AND library_id = ? "
-            "ORDER BY priority DESC, created_at ASC LIMIT 1"
-        )
-        select_params = (library_id,)
-
-    async with conn.execute(select_sql, select_params) as cur:
-        row = await cur.fetchone()
-    if row is None:
-        return None
-    task_id = str(row["id"])
-
-    # 条件 UPDATE（status 仍是 pending 才执行）防止多个 worker 抢同一条
     now = _now_iso()
-    async with conn.execute(
-        "UPDATE task_queue SET status = ?, started_at = ? "
-        "WHERE id = ? AND status = 'pending' "
-        "RETURNING *",
-        (TaskStatus.PROCESSING.value, now, task_id),
-    ) as cur:
+    if library_id is None:
+        sql = (
+            "UPDATE task_queue SET status = ?, started_at = ? "
+            "WHERE id = ("
+            "  SELECT id FROM task_queue WHERE status = 'pending' "
+            "  ORDER BY priority DESC, created_at ASC LIMIT 1"
+            ") "
+            "RETURNING *"
+        )
+        params: tuple[object, ...] = (TaskStatus.PROCESSING.value, now)
+    else:
+        sql = (
+            "UPDATE task_queue SET status = ?, started_at = ? "
+            "WHERE id = ("
+            "  SELECT id FROM task_queue WHERE status = 'pending' AND library_id = ? "
+            "  ORDER BY priority DESC, created_at ASC LIMIT 1"
+            ") "
+            "RETURNING *"
+        )
+        params = (TaskStatus.PROCESSING.value, now, library_id)
+
+    async with conn.execute(sql, params) as cur:
         updated = await cur.fetchone()
     await conn.commit()
     return _row_to_task(updated) if updated else None
@@ -431,9 +426,7 @@ async def mark_failed_with_retry(
     task = await transition(db, task_id, TaskStatus.FAILED, error_message=error)
     permanent = is_permanent_failure(error)
     next_status = (
-        TaskStatus.DEAD
-        if permanent or task.attempts >= MAX_ATTEMPTS
-        else TaskStatus.PENDING
+        TaskStatus.DEAD if permanent or task.attempts >= MAX_ATTEMPTS else TaskStatus.PENDING
     )
     if permanent:
         await logger.ainfo(
@@ -459,8 +452,7 @@ async def mark_failed_with_retry(
             )
         else:
             await db.conn.execute(
-                "UPDATE task_queue SET status = ?, completed_at = ? "
-                "WHERE id = ? AND status = ?",
+                "UPDATE task_queue SET status = ?, completed_at = ? WHERE id = ? AND status = ?",
                 (TaskStatus.DEAD.value, _now_iso(), task_id, TaskStatus.FAILED.value),
             )
         await db.conn.commit()
@@ -519,8 +511,7 @@ async def mark_stuck_tasks_failed(
     cutoff = (datetime.now(UTC) - timedelta(seconds=threshold_sec)).isoformat()
     conn = db.conn
     async with conn.execute(
-        "SELECT id FROM task_queue "
-        "WHERE status = ? AND started_at IS NOT NULL AND started_at < ?",
+        "SELECT id FROM task_queue WHERE status = ? AND started_at IS NOT NULL AND started_at < ?",
         (TaskStatus.PROCESSING.value, cutoff),
     ) as cur:
         stuck_ids = [str(row["id"]) for row in await cur.fetchall()]
@@ -554,11 +545,16 @@ async def mark_stuck_tasks_failed(
 
 
 async def pause_library(db: Database, library_id: str) -> int:
-    """Pause all PROCESSING + PENDING tasks in a library."""
+    """Pause queued-but-not-started tasks in a library.
+
+    PROCESSING tasks are deliberately left alone. ONNX/torch inference is not
+    safely interruptible; the worker will finish the current photo, then stop
+    because no PENDING tasks remain.
+    """
     conn = db.conn
     async with conn.execute(
         "UPDATE task_queue SET status = 'paused' "
-        "WHERE library_id = ? AND status IN ('pending', 'processing') "
+        "WHERE library_id = ? AND status = 'pending' "
         "RETURNING id",
         (library_id,),
     ) as cur:
@@ -582,11 +578,11 @@ async def resume_library(db: Database, library_id: str) -> int:
 
 
 async def cancel_library(db: Database, library_id: str) -> int:
-    """Cancel all non-terminal tasks in a library."""
+    """Cancel queued tasks in a library, leaving in-flight work to finish."""
     conn = db.conn
     async with conn.execute(
         "UPDATE task_queue SET status = 'cancelled', completed_at = ? "
-        "WHERE library_id = ? AND status IN ('pending', 'processing', 'paused', 'failed') "
+        "WHERE library_id = ? AND status IN ('pending', 'paused') "
         "RETURNING id",
         (_now_iso(), library_id),
     ) as cur:

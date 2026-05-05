@@ -54,10 +54,7 @@ export class ApiError extends Error {
   }
 }
 
-async function request<T>(
-  path: string,
-  init: RequestInit = {},
-): Promise<T> {
+async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const base = await getBackendUrl()
   const url = `${base}${path}`
   const headers = new Headers(init.headers)
@@ -208,9 +205,14 @@ export interface PhotoRow {
   companion_path?: string | null
   companion_format?: string | null
   companion_size?: number | null
+  country?: string | null
+  province?: string | null
+  city?: string | null
+  district?: string | null
+  place?: string | null
   created_at: string
-  shot_at: string  // ISO8601 拍摄时间（EXIF DateTimeOriginal 优先）
-  scene_id: number | null  // 场景分组 id
+  shot_at: string // ISO8601 拍摄时间（EXIF DateTimeOriginal 优先）
+  scene_id: number | null // 场景分组 id
   pipeline_version: string | null
   grade: string | null
   quality_score: number | null
@@ -234,16 +236,16 @@ export interface PhotoRow {
   group_species_evidence?: number | null
   group_species_total?: number | null
   species_conflict?: boolean
-  decision: string | null  // manual grade override: select / usable / record / reject
+  decision: string | null // manual grade override: select / usable / record / reject
   // 分析任务状态:done / failed / pending (前端按此显示"已分析" / "分析失败" / "等待分析")
   // failed 包含 task DEAD(attempts 用尽,通常是图损坏/读取失败)
   analysis_status?: 'done' | 'failed' | 'pending'
   // 失败原因的语义 code,前端用于 i18n 映射:broken_image / invalid_image / file_missing
   // / timeout / unknown。仅在 analysis_status=failed 时有意义。
   analysis_error_code?: string | null
-  analysis_error?: string | null  // 原始错误消息(英文 PIL/rawpy 输出),fallback 显示用
-  exif: Record<string, unknown> | null  // EXIF whitelist 字段 + structured AF metadata
-  best_detection: BestDetection | null  // 深度复核需要画 bbox / 关键点
+  analysis_error?: string | null // 原始错误消息(英文 PIL/rawpy 输出),fallback 显示用
+  exif: Record<string, unknown> | null // EXIF whitelist 字段 + structured AF metadata
+  best_detection: BestDetection | null // 深度复核需要画 bbox / 关键点
   detections: BirdDetectionDetail[] | null
 }
 
@@ -264,6 +266,10 @@ export interface ImportLibraryRequest {
   root_path: string
   display_name?: string | null
   recursive?: boolean
+}
+
+export interface UpdateLibraryRequest {
+  display_name: string
 }
 
 export type TaskQueueStats = Record<string, number>
@@ -303,6 +309,31 @@ export interface DecisionCountsResponse {
   counts: Record<Exclude<DecisionValue, null>, number>
 }
 
+export interface ExportLibraryRequest {
+  target_dir: string
+  grades: Array<'select' | 'usable' | 'record' | 'reject'>
+  min_score?: number | null
+  max_score?: number | null
+  include_companions?: boolean
+  layout?: 'merged' | 'by_grade'
+  preserve_structure?: boolean
+  include_manifest?: boolean
+}
+
+export interface ExportLibraryResponse {
+  library_id: string
+  output_dir: string
+  selected_count: number
+  exported_count: number
+  companion_count: number
+  skipped_missing: number
+  failed_count: number
+  manifest: {
+    json: string | null
+    csv: string | null
+  }
+}
+
 export interface SpeciesOverrideValue {
   canonical_sci: string
   canonical_zh?: string | null
@@ -338,18 +369,18 @@ export const api = {
       body: JSON.stringify(body),
     }),
   libraryDetail: (id: string) => request<LibraryDetail>(`/library/${id}`),
-  deleteLibrary: (id: string) =>
-    request<void>(`/library/${id}`, { method: 'DELETE' }),
+  updateLibrary: (id: string, body: UpdateLibraryRequest) =>
+    request<LibrarySummary>(`/library/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    }),
+  deleteLibrary: (id: string) => request<void>(`/library/${id}`, { method: 'DELETE' }),
   buildThumbnails: (id: string) =>
-    request<{ built: number; skipped: number; failed: number }>(
-      `/library/${id}/thumbnails`,
-      { method: 'POST' },
-    ),
+    request<{ built: number; skipped: number; failed: number }>(`/library/${id}/thumbnails`, {
+      method: 'POST',
+    }),
   buildPhotoThumbnail: (photoId: string) =>
-    request<PhotoThumbnailResponse>(
-      `/library/photo/${photoId}/thumbnail`,
-      { method: 'POST' },
-    ),
+    request<PhotoThumbnailResponse>(`/library/photo/${photoId}/thumbnail`, { method: 'POST' }),
   libraryEventsUrl: async (libraryId: string): Promise<string> => {
     const base = await getBackendUrl()
     const token = await getBackendAuthToken()
@@ -365,20 +396,11 @@ export const api = {
       body: JSON.stringify({ library_id: libraryId, force_rerun: forceRerun }),
     }),
   pauseAnalysis: (libraryId: string) =>
-    request<QueueStatsResponse>(
-      `/analysis/library/${libraryId}/pause`,
-      { method: 'POST' },
-    ),
+    request<QueueStatsResponse>(`/analysis/library/${libraryId}/pause`, { method: 'POST' }),
   resumeAnalysis: (libraryId: string) =>
-    request<QueueStatsResponse>(
-      `/analysis/library/${libraryId}/resume`,
-      { method: 'POST' },
-    ),
+    request<QueueStatsResponse>(`/analysis/library/${libraryId}/resume`, { method: 'POST' }),
   cancelAnalysis: (libraryId: string) =>
-    request<QueueStatsResponse>(
-      `/analysis/library/${libraryId}/cancel`,
-      { method: 'POST' },
-    ),
+    request<QueueStatsResponse>(`/analysis/library/${libraryId}/cancel`, { method: 'POST' }),
   getQueueStats: (libraryId: string) =>
     request<QueueStatsResponse>(`/analysis/library/${libraryId}/stats`),
 
@@ -392,8 +414,7 @@ export const api = {
   },
 
   // Decisions
-  getDecision: (photoId: string) =>
-    request<DecisionRow>(`/decisions/photo/${photoId}`),
+  getDecision: (photoId: string) => request<DecisionRow>(`/decisions/photo/${photoId}`),
   setDecision: (photoId: string, decision: DecisionValue) =>
     request<DecisionRow>(`/decisions/photo/${photoId}`, {
       method: 'PUT',
@@ -432,6 +453,13 @@ export const api = {
   libraryDecisionCounts: (libraryId: string) =>
     request<DecisionCountsResponse>(`/decisions/library/${libraryId}/counts`),
 
+  // Export
+  exportLibrary: (libraryId: string, body: ExportLibraryRequest) =>
+    request<ExportLibraryResponse>(`/export/library/${libraryId}`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
   // Reverse geocoding — provider chain(amap → baidu → tencent → nominatim → offline),
   // 后端按可用 key 自动选,前端只看 display_name + source 标识即可。
   reverseGeocode: (lat: number, lon: number, lang = 'zh-CN') =>
@@ -443,9 +471,7 @@ export const api = {
   geoSummary: () => request<GeoSummary>('/archive/geo/summary'),
   geoProvinces: () => request<GeoProvinceRow[]>('/archive/geo/provinces'),
   geoCities: (province: string) =>
-    request<GeoCityRow[]>(
-      `/archive/geo/cities?province=${encodeURIComponent(province)}`,
-    ),
+    request<GeoCityRow[]>(`/archive/geo/cities?province=${encodeURIComponent(province)}`),
   geoSpots: (province: string, city: string) =>
     request<GeoSpot[]>(
       `/archive/geo/spots?province=${encodeURIComponent(province)}&city=${encodeURIComponent(city)}`,
@@ -471,9 +497,17 @@ export interface GeoCityRow {
   species_count: number
 }
 
+export interface GeoSpecies {
+  name: string
+  latin_name: string | null
+  english_name: string | null
+  photo_count: number
+}
+
 export interface GeoSpotPhoto {
   photo_id: string
   file_name: string
+  species: GeoSpecies[]
   species_latin: string | null
   species_zh: string | null
   thumb_grid: string | null
@@ -487,6 +521,7 @@ export interface GeoSpot {
   place: string | null
   photo_count: number
   species_count: number
+  species: GeoSpecies[]
   photos: GeoSpotPhoto[]
 }
 

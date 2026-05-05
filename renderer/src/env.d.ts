@@ -19,18 +19,28 @@ interface PlumeLensAPI {
   getBackendAuthToken(): Promise<string | null>
   getAppVersion(): Promise<string>
   openFolder(): Promise<string | null>
+  selectExportDirectory(): Promise<string | null>
   openLogsDir(): Promise<string>
+  openPathInFinder(
+    path: string,
+  ): Promise<
+    | { ok: true }
+    | { ok: false; reason: 'invalid_path' | 'path_missing' | 'open_failed'; message?: string }
+  >
   onBackendReady(cb: (url: string) => void): void
   onBackendError(cb: (msg: string) => void): void
   /** 订阅 engine 状态变化(ready/unhealthy/crashed/fatal)。返回 unsubscribe。 */
   onEngineStatus(cb: (payload: EngineStatusPayload) => void): () => void
   /** 启动期探测的外部编辑器解析名;null = 未安装,UI 应隐藏对应按钮。 */
   listEditors(): Promise<{ topaz: string | null; photoshop: string | null }>
-  /** 用指定外部编辑器打开文件。失败时 reason: not_installed/file_missing/spawn_failed。 */
+  /** 用指定外部编辑器打开文件。失败时 reason: not_installed/file_missing/app_missing/spawn_failed。 */
   openInEditor(
     tool: 'topaz' | 'photoshop',
     path: string,
-  ): Promise<{ ok: true; app: string } | { ok: false; reason: string }>
+  ): Promise<
+    | { ok: true; app: string }
+    | { ok: false; reason: 'not_installed' | 'file_missing' | 'app_missing' | 'spawn_failed' }
+  >
   /** 读用户设置(API keys 等),持久化在 userData/settings.json */
   getUserSettings(): Promise<UserSettings>
   /** 保存设置 — 空字符串视为清除该 key;merge 不动未传入字段 */

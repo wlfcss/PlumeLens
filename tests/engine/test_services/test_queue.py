@@ -423,6 +423,22 @@ class TestBatchOps:
         stats = await get_stats(db, "lib-1")
         assert stats["pending"] == 2
 
+    async def test_pause_library_leaves_processing_to_finish(
+        self,
+        db_with_photos: Database,
+    ) -> None:
+        db = db_with_photos
+        await enqueue_photos(db, "lib-1", ["photo-0", "photo-1"])
+        processing = await pick_next(db, library_id="lib-1")
+        assert processing is not None
+
+        paused = await pause_library(db, "lib-1")
+        assert paused == 1
+
+        stats = await get_stats(db, "lib-1")
+        assert stats["processing"] == 1
+        assert stats["paused"] == 1
+
     async def test_cancel_library(
         self,
         db_with_photos: Database,
@@ -435,6 +451,22 @@ class TestBatchOps:
         stats = await get_stats(db, "lib-1")
         assert stats["cancelled"] == 2
         assert stats["pending"] == 0
+
+    async def test_cancel_library_leaves_processing_to_finish(
+        self,
+        db_with_photos: Database,
+    ) -> None:
+        db = db_with_photos
+        await enqueue_photos(db, "lib-1", ["photo-0", "photo-1"])
+        processing = await pick_next(db, library_id="lib-1")
+        assert processing is not None
+
+        cancelled = await cancel_library(db, "lib-1")
+        assert cancelled == 1
+
+        stats = await get_stats(db, "lib-1")
+        assert stats["processing"] == 1
+        assert stats["cancelled"] == 1
 
 
 class TestStats:

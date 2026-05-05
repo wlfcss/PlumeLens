@@ -215,14 +215,44 @@ class TestBatch:
 
 class TestLifecycle:
     async def test_cancel(self, client_with_lib) -> None:
-        client, lib_id, _, _ = client_with_lib
-        # 先入队
-        await client.post("/analysis/batch", json={"library_id": lib_id})
-        cancel_resp = await client.post(f"/analysis/library/{lib_id}/cancel")
-        assert cancel_resp.status_code == 200
-        stats = cancel_resp.json()["stats"]
-        # cancelled + 可能已经 completed 的
-        assert stats.get("cancelled", 0) + stats.get("completed", 0) == 2
+        client, lib_id, _, pipeline = client_with_lib
+        from engine.core.config import settings
+
+        old_concurrency = settings.analysis_concurrency
+        settings.analysis_concurrency = 1
+        release = asyncio.Event()
+
+        async def slow_analyze(image_path: Path, photo_id: str = "") -> PipelineResult:
+            await release.wait()
+            return _fake_result(photo_id)
+
+        try:
+            pipeline.analyze = AsyncMock(side_effect=slow_analyze)
+            await client.post("/analysis/batch", json={"library_id": lib_id})
+            for _ in range(50):
+                stats_resp = await client.get(f"/analysis/library/{lib_id}/stats")
+                stats = stats_resp.json()["stats"]
+                if stats.get("processing", 0) >= 1:
+                    break
+                await asyncio.sleep(0.05)
+
+            cancel_resp = await client.post(f"/analysis/library/{lib_id}/cancel")
+            assert cancel_resp.status_code == 200
+            stats = cancel_resp.json()["stats"]
+            assert stats.get("processing", 0) == 1
+            assert stats.get("cancelled", 0) == 1
+
+            release.set()
+            for _ in range(50):
+                stats_resp = await client.get(f"/analysis/library/{lib_id}/stats")
+                stats = stats_resp.json()["stats"]
+                if stats.get("completed", 0) >= 1:
+                    break
+                await asyncio.sleep(0.05)
+            assert stats.get("completed", 0) == 1
+            assert stats.get("cancelled", 0) == 1
+        finally:
+            settings.analysis_concurrency = old_concurrency
 
 
 class TestAutoBackfill:

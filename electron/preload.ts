@@ -16,12 +16,20 @@ export type EngineStatusPayload =
 
 contextBridge.exposeInMainWorld('plumelens', {
   getBackendUrl: (): Promise<string | null> => ipcRenderer.invoke('get-backend-url'),
-  getBackendAuthToken: (): Promise<string | null> =>
-    ipcRenderer.invoke('get-backend-auth-token'),
+  getBackendAuthToken: (): Promise<string | null> => ipcRenderer.invoke('get-backend-auth-token'),
   getAppVersion: (): Promise<string> => ipcRenderer.invoke('get-app-version'),
   openFolder: (): Promise<string | null> => ipcRenderer.invoke('dialog:open-folder'),
+  selectExportDirectory: (): Promise<string | null> =>
+    ipcRenderer.invoke('dialog:select-export-directory'),
   /** 打开 logs 目录 — 用户在 fatal 状态点 banner 触发,Finder/Explorer 弹窗。 */
   openLogsDir: (): Promise<string> => ipcRenderer.invoke('open-logs-dir'),
+  /** 在 Finder 中打开指定本地路径。 */
+  openPathInFinder: (
+    path: string,
+  ): Promise<
+    | { ok: true }
+    | { ok: false; reason: 'invalid_path' | 'path_missing' | 'open_failed'; message?: string }
+  > => ipcRenderer.invoke('open-path-in-finder', path),
   /** 启动期探测的外部编辑器(Topaz/Photoshop)解析名;null = 未安装。 */
   listEditors: (): Promise<{ topaz: string | null; photoshop: string | null }> =>
     ipcRenderer.invoke('list-editors'),
@@ -32,13 +40,15 @@ contextBridge.exposeInMainWorld('plumelens', {
     tencentKey?: string
   }> => ipcRenderer.invoke('get-user-settings'),
   /** 保存 settings.json — 字段空字符串视为清除该 key,merge 不动其他字段 */
-  saveUserSettings: (
-    partial: { amapKey?: string; baiduAk?: string; tencentKey?: string },
-  ): Promise<{ amapKey?: string; baiduAk?: string; tencentKey?: string }> =>
+  saveUserSettings: (partial: {
+    amapKey?: string
+    baiduAk?: string
+    tencentKey?: string
+  }): Promise<{ amapKey?: string; baiduAk?: string; tencentKey?: string }> =>
     ipcRenderer.invoke('save-user-settings', partial),
   /** 重启 engine 子进程 — settings 改后调使新 env 注入生效 */
   restartEngine: (): Promise<boolean> => ipcRenderer.invoke('restart-engine'),
-  /** 用指定外部编辑器打开文件(macOS spawn `open -a`)。 */
+  /** 用指定外部编辑器打开文件(Topaz 走 bundle executable,其他走系统 open)。 */
   openInEditor: (
     tool: 'topaz' | 'photoshop',
     path: string,

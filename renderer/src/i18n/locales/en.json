@@ -74,6 +74,19 @@
     "pipelineReadiness": "Pipeline readiness",
     "pipelineState": "Pipeline state",
     "monitor": "Local culling monitor",
+    "runtime": {
+      "initializing": "Detecting local inference devices",
+      "localOnly": "Local inference",
+      "unavailable": "Waiting for backend recovery"
+    },
+    "device": {
+      "cpu": "CPU",
+      "gpu": "GPU",
+      "mps": "MPS",
+      "mixed": "Mixed",
+      "unknown": "Unknown",
+      "detecting": "Detecting"
+    },
     "heroSignals": {
       "local": "Local compute",
       "workflow": "Folder-first",
@@ -82,10 +95,13 @@
     "status": {
       "engine": "Engine",
       "detector": "Detector",
+      "quality": "Quality",
       "pose": "Pose",
       "species": "Species",
       "ready": "Ready",
       "pending": "Pending",
+      "loading": "Loading",
+      "error": "Error",
       "training": "Next in line"
     }
   },
@@ -131,7 +147,18 @@
       "starting": "Starting…",
       "analyzingProgress": "Analyzing {{progress}}",
       "analyzedProgress": "Analyzed {{progress}}",
-      "analyzingPercent": "Analyzing… {{percent}}%"
+      "analyzingPercent": "Analyzing… {{percent}}%",
+      "alias": "Folder alias",
+      "editAlias": "Edit folder alias",
+      "saveAlias": "Save folder alias",
+      "cancelAlias": "Cancel alias edit",
+      "aliasPlaceholder": "Enter folder alias",
+      "aliasEmpty": "Alias cannot be empty",
+      "aliasFailed": "Failed to save alias"
+    },
+    "folderMenu": {
+      "label": "Folder actions",
+      "openInFinder": "Open in Finder"
     },
     "report": {
       "label": "Folder report",
@@ -187,7 +214,11 @@
     "group": {
       "photos": "photos",
       "bestScore": "Best",
-      "keepBest": "Keep best 1"
+      "keepBest": "Keep best 1",
+      "pendingTitle": "{{time}} · Pending grouping",
+      "singleTitle": "Scene #{{scene}} · {{time}}",
+      "countTitle": "Scene #{{scene}} · {{time}} · {{count}} photos",
+      "durationTitle": "Scene #{{scene}} · {{time}} · {{count}} photos · {{minutes}} min"
     },
     "grade": {
       "reject": "Reject",
@@ -246,7 +277,9 @@
       "frameLabel": "Frame",
       "speciesTimes": "{{name}} × {{count}}",
       "speciesPlus": "{{a}} + {{b}}",
-      "speciesEtc": "{{name}} +{{count}} species"
+      "speciesEtc": "{{name}} +{{count}} species",
+      "analysisCaption": "{{species}} · {{grade}} · score {{score}}",
+      "pendingCaption": "Waiting for analysis"
     },
     "actions": {
       "select": "Select",
@@ -271,7 +304,13 @@
       "targetRaw": "Open {{format}} raw",
       "targetMain": "Open main file",
       "openInTopaz": "Topaz",
-      "openInPhotoshop": "Photoshop"
+      "openInPhotoshop": "Photoshop",
+      "error": {
+        "not_installed": "External editor was not detected",
+        "file_missing": "The target file no longer exists",
+        "app_missing": "The editor executable was not found",
+        "spawn_failed": "Failed to launch the external editor"
+      }
     },
     "review": {
       "label": "Deep review",
@@ -281,14 +320,22 @@
       "previous": "Previous photo",
       "next": "Next photo",
       "original": "Original",
-      "originalHint": "Hold to zoom · drag to pan",
+      "originalHint": "Click to zoom · drag to pan",
       "iqaCrop": "IQA crop · 2.5×",
       "cropHint": "Quality scoring view",
       "cropNeedsSubject": "Subject required",
+      "zoomLabel": "Zoom scale",
+      "zoomScale": "{{scale}}x zoom",
+      "fullscreen": "Fullscreen",
+      "fullscreenHint": "Click to zoom · drag to pan · Esc to exit",
       "toggleBbox": "Detection box",
       "togglePose": "Pose points",
       "toggleAfPoint": "AF area / points",
       "afPointUnknown": " · unavailable",
+      "afArea": "AF area",
+      "afAvailablePoint": "Available AF point",
+      "afPoint": "AF point",
+      "afFocusedPoint": "Focused AF point",
       "filmstripLabel": "Review photo thumbnails",
       "shortcutsLabel": "Review shortcuts",
       "activeBirdHint": "{{total}} birds · current Bird {{current}}",
@@ -330,6 +377,8 @@
       "focalLength": "Focal length",
       "camera": "Camera",
       "lens": "Lens",
+      "unknownCamera": "Unknown camera",
+      "unknownLens": "Unknown lens",
       "time": "Time",
       "location": "Location",
       "openInMaps": "Open in Maps",
@@ -356,6 +405,16 @@
       "collected": "Collected",
       "species": "Catalog size",
       "protected": "Protected"
+    },
+    "summarySignalAria": "{{label}}: {{signal}}",
+    "summarySignals": {
+      "collected": "Green means collected species; click to filter collected species",
+      "species": "Gray means the full catalog range; click to view all",
+      "protected1": "Red means highest conservation priority; click to filter national class I",
+      "protected2": "Gold means conservation priority; click to filter national class II",
+      "threatened": "Red means threatened or near-threatened species; click to filter",
+      "regular": "Gray means regular China-list species; click to filter",
+      "modelExtra": "Purple means model-extended catalog; click to filter foreign ornamental species"
     },
     "tabs": {
       "species": "Species",
@@ -409,12 +468,36 @@
     },
     "geo": {
       "country": "China",
+      "speciesLabel": "Species",
+      "photosLabel": "Photos",
       "tooltipSpecies": "{{count}} species",
       "tooltipPhotos": "{{count}} photos",
       "noData": "No data",
       "legendMore": "More",
       "legendNone": "None",
+      "synced": "Location index synced",
+      "statsLabel": "Location stats",
+      "statsMapped": "Mapped",
+      "statsPending": "Pending",
+      "statsNoGps": "No GPS",
       "statProvinces": "{{count}} provinces with photos",
+      "statCities": "{{count}} cities with photos",
+      "statSpots": "{{count}} photo spots",
+      "density": "Species density",
+      "hotspots": "Hotspots",
+      "rankSpecies": "{{count}} species",
+      "rankPhotos": "{{count}} photos",
+      "rankEmpty": "No mapped data yet",
+      "speciesFilter": "Species filter",
+      "allSpecies": "All species",
+      "filteredPhotos": "Showing {{shown}} / {{total}} photos",
+      "filterEmpty": "No displayable photos for this species",
+      "unknownSpecies": "Unknown species",
+      "level": {
+        "country": "Country layer",
+        "province": "Province layer",
+        "city": "City layer"
+      },
       "loadingProvince": "Loading provincial map…",
       "backfillProgress": "Resolving locations {{resolved}}/{{total}}…",
       "unmapped": "{{count}} photos lack GPS and are hidden from the map",
@@ -442,6 +525,22 @@
     "label": "Export",
     "title": "Prepare output",
     "confirm": "Start export",
+    "target": {
+      "label": "Export location",
+      "choose": "Choose location",
+      "change": "Change location",
+      "empty": "Choose a folder outside the source library"
+    },
+    "status": {
+      "ready": "Ready to export",
+      "running": "Exporting",
+      "success": "Export complete",
+      "error": "Export failed"
+    },
+    "result": {
+      "output": "Output folder",
+      "stats": "{{exported}} exported, {{companions}} companion files, {{failed}} failed"
+    },
     "scope": {
       "label": "Scope",
       "reviewed": "Select, usable, record",
@@ -456,9 +555,22 @@
       "label": "Structure",
       "keep": "Keep original folder structure"
     },
+    "layout": {
+      "label": "Export mode",
+      "merged": {
+        "label": "Merged export",
+        "short": "Folder / photo",
+        "hint": "Keep the current folder structure without grade folders"
+      },
+      "byGrade": {
+        "label": "By grade",
+        "short": "Folder / grade / photo",
+        "hint": "Group select, usable, and record photos inside each folder"
+      }
+    },
     "bundle": {
       "label": "Bundle",
-      "report": "Include report and CSV"
+      "report": "Include Chinese report and CSV"
     },
     "summary": {
       "label": "Export summary",

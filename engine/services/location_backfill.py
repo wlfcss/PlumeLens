@@ -12,13 +12,13 @@ geocoding(走 services/geocoder 的 provider chain),结果写回 photos 表对�
 from __future__ import annotations
 
 import contextlib
-import json
 from typing import Any
 
 import structlog
 
 from engine.core.database import Database
 from engine.services.geocoder import reverse
+from engine.services.gps import parse_gps_from_exif
 
 logger = structlog.stdlib.get_logger()
 
@@ -26,33 +26,7 @@ logger = structlog.stdlib.get_logger()
 def _parse_gps_from_exif(exif_json: str | None) -> tuple[float, float] | None:
     """从 photos.exif_json 提取 (lat, lon) WGS84 十进制度。
     无 GPS / 解析失败返回 None。"""
-    if not exif_json:
-        return None
-    try:
-        exif = json.loads(exif_json)
-    except Exception:
-        return None
-    gps = exif.get("GPSInfo")
-    if not isinstance(gps, dict):
-        return None
-
-    def _to_decimal(dms: object, ref: object) -> float | None:
-        if not isinstance(dms, list) or len(dms) < 3:
-            return None
-        try:
-            d, m, s = float(dms[0]), float(dms[1]), float(dms[2])
-        except (TypeError, ValueError):
-            return None
-        value = d + m / 60.0 + s / 3600.0
-        if ref in ("S", "W"):
-            value = -value
-        return value
-
-    lat = _to_decimal(gps.get("GPSLatitude"), gps.get("GPSLatitudeRef"))
-    lon = _to_decimal(gps.get("GPSLongitude"), gps.get("GPSLongitudeRef"))
-    if lat is None or lon is None:
-        return None
-    return lat, lon
+    return parse_gps_from_exif(exif_json)
 
 
 def _split_components(display_name: str) -> dict[str, str | None]:
@@ -212,16 +186,17 @@ async def backfill_library_locations(
     reverse_geocoding 写回。Provider chain 自动 fallback,链路全失败时该照片
     保持 NULL,下次启动可重试(只要 country 仍 NULL)。"""
     conn = db.conn
-    # 关键预过滤:exif_json LIKE '%GPSInfo%' — 只挑 EXIF 里真有 GPSInfo 字段的照片。
+    # 关键预过滤:只挑 EXIF 里真有经纬度字段的照片。
     # 老逻辑只看 `country IS NULL AND exif_json IS NOT NULL`,会把 photos 表里
     # 全部"没 GPS 但有 EXIF"的照片每次启动都重扫一遍 → 解析失败 → skipped += 1,
-    # 大库可能数千张照片永远在 backfill 队列里空跑。LIKE 用 substring 匹配开销 O(n) 但
-    # 比每张照片 json.loads + GPSInfo 字典查找快得多,而且 GPSInfo 字符串在 exif_json
-    # 中出现 = 必有这个字段(不会假阳性,因为字段名固定)。
+    # 大库可能数千张照片永远在 backfill 队列里空跑。部分相机会写空 GPSInfo 容器,
+    # 所以这里必须看 GPSLatitude/GPSLongitude,不能只看 GPSInfo。
     async with conn.execute(
         "SELECT id, exif_json FROM photos "
         "WHERE library_id = ? AND country IS NULL "
-        "AND exif_json IS NOT NULL AND exif_json LIKE '%GPSInfo%'",
+        "AND exif_json IS NOT NULL "
+        "AND exif_json LIKE '%GPSLatitude%' "
+        "AND exif_json LIKE '%GPSLongitude%'",
         (library_id,),
     ) as cur:
         rows = list(await cur.fetchall())  # 实化成 list 才能 len()/enumerate 二次遍历

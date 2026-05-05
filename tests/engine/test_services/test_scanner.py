@@ -479,8 +479,7 @@ class TestScanLibraryWithCompanion:
         assert report.added == 0
 
         async with db.conn.execute(
-            "SELECT companion_path, companion_format, file_hash FROM photos "
-            "WHERE library_id = ?",
+            "SELECT companion_path, companion_format, file_hash FROM photos WHERE library_id = ?",
             ("lib-test",),
         ) as cur:
             row = await cur.fetchone()
@@ -555,8 +554,7 @@ class TestBackfillCompanion:
         assert updated == 1  # 只 JPG 主 entry 被更新
 
         async with db.conn.execute(
-            "SELECT file_path, companion_path FROM photos WHERE library_id = ? "
-            "ORDER BY file_path",
+            "SELECT file_path, companion_path FROM photos WHERE library_id = ? ORDER BY file_path",
             ("lib-test",),
         ) as cur:
             rows = await cur.fetchall()
@@ -566,3 +564,48 @@ class TestBackfillCompanion:
         by_path = {str(r["file_path"]): r["companion_path"] for r in rows}
         assert by_path[str(jpg)] == str(cr3)  # JPG 行: companion = CR3 path
         assert by_path[str(cr3)] is None  # CR3 行: companion 仍 NULL
+
+    async def test_backfills_raw_companion_when_db_only_has_jpg(
+        self,
+        db: Database,
+        tmp_path: Path,
+    ) -> None:
+        """当前线上老库形态:DB 只有 JPG 行,但图库目录里有同名 CR3。
+        backfill 必须扫描 root_path 的文件系统,不能只看 photos 表已有路径。"""
+        root = tmp_path / "lib"
+        jpg = root / "IMG_030.JPG"
+        cr3 = root / "IMG_030.CR3"
+        _make_jpeg(jpg)
+        _touch(cr3, b"raw")
+        await db.conn.execute(
+            "UPDATE libraries SET parent_path = ?, root_path = ? WHERE id = ?",
+            (str(tmp_path), str(root), "lib-test"),
+        )
+        await db.conn.execute(
+            "INSERT INTO photos (id, file_path, file_name, file_size, file_mtime, "
+            "format, created_at, library_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "photo-jpg-only",
+                str(jpg),
+                jpg.name,
+                jpg.stat().st_size,
+                "2026-01-01",
+                "JPG",
+                "2026-01-01",
+                "lib-test",
+            ),
+        )
+        await db.conn.commit()
+
+        updated = await backfill_companion_for_library(db, "lib-test")
+        assert updated == 1
+
+        async with db.conn.execute(
+            "SELECT companion_path, companion_format, companion_size FROM photos WHERE id = ?",
+            ("photo-jpg-only",),
+        ) as cur:
+            row = await cur.fetchone()
+        assert row is not None
+        assert row["companion_path"] == str(cr3)
+        assert row["companion_format"] == "CR3"
+        assert row["companion_size"] == 3

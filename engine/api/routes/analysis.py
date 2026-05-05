@@ -63,8 +63,7 @@ def _has_active_tasks(stats: dict[str, int]) -> bool:
 async def _mark_library_analyzing(db: Database, library_id: str) -> None:
     """Keep library summary/status in sync with the live analysis queue."""
     await db.conn.execute(
-        "UPDATE libraries SET status = ? "
-        "WHERE id = ? AND status NOT IN ('path_missing', 'error')",
+        "UPDATE libraries SET status = ? WHERE id = ? AND status NOT IN ('path_missing', 'error')",
         ("analyzing_partial", library_id),
     )
     await db.conn.commit()
@@ -318,8 +317,12 @@ async def resume(request: Request, library_id: str) -> QueueStats:
 async def cancel(request: Request, library_id: str) -> QueueStats:
     db = await _db(request)
     await cancel_library(db, library_id)
-    await _mark_library_analysis_idle(db, library_id)
-    return QueueStats(library_id=library_id, stats=await get_stats(db, library_id))
+    stats = await get_stats(db, library_id)
+    if int(stats.get(TaskStatus.PROCESSING.value, 0)) > 0:
+        await _mark_library_analyzing(db, library_id)
+    else:
+        await _mark_library_analysis_idle(db, library_id)
+    return QueueStats(library_id=library_id, stats=stats)
 
 
 @router.get("/library/{library_id}/stats", response_model=QueueStats)

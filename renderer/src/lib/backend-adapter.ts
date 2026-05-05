@@ -22,6 +22,8 @@ import type {
 } from '@/lib/mock-workspace'
 import { resolveSpeciesCanonicalSci } from '@/lib/species-wiki'
 
+type Translate = (key: string, options?: Record<string, unknown>) => string
+
 function formatScore(score: number | null | undefined): string {
   if (score === null || score === undefined || !Number.isFinite(score)) return '--'
   return (score * 100).toFixed(1)
@@ -132,8 +134,8 @@ function summarizeGroupSpecies(
   return { primarySpecies: primary, isNewSpecies: isNew }
 }
 
-/** 格式化组标题：'场景 #N · HH:MM · 12 张'（场景分组完成时）/ '未分组单张' */
-function buildGroupTitle(group: GroupPlan): string {
+/** 格式化组标题：场景分组完成时展示 scene id / 时间 / 张数。 */
+function buildGroupTitle(group: GroupPlan, t: Translate): string {
   const start = new Date(group.startMs)
   const hh = String(start.getHours()).padStart(2, '0')
   const mm = String(start.getMinutes()).padStart(2, '0')
@@ -142,16 +144,25 @@ function buildGroupTitle(group: GroupPlan): string {
 
   if (group.sceneId < 0) {
     // scene_id 还没分配（后台未完成）
-    return `${hh}:${mm} · 待分组`
+    return t('selection.group.pendingTitle', { time: `${hh}:${mm}` })
   }
   if (photoCount === 1) {
-    return `场景 #${group.sceneId + 1} · ${hh}:${mm}`
+    return t('selection.group.singleTitle', { scene: group.sceneId + 1, time: `${hh}:${mm}` })
   }
   if (spanSec < 60) {
-    return `场景 #${group.sceneId + 1} · ${hh}:${mm} · ${photoCount} 张`
+    return t('selection.group.countTitle', {
+      scene: group.sceneId + 1,
+      time: `${hh}:${mm}`,
+      count: photoCount,
+    })
   }
   const minutes = Math.round(spanSec / 60)
-  return `场景 #${group.sceneId + 1} · ${hh}:${mm} · ${photoCount} 张 · ${minutes} 分钟`
+  return t('selection.group.durationTitle', {
+    scene: group.sceneId + 1,
+    time: `${hh}:${mm}`,
+    count: photoCount,
+    minutes,
+  })
 }
 
 // ---------- Photo ----------
@@ -183,11 +194,7 @@ function lookupLatinName(speciesName: string | null): string | null {
 }
 
 function withConsensusCandidate(row: PhotoRow, candidates: SpeciesCandidate[]): SpeciesCandidate[] {
-  if (
-    row.species_source !== 'group_consensus' ||
-    !row.group_species ||
-    !row.group_species_latin
-  ) {
+  if (row.species_source !== 'group_consensus' || !row.group_species || !row.group_species_latin) {
     return candidates
   }
   const consensus: SpeciesCandidate = {
@@ -261,22 +268,23 @@ export function buildPhotoRecordFromRow(
   row: PhotoRow,
   folderId: string,
   groupId: string,
-  cameraFallback = '未知机身',
-  lensFallback = '未知镜头',
+  t: Translate,
 ): PhotoRecord {
   const grade = safeGrade(row.grade)
   const decision = safeDecision(row.decision)
   const isAnalyzed = row.pipeline_version !== null
   const bestQuality = row.best_detection?.quality ?? null
-  const speciesCandidates =
-    withConsensusCandidate(row, row.best_detection?.species_candidates
+  const speciesCandidates = withConsensusCandidate(
+    row,
+    row.best_detection?.species_candidates
       ?.map((candidate) => ({
         name: candidate.canonical_zh ?? candidate.canonical_sci ?? '',
         latinName: candidate.canonical_sci ?? null,
         englishName: candidate.canonical_en ?? null,
         confidence: candidate.confidence ?? 0,
       }))
-      .filter((candidate) => candidate.name.length > 0) ?? [])
+      .filter((candidate) => candidate.name.length > 0) ?? [],
+  )
   const finalScore = bestQuality?.combined ?? row.quality_score
 
   return {
@@ -286,14 +294,16 @@ export function buildPhotoRecordFromRow(
     fileName: row.file_name,
     filePath: row.file_path,
     shotAt: row.shot_at,
-    camera: cameraFallback,
-    lens: lensFallback,
+    camera: t('selection.exif.unknownCamera'),
+    lens: t('selection.exif.unknownLens'),
     speciesName: row.species,
     speciesLatinName: row.species_latin ?? lookupLatinName(row.species),
     manualSpecies: row.manual_species,
-    speciesSource: row.species_source ?? (row.manual_species ? 'manual' : row.species ? 'model' : 'none'),
+    speciesSource:
+      row.species_source ?? (row.manual_species ? 'manual' : row.species ? 'model' : 'none'),
     modelSpeciesName: row.model_species ?? row.species,
-    modelSpeciesLatinName: row.model_species_latin ?? row.species_latin ?? lookupLatinName(row.species),
+    modelSpeciesLatinName:
+      row.model_species_latin ?? row.species_latin ?? lookupLatinName(row.species),
     groupSpeciesName: row.group_species ?? null,
     groupSpeciesLatinName: row.group_species_latin ?? null,
     groupSpeciesConfidence: row.group_species_confidence ?? null,
@@ -331,8 +341,12 @@ export function buildPhotoRecordFromRow(
     problemTags: deriveProblemTags(row),
     sceneTag: 'record_shot',
     caption: isAnalyzed
-      ? `${row.species ?? '未识别物种'} · ${grade} · 分数 ${formatScore(finalScore)}`
-      : '等待分析',
+      ? t('selection.photo.analysisCaption', {
+          species: row.species ?? t('selection.photo.unidentified'),
+          grade,
+          score: formatScore(finalScore),
+        })
+      : t('selection.photo.pendingCaption'),
     previewGradient: buildPreviewBg(row.thumb_grid, row.id),
     placeholderGradient: gradientPlaceholder(row.id),
     thumbGridUrl: thumbnailUrl(row.thumb_grid, 'grid'),
@@ -348,6 +362,11 @@ export function buildPhotoRecordFromRow(
     companionPath: row.companion_path ?? null,
     companionFormat: row.companion_format ?? null,
     companionSize: row.companion_size ?? null,
+    country: row.country ?? null,
+    province: row.province ?? null,
+    city: row.city ?? null,
+    district: row.district ?? null,
+    place: row.place ?? null,
   }
 }
 
@@ -524,7 +543,7 @@ export interface DetailFragment {
   photos: PhotoRecord[]
 }
 
-export function buildFragmentFromDetail(detail: LibraryDetail): DetailFragment {
+export function buildFragmentFromDetail(detail: LibraryDetail, t: Translate): DetailFragment {
   const folder = buildFolderRecord(detail.library)
 
   // 1. 时间窗口聚类（5min）：连拍/同场景照片自动归入一组
@@ -541,6 +560,7 @@ export function buildFragmentFromDetail(detail: LibraryDetail): DetailFragment {
       row,
       folder.id,
       photoToGroup.get(row.id) ?? `group-${folder.id}-orphan`,
+      t,
     ),
   )
 
@@ -551,7 +571,7 @@ export function buildFragmentFromDetail(detail: LibraryDetail): DetailFragment {
     return {
       id: plan.id,
       folderId: folder.id,
-      title: buildGroupTitle(plan),
+      title: buildGroupTitle(plan, t),
       groupType: plan.photoIds.length >= 3 ? 'burst' : 'time',
       sceneTag: 'record_shot',
       primarySpecies,
