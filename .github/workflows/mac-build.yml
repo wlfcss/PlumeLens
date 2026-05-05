@@ -139,7 +139,41 @@ jobs:
         run: |
           set -euo pipefail
           tag="${GITHUB_REF_NAME}"
+          version="${tag#v}"
           dmg="$(ls release/PlumeLens-*-arm64.dmg | head -n 1)"
-          gh release view "$tag" >/dev/null 2>&1 || \
-            gh release create "$tag" --title "$tag" --notes "PlumeLens $tag"
+
+          cat > release-notes.md <<EOF
+          ## PlumeLens ${version}
+
+          鉴翎 0.5.0 是一次面向真实选片工作流的稳定版更新，重点补齐导出、羽迹地理分布、深度复核和自动打包发布。
+
+          ### 主要更新
+
+          - 导出功能落地：支持多文件夹并行导出、右侧浮窗进度、收起后继续导出、合并导出与按评级分类导出。
+          - JPG/RAW 同步导出：优先复制主文件，并自动携带 RAW companion。
+          - 中文导出报告：manifest / CSV / 目录命名使用中文口径与文件夹别名。
+          - 羽迹地理分布重做：只统计有效入羽迹照片，按物理地点合并，地点详情支持鸟种筛选。
+          - 深度复核增强：固定分数区域、倍率选择、全屏查看、拖动与点击放大。
+          - 队列稳定性修复：暂停/取消不再破坏 processing 状态，多 worker 取任务改为原子语义。
+          - 缩略图可靠性修复：空缩略图自动重建并带本地缓存刷新。
+          - 外部编辑增强：Topaz / Photoshop 识别与启动路径更稳。
+          - 启动状态增强：展示 CPU / GPU / MPS / Mixed 推理设备状态。
+          - 版本更新：应用、Python 后端、FastAPI 均更新到 0.5.0。
+
+          ### 自动构建
+
+          - 本 Release 由 GitHub Actions 的 macOS arm64 自动构建流程生成。
+          - Windows 自动构建暂时停用。
+
+          ### 校验
+
+          - 本地已通过 ruff、pyright、pytest、typecheck、lint、vitest、Playwright 与 macOS DMG 打包校验。
+          - Actions Release 产物会在构建过程中完成模型资产校验、PyInstaller 后端冻结、Electron 打包、codesign 校验与 DMG 内容校验。
+          EOF
+
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release edit "$tag" --title "PlumeLens ${version}" --notes-file release-notes.md
+          else
+            gh release create "$tag" --title "PlumeLens ${version}" --notes-file release-notes.md
+          fi
           gh release upload "$tag" "$dmg" --clobber
