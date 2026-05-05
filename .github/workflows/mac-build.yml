@@ -43,7 +43,8 @@ jobs:
       - name: Install dependencies
         run: |
           npm ci
-          uv sync --dev
+          uv sync --extra dev
+          uv run pyinstaller --version
 
       - name: Restore private model assets
         env:
