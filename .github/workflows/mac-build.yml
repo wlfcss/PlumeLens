@@ -22,7 +22,7 @@ jobs:
     env:
       PLUMELENS_FORCE_ENGINE_BUILD: '1'
       MODEL_BUNDLE_URL: ${{ secrets.PLUMELENS_MODELS_URL }}
-      MODEL_RELEASE_TAG: ${{ vars.PLUMELENS_MODELS_RELEASE_TAG }}
+      MODEL_RELEASE_TAG: ${{ vars.PLUMELENS_MODELS_RELEASE_TAG || 'models-v3' }}
       MODEL_RELEASE_ASSET: ${{ vars.PLUMELENS_MODELS_RELEASE_ASSET || 'plumelens-models-v3.tar.gz' }}
 
     steps:

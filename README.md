@@ -121,7 +121,7 @@ npm run dist:mac                      # → release/PlumeLens-x.y.z-arm64.dmg
 - tag 构建：自动创建/更新同名 GitHub Release asset
 - Windows / Linux / eval 自动流程暂时停用
 
-完整 DMG 依赖未入 git 的模型资产。远端构建需配置其一：
+完整 DMG 依赖未入 git 的模型资产。默认从本仓库 `models-v3` Release 下载 `plumelens-models-v3.tar.gz`；如需换源，可配置其一覆盖：
 
 - secret `PLUMELENS_MODELS_URL`：指向 `.tar.gz` / `.zip` 模型包
 - repo variables `PLUMELENS_MODELS_RELEASE_TAG` + `PLUMELENS_MODELS_RELEASE_ASSET`：从本仓库 Release 下载模型包
