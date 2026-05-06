@@ -31,6 +31,32 @@ const windowBounds = {
   minHeight: 860,
 } as const
 
+const REALPATH_CACHE_TTL_MS = 60_000
+const REALPATH_CACHE_MAX = 2048
+
+const realpathCache = new Map<string, { value: string; expiresAt: number }>()
+
+async function cachedRealpath(path: string): Promise<string> {
+  const now = Date.now()
+  const cached = realpathCache.get(path)
+  if (cached && cached.expiresAt > now) {
+    // Refresh insertion order so the oldest entry is a true LRU candidate.
+    realpathCache.delete(path)
+    realpathCache.set(path, cached)
+    return cached.value
+  }
+  if (cached) realpathCache.delete(path)
+
+  const value = await realpath(path)
+  realpathCache.set(path, { value, expiresAt: now + REALPATH_CACHE_TTL_MS })
+  while (realpathCache.size > REALPATH_CACHE_MAX) {
+    const oldest = realpathCache.keys().next()
+    if (oldest.done) break
+    realpathCache.delete(oldest.value)
+  }
+  return value
+}
+
 function createWindow(): void {
   const isDev = !app.isPackaged
   mainWindow = new BrowserWindow({
@@ -416,7 +442,7 @@ app.whenReady().then(async () => {
     try {
       // realpath 单文件确认真实落点(防 thumbnailsRoot 内 symlink 逃逸);
       // root 用启动期缓存的 realRootCache,无需每次重算。
-      const realFile = await realpath(resolved)
+      const realFile = await cachedRealpath(resolved)
       if (!realFile.startsWith(realRootCache + '/') && realFile !== realRootCache) {
         return new Response('Forbidden (symlink escape)', { status: 403 })
       }

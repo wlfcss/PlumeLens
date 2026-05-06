@@ -107,6 +107,10 @@ class Settings(BaseSettings):
     # 每个 task 内部 ONNX 推理会 to_thread 释放 GIL，多 worker 并发 = 多张图同时跑 ONNX。
     # CoreML EP 多 session 共享 ANE/GPU 资源，并发 2 ≈ 1.5-1.8× 吞吐（不是线性）。
     analysis_concurrency: int = 2
+    # 全局 asyncio.to_thread 默认线程池大小。RAW probe / 缩略图 / 哈希 / 推理外围
+    # 都会走这个池；显式设上限避免 Python 默认 min(32, cpu+4) 在大库导入时
+    # 同时拉起过多 RAW 解码和文件 I/O。
+    worker_threads: int = 8
 
     # Pipeline — strict 模式：IQA 模型缺失/加载失败时拒绝启动。
     # 默认 False 给开发期友好（模型还没下载也能跑出 detection-only 结果）；

@@ -2751,7 +2751,6 @@ button:disabled {
     background-color var(--pl-motion-fast) var(--pl-ease),
     box-shadow var(--pl-motion-fast) var(--pl-ease),
     transform var(--pl-motion-fast) var(--pl-ease);
-  will-change: transform;
 }
 
 .collection-card::before {
@@ -2814,6 +2813,7 @@ button:disabled {
   border-color: var(--pl-fg-0);
   box-shadow: 0 16px 42px rgba(0, 0, 0, 0.34);
   transform: translateY(-2px);
+  will-change: transform;
 }
 
 .collection-card--active::before,

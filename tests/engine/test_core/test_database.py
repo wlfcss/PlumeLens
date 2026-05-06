@@ -295,6 +295,9 @@ class TestMigration:
             ) as cur:
                 indexes = {str(r[0]) for r in await cur.fetchall()}
             assert "ix_photos_province" in indexes
+            assert "ix_photos_library_geo_city" in indexes
+            assert "ix_photos_library_geo_place" in indexes
+            assert "ix_photos_library_mtime" in indexes
         finally:
             await db.close()
 

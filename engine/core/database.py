@@ -10,7 +10,7 @@ import structlog
 
 logger = structlog.stdlib.get_logger()
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 # SQL 放在模块常量里便于审阅与测试
 _SCHEMA_STATEMENTS: tuple[str, ...] = (
@@ -353,6 +353,31 @@ class Database:
                 "DB migrated",
                 from_version=prior_version,
                 added="photos.{country,province,city,district,place}",
+            )
+        if prior_version < 9:
+            # v9：补性能索引。这里只建不改数据，覆盖:
+            # - library_detail / export 按库 + 拍摄时间顺序读取 photos
+            # - queue.pick_next 按库领取 pending task
+            # - archive geo 按省/市/place 查询
+            performance_indexes = (
+                "CREATE INDEX IF NOT EXISTS ix_photos_library_mtime "
+                "ON photos(library_id, file_mtime)",
+                "CREATE INDEX IF NOT EXISTS ix_queue_library_pick "
+                "ON task_queue(library_id, status, priority DESC, created_at ASC)",
+                "CREATE INDEX IF NOT EXISTS ix_photos_library_geo_city "
+                "ON photos(library_id, province, city) "
+                "WHERE province IS NOT NULL AND city IS NOT NULL",
+                "CREATE INDEX IF NOT EXISTS ix_photos_library_geo_place "
+                "ON photos(library_id, province, city, place) "
+                "WHERE province IS NOT NULL AND city IS NOT NULL",
+            )
+            for stmt in performance_indexes:
+                with contextlib.suppress(Exception):
+                    await self._conn.execute(stmt)
+            await logger.ainfo(
+                "DB migrated",
+                from_version=prior_version,
+                added="performance_indexes_v9",
             )
 
     async def get_schema_version(self) -> int:

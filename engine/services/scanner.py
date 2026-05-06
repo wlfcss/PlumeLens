@@ -868,8 +868,8 @@ async def scan_library(
                 str(row["companion_path"]) if row["companion_path"] is not None else None,
             )
 
-    raw_files = _walk_supported_files(root, recursive=recursive)
-    files, companion_map = _resolve_pairs(raw_files)
+    raw_files = await asyncio.to_thread(_walk_supported_files, root, recursive=recursive)
+    files, companion_map = await asyncio.to_thread(_resolve_pairs, raw_files)
     now = _now_iso()
 
     for path in files:
@@ -887,7 +887,7 @@ async def scan_library(
         comp_size = comp.size if comp else None
 
         if prev is None:
-            meta = _probe_image_meta(path)
+            meta = await asyncio.to_thread(_probe_image_meta, path)
             photo_id = str(uuid.uuid4())
             try:
                 await conn.execute(
@@ -925,7 +925,7 @@ async def scan_library(
                 continue
             # 主文件变了 → 重读 meta + 清 hash;否则只更新 companion 字段
             if not file_unchanged:
-                meta = _probe_image_meta(path)
+                meta = await asyncio.to_thread(_probe_image_meta, path)
                 try:
                     await conn.execute(
                         "UPDATE photos SET file_size = ?, file_mtime = ?, "
@@ -1016,7 +1016,7 @@ async def backfill_companion_for_library(db: Database, library_id: str) -> int:
             )
     if not fs_paths:
         fs_paths = await asyncio.to_thread(_filter_existing_paths, paths)
-    _primaries, companion_map = _resolve_pairs(fs_paths)
+    _primaries, companion_map = await asyncio.to_thread(_resolve_pairs, fs_paths)
 
     updated = 0
     for path_str, comp in companion_map.items():
@@ -1084,7 +1084,7 @@ async def backfill_hashes(db: Database, library_id: str, batch_size: int = 50) -
             photo_id = str(row["id"])
             file_path = Path(str(row["file_path"]))
             try:
-                sha = _sha256_file(file_path)
+                sha = await asyncio.to_thread(_sha256_file, file_path)
             except FileNotFoundError:
                 skipped_ids.add(photo_id)
                 continue

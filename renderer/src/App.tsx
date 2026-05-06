@@ -1605,46 +1605,81 @@ export default function App() {
     },
     [photosByFolder, summariesByFolder, workspace.folders],
   )
-  const filteredSelectionPhotos = sortPhotos(
-    activeFolderPhotos.filter(
-      (photo) =>
-        filterPhotoByQuickFilters(photo, activeQuickFilters) &&
-        matchesQuery([photo.fileName, photo.speciesName, photo.caption], deferredSearch),
-    ),
-    activeSort,
+  const filteredSelectionPhotos = useMemo(
+    () =>
+      sortPhotos(
+        activeFolderPhotos.filter(
+          (photo) =>
+            filterPhotoByQuickFilters(photo, activeQuickFilters) &&
+            matchesQuery([photo.fileName, photo.speciesName, photo.caption], deferredSearch),
+        ),
+        activeSort,
+      ),
+    [activeFolderPhotos, activeQuickFilters, activeSort, deferredSearch],
   )
-  const groupStartMs = buildGroupStartMsMap(activeFolderPhotos)
+  const groupStartMs = useMemo(
+    () => buildGroupStartMsMap(activeFolderPhotos),
+    [activeFolderPhotos],
+  )
 
-  const folderGroups = workspace.groups
-    .filter((group) => group.folderId === activeFolder?.id)
-    .map((group) => ({
-      group,
-      photos: filteredSelectionPhotos.filter((photo) => photo.groupId === group.id),
-    }))
-    .filter((entry) => entry.photos.length > 0)
-    .toSorted((left, right) => {
-      // 组视图始终按组起始拍摄时间倒序；不复用 entry.photos[0]，
-      // 避免组内照片排序/筛选改变组与组之间的位置。
-      const leftStart = groupStartMs.get(left.group.id) ?? Number.NEGATIVE_INFINITY
-      const rightStart = groupStartMs.get(right.group.id) ?? Number.NEGATIVE_INFINITY
-      if (leftStart !== rightStart) return rightStart - leftStart
-      return left.group.id.localeCompare(right.group.id)
-    })
+  const folderGroups = useMemo(() => {
+    const photosByGroup = new Map<string, PhotoRecord[]>()
+    for (const photo of filteredSelectionPhotos) {
+      const bucket = photosByGroup.get(photo.groupId)
+      if (bucket) bucket.push(photo)
+      else photosByGroup.set(photo.groupId, [photo])
+    }
+    return workspace.groups
+      .filter((group) => group.folderId === activeFolder?.id)
+      .map((group) => ({
+        group,
+        photos: photosByGroup.get(group.id) ?? EMPTY_PHOTOS,
+      }))
+      .filter((entry) => entry.photos.length > 0)
+      .toSorted((left, right) => {
+        // 组视图始终按组起始拍摄时间倒序；不复用 entry.photos[0]，
+        // 避免组内照片排序/筛选改变组与组之间的位置。
+        const leftStart = groupStartMs.get(left.group.id) ?? Number.NEGATIVE_INFINITY
+        const rightStart = groupStartMs.get(right.group.id) ?? Number.NEGATIVE_INFINITY
+        if (leftStart !== rightStart) return rightStart - leftStart
+        return left.group.id.localeCompare(right.group.id)
+      })
+  }, [activeFolder?.id, filteredSelectionPhotos, groupStartMs, workspace.groups])
 
-  const flatSelectionPhotos =
-    viewMode === 'flat' ? filteredSelectionPhotos : folderGroups.flatMap((entry) => entry.photos)
+  const flatSelectionPhotos = useMemo(
+    () =>
+      viewMode === 'flat'
+        ? filteredSelectionPhotos
+        : folderGroups.flatMap((entry) => entry.photos),
+    [filteredSelectionPhotos, folderGroups, viewMode],
+  )
 
-  const focusedPhoto = workspace.photos.find((photo) => photo.id === focusedPhotoId) ?? null
-  const reviewPhoto = workspace.photos.find((photo) => photo.id === reviewPhotoId) ?? null
-  const reviewGroup = workspace.groups.find((group) => group.id === reviewPhoto?.groupId) ?? null
-  const comparePhotos = comparePhotoIds
-    .map((id) => workspace.photos.find((photo) => photo.id === id) ?? null)
-    .filter((photo): photo is PhotoRecord => photo !== null)
-  const activeSpecies =
-    speciesRecords.find((species) => species.id === activeSpeciesId) ??
-    speciesRecords.find((species) => species.collected) ??
-    speciesRecords[0] ??
-    null
+  const photoById = useMemo(
+    () => new Map(workspace.photos.map((photo) => [photo.id, photo])),
+    [workspace.photos],
+  )
+  const groupById = useMemo(
+    () => new Map(workspace.groups.map((group) => [group.id, group])),
+    [workspace.groups],
+  )
+  const focusedPhoto = focusedPhotoId ? (photoById.get(focusedPhotoId) ?? null) : null
+  const reviewPhoto = reviewPhotoId ? (photoById.get(reviewPhotoId) ?? null) : null
+  const reviewGroup = reviewPhoto?.groupId ? (groupById.get(reviewPhoto.groupId) ?? null) : null
+  const comparePhotos = useMemo(
+    () =>
+      comparePhotoIds
+        .map((id) => photoById.get(id) ?? null)
+        .filter((photo): photo is PhotoRecord => photo !== null),
+    [comparePhotoIds, photoById],
+  )
+  const activeSpecies = useMemo(
+    () =>
+      speciesRecords.find((species) => species.id === activeSpeciesId) ??
+      speciesRecords.find((species) => species.collected) ??
+      speciesRecords[0] ??
+      null,
+    [activeSpeciesId, speciesRecords],
+  )
 
   useEffect(() => {
     if (speciesRecords.length === 0) {
@@ -1658,16 +1693,24 @@ export default function App() {
     }
   }, [activeSpeciesId, setActiveSpeciesId, speciesRecords])
 
-  const archivePhotos = sortPhotos(
-    workspace.photos.filter(
-      (photo) =>
-        isArchiveEligiblePhoto(photo) &&
-        matchesQuery(archivePhotoSearchParts(photo), deferredSearch),
-    ),
-    'score',
+  const archivePhotos = useMemo(
+    () =>
+      sortPhotos(
+        workspace.photos.filter(
+          (photo) =>
+            isArchiveEligiblePhoto(photo) &&
+            matchesQuery(archivePhotoSearchParts(photo), deferredSearch),
+        ),
+        'score',
+      ),
+    [deferredSearch, workspace.photos],
   )
-  const archiveSpecies = speciesRecords.filter((species) =>
-    matchesQuery([species.name, species.latinName, species.summary], deferredSearch),
+  const archiveSpecies = useMemo(
+    () =>
+      speciesRecords.filter((species) =>
+        matchesQuery([species.name, species.latinName, species.summary], deferredSearch),
+      ),
+    [deferredSearch, speciesRecords],
   )
   const reviewPhotos = useMemo(() => {
     if (!reviewPhoto) return []

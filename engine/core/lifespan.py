@@ -4,6 +4,7 @@ import asyncio
 import os
 import sys
 from collections.abc import AsyncGenerator
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 
 import structlog
@@ -240,6 +241,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
 
     await logger.ainfo("PlumeLens Engine starting", data_dir=str(settings.data_dir))
 
+    worker_threads = max(1, int(settings.worker_threads))
+    thread_pool = ThreadPoolExecutor(
+        max_workers=worker_threads,
+        thread_name_prefix="plumelens-worker",
+    )
+    asyncio.get_running_loop().set_default_executor(thread_pool)
+    app.state.thread_pool = thread_pool
+    await logger.ainfo("Configured default thread pool", max_workers=worker_threads)
+
     # Open SQLite database (WAL + schema migration)
     db = Database(settings.data_dir / "plumelens.db")
     await db.connect()
@@ -287,4 +297,5 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         await geocode_task
     app.state.pipeline.close()
     await app.state.db.close()
+    thread_pool.shutdown(wait=False, cancel_futures=True)
     await logger.ainfo("PlumeLens Engine shutting down")

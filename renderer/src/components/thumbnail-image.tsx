@@ -37,6 +37,11 @@ export function ThumbnailImage({
   const [attempt, setAttempt] = useState(0)
   const [loaded, setLoaded] = useState(false)
   const retryTimerRef = useRef<number | null>(null)
+  const onStatusChangeRef = useRef(onStatusChange)
+
+  useEffect(() => {
+    onStatusChangeRef.current = onStatusChange
+  }, [onStatusChange])
 
   useEffect(() => {
     if (retryTimerRef.current !== null) {
@@ -46,7 +51,7 @@ export function ThumbnailImage({
     setAttempt(0)
     setLoaded(false)
     if (photoId) {
-      onStatusChange?.(photoId, src ? 'loading' : 'missing')
+      onStatusChangeRef.current?.(photoId, src ? 'loading' : 'missing')
     }
     return () => {
       if (retryTimerRef.current !== null) {
@@ -54,7 +59,7 @@ export function ThumbnailImage({
         retryTimerRef.current = null
       }
     }
-  }, [onStatusChange, photoId, src])
+  }, [photoId, src])
 
   useEffect(() => {
     if (!src || loaded) return undefined
@@ -98,7 +103,7 @@ export function ThumbnailImage({
       // main 进程的 plumelens:// 协议并发处理(libuv 4 worker thread + cached realpath
       // root),实测可在 1-2s 内全部就位。大批量弹层可按场景传入 lazy。
       onError={() => {
-        if (photoId) onStatusChange?.(photoId, 'error')
+        if (photoId) onStatusChangeRef.current?.(photoId, 'error')
         if (attempt >= MAX_RETRY_ATTEMPTS || retryTimerRef.current !== null) return
         retryTimerRef.current = window.setTimeout(() => {
           retryTimerRef.current = null
@@ -111,7 +116,7 @@ export function ThumbnailImage({
           retryTimerRef.current = null
         }
         setLoaded(true)
-        if (photoId) onStatusChange?.(photoId, 'loaded')
+        if (photoId) onStatusChangeRef.current?.(photoId, 'loaded')
       }}
       src={displaySrc}
       style={{ opacity: loaded ? 1 : 0 }}

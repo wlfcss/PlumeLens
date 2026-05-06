@@ -8,11 +8,14 @@ from contextlib import suppress
 from datetime import UTC, datetime
 from typing import Any
 
+import structlog
+
 MAX_EVENT_QUEUE_SIZE = 128
 
 LibraryEvent = dict[str, Any]
 
 _subscribers: dict[str, set[asyncio.Queue[LibraryEvent]]] = {}
+logger = structlog.stdlib.get_logger()
 
 
 def _now_iso() -> str:
@@ -63,5 +66,13 @@ def publish_library_event(
         except asyncio.QueueFull:
             with suppress(asyncio.QueueEmpty):
                 queue.get_nowait()
-            with suppress(asyncio.QueueFull):
+            try:
                 queue.put_nowait(event)
+            except asyncio.QueueFull:
+                logger.warning(
+                    "Library event dropped",
+                    library_id=library_id,
+                    event_type=event_type,
+                    subscriber_count=len(subscribers),
+                    queue_size=queue.qsize(),
+                )
