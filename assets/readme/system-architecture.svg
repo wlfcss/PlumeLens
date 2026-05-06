@@ -1,0 +1,75 @@
+<svg width="1280" height="560" viewBox="0 0 1280 560" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
+  <title id="title">PlumeLens system architecture</title>
+  <desc id="desc">A visual architecture diagram for the Electron, FastAPI, SQLite and local model layers of PlumeLens.</desc>
+  <rect width="1280" height="560" rx="28" fill="#050505"/>
+  <defs>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1a1a1a" stroke-width="1"/>
+    </pattern>
+    <linearGradient id="panel" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#181818"/>
+      <stop offset="1" stop-color="#090909"/>
+    </linearGradient>
+    <style>
+      .eyebrow { fill: #8b8b8b; font: 500 16px ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; letter-spacing: .08em; }
+      .title { fill: #f6f6f6; font: 700 34px ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .subtitle { fill: #bdbdbd; font: 500 18px ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .box-title { fill: #f8f8f8; font: 700 23px ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .box-line { fill: #adadad; font: 500 16px ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .mono { fill: #e6e6e6; font: 650 16px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+      .chip { fill: #050505; font: 800 14px ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    </style>
+  </defs>
+  <rect width="1280" height="560" fill="url(#grid)" opacity=".55"/>
+  <circle cx="1070" cy="110" r="148" stroke="#1d1d1d" stroke-width="64" opacity=".45"/>
+  <circle cx="202" cy="422" r="4" fill="#FF4D4D"/>
+  <circle cx="1056" cy="454" r="4" fill="#74F69C"/>
+  <circle cx="705" cy="124" r="4" fill="#FFD45A"/>
+
+  <text x="64" y="68" class="eyebrow">DESKTOP AI WORKSTATION</text>
+  <text x="64" y="112" class="title">本地桌面应用架构</text>
+  <text x="64" y="146" class="subtitle">Electron 负责桌面安全边界与窗口，FastAPI 负责业务和模型推理，SQLite 保存可复核的长期结果。</text>
+
+  <g transform="translate(64 210)">
+    <rect width="306" height="230" rx="22" fill="url(#panel)" stroke="#2a2a2a"/>
+    <text x="28" y="48" class="box-title">Electron App</text>
+    <text x="28" y="84" class="mono">Main + Preload + Renderer</text>
+    <text x="28" y="122" class="box-line">React 19 / TypeScript</text>
+    <text x="28" y="150" class="box-line">Tailwind CSS v4 / shadcn/ui</text>
+    <text x="28" y="178" class="box-line">i18next 中文界面</text>
+    <rect x="28" y="196" width="96" height="24" rx="12" fill="#f6f6f6"/><text x="47" y="213" class="chip">UI state</text>
+  </g>
+
+  <path d="M386 325H470" stroke="#595959" stroke-width="2"/>
+  <path d="M470 325L459 317V333L470 325Z" fill="#595959"/>
+  <text x="402" y="304" class="box-line">HTTP + SSE</text>
+
+  <g transform="translate(486 210)">
+    <rect width="306" height="230" rx="22" fill="url(#panel)" stroke="#2a2a2a"/>
+    <text x="28" y="48" class="box-title">Python Backend</text>
+    <text x="28" y="84" class="mono">FastAPI / Pydantic</text>
+    <text x="28" y="122" class="box-line">Scanner / Queue / Exporter</text>
+    <text x="28" y="150" class="box-line">Archive / Geocoder / Cache</text>
+    <text x="28" y="178" class="box-line">structlog JSON logs</text>
+    <rect x="28" y="196" width="106" height="24" rx="12" fill="#FFD45A"/><text x="48" y="213" class="chip">business</text>
+  </g>
+
+  <path d="M808 325H892" stroke="#595959" stroke-width="2"/>
+  <path d="M892 325L881 317V333L892 325Z" fill="#595959"/>
+  <text x="819" y="304" class="box-line">to_thread</text>
+
+  <g transform="translate(908 210)">
+    <rect width="306" height="230" rx="22" fill="url(#panel)" stroke="#2a2a2a"/>
+    <text x="28" y="48" class="box-title">Hybrid Pipeline</text>
+    <text x="28" y="84" class="mono">ONNX Runtime + Torch</text>
+    <text x="28" y="122" class="box-line">YOLO / Pose / IQA</text>
+    <text x="28" y="150" class="box-line">DINOv3 species v3</text>
+    <text x="28" y="178" class="box-line">CPU / GPU / MPS / Mixed</text>
+    <rect x="28" y="196" width="86" height="24" rx="12" fill="#74F69C"/><text x="50" y="213" class="chip">local</text>
+  </g>
+
+  <g transform="translate(165 468)">
+    <rect width="950" height="54" rx="17" fill="#101010" stroke="#282828"/>
+    <text x="28" y="34" class="subtitle">应用数据目录保存 SQLite WAL、缩略图、导出记录和日志；用户照片目录保持只读。</text>
+  </g>
+</svg>
