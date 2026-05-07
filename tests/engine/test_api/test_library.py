@@ -134,6 +134,27 @@ class TestListAndDetail:
         resp = await client.get("/library/does-not-exist")
         assert resp.status_code == 404
 
+    async def test_detail_supports_photo_pagination(self, real_client) -> None:
+        client, tmp = real_client
+        lib_root = tmp / "lib_detail_paged"
+        for name in ("a.jpg", "b.jpg", "c.jpg"):
+            _make_jpeg(lib_root / name)
+        created = await client.post("/library/import", json={"root_path": str(lib_root)})
+        lib_id = created.json()["id"]
+
+        first_page = (await client.get(f"/library/{lib_id}?limit=1&offset=0")).json()
+        assert len(first_page["photos"]) == 1
+        assert first_page["photo_total"] == 3
+        assert first_page["photo_offset"] == 0
+        assert first_page["photo_limit"] == 1
+        assert first_page["next_offset"] == 1
+
+        last_page = (await client.get(f"/library/{lib_id}?limit=1&offset=2")).json()
+        assert len(last_page["photos"]) == 1
+        assert last_page["photo_total"] == 3
+        assert last_page["photo_offset"] == 2
+        assert last_page["next_offset"] is None
+
     async def test_update_display_name_persists_to_list_and_detail(self, real_client) -> None:
         client, tmp = real_client
         lib_root = tmp / "lib_alias"
@@ -164,6 +185,52 @@ class TestListAndDetail:
         updated = await client.patch(f"/library/{lib_id}", json={"display_name": "   "})
         assert updated.status_code == 400
         assert updated.json()["detail"] == "Display name cannot be empty"
+
+    async def test_missing_root_is_reported_as_path_missing(self, real_client) -> None:
+        client, tmp = real_client
+        lib_root = tmp / "lib_missing_root"
+        _make_jpeg(lib_root / "p.jpg")
+        created = await client.post("/library/import", json={"root_path": str(lib_root)})
+        lib_id = created.json()["id"]
+
+        lib_root.rename(tmp / "lib_missing_root_renamed")
+
+        libs = (await client.get("/library")).json()
+        assert libs[0]["id"] == lib_id
+        assert libs[0]["status"] == "path_missing"
+
+        detail = (await client.get(f"/library/{lib_id}")).json()
+        assert detail["library"]["status"] == "path_missing"
+        assert detail["photos"][0]["file_path"].endswith("lib_missing_root/p.jpg")
+
+    async def test_relink_moved_library_preserves_photo_identity(self, real_client) -> None:
+        client, tmp = real_client
+        lib_root = tmp / "lib_relink"
+        _make_jpeg(lib_root / "nested" / "p.jpg")
+        created = await client.post("/library/import", json={"root_path": str(lib_root)})
+        lib_id = created.json()["id"]
+        before = (await client.get(f"/library/{lib_id}")).json()
+        photo_id = before["photos"][0]["id"]
+
+        moved_root = tmp / "lib_relink_moved"
+        lib_root.rename(moved_root)
+        missing = await client.get("/library")
+        assert missing.json()[0]["status"] == "path_missing"
+
+        relinked = await client.post(
+            f"/library/{lib_id}/relink",
+            json={"root_path": str(moved_root)},
+        )
+        assert relinked.status_code == 200
+        payload = relinked.json()
+        assert payload["library"]["status"] == "ready"
+        assert payload["library"]["root_path"] == str(moved_root)
+        assert payload["matched_photos"] == 1
+
+        after = (await client.get(f"/library/{lib_id}")).json()
+        assert after["library"]["status"] == "ready"
+        assert after["photos"][0]["id"] == photo_id
+        assert after["photos"][0]["file_path"] == str(moved_root / "nested" / "p.jpg")
 
     async def test_detail_applies_manual_species_override_per_bird(self, real_client) -> None:
         client, tmp = real_client
@@ -528,6 +595,11 @@ class TestListAndDetail:
         # 即使模型 top-1（暗绿绣眼鸟）已经与 winner 一致
         assert by_name["d.jpg"]["species_source"] == "group_consensus"
         assert by_name["d.jpg"]["group_species_latin"] == "Zosterops simplex"
+
+        paged = (await client.get(f"/library/{lib_id}?limit=1&offset=3")).json()
+        assert [p["file_name"] for p in paged["photos"]] == ["d.jpg"]
+        assert paged["photos"][0]["species_source"] == "group_consensus"
+        assert paged["photos"][0]["group_species_latin"] == "Zosterops simplex"
 
     async def test_species_source_marks_head_invisible_as_model_unconfirmed(
         self,

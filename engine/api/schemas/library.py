@@ -58,6 +58,12 @@ class UpdateLibraryRequest(BaseModel):
     )
 
 
+class RelinkLibraryRequest(BaseModel):
+    """Request body for POST /library/{id}/relink."""
+
+    root_path: str = Field(..., description="New absolute path for a moved/renamed library folder")
+
+
 class LibrarySummary(BaseModel):
     """A single library entry as returned by GET /library list."""
 
@@ -72,6 +78,17 @@ class LibrarySummary(BaseModel):
     last_opened_at: str
     last_scanned_at: str | None
     last_analyzed_at: str | None
+
+
+class RelinkLibraryResponse(BaseModel):
+    """Result of relinking a moved/renamed source folder."""
+
+    library: LibrarySummary
+    previous_root_path: str
+    matched_photos: int
+    relinked_photos: int
+    missing_photos: int
+    relinked_companions: int
 
 
 class BBox(BaseModel):
@@ -200,3 +217,7 @@ class LibraryDetail(BaseModel):
 
     library: LibrarySummary
     photos: list[PhotoRow]
+    photo_total: int | None = None
+    photo_offset: int = 0
+    photo_limit: int | None = None
+    next_offset: int | None = None

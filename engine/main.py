@@ -41,7 +41,7 @@ def _request_token(request: Request) -> str | None:
 def create_app() -> FastAPI:
     application = FastAPI(
         title="PlumeLens Engine",
-        version="0.5.0",
+        version="0.6.0",
         lifespan=lifespan,
     )
 

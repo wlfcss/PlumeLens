@@ -349,43 +349,64 @@ async def set_species_override(
 async def list_species_overrides(
     db: Database,
     library_id: str,
+    photo_ids: list[str] | None = None,
 ) -> dict[str, list[SpeciesOverrideRecord]]:
-    """Return all manual species overrides in a library, grouped by photo_id.
+    """Return manual species overrides in a library, grouped by photo_id.
 
     Each record carries bird_index + bbox（v6 schema 之后写入的会有 bbox；老数据 None）。
     Caller (library.py) uses bbox 做 IoU 匹配新 detections；老数据 fallback 到 bird_index。
     """
+    unique_photo_ids: list[str] | None = None
+    if photo_ids is not None:
+        unique_photo_ids = list(dict.fromkeys(photo_ids))
+        if not unique_photo_ids:
+            return {}
+
     out: dict[str, list[SpeciesOverrideRecord]] = {}
-    async with db.conn.execute(
+    base_sql = (
         "SELECT pso.photo_id, pso.bird_index, pso.canonical_sci, "
         "pso.canonical_zh, pso.canonical_en, "
         "pso.bbox_x1, pso.bbox_y1, pso.bbox_x2, pso.bbox_y2 "
         "FROM photo_species_overrides pso "
         "JOIN photos p ON pso.photo_id = p.id "
-        "WHERE p.library_id = ?",
-        (library_id,),
-    ) as cur:
-        async for row in cur:
-            photo_id = str(row["photo_id"])
-            x1 = row["bbox_x1"]
-            y1 = row["bbox_y1"]
-            x2 = row["bbox_x2"]
-            y2 = row["bbox_y2"]
-            bbox: tuple[float, float, float, float] | None
-            if x1 is not None and y1 is not None and x2 is not None and y2 is not None:
-                bbox = (float(x1), float(y1), float(x2), float(y2))
-            else:
-                bbox = None
-            record: SpeciesOverrideRecord = {
-                "bird_index": int(row["bird_index"]),
-                "canonical_sci": str(row["canonical_sci"]),
-                "canonical_zh": (
-                    str(row["canonical_zh"]) if row["canonical_zh"] is not None else None
-                ),
-                "canonical_en": (
-                    str(row["canonical_en"]) if row["canonical_en"] is not None else None
-                ),
-                "bbox": bbox,
-            }
-            out.setdefault(photo_id, []).append(record)
+        "WHERE p.library_id = ?"
+    )
+
+    async def _collect(sql: str, params: tuple[object, ...]) -> None:
+        async with db.conn.execute(sql, params) as cur:
+            async for row in cur:
+                photo_id = str(row["photo_id"])
+                x1 = row["bbox_x1"]
+                y1 = row["bbox_y1"]
+                x2 = row["bbox_x2"]
+                y2 = row["bbox_y2"]
+                bbox: tuple[float, float, float, float] | None
+                if x1 is not None and y1 is not None and x2 is not None and y2 is not None:
+                    bbox = (float(x1), float(y1), float(x2), float(y2))
+                else:
+                    bbox = None
+                record: SpeciesOverrideRecord = {
+                    "bird_index": int(row["bird_index"]),
+                    "canonical_sci": str(row["canonical_sci"]),
+                    "canonical_zh": (
+                        str(row["canonical_zh"]) if row["canonical_zh"] is not None else None
+                    ),
+                    "canonical_en": (
+                        str(row["canonical_en"]) if row["canonical_en"] is not None else None
+                    ),
+                    "bbox": bbox,
+                }
+                out.setdefault(photo_id, []).append(record)
+
+    if unique_photo_ids is None:
+        await _collect(base_sql, (library_id,))
+    else:
+        chunk_size = 500
+        for start in range(0, len(unique_photo_ids), chunk_size):
+            chunk = unique_photo_ids[start : start + chunk_size]
+            placeholders = ",".join("?" for _ in chunk)
+            await _collect(
+                f"{base_sql} AND pso.photo_id IN ({placeholders})",
+                (library_id, *chunk),
+            )
     return out

@@ -20,7 +20,6 @@ import sys
 from pathlib import Path
 from statistics import mean, median
 
-import numpy as np
 import onnxruntime as ort
 
 # 确保能 import engine
@@ -36,8 +35,16 @@ MODELS_DIR = ROOT / "engine" / "models"
 
 def load_iqa() -> QualityAssessor:
     so = ort.SessionOptions()
-    clipiqa = ort.InferenceSession(str(MODELS_DIR / "clipiqa_plus.onnx"), so, providers=["CPUExecutionProvider"])
-    hyperiqa = ort.InferenceSession(str(MODELS_DIR / "hyperiqa.onnx"), so, providers=["CPUExecutionProvider"])
+    clipiqa = ort.InferenceSession(
+        str(MODELS_DIR / "clipiqa_plus.onnx"),
+        so,
+        providers=["CPUExecutionProvider"],
+    )
+    hyperiqa = ort.InferenceSession(
+        str(MODELS_DIR / "hyperiqa.onnx"),
+        so,
+        providers=["CPUExecutionProvider"],
+    )
     return QualityAssessor(clipiqa, hyperiqa, clipiqa_weight=0.35, hyperiqa_weight=0.65)
 
 
@@ -47,7 +54,10 @@ def hist_summary(name: str, scores: list[float]) -> None:
         return
     print(f"\n=== {name}（n={len(scores)}） ===")
     s = sorted(scores)
-    print(f"  min={s[0]:.3f}  median={s[len(s)//2]:.3f}  mean={mean(scores):.3f}  max={s[-1]:.3f}")
+    print(
+        f"  min={s[0]:.3f}  median={s[len(s)//2]:.3f}  "
+        f"mean={mean(scores):.3f}  max={s[-1]:.3f}"
+    )
     buckets: dict[float, int] = collections.Counter()
     for x in scores:
         b = int(x * 10) / 10
@@ -117,8 +127,13 @@ def main(library_root: str | None) -> None:
 
             # 新 crop（expand_for_iqa）
             new_crop = expand_for_iqa(
-                image, x1, y1, x2, y2,
-                expand=expand_ratio, max_aspect_ratio=max_aspect_ratio,
+                image,
+                x1,
+                y1,
+                x2,
+                y2,
+                expand=expand_ratio,
+                max_aspect_ratio=max_aspect_ratio,
             )
 
             # 双跑 IQA
@@ -167,13 +182,17 @@ def main(library_root: str | None) -> None:
     if new_combined:
         thresholds_set = [
             ("当前 default (0.33, 0.43, 0.60)", (0.33, 0.43, 0.60)),
-            ("已改 (0.20, 0.45, 0.85)",         (0.20, 0.45, 0.85)),
-            ("严苛 (0.30, 0.55, 0.85)",         (0.30, 0.55, 0.85)),
-            ("更严 (0.40, 0.60, 0.85)",         (0.40, 0.60, 0.85)),
-            ("超严 (0.50, 0.65, 0.88)",         (0.50, 0.65, 0.88)),
+            ("已改 (0.20, 0.45, 0.85)", (0.20, 0.45, 0.85)),
+            ("严苛 (0.30, 0.55, 0.85)", (0.30, 0.55, 0.85)),
+            ("更严 (0.40, 0.60, 0.85)", (0.40, 0.60, 0.85)),
+            ("超严 (0.50, 0.65, 0.88)", (0.50, 0.65, 0.88)),
         ]
         print("\n##################  分档规则在 新 combined 上的分布 ##################")
-        print(f"  combined 分布：min={min(new_combined):.3f} median={median(new_combined):.3f} mean={mean(new_combined):.3f} max={max(new_combined):.3f}")
+        print(
+            f"  combined 分布：min={min(new_combined):.3f} "
+            f"median={median(new_combined):.3f} mean={mean(new_combined):.3f} "
+            f"max={max(new_combined):.3f}"
+        )
         n = len(new_combined)
         print(f"\n{'阈值组':<35} {'reject':>10} {'record':>10} {'usable':>10} {'select':>10}")
         print("-" * 80)
@@ -182,7 +201,12 @@ def main(library_root: str | None) -> None:
             record = sum(1 for s in new_combined if rmax <= s < recmax)
             usable = sum(1 for s in new_combined if recmax <= s < usmax)
             select = sum(1 for s in new_combined if s >= usmax)
-            print(f"{name:<35} {reject:>4} ({100*reject/n:>3.0f}%) {record:>4} ({100*record/n:>3.0f}%) {usable:>4} ({100*usable/n:>3.0f}%) {select:>4} ({100*select/n:>3.0f}%)")
+            print(
+                f"{name:<35} {reject:>4} ({100 * reject / n:>3.0f}%) "
+                f"{record:>4} ({100 * record / n:>3.0f}%) "
+                f"{usable:>4} ({100 * usable / n:>3.0f}%) "
+                f"{select:>4} ({100 * select / n:>3.0f}%)"
+            )
 
 
 if __name__ == "__main__":

@@ -33,7 +33,7 @@ logger = structlog.stdlib.get_logger()
 
 # 公共配置
 TIMEOUT_SEC = 2.5
-USER_AGENT = "PlumeLens/0.5.0 (rev-geocoding)"
+USER_AGENT = "PlumeLens/0.6.0 (rev-geocoding)"
 CACHE_MAX = 1024
 # 离线兜底距离上限(经度差^2 + 纬度差^2 加权,单位约等于度^2)。
 # nearest city 超过这个距离就返回 None — 避免南极坐标落到非洲城市这种荒诞结果。

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 import structlog
 from fastapi import APIRouter, HTTPException, Request
@@ -106,6 +107,35 @@ async def _db(request: Request) -> Database:
     if db is None:
         raise HTTPException(status_code=503, detail="Database not initialized")
     return db
+
+
+async def _ensure_library_source_available(db: Database, library_id: str) -> None:
+    async with db.conn.execute(
+        "SELECT root_path, status FROM libraries WHERE id = ?",
+        (library_id,),
+    ) as cur:
+        row = await cur.fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Library not found")
+
+    root_path = str(row["root_path"])
+    exists = await asyncio.to_thread(Path(root_path).exists)
+    if not exists:
+        await db.conn.execute(
+            "UPDATE libraries SET status = 'path_missing' WHERE id = ?",
+            (library_id,),
+        )
+        await db.conn.commit()
+        raise HTTPException(
+            status_code=409,
+            detail="Library source path is missing; relink the folder before analysis",
+        )
+    if str(row["status"]) == "path_missing":
+        await db.conn.execute(
+            "UPDATE libraries SET status = 'ready' WHERE id = ?",
+            (library_id,),
+        )
+        await db.conn.commit()
 
 
 async def _pipeline(request: Request) -> PipelineManager:
@@ -223,6 +253,7 @@ async def start_batch(
     """
     db = await _db(request)
     pipeline = await _pipeline(request)
+    await _ensure_library_source_available(db, body.library_id)
 
     # 同步补哈希（幂等，已有哈希的 photo 直接跳过；空集时秒级返回）
     await backfill_hashes(db, body.library_id)
@@ -306,6 +337,7 @@ async def pause(request: Request, library_id: str) -> QueueStats:
 async def resume(request: Request, library_id: str) -> QueueStats:
     db = await _db(request)
     pipeline = await _pipeline(request)
+    await _ensure_library_source_available(db, library_id)
     await resume_library(db, library_id)
     await _mark_library_analyzing(db, library_id)
     # 重启 drain worker

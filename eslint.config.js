@@ -6,7 +6,7 @@ export default tseslint.config(
   ...tseslint.configs.recommended,
   {
     ignores: [
-      'out/', 'dist/', 'release/', 'node_modules/', 'engine/', '.venv/',
+      'out/', 'dist/', 'release/', 'node_modules/', 'engine/', '.venv/', '.claude/',
       '*.js',
       'scripts/**/*.cjs', // CommonJS Node 脚本，用 require/module/console（ESM lint 规则不适用）
     ],

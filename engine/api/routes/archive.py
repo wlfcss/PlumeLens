@@ -4,7 +4,7 @@
 数据流:
 - photos.country/province/city/district/place 由 location_backfill 持久化
 - 鸟种来自 analysis_results 的 best detection 物种(JSON 字段) ∪ photo_species_overrides
-- 这里只做 SQL 聚合,reverse_geocoding 不在请求路径上(已 backfill)
+- 请求路径不做 reverse_geocoding;先用 SQL 过滤有效照片,再按羽迹有效物种口径聚合
 
 API:
 - GET /archive/geo/provinces → 一级中国地图:每个省鸟种数 + 照片数
@@ -20,6 +20,7 @@ import re
 import unicodedata
 from collections import Counter
 from dataclasses import dataclass
+from time import monotonic
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -110,6 +111,8 @@ class GeoSummary(BaseModel):
 # ---------------------------------------------------------------------------
 ARCHIVE_GRADES = {"select", "usable", "record"}
 ARCHIVE_SPECIES_SOURCES = {"manual", "model", "group_consensus"}
+_ARCHIVE_GEO_CACHE_TTL_SECONDS = 10.0
+_archive_geo_cache: dict[str, tuple[float, Any]] = {}
 
 
 @dataclass
@@ -383,10 +386,13 @@ async def _load_geo_photos(
         "ar.pipeline_version, ar.grade, ar.quality_score, ar.bird_count, ar.species, "
         "ar.result_json, pd.decision "
         "FROM photos p "
-        "LEFT JOIN analysis_results ar ON ar.photo_id = p.id AND ar.is_active = 1 "
+        "JOIN analysis_results ar ON ar.photo_id = p.id AND ar.is_active = 1 "
         "LEFT JOIN photo_decisions pd ON pd.photo_id = p.id "
-        f"WHERE {where_sql} "
-        "ORDER BY p.library_id, p.file_mtime ASC",
+        f"WHERE ({where_sql}) "
+        "AND ar.pipeline_version IS NOT NULL "
+        "AND ar.bird_count > 0 "
+        "AND COALESCE(pd.decision, ar.grade) IN ('select', 'usable', 'record') "
+        "ORDER BY p.library_id, p.file_mtime ASC, p.id ASC",
         params,
     ) as cur:
         rows = await cur.fetchall()
@@ -410,6 +416,25 @@ async def _load_geo_photos(
     for library_photos in by_library.values():
         _apply_group_species_consensus(library_photos)
     return photos
+
+
+def _get_geo_cache(key: str) -> Any | None:
+    cached = _archive_geo_cache.get(key)
+    if cached is None:
+        return None
+    created_at, value = cached
+    if monotonic() - created_at > _ARCHIVE_GEO_CACHE_TTL_SECONDS:
+        _archive_geo_cache.pop(key, None)
+        return None
+    return value
+
+
+def _set_geo_cache(key: str, value: Any) -> Any:
+    _archive_geo_cache[key] = (monotonic(), value)
+    if len(_archive_geo_cache) > 64:
+        oldest = min(_archive_geo_cache.items(), key=lambda item: item[1][0])[0]
+        _archive_geo_cache.pop(oldest, None)
+    return value
 
 
 def _species_from_candidate(
@@ -555,6 +580,11 @@ async def geo_summary(request: Request) -> GeoSummary:
 async def geo_provinces(request: Request) -> list[GeoProvinceRow]:
     """一级地图:每个省的照片数 + 鸟种数(去重后)。"""
     db = await _db(request)
+    cache_key = f"{db.path}:provinces"
+    cached = _get_geo_cache(cache_key)
+    if cached is not None:
+        return cached
+
     photos = await _load_geo_photos(db, "p.province IS NOT NULL")
     by_province: dict[str, dict[str, Any]] = {}
     for item in photos:
@@ -568,14 +598,17 @@ async def geo_provinces(request: Request) -> list[GeoProvinceRow]:
         for entry in species:
             bucket["species"].add(_species_key(entry))
 
-    return [
-        GeoProvinceRow(
-            province=prov,
-            photo_count=int(b["photos"]),
-            species_count=len(b["species"]),
-        )
-        for prov, b in sorted(by_province.items(), key=lambda x: -int(x[1]["photos"]))
-    ]
+    return _set_geo_cache(
+        cache_key,
+        [
+            GeoProvinceRow(
+                province=prov,
+                photo_count=int(b["photos"]),
+                species_count=len(b["species"]),
+            )
+            for prov, b in sorted(by_province.items(), key=lambda x: -int(x[1]["photos"]))
+        ],
+    )
 
 
 @router.get("/geo/cities", response_model=list[GeoCityRow])
@@ -585,6 +618,11 @@ async def geo_cities(
 ) -> list[GeoCityRow]:
     """二级地图:某省内每个市的照片数 + 鸟种数。"""
     db = await _db(request)
+    cache_key = f"{db.path}:cities:{province}"
+    cached = _get_geo_cache(cache_key)
+    if cached is not None:
+        return cached
+
     photos = await _load_geo_photos(db, "p.province = ? AND p.city IS NOT NULL", (province,))
     by_city: dict[str, dict[str, Any]] = {}
     for item in photos:
@@ -598,14 +636,17 @@ async def geo_cities(
         for entry in species:
             bucket["species"].add(_species_key(entry))
 
-    return [
-        GeoCityRow(
-            city=city,
-            photo_count=int(b["photos"]),
-            species_count=len(b["species"]),
-        )
-        for city, b in sorted(by_city.items(), key=lambda x: -int(x[1]["photos"]))
-    ]
+    return _set_geo_cache(
+        cache_key,
+        [
+            GeoCityRow(
+                city=city,
+                photo_count=int(b["photos"]),
+                species_count=len(b["species"]),
+            )
+            for city, b in sorted(by_city.items(), key=lambda x: -int(x[1]["photos"]))
+        ],
+    )
 
 
 @router.get("/geo/spots", response_model=list[GeoSpot])
@@ -622,6 +663,11 @@ async def geo_spots(
     4 位小数 round 兜底生成临时点位。
     """
     db = await _db(request)
+    cache_key = f"{db.path}:spots:{province}:{city}:{max_photos_per_spot}"
+    cached = _get_geo_cache(cache_key)
+    if cached is not None:
+        return cached
+
     photos = await _load_geo_photos(db, "p.province = ? AND p.city = ?", (province, city))
 
     spots: dict[str, dict[str, Any]] = {}
@@ -676,17 +722,20 @@ async def geo_spots(
                 )
             )
 
-    return [
-        GeoSpot(
-            lat=float(b["lat_sum"]) / max(1, int(b["photo_total"])),
-            lon=float(b["lon_sum"]) / max(1, int(b["photo_total"])),
-            place=b["place"],
-            # 真实总数(可能 > max_photos_per_spot,bucket["photos"] 列表只截断展示);
-            # 前端 tooltip 显示总数,弹卡片缩略图列表显示截断后的样本。
-            photo_count=int(b["photo_total"]),
-            species_count=len({_species_key(s) for s in b["species"]}),
-            species=_species_summary(b["species"]),
-            photos=b["photos"],
-        )
-        for b in sorted(spots.values(), key=lambda x: -int(x["photo_total"]))
-    ]
+    return _set_geo_cache(
+        cache_key,
+        [
+            GeoSpot(
+                lat=float(b["lat_sum"]) / max(1, int(b["photo_total"])),
+                lon=float(b["lon_sum"]) / max(1, int(b["photo_total"])),
+                place=b["place"],
+                # 真实总数(可能 > max_photos_per_spot,bucket["photos"] 列表只截断展示);
+                # 前端 tooltip 显示总数,弹卡片缩略图列表显示截断后的样本。
+                photo_count=int(b["photo_total"]),
+                species_count=len({_species_key(s) for s in b["species"]}),
+                species=_species_summary(b["species"]),
+                photos=b["photos"],
+            )
+            for b in sorted(spots.values(), key=lambda x: -int(x["photo_total"]))
+        ],
+    )

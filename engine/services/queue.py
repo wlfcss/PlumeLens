@@ -528,6 +528,8 @@ async def mark_stuck_tasks_failed(
                 f"Stuck in PROCESSING > {threshold_sec}s — assumed worker hang",
             )
             handled += 1
+        except IllegalTransitionError:
+            await logger.ainfo("Stuck task already moved by worker", task_id=task_id)
         except Exception:
             logger.exception("Failed to mark stuck task as failed", task_id=task_id)
     if handled > 0:

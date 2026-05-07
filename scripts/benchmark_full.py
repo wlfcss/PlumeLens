@@ -14,7 +14,6 @@ import sys
 import time
 from pathlib import Path
 
-import numpy as np
 import onnxruntime as ort
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -22,7 +21,6 @@ sys.path.insert(0, str(ROOT))
 
 from engine.pipeline.detector import BirdDetector  # noqa: E402
 from engine.pipeline.grader import (  # noqa: E402
-    DEFAULT_THRESHOLDS,
     apply_pose_penalty,
     grade,
 )
@@ -44,9 +42,9 @@ PADDING_RATIO = 0.10  # pose 紧裁切
 # 多套阈值
 THRESHOLDS_SET = [
     ("当前 default (0.33, 0.43, 0.60)", (0.33, 0.43, 0.60)),
-    ("已改 (0.20, 0.45, 0.85)",         (0.20, 0.45, 0.85)),
-    ("严苛 (0.30, 0.55, 0.85)",         (0.30, 0.55, 0.85)),
-    ("超严 (0.50, 0.65, 0.88)",         (0.50, 0.65, 0.88)),
+    ("已改 (0.20, 0.45, 0.85)", (0.20, 0.45, 0.85)),
+    ("严苛 (0.30, 0.55, 0.85)", (0.30, 0.55, 0.85)),
+    ("超严 (0.50, 0.65, 0.88)", (0.50, 0.65, 0.88)),
 ]
 
 
@@ -61,7 +59,10 @@ def hist(name: str, scores: list[float]) -> None:
         return
     s = sorted(scores)
     print(f"\n=== {name}（n={len(scores)}） ===")
-    print(f"  min={s[0]:.3f}  median={s[len(s)//2]:.3f}  mean={statistics.mean(scores):.3f}  max={s[-1]:.3f}")
+    print(
+        f"  min={s[0]:.3f}  median={s[len(s)//2]:.3f}  "
+        f"mean={statistics.mean(scores):.3f}  max={s[-1]:.3f}"
+    )
     buckets: dict[float, int] = collections.Counter()
     for x in scores:
         b = int(x * 10) / 10
@@ -75,11 +76,13 @@ def grade_label(g: QualityGrade) -> str:
     return g.value
 
 
+def pct(value: int, total: int) -> str:
+    return f"{100 * value / total:.0f}%" if total else "-"
+
+
 def main(folder: str) -> None:
     root = Path(folder)
-    files = sorted(
-        p for p in root.rglob("*") if p.suffix.lower() in SUPPORTED_EXTENSIONS
-    )
+    files = sorted(p for p in root.rglob("*") if p.suffix.lower() in SUPPORTED_EXTENSIONS)
     print(f"扫到 {len(files)} 张")
     if not files:
         return
@@ -135,8 +138,13 @@ def main(folder: str) -> None:
 
             # IQA: 大裁切
             iqa_crop = expand_for_iqa(
-                image, box.x1, box.y1, box.x2, box.y2,
-                expand=EXPAND_RATIO, max_aspect_ratio=MAX_ASPECT_RATIO,
+                image,
+                box.x1,
+                box.y1,
+                box.x2,
+                box.y2,
+                expand=EXPAND_RATIO,
+                max_aspect_ratio=MAX_ASPECT_RATIO,
             )
             iqa_scores = iqa.assess(iqa_crop)
             clip_scores.append(iqa_scores.clipiqa)
@@ -162,8 +170,10 @@ def main(folder: str) -> None:
             if pose_info is None:
                 no_pose_n += 1
             else:
-                if pose_info.head_visible: head_visible_n += 1
-                if pose_info.eye_visible: eye_visible_n += 1
+                if pose_info.head_visible:
+                    head_visible_n += 1
+                if pose_info.eye_visible:
+                    eye_visible_n += 1
 
             # 各阈值下的 grade
             for name, th in THRESHOLDS_SET:
@@ -183,7 +193,10 @@ def main(folder: str) -> None:
             eta = (len(files) - i - 1) / rate
             print(f"  {i+1}/{len(files)}  [{rate:.1f} img/s, ETA {eta/60:.1f} min]")
 
-    print(f"\n完成 {len(combined_scores)} 张  |  无鸟 {n_no_bird}  |  失败 {n_failed}  |  总耗时 {(time.time()-start_t)/60:.1f} min")
+    print(
+        f"\n完成 {len(combined_scores)} 张  |  无鸟 {n_no_bird}  |  "
+        f"失败 {n_failed}  |  总耗时 {(time.time() - start_t) / 60:.1f} min"
+    )
 
     # === IQA 分布 ===
     print("\n" + "#" * 70)
@@ -200,7 +213,10 @@ def main(folder: str) -> None:
     n_pose_total = len(combined_scores) - no_pose_n
     if n_pose_total > 0:
         print(f"  has pose:        {n_pose_total} ({100*n_pose_total/len(combined_scores):.1f}%)")
-        print(f"  head_visible:    {head_visible_n} ({100*head_visible_n/n_pose_total:.1f}% of with-pose)")
+        print(
+            f"  head_visible:    {head_visible_n} "
+            f"({100 * head_visible_n / n_pose_total:.1f}% of with-pose)"
+        )
         print(f"  eye_visible:     {eye_visible_n} ({100*eye_visible_n/n_pose_total:.1f}%)")
     print(f"  no pose result:  {no_pose_n}")
 
@@ -212,17 +228,25 @@ def main(folder: str) -> None:
 
     for name, _ in THRESHOLDS_SET:
         print(f"\n{name}")
-        print(f"  {'':<22}  {'reject':>10} {'record':>10} {'usable':>10} {'select':>10} {'no_bird':>10}")
-        for label, dist in [("仅 IQA", grade_dist_iqa_only[name]),
-                             ("IQA+pose 降档", grade_dist_with_pose[name])]:
+        print(
+            f"  {'':<22}  {'reject':>10} {'record':>10} {'usable':>10} "
+            f"{'select':>10} {'no_bird':>10}"
+        )
+        for label, dist in [
+            ("仅 IQA", grade_dist_iqa_only[name]),
+            ("IQA+pose 降档", grade_dist_with_pose[name]),
+        ]:
             r = dist.get("reject", 0)
             rc = dist.get("record", 0)
             us = dist.get("usable", 0)
             sel = dist.get("select", 0)
             nb = dist.get("no_bird", 0)
             tot = r + rc + us + sel + nb
-            def pct(x): return f"{100*x/tot:.0f}%" if tot else "-"
-            print(f"  {label:<22}  {r:>4} ({pct(r):>4}) {rc:>4} ({pct(rc):>4}) {us:>4} ({pct(us):>4}) {sel:>4} ({pct(sel):>4}) {nb:>4} ({pct(nb):>4})")
+            print(
+                f"  {label:<22}  {r:>4} ({pct(r, tot):>4}) "
+                f"{rc:>4} ({pct(rc, tot):>4}) {us:>4} ({pct(us, tot):>4}) "
+                f"{sel:>4} ({pct(sel, tot):>4}) {nb:>4} ({pct(nb, tot):>4})"
+            )
 
 
 if __name__ == "__main__":

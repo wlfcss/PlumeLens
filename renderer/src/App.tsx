@@ -22,6 +22,8 @@ import {
   X,
 } from 'lucide-react'
 import {
+  Suspense,
+  lazy,
   startTransition,
   useCallback,
   useDeferredValue,
@@ -32,10 +34,11 @@ import {
   type CSSProperties,
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
+  type RefObject,
 } from 'react'
 import { useTranslation } from 'react-i18next'
+import { useVirtualizer } from '@tanstack/react-virtual'
 
-import { ArchiveGeoMap } from '@/components/archive-geo-map'
 import { EngineStatusBanner } from '@/components/engine-status-banner'
 import { ReviewModal } from '@/components/review/review-modal'
 import { SettingsModal } from '@/components/settings-modal'
@@ -51,6 +54,7 @@ import {
   useLibraries,
   useLibraryDetail,
   useLibraryEvents,
+  useRelinkLibrary,
   useUpdateLibrary,
 } from '@/hooks/use-library'
 import { useQueryClient } from '@tanstack/react-query'
@@ -94,10 +98,23 @@ import { cn } from '@/lib/utils'
 import { useShallow, useUIStore, type QuickFilter, type ViewMode } from '@/stores/ui-store'
 import { subscribeEngineStatus, useEngineStore } from '@/stores/engine-store'
 
+const PHOTO_GRID_MIN_COLUMN_WIDTH = 260
+const PHOTO_GRID_GAP = 18
+const PHOTO_GROUP_ESTIMATED_HEIGHT = 460
+const COLLECTION_GRID_MIN_COLUMN_WIDTH = 150
+const COLLECTION_GRID_GAP = 8
+const COLLECTION_HEADING_ESTIMATED_HEIGHT = 52
+const COLLECTION_CARD_ROW_ESTIMATED_HEIGHT = 204
+
+const ArchiveGeoMap = lazy(() =>
+  import('@/components/archive-geo-map').then((module) => ({ default: module.ArchiveGeoMap })),
+)
+
 type Tone = 'neutral' | 'warning' | 'accent' | 'success' | 'muted'
 type SortMode = 'score' | 'shot_at' | 'name'
 type PhotoCategory = PhotoGrade | 'no_bird'
 type ExportLayout = 'merged' | 'by_grade'
+type ExportContentMode = 'files' | 'files_xmp' | 'xmp_only'
 
 type FolderSummary = {
   newSpeciesCount: number
@@ -119,11 +136,30 @@ type ExportSession = {
   initialSource: ExportSourceSnapshot
 }
 
+type ResponsiveGridLayout = {
+  columns: number
+  width: number
+}
+
+type CollectionVirtualRow =
+  | {
+      type: 'heading'
+      group: SpeciesCollectionGroup
+      litCount: number
+      firstGroup: boolean
+    }
+  | {
+      type: 'cards'
+      groupId: SpeciesCollectionGroupId
+      species: SpeciesRecord[]
+    }
+
 type ExportOptionsSnapshot = {
   grades: PhotoGrade[]
   min: number | null
   max: number | null
   layout: ExportLayout
+  contentMode: ExportContentMode
   targetDir: string
 }
 
@@ -134,9 +170,10 @@ type FolderContextMenuState = {
 } | null
 
 const FOLDER_CONTEXT_MENU_WIDTH = 188
-const FOLDER_CONTEXT_MENU_HEIGHT = 48
+const FOLDER_CONTEXT_MENU_HEIGHT = 88
 
 const EMPTY_PHOTOS: PhotoRecord[] = []
+const EMPTY_SPECIES: SpeciesRecord[] = []
 const EMPTY_FOLDER_SUMMARY: FolderSummary = {
   newSpeciesCount: 0,
   birdPhotoCount: 0,
@@ -275,6 +312,48 @@ function matchesQuery(parts: Array<string | null | undefined>, query: string): b
 
 function formatRatio(current: number, total: number): string {
   return `${current}/${total}`
+}
+
+function useResponsiveGridLayout(
+  containerRef: RefObject<HTMLElement | null>,
+  minColumnWidth: number,
+  gap: number,
+): ResponsiveGridLayout {
+  const [layout, setLayout] = useState<ResponsiveGridLayout>({
+    columns: 1,
+    width: minColumnWidth,
+  })
+
+  useEffect(() => {
+    const element = containerRef.current
+    if (!element) return undefined
+
+    const updateColumns = () => {
+      const width = Math.max(minColumnWidth, element.clientWidth)
+      const nextColumns = Math.max(1, Math.floor((width + gap) / (minColumnWidth + gap)))
+      setLayout((current) =>
+        current.columns === nextColumns && current.width === width
+          ? current
+          : { columns: nextColumns, width },
+      )
+    }
+
+    updateColumns()
+    if (typeof ResizeObserver !== 'undefined') {
+      const observer = new ResizeObserver(updateColumns)
+      observer.observe(element)
+      return () => observer.disconnect()
+    }
+
+    window.addEventListener('resize', updateColumns)
+    return () => window.removeEventListener('resize', updateColumns)
+  }, [containerRef, gap, minColumnWidth])
+
+  return layout
+}
+
+function virtualGridStyle(columns: number): CSSProperties {
+  return { '--virtual-grid-columns': String(columns) } as CSSProperties
 }
 
 export function isPlainSpaceKey(event: KeyboardEvent): boolean {
@@ -1432,6 +1511,11 @@ export function buildArchiveMapPins(
 export default function App() {
   const { t } = useTranslation()
   const { data: backendData, isReady, isError } = useBackendHealth()
+  const engineState = useEngineStore((s) => s.state)
+  const appInteractive =
+    (engineState === 'ready' || engineState === 'degraded') &&
+    isReady &&
+    Boolean(backendData?.pipeline.ready)
   // 起手用空 workspace，避免 useLibraries 还没 fetch 完时闪现 mock 数据。
   // useLibraries effect 拿到真数据后会注入；fetch 失败的 fallback 在 handleChooseFolder 里。
   const [workspace, setWorkspace] = useState<WorkspaceSnapshot>(() => ({
@@ -1442,6 +1526,7 @@ export default function App() {
   }))
   const [exportSessions, setExportSessions] = useState<ExportSession[]>([])
   const [folderContextMenu, setFolderContextMenu] = useState<FolderContextMenuState>(null)
+  const [relinkingFolderId, setRelinkingFolderId] = useState<string | null>(null)
 
   const {
     route,
@@ -1502,7 +1587,11 @@ export default function App() {
   )
 
   const deferredSearch = useDeferredValue(searchQuery)
-  const speciesRecords = useMemo(() => deriveSpeciesRecords(workspace), [workspace])
+  const shouldLoadArchiveWorkspace = route === 'archive'
+  const speciesRecords = useMemo(
+    () => (shouldLoadArchiveWorkspace ? deriveSpeciesRecords(workspace) : EMPTY_SPECIES),
+    [shouldLoadArchiveWorkspace, workspace],
+  )
 
   // TODO: Replace mock workspace mutations with backend API + TanStack Query mutations
   // once scan, decision, compare, and export endpoints are wired.
@@ -1563,6 +1652,7 @@ export default function App() {
   }, [photosByFolder])
   const activeFolder =
     workspace.folders.find((folder) => folder.id === activeFolderId) ?? visibleFolders[0] ?? null
+  const activeSourceMissing = activeFolder?.status === 'path_missing'
   const activeFolderPhotos = activeFolder
     ? (photosByFolder.get(activeFolder.id) ?? EMPTY_PHOTOS)
     : EMPTY_PHOTOS
@@ -1570,7 +1660,7 @@ export default function App() {
     ? (summariesByFolder.get(activeFolder.id) ?? EMPTY_FOLDER_SUMMARY)
     : EMPTY_FOLDER_SUMMARY
   const openExportForActiveFolder = useCallback(() => {
-    if (!activeFolder) return
+    if (!activeFolder || activeFolder.status === 'path_missing') return
     setExportSessions((current) => [
       ...current,
       {
@@ -1617,10 +1707,7 @@ export default function App() {
       ),
     [activeFolderPhotos, activeQuickFilters, activeSort, deferredSearch],
   )
-  const groupStartMs = useMemo(
-    () => buildGroupStartMsMap(activeFolderPhotos),
-    [activeFolderPhotos],
-  )
+  const groupStartMs = useMemo(() => buildGroupStartMsMap(activeFolderPhotos), [activeFolderPhotos])
 
   const folderGroups = useMemo(() => {
     const photosByGroup = new Map<string, PhotoRecord[]>()
@@ -1648,9 +1735,7 @@ export default function App() {
 
   const flatSelectionPhotos = useMemo(
     () =>
-      viewMode === 'flat'
-        ? filteredSelectionPhotos
-        : folderGroups.flatMap((entry) => entry.photos),
+      viewMode === 'flat' ? filteredSelectionPhotos : folderGroups.flatMap((entry) => entry.photos),
     [filteredSelectionPhotos, folderGroups, viewMode],
   )
 
@@ -1682,6 +1767,7 @@ export default function App() {
   )
 
   useEffect(() => {
+    if (!shouldLoadArchiveWorkspace) return
     if (speciesRecords.length === 0) {
       if (activeSpeciesId !== null) setActiveSpeciesId(null)
       return
@@ -1691,27 +1777,25 @@ export default function App() {
         speciesRecords.find((species) => species.collected)?.id ?? speciesRecords[0]?.id ?? null,
       )
     }
-  }, [activeSpeciesId, setActiveSpeciesId, speciesRecords])
+  }, [activeSpeciesId, setActiveSpeciesId, shouldLoadArchiveWorkspace, speciesRecords])
 
-  const archivePhotos = useMemo(
-    () =>
-      sortPhotos(
-        workspace.photos.filter(
-          (photo) =>
-            isArchiveEligiblePhoto(photo) &&
-            matchesQuery(archivePhotoSearchParts(photo), deferredSearch),
-        ),
-        'score',
+  const archivePhotos = useMemo(() => {
+    if (!shouldLoadArchiveWorkspace) return EMPTY_PHOTOS
+    return sortPhotos(
+      workspace.photos.filter(
+        (photo) =>
+          isArchiveEligiblePhoto(photo) &&
+          matchesQuery(archivePhotoSearchParts(photo), deferredSearch),
       ),
-    [deferredSearch, workspace.photos],
-  )
-  const archiveSpecies = useMemo(
-    () =>
-      speciesRecords.filter((species) =>
-        matchesQuery([species.name, species.latinName, species.summary], deferredSearch),
-      ),
-    [deferredSearch, speciesRecords],
-  )
+      'score',
+    )
+  }, [deferredSearch, shouldLoadArchiveWorkspace, workspace.photos])
+  const archiveSpecies = useMemo(() => {
+    if (!shouldLoadArchiveWorkspace) return EMPTY_SPECIES
+    return speciesRecords.filter((species) =>
+      matchesQuery([species.name, species.latinName, species.summary], deferredSearch),
+    )
+  }, [deferredSearch, shouldLoadArchiveWorkspace, speciesRecords])
   const reviewPhotos = useMemo(() => {
     if (!reviewPhoto) return []
     const source = route === 'archive' ? archivePhotos : flatSelectionPhotos
@@ -1721,11 +1805,12 @@ export default function App() {
 
   const { data: realLibraries } = useLibraries()
   const allLibraryIds = useMemo(() => (realLibraries ?? []).map((l) => l.id), [realLibraries])
-  const allDetails = useAllLibraryDetails(allLibraryIds)
+  const allDetails = useAllLibraryDetails(allLibraryIds, shouldLoadArchiveWorkspace)
   const { data: activeDetail } = useLibraryDetail(activeFolderId)
   useLibraryEvents(activeFolderId, Boolean(activeFolderId))
   const importLibrary = useImportLibrary()
   const { mutateAsync: updateLibraryDisplayName } = useUpdateLibrary()
+  const { mutateAsync: relinkLibrary } = useRelinkLibrary()
   const startBatch = useStartBatch()
   const { mutate: rebuildPhotoThumbnail } = useBuildPhotoThumbnail(activeFolderId)
   const queryClient = useQueryClient()
@@ -1977,8 +2062,46 @@ export default function App() {
     [updateLibraryDisplayName],
   )
 
+  const handleRelinkFolder = useCallback(
+    async (folderId: string) => {
+      const path = await window.plumelens?.openFolder?.()
+      if (!path) return
+      setRelinkingFolderId(folderId)
+      try {
+        const response = await relinkLibrary({ libraryId: folderId, rootPath: path })
+        const updated = response.library
+        setWorkspace((current) => ({
+          ...current,
+          folders: current.folders.map((folder) =>
+            folder.id === updated.id
+              ? {
+                  ...folder,
+                  parentPath: updated.parent_path,
+                  rootPath: updated.root_path,
+                  status: updated.status,
+                  totalCount: updated.total_count,
+                  analyzedCount: updated.analyzed_count,
+                  recursive: updated.recursive,
+                  lastOpenedAt: updated.last_opened_at,
+                  lastScannedAt: updated.last_scanned_at ?? updated.last_opened_at,
+                  lastAnalyzedAt: updated.last_analyzed_at,
+                }
+              : folder,
+          ),
+        }))
+        void queryClient.refetchQueries({ queryKey: LIBRARY_DETAIL_KEY(folderId), type: 'active' })
+      } catch (err) {
+        console.warn('Failed to relink library source folder:', err)
+        throw err
+      } finally {
+        setRelinkingFolderId(null)
+      }
+    },
+    [queryClient, relinkLibrary],
+  )
+
   async function handleStartAnalysis() {
-    if (!activeFolderId) return
+    if (!activeFolderId || activeSourceMissing) return
     try {
       await startBatch.mutateAsync({ libraryId: activeFolderId })
       // bump key 让 useAnalysisProgress 重建 SSE 连接（如果上一个 idle 死了）
@@ -2149,6 +2272,8 @@ export default function App() {
       route={route}
       searchQuery={searchQuery}
       t={t}
+      controlsDisabled={!appInteractive}
+      exportDisabled={Boolean(activeSourceMissing)}
     >
       {route === 'selection' ? (
         <SelectionScreen
@@ -2170,12 +2295,14 @@ export default function App() {
           onOpenCompare={handleOpenCompare}
           onOpenExport={openExportForActiveFolder}
           onOpenReview={handleOpenReview}
+          onRelinkFolder={handleRelinkFolder}
           onRenameFolder={handleRenameFolder}
           onSelectFolder={handleSelectFolder}
           onSetDecision={handleSetDecision}
           onStartAnalysis={handleStartAnalysis}
           onToggleCompare={toggleComparePhotoId}
           progressEvent={progressEvent}
+          relinkingFolderId={relinkingFolderId}
           setActiveQuickFilter={setActiveQuickFilter}
           setActiveSort={setActiveSort}
           setFocusedPhotoId={setFocusedPhotoId}
@@ -2251,6 +2378,7 @@ export default function App() {
         menu={folderContextMenu}
         onClose={closeFolderContextMenu}
         onOpenFolder={openFolderInFinder}
+        onRelinkFolder={handleRelinkFolder}
         t={t}
       />
     </AppShell>
@@ -2261,11 +2389,13 @@ function FolderContextMenu({
   menu,
   onClose,
   onOpenFolder,
+  onRelinkFolder,
   t,
 }: {
   menu: FolderContextMenuState
   onClose: () => void
   onOpenFolder: (folder: FolderRecord) => void
+  onRelinkFolder: (folderId: string) => Promise<void>
   t: ReturnType<typeof useTranslation>['t']
 }) {
   useEffect(() => {
@@ -2302,12 +2432,30 @@ function FolderContextMenu({
         <FolderOpen className="h-4 w-4" />
         <span>{t('selection.folderMenu.openInFinder')}</span>
       </button>
+      {menu.folder.status === 'path_missing' ? (
+        <button
+          onClick={(event) => {
+            event.stopPropagation()
+            onClose()
+            void onRelinkFolder(menu.folder.id).catch((err) => {
+              console.warn('Failed to relink library source folder:', err)
+            })
+          }}
+          role="menuitem"
+          type="button"
+        >
+          <FolderSearch2 className="h-4 w-4" />
+          <span>{t('selection.sourceMissing.relinkAction')}</span>
+        </button>
+      ) : null}
     </div>
   )
 }
 
 function AppShell({
   children,
+  controlsDisabled,
+  exportDisabled,
   onNavigate,
   onOpenExport,
   onOpenSettings,
@@ -2317,6 +2465,8 @@ function AppShell({
   t,
 }: {
   children: ReactNode
+  controlsDisabled: boolean
+  exportDisabled: boolean
   onNavigate: (route: AppRoute) => void
   onOpenExport: () => void
   onOpenSettings: () => void
@@ -2325,10 +2475,18 @@ function AppShell({
   searchQuery: string
   t: ReturnType<typeof useTranslation>['t']
 }) {
+  const disabledTitle = controlsDisabled ? t('nav.loadingDisabled') : undefined
+  const exportDisabledTitle = exportDisabled ? t('selection.sourceMissing.exportDisabled') : undefined
   return (
     <div className="app-shell">
       <header className="command-bar">
-        <button className="brand-mark" onClick={() => onNavigate('start')} type="button">
+        <button
+          className="brand-mark"
+          disabled={controlsDisabled}
+          onClick={() => onNavigate('start')}
+          title={disabledTitle}
+          type="button"
+        >
           <span className="brand-mark__icon">
             <Feather className="h-4 w-4" />
           </span>
@@ -2347,8 +2505,10 @@ function AppShell({
                   'route-switcher__item',
                   route === item && 'route-switcher__item--active',
                 )}
+                disabled={controlsDisabled}
                 key={item}
                 onClick={() => onNavigate(item)}
+                title={disabledTitle}
                 type="button"
               >
                 <Icon className="h-4 w-4" />
@@ -2359,18 +2519,31 @@ function AppShell({
         </nav>
 
         <div className="command-actions">
-          <label className="search-pill">
+          <label
+            className={cn('search-pill', controlsDisabled && 'search-pill--disabled')}
+            title={disabledTitle}
+          >
             <Search className="h-4 w-4" />
             <input
               onChange={(event) => onSearchChange(event.target.value)}
+              disabled={controlsDisabled}
               placeholder={t('nav.search')}
               value={searchQuery}
             />
           </label>
-          <IconButton label={t('common.export')} onClick={onOpenExport}>
+          <IconButton
+            disabled={controlsDisabled || exportDisabled}
+            label={t('common.export')}
+            onClick={onOpenExport}
+            title={disabledTitle ?? exportDisabledTitle}
+          >
             <Download className="h-4 w-4" />
           </IconButton>
-          <IconButton label={t('common.settings')} onClick={onOpenSettings}>
+          <IconButton
+            disabled={controlsDisabled}
+            label={t('common.settings')}
+            onClick={onOpenSettings}
+          >
             <Settings2 className="h-4 w-4" />
           </IconButton>
           {/* 引擎状态在左下角 status bar 已有完整展示，此处不重复 */}
@@ -2471,19 +2644,17 @@ function StartScreen({
                     <strong>{folder.displayName}</strong>
                     <small>{folder.parentPath}</small>
                   </span>
-                  <StatusDot tone={statusTone(folder.status)} />
+                  <span className="folder-line__status">
+                    <StatusDot tone={statusTone(folder.status)} />
+                    <span>{t(statusLabelKey(folder.status))}</span>
+                  </span>
                 </button>
               ))}
             </div>
           </div>
         </section>
       ) : null}
-      <EnginePanel
-        backendData={backendData}
-        isError={isError}
-        isReady={isReady}
-        t={t}
-      />
+      <EnginePanel backendData={backendData} isError={isError} isReady={isReady} t={t} />
     </main>
   )
 }
@@ -2581,7 +2752,10 @@ function getPipelineModel(models: PipelineModels | undefined, key: string) {
   return models?.[key]
 }
 
-function runtimeSummaryLabel(items: PipelineStatusItemModel[], t: ReturnType<typeof useTranslation>['t']) {
+function runtimeSummaryLabel(
+  items: PipelineStatusItemModel[],
+  t: ReturnType<typeof useTranslation>['t'],
+) {
   const providers = Array.from(
     new Set(
       items
@@ -2827,6 +3001,7 @@ function SelectionScreen({
   onOpenExport,
   onOpenFolderContextMenu,
   onOpenReview,
+  onRelinkFolder,
   onRenameFolder,
   onSelectFolder,
   onSetDecision,
@@ -2834,6 +3009,7 @@ function SelectionScreen({
   onThumbnailLoadStatus,
   onToggleCompare,
   progressEvent,
+  relinkingFolderId,
   setActiveQuickFilter,
   setActiveSort,
   setFocusedPhotoId,
@@ -2860,6 +3036,7 @@ function SelectionScreen({
   onOpenExport: () => void
   onOpenFolderContextMenu: (folder: FolderRecord, event: ReactMouseEvent<HTMLElement>) => void
   onOpenReview: (photoId: string) => void
+  onRelinkFolder: (folderId: string) => Promise<void>
   onRenameFolder: (folderId: string, displayName: string) => Promise<void>
   onSelectFolder: (folderId: string) => void
   onSetDecision: (photoId: string, decision: SelectionDecision) => void
@@ -2867,6 +3044,7 @@ function SelectionScreen({
   onThumbnailLoadStatus: (photoId: string, status: ThumbnailLoadStatus) => void
   onToggleCompare: (photoId: string) => void
   progressEvent: AnalysisProgressEventLite | null
+  relinkingFolderId: string | null
   setActiveQuickFilter: (filter: QuickFilter) => void
   setActiveSort: (sort: SortMode) => void
   setFocusedPhotoId: (photoId: string | null) => void
@@ -2876,6 +3054,18 @@ function SelectionScreen({
   viewMode: ViewMode
   workspace: WorkspaceSnapshot
 }) {
+  const selectionScrollRef = useRef<HTMLElement | null>(null)
+  const [selectionScrollElement, setSelectionScrollElement] = useState<HTMLElement | null>(null)
+  const setSelectionScrollNode = useCallback((node: HTMLElement | null) => {
+    selectionScrollRef.current = node
+    setSelectionScrollElement((current) => (current === node ? current : node))
+  }, [])
+  const selectionFilterKey = `${activeFolder?.id ?? ''}:${viewMode}:${activeSort}:${activeQuickFilters.join(',')}`
+
+  useEffect(() => {
+    selectionScrollElement?.scrollTo({ top: 0 })
+  }, [selectionFilterKey, selectionScrollElement])
+
   if (!activeFolder) {
     return (
       <main className="empty-screen">
@@ -2902,14 +3092,16 @@ function SelectionScreen({
         workspace={workspace}
       />
 
-      <section className="selection-main selection-scroll">
+      <section className="selection-main selection-scroll" ref={setSelectionScrollNode}>
         <FolderTopline
           activeFolder={activeFolder}
           analysisStarting={analysisStarting}
           onOpenExport={onOpenExport}
+          onRelinkFolder={onRelinkFolder}
           onRenameFolder={onRenameFolder}
           onStartAnalysis={onStartAnalysis}
           progressEvent={progressEvent}
+          relinking={relinkingFolderId === activeFolder.id}
           t={t}
         />
         <MetricStrip photos={folderPhotos} summary={activeFolderSummary} t={t} />
@@ -2928,25 +3120,23 @@ function SelectionScreen({
 
         <div className="photo-flow">
           {viewMode === 'grouped' ? (
-            filteredGroups.map(({ group, photos }) => (
-              <PhotoGroup
-                focusedPhotoId={focusedPhotoId}
-                group={group}
-                key={group.id}
-                onFocusPhoto={setFocusedPhotoId}
-                onOpenReview={onOpenReview}
-                onThumbnailLoadStatus={onThumbnailLoadStatus}
-                photos={photos}
-                t={t}
-              />
-            ))
+            <VirtualizedPhotoGroups
+              focusedPhotoId={focusedPhotoId}
+              groups={filteredGroups}
+              onFocusPhoto={setFocusedPhotoId}
+              onOpenReview={onOpenReview}
+              onThumbnailLoadStatus={onThumbnailLoadStatus}
+              scrollElement={selectionScrollElement}
+              t={t}
+            />
           ) : (
-            <PhotoGrid
+            <VirtualizedPhotoGrid
               focusedPhotoId={focusedPhotoId}
               onFocusPhoto={setFocusedPhotoId}
               onOpenReview={onOpenReview}
               onThumbnailLoadStatus={onThumbnailLoadStatus}
               photos={flatPhotos}
+              scrollElement={selectionScrollElement}
               t={t}
             />
           )}
@@ -2959,6 +3149,7 @@ function SelectionScreen({
         onToggleCompare={onToggleCompare}
         photo={focusedPhoto}
         setFocusedPhotoId={setFocusedPhotoId}
+        sourceMissing={activeFolder.status === 'path_missing'}
         t={t}
       />
 
@@ -3029,6 +3220,9 @@ function FolderRail({
                   <span className="folder-rail-item__meta">
                     <StatusDot tone={statusTone(folder.status)} />
                     <span>{formatRatio(folder.analyzedCount, folder.totalCount)}</span>
+                    {folder.status === 'path_missing' ? (
+                      <span>{t('selection.sourceMissing.short')}</span>
+                    ) : null}
                     <span>{summary.gradeCounts.select}</span>
                   </span>
                 </button>
@@ -3045,17 +3239,21 @@ function FolderTopline({
   activeFolder,
   analysisStarting,
   onOpenExport,
+  onRelinkFolder,
   onRenameFolder,
   onStartAnalysis,
   progressEvent,
+  relinking,
   t,
 }: {
   activeFolder: FolderRecord
   analysisStarting: boolean
   onOpenExport: () => void
+  onRelinkFolder: (folderId: string) => Promise<void>
   onRenameFolder: (folderId: string, displayName: string) => Promise<void>
   onStartAnalysis: () => void
   progressEvent: AnalysisProgressEventLite | null
+  relinking: boolean
   t: ReturnType<typeof useTranslation>['t']
 }) {
   const [aliasDraft, setAliasDraft] = useState(activeFolder.displayName)
@@ -3069,12 +3267,19 @@ function FolderTopline({
     ? Math.min(1, progressEvent.completed / Math.max(progressEvent.total, 1))
     : 0
   const progressLabel = hasProgress ? `${progressEvent.completed} / ${progressEvent.total}` : null
+  const sourceMissing = activeFolder.status === 'path_missing'
+  const sourceDisabledTitle = sourceMissing ? t('selection.sourceMissing.disabledTooltip') : undefined
+  const [relinkError, setRelinkError] = useState<string | null>(null)
   useEffect(() => {
     if (!aliasEditing) {
       setAliasDraft(activeFolder.displayName)
       setAliasError(null)
     }
   }, [activeFolder.displayName, activeFolder.id, aliasEditing])
+
+  useEffect(() => {
+    setRelinkError(null)
+  }, [activeFolder.id, activeFolder.status])
 
   const startAliasEditing = () => {
     setAliasDraft(activeFolder.displayName)
@@ -3108,6 +3313,15 @@ function FolderTopline({
       setAliasError(t('selection.folderHeader.aliasFailed'))
     } finally {
       setAliasSaving(false)
+    }
+  }
+
+  const submitRelink = async () => {
+    setRelinkError(null)
+    try {
+      await onRelinkFolder(activeFolder.id)
+    } catch {
+      setRelinkError(t('selection.sourceMissing.relinkFailed'))
     }
   }
 
@@ -3182,6 +3396,29 @@ function FolderTopline({
           </span>
         ) : null}
         <p>{activeFolder.rootPath}</p>
+        {sourceMissing ? (
+          <div className="source-link-warning" role="status">
+            <span>
+              <strong>{t('selection.sourceMissing.title')}</strong>
+              <small>{relinkError ?? t('selection.sourceMissing.body')}</small>
+            </span>
+            <button
+              className="button-ghost button-compact"
+              disabled={relinking}
+              onClick={() => void submitRelink()}
+              type="button"
+            >
+              {relinking ? (
+                <RefreshCw className="h-4 w-4 animate-spin" />
+              ) : (
+                <FolderSearch2 className="h-4 w-4" />
+              )}
+              {relinking
+                ? t('selection.sourceMissing.relinking')
+                : t('selection.sourceMissing.relinkAction')}
+            </button>
+          </div>
+        ) : null}
       </div>
       <div className="folder-actions">
         <span className="folder-status">
@@ -3203,8 +3440,9 @@ function FolderTopline({
         ) : null}
         <button
           className="button-primary button-compact"
-          disabled={analysisStarting || running}
+          disabled={analysisStarting || running || sourceMissing}
           onClick={onStartAnalysis}
+          title={sourceDisabledTitle}
           type="button"
         >
           <Sparkles className="h-4 w-4" />
@@ -3214,11 +3452,22 @@ function FolderTopline({
               ? t('selection.folderHeader.starting')
               : t('selection.folderHeader.startAnalysis')}
         </button>
-        <button className="button-ghost button-compact" onClick={onOpenExport} type="button">
+        <button
+          className="button-ghost button-compact"
+          disabled={sourceMissing}
+          onClick={onOpenExport}
+          title={sourceDisabledTitle}
+          type="button"
+        >
           <Download className="h-4 w-4" />
           {t('common.export')}
         </button>
-        <button className="button-ghost button-compact" type="button">
+        <button
+          className="button-ghost button-compact"
+          disabled={sourceMissing}
+          title={sourceDisabledTitle}
+          type="button"
+        >
           <RefreshCw className="h-4 w-4" />
           {activeFolder.status === 'ready'
             ? t('selection.folderHeader.update')
@@ -3340,6 +3589,143 @@ function SelectionControls({
         </button>
       </div>
     </section>
+  )
+}
+
+function VirtualizedPhotoGroups({
+  focusedPhotoId,
+  groups,
+  onFocusPhoto,
+  onOpenReview,
+  onThumbnailLoadStatus,
+  scrollElement,
+  t,
+}: {
+  focusedPhotoId: string | null
+  groups: Array<{ group: PhotoGroupRecord; photos: PhotoRecord[] }>
+  onFocusPhoto: (photoId: string | null) => void
+  onOpenReview: (photoId: string) => void
+  onThumbnailLoadStatus: (photoId: string, status: ThumbnailLoadStatus) => void
+  scrollElement: HTMLElement | null
+  t: ReturnType<typeof useTranslation>['t']
+}) {
+  const virtualizer = useVirtualizer({
+    count: groups.length,
+    getScrollElement: () => scrollElement,
+    estimateSize: () => PHOTO_GROUP_ESTIMATED_HEIGHT,
+    overscan: 3,
+  })
+
+  if (groups.length === 0) return null
+
+  return (
+    <div className="photo-flow-virtual" style={{ height: virtualizer.getTotalSize() }}>
+      {virtualizer.getVirtualItems().map((virtualRow) => {
+        const entry = groups[virtualRow.index]
+        if (!entry) return null
+        return (
+          <div
+            className="photo-flow-virtual__item"
+            data-index={virtualRow.index}
+            key={entry.group.id}
+            ref={virtualizer.measureElement}
+            style={{ transform: `translateY(${virtualRow.start}px)` }}
+          >
+            <PhotoGroup
+              focusedPhotoId={focusedPhotoId}
+              group={entry.group}
+              onFocusPhoto={onFocusPhoto}
+              onOpenReview={onOpenReview}
+              onThumbnailLoadStatus={onThumbnailLoadStatus}
+              photos={entry.photos}
+              t={t}
+            />
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+function VirtualizedPhotoGrid({
+  focusedPhotoId,
+  onFocusPhoto,
+  onOpenReview,
+  onThumbnailLoadStatus,
+  photos,
+  scrollElement,
+  t,
+}: {
+  focusedPhotoId: string | null
+  onFocusPhoto: (photoId: string | null) => void
+  onOpenReview: (photoId: string) => void
+  onThumbnailLoadStatus: (photoId: string, status: ThumbnailLoadStatus) => void
+  photos: PhotoRecord[]
+  scrollElement: HTMLElement | null
+  t: ReturnType<typeof useTranslation>['t']
+}) {
+  const containerRef = useRef<HTMLDivElement | null>(null)
+  const gridLayout = useResponsiveGridLayout(
+    containerRef,
+    PHOTO_GRID_MIN_COLUMN_WIDTH,
+    PHOTO_GRID_GAP,
+  )
+  const columns = gridLayout.columns
+  const rows = useMemo(() => {
+    const nextRows: PhotoRecord[][] = []
+    for (let start = 0; start < photos.length; start += columns) {
+      nextRows.push(photos.slice(start, start + columns))
+    }
+    return nextRows
+  }, [columns, photos])
+  const estimatedRowHeight = useMemo(() => {
+    const tileWidth = Math.max(
+      PHOTO_GRID_MIN_COLUMN_WIDTH,
+      (gridLayout.width - PHOTO_GRID_GAP * (columns - 1)) / columns,
+    )
+    return Math.round(tileWidth * 0.75 + 54 + PHOTO_GRID_GAP)
+  }, [columns, gridLayout.width])
+  const virtualizer = useVirtualizer({
+    count: rows.length,
+    getScrollElement: () => scrollElement,
+    estimateSize: () => estimatedRowHeight,
+    overscan: 5,
+  })
+
+  if (photos.length === 0) return null
+
+  return (
+    <div className="photo-grid-virtual" ref={containerRef}>
+      <div className="photo-grid-virtual__spacer" style={{ height: virtualizer.getTotalSize() }}>
+        {virtualizer.getVirtualItems().map((virtualRow) => {
+          const rowPhotos = rows[virtualRow.index] ?? EMPTY_PHOTOS
+          return (
+            <div
+              className="photo-grid photo-grid--virtual-row"
+              data-index={virtualRow.index}
+              key={virtualRow.key}
+              ref={virtualizer.measureElement}
+              style={{
+                ...virtualGridStyle(columns),
+                transform: `translateY(${virtualRow.start}px)`,
+              }}
+            >
+              {rowPhotos.map((photo) => (
+                <PhotoTile
+                  focused={focusedPhotoId === photo.id}
+                  key={photo.id}
+                  onFocusPhoto={onFocusPhoto}
+                  onOpenReview={onOpenReview}
+                  onThumbnailLoadStatus={onThumbnailLoadStatus}
+                  photo={photo}
+                  t={t}
+                />
+              ))}
+            </div>
+          )
+        })}
+      </div>
+    </div>
   )
 }
 
@@ -3553,9 +3939,11 @@ function useExternalEditors(): { topaz: string | null; photoshop: string | null 
 /** 编辑入口:Topaz / Photoshop "用 X 打开"。优先 RAW 同伴,无 RAW 用主文件。 */
 function ExternalEditorActions({
   photo,
+  sourceMissing,
   t,
 }: {
   photo: PhotoRecord
+  sourceMissing: boolean
   t: ReturnType<typeof useTranslation>['t']
 }) {
   const editors = useExternalEditors()
@@ -3570,6 +3958,10 @@ function ExternalEditorActions({
 
   const openIn = async (tool: 'topaz' | 'photoshop') => {
     setEditorError(null)
+    if (sourceMissing) {
+      setEditorError(t('selection.editor.error.source_missing'))
+      return
+    }
     const opener = window.plumelens?.openInEditor
     if (!opener) {
       setEditorError(t('selection.editor.error.spawn_failed'))
@@ -3587,6 +3979,7 @@ function ExternalEditorActions({
   const targetLabel = photo.companionPath
     ? t('selection.editor.targetRaw', { format: photo.companionFormat ?? 'RAW' })
     : t('selection.editor.targetMain')
+  const disabledTitle = sourceMissing ? t('selection.editor.error.source_missing') : undefined
   return (
     <div className="inspector-editors">
       <span className="inspector-editors__hint">
@@ -3596,8 +3989,9 @@ function ExternalEditorActions({
         {editors.topaz ? (
           <button
             className="button-ghost button-compact"
+            disabled={sourceMissing}
             onClick={() => void openIn('topaz')}
-            title={editors.topaz}
+            title={disabledTitle ?? editors.topaz}
             type="button"
           >
             <Wand2 className="h-4 w-4" />
@@ -3607,8 +4001,9 @@ function ExternalEditorActions({
         {editors.photoshop ? (
           <button
             className="button-ghost button-compact"
+            disabled={sourceMissing}
             onClick={() => void openIn('photoshop')}
-            title={editors.photoshop}
+            title={disabledTitle ?? editors.photoshop}
             type="button"
           >
             <Brush className="h-4 w-4" />
@@ -3631,6 +4026,7 @@ function InspectorPanel({
   onToggleCompare,
   photo,
   setFocusedPhotoId,
+  sourceMissing,
   t,
 }: {
   onOpenReview: (photoId: string) => void
@@ -3638,6 +4034,7 @@ function InspectorPanel({
   onToggleCompare: (photoId: string) => void
   photo: PhotoRecord | null
   setFocusedPhotoId: (photoId: string | null) => void
+  sourceMissing: boolean
   t: ReturnType<typeof useTranslation>['t']
 }) {
   const tileSourceBadge = photo ? tileSpeciesSourceBadge(photo, t) : null
@@ -3683,7 +4080,7 @@ function InspectorPanel({
             <StatRow label={t('selection.metrics.birdCount')} value={photo.birdCount} />
           </div>
           <TagCluster photo={photo} t={t} />
-          <ExternalEditorActions photo={photo} t={t} />
+          <ExternalEditorActions photo={photo} sourceMissing={sourceMissing} t={t} />
           <div className="inspector-actions">
             <button
               className="button-primary"
@@ -3743,6 +4140,153 @@ function InspectorPanel({
   )
 }
 
+function CollectionSpeciesCard({
+  active,
+  onSelectSpecies,
+  species,
+  t,
+}: {
+  active: boolean
+  onSelectSpecies: (speciesId: string | null) => void
+  species: SpeciesRecord
+  t: ReturnType<typeof useTranslation>['t']
+}) {
+  return (
+    <button
+      className={cn(
+        'collection-card',
+        species.collected ? 'collection-card--lit' : 'collection-card--locked',
+        !species.imageUrl && 'collection-card--empty-art',
+        active && 'collection-card--active',
+      )}
+      onClick={() => onSelectSpecies(species.id)}
+      style={speciesArtworkStyle(species.imageUrl, species.coverGradient)}
+      type="button"
+    >
+      <span className="collection-card__signal">
+        {species.collected ? <Trophy className="h-3.5 w-3.5" /> : <span aria-hidden="true" />}
+        {species.collected ? t('archive.collection.collected') : t('archive.collection.locked')}
+      </span>
+      <strong>{species.name}</strong>
+      <small>{species.latinName}</small>
+      <span className="collection-card__meta">
+        <span>{species.familyName ?? t('archive.collection.unknownFamily')}</span>
+        <b>
+          {species.collected
+            ? t('archive.collection.photoCount', { count: species.photoCount })
+            : species.catalogSource === 'model_extra'
+              ? t('archive.collection.modelExtraBadge')
+              : (species.protectLevel ?? species.iucn ?? '--')}
+        </b>
+      </span>
+    </button>
+  )
+}
+
+function VirtualizedCollectionBoard({
+  activeSpeciesId,
+  groups,
+  onSelectSpecies,
+  scrollRef,
+  t,
+}: {
+  activeSpeciesId: string | null
+  groups: SpeciesCollectionGroup[]
+  onSelectSpecies: (speciesId: string | null) => void
+  scrollRef: RefObject<HTMLElement | null>
+  t: ReturnType<typeof useTranslation>['t']
+}) {
+  const containerRef = useRef<HTMLDivElement | null>(null)
+  const gridLayout = useResponsiveGridLayout(
+    containerRef,
+    COLLECTION_GRID_MIN_COLUMN_WIDTH,
+    COLLECTION_GRID_GAP,
+  )
+  const columns = gridLayout.columns
+  const rows = useMemo<CollectionVirtualRow[]>(() => {
+    const nextRows: CollectionVirtualRow[] = []
+    groups.forEach((group, groupIndex) => {
+      nextRows.push({
+        type: 'heading',
+        group,
+        litCount: group.litCount,
+        firstGroup: groupIndex === 0,
+      })
+      for (let start = 0; start < group.species.length; start += columns) {
+        nextRows.push({
+          type: 'cards',
+          groupId: group.id,
+          species: group.species.slice(start, start + columns),
+        })
+      }
+    })
+    return nextRows
+  }, [columns, groups])
+  const virtualizer = useVirtualizer({
+    count: rows.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: (index) =>
+      rows[index]?.type === 'heading'
+        ? COLLECTION_HEADING_ESTIMATED_HEIGHT
+        : COLLECTION_CARD_ROW_ESTIMATED_HEIGHT,
+    overscan: 7,
+  })
+
+  if (groups.length === 0) return null
+
+  return (
+    <div className="collection-virtual-board" ref={containerRef}>
+      <div
+        className="collection-virtual-board__spacer"
+        style={{ height: virtualizer.getTotalSize() }}
+      >
+        {virtualizer.getVirtualItems().map((virtualRow) => {
+          const row = rows[virtualRow.index]
+          if (!row) return null
+          return (
+            <div
+              className={cn(
+                'collection-virtual-row',
+                row.type === 'heading' && 'collection-virtual-row--heading',
+                row.type === 'heading' && row.firstGroup && 'collection-virtual-row--first',
+              )}
+              data-index={virtualRow.index}
+              key={virtualRow.key}
+              ref={virtualizer.measureElement}
+              style={{ transform: `translateY(${virtualRow.start}px)` }}
+            >
+              {row.type === 'heading' ? (
+                <div className="collection-section__heading">
+                  <span>
+                    <Shield className="h-4 w-4" />
+                    {t(`archive.collection.groups.${row.group.id}`)}
+                  </span>
+                  <small>{formatRatio(row.litCount, row.group.species.length)}</small>
+                </div>
+              ) : (
+                <div
+                  className="collection-grid collection-grid--virtual-row"
+                  style={virtualGridStyle(columns)}
+                >
+                  {row.species.map((species) => (
+                    <CollectionSpeciesCard
+                      active={activeSpeciesId === species.id}
+                      key={species.id}
+                      onSelectSpecies={onSelectSpecies}
+                      species={species}
+                      t={t}
+                    />
+                  ))}
+                </div>
+              )}
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
 function ArchiveScreen({
   activeSpecies,
   archivePhotos,
@@ -3762,6 +4306,7 @@ function ArchiveScreen({
   onSetArchiveTab: (tab: ArchiveTab) => void
   t: ReturnType<typeof useTranslation>['t']
 }) {
+  const archiveScrollRef = useRef<HTMLElement | null>(null)
   const [collectionFilter, setCollectionFilter] = useState<SpeciesCollectionFilter>('all')
   const [speciesPhotosOpen, setSpeciesPhotosOpen] = useState(false)
   const activeSpeciesWiki = useMemo(
@@ -3812,13 +4357,18 @@ function ArchiveScreen({
       return archiveSpecies.filter((species) => species.collected)
     }
     if (collectionFilter !== 'all') {
-      return archiveSpecies.filter((species) => speciesCollectionGroupId(species) === collectionFilter)
+      return archiveSpecies.filter(
+        (species) => speciesCollectionGroupId(species) === collectionFilter,
+      )
     }
     return archiveSpecies
   }, [archiveSpecies, collectionFilter])
   const collectionGroups = useMemo(() => {
     return buildSpeciesCollectionGroups(filteredArchiveSpecies)
   }, [filteredArchiveSpecies])
+  useEffect(() => {
+    archiveScrollRef.current?.scrollTo({ top: 0 })
+  }, [archiveTab, collectionFilter])
 
   return (
     <main
@@ -3826,6 +4376,7 @@ function ArchiveScreen({
         'archive-screen selection-scroll',
         archiveTab === 'map' && 'archive-screen--map',
       )}
+      ref={archiveScrollRef}
     >
       <section className={cn('archive-main', archiveTab === 'map' && 'archive-main--map')}>
         <div className="archive-heading">
@@ -3867,59 +4418,13 @@ function ArchiveScreen({
 
         {archiveTab === 'species' ? (
           <div className="collection-board">
-            {collectionGroups.map((group) => {
-              const litCount = group.species.filter((species) => species.collected).length
-              return (
-                <section className="collection-section" key={group.id}>
-                  <div className="collection-section__heading">
-                    <span>
-                      <Shield className="h-4 w-4" />
-                      {t(`archive.collection.groups.${group.id}`)}
-                    </span>
-                    <small>{formatRatio(litCount, group.species.length)}</small>
-                  </div>
-                  <div className="collection-grid">
-                    {group.species.map((species) => (
-                      <button
-                        className={cn(
-                          'collection-card',
-                          species.collected ? 'collection-card--lit' : 'collection-card--locked',
-                          !species.imageUrl && 'collection-card--empty-art',
-                          activeSpecies?.id === species.id && 'collection-card--active',
-                        )}
-                        key={species.id}
-                        onClick={() => onSelectSpecies(species.id)}
-                        style={speciesArtworkStyle(species.imageUrl, species.coverGradient)}
-                        type="button"
-                      >
-                        <span className="collection-card__signal">
-                          {species.collected ? (
-                            <Trophy className="h-3.5 w-3.5" />
-                          ) : (
-                            <span aria-hidden="true" />
-                          )}
-                          {species.collected
-                            ? t('archive.collection.collected')
-                            : t('archive.collection.locked')}
-                        </span>
-                        <strong>{species.name}</strong>
-                        <small>{species.latinName}</small>
-                        <span className="collection-card__meta">
-                          <span>{species.familyName ?? t('archive.collection.unknownFamily')}</span>
-                          <b>
-                            {species.collected
-                              ? t('archive.collection.photoCount', { count: species.photoCount })
-                              : species.catalogSource === 'model_extra'
-                                ? t('archive.collection.modelExtraBadge')
-                                : (species.protectLevel ?? species.iucn ?? '--')}
-                          </b>
-                        </span>
-                      </button>
-                    ))}
-                  </div>
-                </section>
-              )
-            })}
+            <VirtualizedCollectionBoard
+              activeSpeciesId={activeSpecies?.id ?? null}
+              groups={collectionGroups}
+              onSelectSpecies={onSelectSpecies}
+              scrollRef={archiveScrollRef}
+              t={t}
+            />
             {collectionGroups.length === 0 ? (
               <p className="collection-empty">{t('archive.collection.empty')}</p>
             ) : null}
@@ -3933,7 +4438,13 @@ function ArchiveScreen({
                   <h2>{t('archive.map.title')}</h2>
                 </div>
               </div>
-              <ArchiveGeoMap onOpenPhoto={onOpenReview} />
+              <Suspense
+                fallback={
+                  <div className="archive-map-empty">{t('archive.geo.loadingProvince')}</div>
+                }
+              >
+                <ArchiveGeoMap onOpenPhoto={onOpenReview} />
+              </Suspense>
             </section>
           </div>
         )}
@@ -4242,6 +4753,7 @@ function ExportDrawer({
   const [minScore, setMinScore] = useState('')
   const [maxScore, setMaxScore] = useState('')
   const [layout, setLayout] = useState<ExportLayout>('merged')
+  const [contentMode, setContentMode] = useState<ExportContentMode>('files_xmp')
   const [targetDir, setTargetDir] = useState('')
   const [collapsed, setCollapsed] = useState(false)
   const [status, setStatus] = useState<'idle' | 'running' | 'success' | 'error'>('idle')
@@ -4253,10 +4765,11 @@ function ExportDrawer({
   const sourceFolder = lockedSource?.folder ?? source.folder
   const sourcePhotos = lockedSource?.photos ?? source.photos
   const sourceSummary = lockedSource?.summary ?? source.summary
+  const sourceMissing = sourceFolder?.status === 'path_missing'
 
   const min = minScore.trim() === '' ? null : Number(minScore)
   const max = maxScore.trim() === '' ? null : Number(maxScore)
-  const activeOptions = lockedOptions ?? { grades, min, max, layout, targetDir }
+  const activeOptions = lockedOptions ?? { grades, min, max, layout, contentMode, targetDir }
   const controlsLocked = lockedOptions !== null
   const exportPhotos = useMemo(() => {
     const activeGrades = new Set(activeOptions.grades)
@@ -4302,11 +4815,17 @@ function ExportDrawer({
 
   const startExport = async () => {
     if (!sourceFolder || !targetDir || status === 'running') return
+    if (sourceFolder.status === 'path_missing') {
+      setError(t('selection.sourceMissing.exportDisabled'))
+      setStatus('error')
+      return
+    }
     const exportOptions = {
       grades: [...grades],
       min: min !== null && Number.isFinite(min) ? min : null,
       max: max !== null && Number.isFinite(max) ? max : null,
       layout,
+      contentMode,
       targetDir,
     }
     const exportSource = {
@@ -4326,7 +4845,9 @@ function ExportDrawer({
         grades: exportOptions.grades,
         min_score: exportOptions.min,
         max_score: exportOptions.max,
+        copy_files: exportOptions.contentMode !== 'xmp_only',
         include_companions: true,
+        include_xmp_sidecars: exportOptions.contentMode !== 'files',
         layout: exportOptions.layout,
         preserve_structure: true,
         include_manifest: true,
@@ -4342,8 +4863,31 @@ function ExportDrawer({
   const closePanel = () => {
     if (status !== 'running') onClose()
   }
+
+  const openExportOutput = async () => {
+    if (!result?.output_dir) return
+    const openResult = await window.plumelens?.openPathInFinder?.(result.output_dir)
+    if (openResult && !openResult.ok) {
+      setError(t('export.result.openFailed'))
+    }
+  }
+
+  const resetExport = () => {
+    setLockedSource(null)
+    setLockedOptions(null)
+    setResult(null)
+    setError(null)
+    setStatus('idle')
+    setCollapsed(false)
+  }
+
   const canStart = Boolean(
-    sourceFolder && targetDir && exportPhotos.length > 0 && status === 'idle' && !controlsLocked,
+    sourceFolder &&
+      !sourceMissing &&
+      targetDir &&
+      exportPhotos.length > 0 &&
+      status === 'idle' &&
+      !controlsLocked,
   )
   const statusText =
     status === 'running'
@@ -4445,6 +4989,10 @@ function ExportDrawer({
         <div className="export-grid">
           <ExportOption title={t('export.scope.label')} value={t('export.scope.reviewed')} />
           <ExportOption
+            title={t('export.content.label')}
+            value={t(`export.content.${activeOptions.contentMode}.short`)}
+          />
+          <ExportOption
             title={t('export.structure.label')}
             value={
               activeOptions.layout === 'merged'
@@ -4453,6 +5001,34 @@ function ExportDrawer({
             }
           />
           <ExportOption title={t('export.bundle.label')} value={t('export.bundle.report')} />
+        </div>
+
+        <div className="export-control-block">
+          <SectionLabel label={t('export.content.label')} />
+          <div className="export-layout-grid" role="group" aria-label={t('export.content.label')}>
+            {(['files', 'files_xmp', 'xmp_only'] as ExportContentMode[]).map((mode) => (
+              <button
+                className={cn(
+                  'export-layout-button',
+                  activeOptions.contentMode === mode && 'is-active',
+                )}
+                disabled={controlsLocked}
+                key={mode}
+                onClick={() => setContentMode(mode)}
+                type="button"
+              >
+                {mode === 'xmp_only' ? (
+                  <PencilLine className="h-4 w-4" />
+                ) : (
+                  <Download className="h-4 w-4" />
+                )}
+                <span>
+                  <strong>{t(`export.content.${mode}.label`)}</strong>
+                  <small>{t(`export.content.${mode}.hint`)}</small>
+                </span>
+              </button>
+            ))}
+          </div>
         </div>
 
         <div className="export-control-block">
@@ -4577,11 +5153,27 @@ function ExportDrawer({
                 companions: result.companion_count,
                 exported: result.exported_count,
                 failed: result.failed_count,
+                xmp: result.xmp_count,
               })}
             </small>
           </div>
         ) : null}
         {error ? <p className="export-error">{error}</p> : null}
+
+        {controlsLocked && status !== 'running' ? (
+          <div className="export-completion-actions">
+            {result ? (
+              <button className="button-ghost" onClick={openExportOutput} type="button">
+                <FolderOpen className="h-4 w-4" />
+                {t('export.result.openFolder')}
+              </button>
+            ) : null}
+            <button className="button-ghost" onClick={resetExport} type="button">
+              <RefreshCw className="h-4 w-4" />
+              {t('export.result.reset')}
+            </button>
+          </div>
+        ) : null}
 
         <div className="action-row">
           <button
@@ -4792,6 +5384,7 @@ export function IconButton({
   disabled,
   label,
   onClick,
+  title,
 }: {
   active?: boolean
   ariaKeyShortcuts?: string
@@ -4800,6 +5393,7 @@ export function IconButton({
   disabled?: boolean
   label: string
   onClick?: () => void
+  title?: string
 }) {
   return (
     <button
@@ -4808,6 +5402,7 @@ export function IconButton({
       className={cn('icon-button', active && 'icon-button--active', className)}
       disabled={disabled}
       onClick={onClick}
+      title={title}
       type="button"
     >
       {children}

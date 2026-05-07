@@ -9,7 +9,8 @@
     "selection": "Select",
     "archive": "Trail",
     "primary": "Primary navigation",
-    "search": "Search folders, files, or species"
+    "search": "Search folders, files, or species",
+    "loadingDisabled": "Available after the local engine finishes loading"
   },
   "common": {
     "export": "Export",
@@ -160,6 +161,16 @@
       "label": "Folder actions",
       "openInFinder": "Open in Finder"
     },
+    "sourceMissing": {
+      "short": "Missing",
+      "title": "Source folder is disconnected",
+      "body": "Cached thumbnails, scores, and manual decisions remain available. Analysis, export, and external editing need the source folder to be relinked first.",
+      "relinkAction": "Relink folder",
+      "relinking": "Relinking…",
+      "relinkFailed": "Relink failed: choose the folder after it was moved or renamed.",
+      "disabledTooltip": "Source folder is disconnected; relink it first",
+      "exportDisabled": "Source folder is disconnected; relink it before export"
+    },
     "report": {
       "label": "Folder report",
       "title": "Current folder overview",
@@ -307,6 +318,7 @@
       "openInPhotoshop": "Photoshop",
       "error": {
         "not_installed": "External editor was not detected",
+        "source_missing": "Source folder is disconnected; relink it before external editing",
         "file_missing": "The target file no longer exists",
         "app_missing": "The editor executable was not found",
         "spawn_failed": "Failed to launch the external editor"

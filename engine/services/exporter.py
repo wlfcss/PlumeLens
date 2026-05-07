@@ -13,10 +13,12 @@ import csv
 import json
 import re
 import shutil
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from xml.sax.saxutils import escape, quoteattr
 
 from engine.api.schemas.export import (
     ExportLayout,
@@ -55,6 +57,7 @@ class ExportManifestRow:
     dest_path: str | None
     companion_source_path: str | None
     companion_dest_path: str | None
+    xmp_dest_path: str | None
     grade: str | None
     auto_grade: str | None
     decision: str | None
@@ -64,6 +67,7 @@ class ExportManifestRow:
     shot_at: str
     exported_main: bool
     exported_companion: bool
+    exported_xmp: bool
     error: str | None
 
 
@@ -76,6 +80,7 @@ _CHINESE_MANIFEST_FIELDNAMES = [
     "导出相对路径",
     "同伴源文件路径",
     "同伴导出路径",
+    "XMP导出路径",
     "评级",
     "自动评级",
     "人工决策",
@@ -85,6 +90,7 @@ _CHINESE_MANIFEST_FIELDNAMES = [
     "拍摄时间",
     "已导出照片",
     "已导出同伴文件",
+    "已导出XMP",
     "错误原因",
 ]
 _GRADE_LABELS: dict[str, str] = {
@@ -101,7 +107,21 @@ _RAW_EXTENSION_ORDER = tuple(sorted(RAW_EXTENSIONS))
 _ERROR_LABELS: dict[str, str] = {
     "source_missing": "源文件不存在",
     "companion_missing": "同伴文件不存在",
+    "insufficient_space": "目标磁盘剩余空间不足",
 }
+_GRADE_RATINGS: dict[str, int] = {
+    "select": 5,
+    "usable": 4,
+    "record": 3,
+    "reject": -1,
+}
+_GRADE_XMP_LABELS: dict[str, str] = {
+    "select": "Green",
+    "usable": "Yellow",
+    "record": "Blue",
+    "reject": "Red",
+}
+_EXPORT_SPACE_MARGIN = 1.05
 
 
 def _now_stamp() -> str:
@@ -218,6 +238,53 @@ def _copy_file(source: Path, dest: Path) -> None:
     shutil.copy2(source, dest)
 
 
+def _write_text_file(path: Path, body: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body, encoding="utf-8")
+
+
+def _unlink_silent(path: Path | None) -> None:
+    if path is None:
+        return
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError:
+        pass
+
+
+def _prune_empty_dirs(start: Path, stop: Path) -> None:
+    cursor = start
+    while cursor != stop and _is_relative_to(cursor, stop):
+        try:
+            cursor.rmdir()
+        except OSError:
+            break
+        cursor = cursor.parent
+
+
+def _release_dest(path: Path, output_dir: Path, used: set[Path]) -> None:
+    with suppress(ValueError):
+        used.discard(path.relative_to(output_dir))
+
+
+def _existing_parent(path: Path) -> Path:
+    cursor = path
+    while not cursor.exists() and cursor != cursor.parent:
+        cursor = cursor.parent
+    return cursor
+
+
+def _file_size(path: Path | None) -> int:
+    if path is None:
+        return 0
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
+
+
 def _case_exact_existing_path(candidate: Path, inode: tuple[int, int]) -> Path:
     try:
         for child in candidate.parent.iterdir():
@@ -250,6 +317,112 @@ def _discover_companion_path(photo: ExportPhoto, source: Path) -> Path | None:
             seen.add(inode)
             candidates.append(_case_exact_existing_path(candidate, inode))
     return candidates[0] if len(candidates) == 1 else None
+
+
+def _xmp_rating(grade: str | None) -> int:
+    return _GRADE_RATINGS.get(grade or "", 0)
+
+
+def _xmp_label(grade: str | None) -> str:
+    return _GRADE_XMP_LABELS.get(grade or "", "None")
+
+
+def _xmp_sidecar_path(path: Path) -> Path:
+    return path.with_suffix(".xmp")
+
+
+def _xmp_dest_for(output_dir: Path, base: Path, used: set[Path]) -> Path:
+    rel = base.relative_to(output_dir) if base.is_absolute() else base
+    return _unique_dest(output_dir, _xmp_sidecar_path(rel), used)
+
+
+def _xmp_keywords(photo: ExportPhoto) -> list[str]:
+    grade = _effective_grade(photo)
+    keywords = ["PlumeLens", f"评级:{_grade_label(grade) or '未评级'}"]
+    if photo.species:
+        keywords.extend([photo.species, f"鸟种:{photo.species}"])
+    if photo.bird_count is not None:
+        keywords.append(f"鸟数量:{photo.bird_count}")
+    return list(dict.fromkeys(keyword for keyword in keywords if keyword))
+
+
+def _xmp_packet(photo: ExportPhoto, source: Path) -> str:
+    grade = _effective_grade(photo)
+    rating = str(_xmp_rating(grade))
+    label = _xmp_label(grade)
+    metadata_date = datetime.now(UTC).isoformat()
+    subject_items = "\n".join(
+        f"        <rdf:li>{escape(keyword)}</rdf:li>" for keyword in _xmp_keywords(photo)
+    )
+    hierarchical_items = "\n".join(
+        f"        <rdf:li>{escape(keyword)}</rdf:li>"
+        for keyword in ["PlumeLens", f"PlumeLens|{_grade_label(grade) or '未评级'}"]
+    )
+    description = f"PlumeLens 导出评级：{_grade_label(grade) or '未评级'}" + (
+        f"；鸟种：{photo.species}" if photo.species else ""
+    )
+    return (
+        '<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>\n'
+        '<x:xmpmeta xmlns:x="adobe:ns:meta/">\n'
+        '  <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">\n'
+        '    <rdf:Description rdf:about=""\n'
+        '      xmlns:xmp="http://ns.adobe.com/xap/1.0/"\n'
+        '      xmlns:dc="http://purl.org/dc/elements/1.1/"\n'
+        '      xmlns:lr="http://ns.adobe.com/lightroom/1.0/"\n'
+        f"      xmp:Rating={quoteattr(rating)}\n"
+        f"      xmp:Label={quoteattr(label)}\n"
+        f"      xmp:MetadataDate={quoteattr(metadata_date)}\n"
+        f"      xmp:CreatorTool={quoteattr('PlumeLens')}\n"
+        f"      xmp:Nickname={quoteattr(source.name)}>\n"
+        "      <dc:description>\n"
+        "        <rdf:Alt>\n"
+        f'          <rdf:li xml:lang="x-default">{escape(description)}</rdf:li>\n'
+        "        </rdf:Alt>\n"
+        "      </dc:description>\n"
+        "      <dc:subject>\n"
+        "        <rdf:Bag>\n"
+        f"{subject_items}\n"
+        "        </rdf:Bag>\n"
+        "      </dc:subject>\n"
+        "      <lr:hierarchicalSubject>\n"
+        "        <rdf:Bag>\n"
+        f"{hierarchical_items}\n"
+        "        </rdf:Bag>\n"
+        "      </lr:hierarchicalSubject>\n"
+        "    </rdf:Description>\n"
+        "  </rdf:RDF>\n"
+        "</x:xmpmeta>\n"
+        '<?xpacket end="w"?>\n'
+    )
+
+
+def _estimate_export_bytes(
+    selected: list[ExportPhoto],
+    body: ExportLibraryRequest,
+) -> int:
+    total = 0
+    for photo in selected:
+        source = Path(photo.file_path)
+        if body.copy_files:
+            total += _file_size(source)
+            if body.include_companions:
+                total += _file_size(_discover_companion_path(photo, source))
+        if body.include_xmp_sidecars:
+            total += 16 * 1024
+    return int(total * _EXPORT_SPACE_MARGIN)
+
+
+def _ensure_target_has_space(target: Path, required_bytes: int) -> None:
+    if required_bytes <= 0:
+        return
+    usage_path = _existing_parent(target)
+    try:
+        free = shutil.disk_usage(usage_path).free
+    except OSError:
+        return
+    if free < required_bytes:
+        msg = "Export target does not have enough free space"
+        raise ExportError(msg)
 
 
 def _yes_no(value: bool) -> str:
@@ -297,6 +470,7 @@ def _manifest_row_to_chinese(row: ExportManifestRow, output_dir: Path) -> dict[s
         "导出相对路径": _rel_to_output(row.dest_path, output_dir),
         "同伴源文件路径": row.companion_source_path,
         "同伴导出路径": row.companion_dest_path,
+        "XMP导出路径": row.xmp_dest_path,
         "评级": _grade_label(row.grade),
         "自动评级": _grade_label(row.auto_grade),
         "人工决策": _grade_label(row.decision),
@@ -306,6 +480,7 @@ def _manifest_row_to_chinese(row: ExportManifestRow, output_dir: Path) -> dict[s
         "拍摄时间": row.shot_at,
         "已导出照片": _yes_no(row.exported_main),
         "已导出同伴文件": _yes_no(row.exported_companion),
+        "已导出XMP": _yes_no(row.exported_xmp),
         "错误原因": _error_label(row.error),
     }
 
@@ -351,14 +526,17 @@ def _run_export(
         msg = "Export target must not be inside the source library"
         raise ExportError(msg)
 
+    selected = [photo for photo in photos if _matches_request(photo, body)]
+    _ensure_target_has_space(target, _estimate_export_bytes(selected, body))
+
     output_dir = _unique_output_dir(target / f"{_safe_name(library_name)}-{_now_stamp()}")
     output_dir.mkdir(parents=True, exist_ok=False)
 
-    selected = [photo for photo in photos if _matches_request(photo, body)]
     rows: list[ExportManifestRow] = []
     used: set[Path] = set()
     exported = 0
     companions = 0
+    xmp_count = 0
     missing = 0
     failed = 0
 
@@ -367,29 +545,39 @@ def _run_export(
         dest_path: Path | None = None
         companion_dest: Path | None = None
         companion_source: Path | None = None
+        xmp_dest: Path | None = None
         exported_main = False
         exported_companion = False
+        exported_xmp = False
         error: str | None = None
+        created_paths: list[Path] = []
         try:
             if not source.exists():
                 missing += 1
                 error = "source_missing"
             else:
-                rel = _dest_rel(
-                    source,
-                    root,
-                    _effective_grade(photo),
-                    body.layout,
-                    body.preserve_structure,
-                )
-                dest_path = _unique_dest(output_dir, rel, used)
-                _copy_file(source, dest_path)
-                exported_main = True
-                exported += 1
-
-                if body.include_companions:
+                if body.copy_files and body.include_companions:
                     companion_source = _discover_companion_path(photo, source)
-                    if companion_source and companion_source.exists():
+                    if photo.companion_path and (
+                        companion_source is None or not companion_source.exists()
+                    ):
+                        error = "companion_missing"
+                        missing += 1
+
+                if error is None and body.copy_files:
+                    rel = _dest_rel(
+                        source,
+                        root,
+                        _effective_grade(photo),
+                        body.layout,
+                        body.preserve_structure,
+                    )
+                    dest_path = _unique_dest(output_dir, rel, used)
+                    _copy_file(source, dest_path)
+                    created_paths.append(dest_path)
+                    exported_main = True
+
+                    if body.include_companions and companion_source and companion_source.exists():
                         comp_rel = _dest_rel(
                             companion_source,
                             root,
@@ -399,14 +587,52 @@ def _run_export(
                         )
                         companion_dest = _unique_dest(output_dir, comp_rel, used)
                         _copy_file(companion_source, companion_dest)
+                        created_paths.append(companion_dest)
                         exported_companion = True
+
+                if error is None and body.include_xmp_sidecars:
+                    xmp_source = (
+                        companion_source
+                        if companion_source is not None and companion_source.exists()
+                        else source
+                    )
+                    if companion_dest is not None:
+                        xmp_dest = _xmp_dest_for(output_dir, companion_dest, used)
+                    elif dest_path is not None:
+                        xmp_dest = _xmp_dest_for(output_dir, dest_path, used)
+                    else:
+                        xmp_rel = _dest_rel(
+                            xmp_source,
+                            root,
+                            _effective_grade(photo),
+                            body.layout,
+                            body.preserve_structure,
+                        )
+                        xmp_dest = _xmp_dest_for(output_dir, xmp_rel, used)
+                    _write_text_file(xmp_dest, _xmp_packet(photo, xmp_source))
+                    created_paths.append(xmp_dest)
+                    exported_xmp = True
+
+                if error is None:
+                    if exported_main:
+                        exported += 1
+                    if exported_companion:
                         companions += 1
-                    elif photo.companion_path:
-                        error = "companion_missing"
-                        missing += 1
+                    if exported_xmp:
+                        xmp_count += 1
         except Exception as exc:
+            for path in reversed(created_paths):
+                _unlink_silent(path)
+                _release_dest(path, output_dir, used)
+                _prune_empty_dirs(path.parent, output_dir)
             failed += 1
             error = str(exc)
+            dest_path = None
+            companion_dest = None
+            xmp_dest = None
+            exported_main = False
+            exported_companion = False
+            exported_xmp = False
 
         rows.append(
             ExportManifestRow(
@@ -418,6 +644,7 @@ def _run_export(
                 if companion_source
                 else photo.companion_path,
                 companion_dest_path=str(companion_dest) if companion_dest else None,
+                xmp_dest_path=str(xmp_dest) if xmp_dest else None,
                 grade=_effective_grade(photo),
                 auto_grade=photo.grade,
                 decision=photo.decision,
@@ -427,6 +654,7 @@ def _run_export(
                 shot_at=_shot_at(photo),
                 exported_main=exported_main,
                 exported_companion=exported_companion,
+                exported_xmp=exported_xmp,
                 error=error,
             )
         )
@@ -445,14 +673,17 @@ def _run_export(
                 "目标目录": target_dir,
                 "输出目录": str(output_dir),
                 "导出布局": _LAYOUT_LABELS[body.layout],
+                "复制照片文件": _yes_no(body.copy_files),
                 "选择评级": [_GRADE_LABELS.get(grade, grade) for grade in body.grades],
                 "最低分": body.min_score,
                 "最高分": body.max_score,
                 "包含同伴文件": _yes_no(body.include_companions),
+                "生成XMP文件": _yes_no(body.include_xmp_sidecars),
                 "包含报告": _yes_no(body.include_manifest),
                 "选中照片数": len(selected),
                 "已导出照片数": exported,
                 "已导出同伴文件数": companions,
+                "已生成XMP文件数": xmp_count,
                 "缺失文件数": missing,
                 "失败数": failed,
             },
@@ -464,6 +695,7 @@ def _run_export(
         selected_count=len(selected),
         exported_count=exported,
         companion_count=companions,
+        xmp_count=xmp_count,
         skipped_missing=missing,
         failed_count=failed,
         manifest=ExportManifestPaths(
@@ -480,13 +712,29 @@ async def export_library(
 ) -> ExportLibraryResponse:
     """Export selected photos from a library."""
     async with db.conn.execute(
-        "SELECT id, display_name, root_path FROM libraries WHERE id = ?",
+        "SELECT id, display_name, root_path, status FROM libraries WHERE id = ?",
         (library_id,),
     ) as cur:
         library = await cur.fetchone()
     if library is None:
         msg = "Library not found"
         raise ExportError(msg)
+
+    root_path = str(library["root_path"])
+    if not await asyncio.to_thread(Path(root_path).exists):
+        await db.conn.execute(
+            "UPDATE libraries SET status = 'path_missing' WHERE id = ?",
+            (library_id,),
+        )
+        await db.conn.commit()
+        msg = "Library source path is missing; relink the folder before export"
+        raise ExportError(msg)
+    if str(library["status"]) == "path_missing":
+        await db.conn.execute(
+            "UPDATE libraries SET status = 'ready' WHERE id = ?",
+            (library_id,),
+        )
+        await db.conn.commit()
 
     async with db.conn.execute(
         "SELECT p.id, p.file_path, p.file_name, p.file_mtime, p.exif_json, "
@@ -525,7 +773,7 @@ async def export_library(
         _run_export,
         library_id=str(library["id"]),
         library_name=str(library["display_name"]),
-        root_path=str(library["root_path"]),
+        root_path=root_path,
         target_dir=body.target_dir,
         photos=photos,
         body=body,

@@ -189,6 +189,28 @@ class TestSpeciesOverrides:
         assert record["bbox"] == (100.5, 200.0, 300.0, 400.5)
         assert record["canonical_sci"] == "Egretta garzetta"
 
+    async def test_list_species_overrides_can_scope_to_photo_ids(
+        self,
+        db_with_photos: Database,
+    ) -> None:
+        await set_species_override(
+            db_with_photos,
+            "photo-0",
+            0,
+            {"canonical_sci": "Sp.A", "canonical_zh": None, "canonical_en": None},
+        )
+        await set_species_override(
+            db_with_photos,
+            "photo-1",
+            0,
+            {"canonical_sci": "Sp.B", "canonical_zh": None, "canonical_en": None},
+        )
+
+        scoped = await list_species_overrides(db_with_photos, "lib-1", ["photo-1"])
+        assert set(scoped) == {"photo-1"}
+        assert scoped["photo-1"][0]["canonical_sci"] == "Sp.B"
+        assert await list_species_overrides(db_with_photos, "lib-1", []) == {}
+
     async def test_set_overwrites_bbox_on_update(
         self,
         db_with_photos: Database,

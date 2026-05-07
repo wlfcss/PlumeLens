@@ -17,6 +17,7 @@ import {
   type LibraryDetail,
   type LibrarySummary,
   type PhotoThumbnailResponse,
+  type RelinkLibraryResponse,
 } from '@/lib/api-client'
 
 export const LIBRARIES_KEY = ['libraries'] as const
@@ -45,17 +46,16 @@ export function useLibraryDetail(libraryId: string | null | undefined) {
  * 拉取所有 library 的 detail（archive / 物种墙跨 library 聚合需要）。
  * 单独 useLibraryDetail 只对 active folder 生效，archive 页要看到所有物种就得这个。
  */
-export function useAllLibraryDetails(libraryIds: string[]): LibraryDetail[] {
+export function useAllLibraryDetails(libraryIds: string[], enabled = true): LibraryDetail[] {
   const results = useQueries({
     queries: libraryIds.map((id) => ({
       queryKey: LIBRARY_DETAIL_KEY(id),
       queryFn: () => api.libraryDetail(id),
+      enabled,
       staleTime: 2_000,
     })),
   })
-  return results
-    .map((r) => r.data)
-    .filter((d): d is LibraryDetail => d !== undefined)
+  return results.map((r) => r.data).filter((d): d is LibraryDetail => d !== undefined)
 }
 
 export function useLibraryEvents(libraryId: string | null | undefined, enabled = true) {
@@ -78,7 +78,8 @@ export function useLibraryEvents(libraryId: string | null | undefined, enabled =
       refreshTimerRef.current = window.setTimeout(flushRefresh, EVENT_REFRESH_DEBOUNCE_MS)
     }
 
-    api.libraryEventsUrl(libraryId)
+    api
+      .libraryEventsUrl(libraryId)
       .then((url) => {
         if (cancelled) return
         source = new EventSource(url)
@@ -138,6 +139,24 @@ export function useUpdateLibrary() {
       )
       qc.invalidateQueries({ queryKey: LIBRARIES_KEY })
       qc.invalidateQueries({ queryKey: LIBRARY_DETAIL_KEY(data.id) })
+    },
+  })
+}
+
+export function useRelinkLibrary() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ libraryId, rootPath }: { libraryId: string; rootPath: string }) =>
+      api.relinkLibrary(libraryId, { root_path: rootPath }),
+    onSuccess: (data: RelinkLibraryResponse) => {
+      qc.setQueryData<LibrarySummary[] | undefined>(LIBRARIES_KEY, (current) =>
+        current?.map((library) => (library.id === data.library.id ? data.library : library)),
+      )
+      qc.setQueryData<LibraryDetail | undefined>(LIBRARY_DETAIL_KEY(data.library.id), (current) =>
+        current ? { ...current, library: data.library } : current,
+      )
+      qc.invalidateQueries({ queryKey: LIBRARIES_KEY })
+      qc.invalidateQueries({ queryKey: LIBRARY_DETAIL_KEY(data.library.id) })
     },
   })
 }

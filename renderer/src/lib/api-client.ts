@@ -252,6 +252,10 @@ export interface PhotoRow {
 export interface LibraryDetail {
   library: LibrarySummary
   photos: PhotoRow[]
+  photo_total?: number | null
+  photo_offset?: number
+  photo_limit?: number | null
+  next_offset?: number | null
 }
 
 export interface PhotoThumbnailResponse {
@@ -268,8 +272,26 @@ export interface ImportLibraryRequest {
   recursive?: boolean
 }
 
+export interface LibraryDetailOptions {
+  limit?: number
+  offset?: number
+}
+
 export interface UpdateLibraryRequest {
   display_name: string
+}
+
+export interface RelinkLibraryRequest {
+  root_path: string
+}
+
+export interface RelinkLibraryResponse {
+  library: LibrarySummary
+  previous_root_path: string
+  matched_photos: number
+  relinked_photos: number
+  missing_photos: number
+  relinked_companions: number
 }
 
 export type TaskQueueStats = Record<string, number>
@@ -314,7 +336,9 @@ export interface ExportLibraryRequest {
   grades: Array<'select' | 'usable' | 'record' | 'reject'>
   min_score?: number | null
   max_score?: number | null
+  copy_files?: boolean
   include_companions?: boolean
+  include_xmp_sidecars?: boolean
   layout?: 'merged' | 'by_grade'
   preserve_structure?: boolean
   include_manifest?: boolean
@@ -326,6 +350,7 @@ export interface ExportLibraryResponse {
   selected_count: number
   exported_count: number
   companion_count: number
+  xmp_count: number
   skipped_missing: number
   failed_count: number
   manifest: {
@@ -368,10 +393,21 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(body),
     }),
-  libraryDetail: (id: string) => request<LibraryDetail>(`/library/${id}`),
+  libraryDetail: (id: string, options: LibraryDetailOptions = {}) => {
+    const params = new URLSearchParams()
+    if (options.limit !== undefined) params.set('limit', String(options.limit))
+    if (options.offset !== undefined) params.set('offset', String(options.offset))
+    const query = params.toString()
+    return request<LibraryDetail>(`/library/${id}${query ? `?${query}` : ''}`)
+  },
   updateLibrary: (id: string, body: UpdateLibraryRequest) =>
     request<LibrarySummary>(`/library/${id}`, {
       method: 'PATCH',
+      body: JSON.stringify(body),
+    }),
+  relinkLibrary: (id: string, body: RelinkLibraryRequest) =>
+    request<RelinkLibraryResponse>(`/library/${id}/relink`, {
+      method: 'POST',
       body: JSON.stringify(body),
     }),
   deleteLibrary: (id: string) => request<void>(`/library/${id}`, { method: 'DELETE' }),

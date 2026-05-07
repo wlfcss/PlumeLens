@@ -5,13 +5,15 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 import uuid
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import structlog
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 
 from engine.api.schemas.library import (
@@ -22,6 +24,8 @@ from engine.api.schemas.library import (
     LibraryStatus,
     LibrarySummary,
     PhotoRow,
+    RelinkLibraryRequest,
+    RelinkLibraryResponse,
     SpeciesSource,
     UpdateLibraryRequest,
 )
@@ -92,6 +96,36 @@ async def _db(request: Request) -> Database:
     return db
 
 
+async def _path_exists(path: str) -> bool:
+    return await asyncio.to_thread(Path(path).exists)
+
+
+async def _sync_library_path_status(db: Database, row: Any) -> LibraryStatus:
+    """Keep library.status honest when the source root was moved/renamed externally."""
+    current = LibraryStatus(str(row["status"]))
+    root_path = str(row["root_path"])
+    exists = await _path_exists(root_path)
+
+    if not exists:
+        if current != LibraryStatus.PATH_MISSING:
+            await db.conn.execute(
+                "UPDATE libraries SET status = ? WHERE id = ?",
+                (LibraryStatus.PATH_MISSING.value, str(row["id"])),
+            )
+            await db.conn.commit()
+        return LibraryStatus.PATH_MISSING
+
+    if current == LibraryStatus.PATH_MISSING:
+        await db.conn.execute(
+            "UPDATE libraries SET status = ? WHERE id = ?",
+            (LibraryStatus.READY.value, str(row["id"])),
+        )
+        await db.conn.commit()
+        return LibraryStatus.READY
+
+    return current
+
+
 async def _fetch_library_summary(db: Database, library_id: str) -> LibrarySummary | None:
     async with db.conn.execute(
         "SELECT * FROM libraries WHERE id = ?",
@@ -100,6 +134,7 @@ async def _fetch_library_summary(db: Database, library_id: str) -> LibrarySummar
         row = await cur.fetchone()
     if row is None:
         return None
+    status = await _sync_library_path_status(db, row)
     # Counts
     async with db.conn.execute(
         "SELECT COUNT(*) AS c FROM photos WHERE library_id = ?",
@@ -121,7 +156,7 @@ async def _fetch_library_summary(db: Database, library_id: str) -> LibrarySummar
         display_name=str(row["display_name"]),
         parent_path=str(row["parent_path"]),
         root_path=str(row["root_path"]),
-        status=LibraryStatus(str(row["status"])),
+        status=status,
         total_count=total,
         analyzed_count=analyzed,
         recursive=bool(int(row["recursive"])),
@@ -626,6 +661,190 @@ async def import_library(
     return summary
 
 
+def _relative_to_root(path: Path, root: Path) -> Path | None:
+    try:
+        return path.relative_to(root)
+    except ValueError:
+        try:
+            return path.resolve().relative_to(root.resolve())
+        except ValueError:
+            return None
+
+
+def _format_from_path(path: Path, fallback: object) -> str | None:
+    suffix = path.suffix.lstrip(".").upper()
+    if suffix:
+        return suffix
+    return str(fallback) if fallback is not None else None
+
+
+@router.post("/{library_id}/relink", response_model=RelinkLibraryResponse)
+async def relink_library(
+    request: Request,
+    library_id: str,
+    body: RelinkLibraryRequest,
+) -> RelinkLibraryResponse:
+    """POST /library/{id}/relink — point a moved/renamed library at a new root.
+
+    The operation preserves photo ids, analysis results, decisions, thumbnails, and
+    scene groups. Only absolute source paths are rewritten from old-root-relative
+    paths to new-root-relative paths.
+    """
+    db = await _db(request)
+    new_root = Path(body.root_path).expanduser().resolve()  # noqa: ASYNC240
+    if not new_root.exists():  # noqa: ASYNC240
+        raise HTTPException(status_code=400, detail=f"Path does not exist: {new_root}")
+    if not new_root.is_dir():  # noqa: ASYNC240
+        raise HTTPException(status_code=400, detail=f"Not a directory: {new_root}")
+
+    async with db.conn.execute(
+        "SELECT id, display_name, root_path FROM libraries WHERE id = ?",
+        (library_id,),
+    ) as cur:
+        library = await cur.fetchone()
+    if library is None:
+        raise HTTPException(status_code=404, detail="Library not found")
+
+    previous_root = Path(str(library["root_path"]))
+    previous_root_path = str(previous_root)
+    new_root_path = str(new_root)
+
+    async with db.conn.execute(
+        "SELECT id FROM libraries WHERE root_path = ? AND id != ?",
+        (new_root_path, library_id),
+    ) as cur:
+        conflict = await cur.fetchone()
+    if conflict is not None:
+        raise HTTPException(status_code=409, detail="Path is already imported as another library")
+
+    async with db.conn.execute(
+        "SELECT id, file_path, file_size, companion_path, companion_format, companion_size "
+        "FROM photos WHERE library_id = ?",
+        (library_id,),
+    ) as cur:
+        rows = list(await cur.fetchall())
+
+    updates: list[
+        tuple[
+            str,
+            str | None,
+            str | None,
+            int | None,
+            str,
+        ]
+    ] = []
+    matched = 0
+    relinked_companions = 0
+
+    for row in rows:
+        old_path = Path(str(row["file_path"]))
+        rel = _relative_to_root(old_path, previous_root)
+        if rel is None:
+            continue
+
+        next_path = new_root / rel
+        try:
+            if next_path.exists() and next_path.stat().st_size == int(row["file_size"]):
+                matched += 1
+        except OSError:
+            pass
+
+        companion_path: str | None = (
+            str(row["companion_path"]) if row["companion_path"] is not None else None
+        )
+        companion_format: str | None = (
+            str(row["companion_format"]) if row["companion_format"] is not None else None
+        )
+        companion_size: int | None = (
+            int(row["companion_size"]) if row["companion_size"] is not None else None
+        )
+        if companion_path is not None:
+            companion_rel = _relative_to_root(Path(companion_path), previous_root)
+            if companion_rel is not None:
+                next_companion = new_root / companion_rel
+                companion_path = str(next_companion)
+                companion_format = _format_from_path(next_companion, row["companion_format"])
+                try:
+                    if next_companion.exists():
+                        companion_size = next_companion.stat().st_size
+                        relinked_companions += 1
+                except OSError:
+                    pass
+
+        updates.append(
+            (
+                str(next_path),
+                companion_path,
+                companion_format,
+                companion_size,
+                str(row["id"]),
+            )
+        )
+
+    if rows:
+        relinkable = len(updates)
+        if relinkable == 0 or matched == 0:
+            raise HTTPException(
+                status_code=400,
+                detail="New folder does not appear to contain this library's photos",
+            )
+        if relinkable >= 5 and matched / relinkable < 0.5:
+            raise HTTPException(
+                status_code=400,
+                detail="New folder only matches a small part of this library",
+            )
+
+    try:
+        await db.conn.execute("BEGIN IMMEDIATE")
+        await db.conn.execute(
+            "UPDATE libraries SET parent_path = ?, root_path = ?, status = ?, "
+            "last_opened_at = ? WHERE id = ?",
+            (
+                str(new_root.parent),
+                new_root_path,
+                LibraryStatus.READY.value,
+                _now_iso(),
+                library_id,
+            ),
+        )
+        for next_path, companion_path, companion_format, companion_size, photo_id in updates:
+            await db.conn.execute(
+                "UPDATE photos SET file_path = ?, companion_path = ?, companion_format = ?, "
+                "companion_size = ? WHERE id = ?",
+                (next_path, companion_path, companion_format, companion_size, photo_id),
+            )
+        await db.conn.commit()
+    except sqlite3.IntegrityError as e:
+        await db.conn.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="Relinked paths conflict with existing photos",
+        ) from e
+    except Exception:
+        await db.conn.rollback()
+        await logger.aexception("Library relink failed", library_id=library_id)
+        raise HTTPException(status_code=500, detail="Relink failed") from None
+
+    summary = await _fetch_library_summary(db, library_id)
+    assert summary is not None
+    publish_library_event(
+        library_id,
+        "library_updated",
+        {
+            "root_path": summary.root_path,
+            "status": summary.status.value,
+        },
+    )
+    return RelinkLibraryResponse(
+        library=summary,
+        previous_root_path=previous_root_path,
+        matched_photos=matched,
+        relinked_photos=len(updates),
+        missing_photos=max(0, len(rows) - matched),
+        relinked_companions=relinked_companions,
+    )
+
+
 @router.patch("/{library_id}", response_model=LibrarySummary)
 async def update_library(
     request: Request,
@@ -662,12 +881,22 @@ async def update_library(
 
 
 @router.get("/{library_id}", response_model=LibraryDetail)
-async def library_detail(request: Request, library_id: str) -> LibraryDetail:
-    """GET /library/{id} — summary + photos."""
+async def library_detail(
+    request: Request,
+    library_id: str,
+    limit: int | None = Query(default=None, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+) -> LibraryDetail:
+    """GET /library/{id} — summary + photos.
+
+    默认保持旧契约一次返回全量照片。传入 limit/offset 时按
+    `(library_id, file_mtime)` 索引分页,为大图库前端逐步迁移做准备。
+    """
     db = await _db(request)
     summary = await _fetch_library_summary(db, library_id)
     if summary is None:
         raise HTTPException(status_code=404, detail="Library not found")
+    photo_total = summary.total_count
 
     # task_queue 一张 photo 可能存在多行(老的 dead/failed/completed + 新的 pending),
     # 直接 LEFT JOIN 会让 photos 出现重复。挑最新一行(rowid 最大)子查询:
@@ -675,7 +904,7 @@ async def library_detail(request: Request, library_id: str) -> LibraryDetail:
     #     或 pending(无 result)的 fallback,不影响正确性
     #   - photo 有多行 task → 取最新那行的 status/error_message,
     #     更准确反映"用户最近一次 batch 的结果"
-    async with db.conn.execute(
+    select_from_sql = (
         "SELECT p.id, p.file_path, p.file_name, p.format, p.width, p.height, "
         "p.thumb_grid, p.thumb_preview, p.created_at, p.file_mtime, p.exif_json, "
         "p.scene_id, p.companion_path, p.companion_format, p.companion_size, "
@@ -690,11 +919,42 @@ async def library_detail(request: Request, library_id: str) -> LibraryDetail:
         "LEFT JOIN task_queue tq ON tq.rowid = ("
         "    SELECT MAX(rowid) FROM task_queue WHERE photo_id = p.id"
         ") "
-        "WHERE p.library_id = ? "
-        "ORDER BY p.file_mtime ASC",
-        (library_id,),
-    ) as cur:
-        rows = await cur.fetchall()
+    )
+    order_by_sql = "ORDER BY p.file_mtime ASC, p.id ASC"
+    sql = select_from_sql + f"WHERE p.library_id = ? {order_by_sql}"
+    params: tuple[object, ...]
+    if limit is not None:
+        sql += " LIMIT ? OFFSET ?"
+        params = (library_id, limit, offset)
+    else:
+        params = (library_id,)
+    async with db.conn.execute(sql, params) as cur:
+        rows = list(await cur.fetchall())
+
+    context_rows = rows
+    if limit is not None:
+        # Group consensus is computed at read time and needs all photos in the
+        # same scene, otherwise a page boundary can hide the votes that should
+        # upgrade model_unconfirmed/conflict rows.  Keep pagination cheap by
+        # expanding only the scene groups touched by this page.
+        scene_ids = sorted({int(row["scene_id"]) for row in rows if row["scene_id"] is not None})
+        if scene_ids:
+            placeholders = ",".join("?" for _ in scene_ids)
+            async with db.conn.execute(
+                select_from_sql
+                + (f"WHERE p.library_id = ? AND p.scene_id IN ({placeholders}) {order_by_sql}"),
+                (library_id, *scene_ids),
+            ) as cur:
+                expanded_rows = list(await cur.fetchall())
+            seen_ids: set[str] = set()
+            merged_rows = []
+            for row in [*rows, *expanded_rows]:
+                photo_id = str(row["id"])
+                if photo_id in seen_ids:
+                    continue
+                seen_ids.add(photo_id)
+                merged_rows.append(row)
+            context_rows = merged_rows
 
     import json as _json
 
@@ -828,22 +1088,31 @@ async def library_detail(request: Request, library_id: str) -> LibraryDetail:
     def _extract_detection_details(
         result_json: object,
         overrides: list[SpeciesOverrideRecord],
-    ) -> tuple[list[BirdDetectionDetail] | None, BestDetection | None]:
+    ) -> tuple[
+        list[BirdDetectionDetail] | None,
+        BestDetection | None,
+        str | None,
+        str | None,
+    ]:
         """Extract all detected birds and apply manual species overrides.
 
         Manual overrides 的匹配按 bbox IoU 做（_match_overrides_to_detections） —
         bird_index 不再是稳定 ID（详见该 helper 注释）。
         """
         if not result_json:
-            return None, None
+            return None, None, None, None
         try:
             data = _json.loads(str(result_json))
             detections_raw = data.get("detections") or []
             if not detections_raw:
-                return None, None
+                return None, None, None, None
             best_index = max(
                 range(len(detections_raw)),
                 key=lambda i: _detection_score(detections_raw[i]),
+            )
+            model_species, model_latin, _manual = _display_species(
+                detections_raw[best_index],
+                None,
             )
             matched_overrides = _match_overrides_to_detections(detections_raw, overrides)
             detections = [
@@ -856,37 +1125,24 @@ async def library_detail(request: Request, library_id: str) -> LibraryDetail:
                 for i, d in enumerate(detections_raw)
             ]
             best = detections[best_index]
-            return detections, BestDetection.model_validate(best.model_dump())
-        except Exception:
-            return None, None
-
-    def _extract_model_species(result_json: object) -> tuple[str | None, str | None]:
-        """Extract raw model species for the best detection, ignoring manual/group layers."""
-        if not result_json:
-            return None, None
-        try:
-            data = _json.loads(str(result_json))
-            detections_raw = data.get("detections") or []
-            if not detections_raw:
-                return None, None
-            best_index = max(
-                range(len(detections_raw)),
-                key=lambda i: _detection_score(detections_raw[i]),
+            return (
+                detections,
+                BestDetection.model_validate(best.model_dump()),
+                model_species,
+                model_latin,
             )
-            species, latin, _manual = _display_species(detections_raw[best_index], None)
-            return species, latin
         except Exception:
-            return None, None
+            return None, None, None, None
 
-    species_overrides = await list_species_overrides(db, library_id)
+    override_photo_ids = [str(row["id"]) for row in context_rows] if limit is not None else None
+    species_overrides = await list_species_overrides(db, library_id, override_photo_ids)
 
-    photos: list[PhotoRow] = []
-    for r in rows:
-        details, best = _extract_detection_details(
+    photo_by_id: dict[str, PhotoRow] = {}
+    for r in context_rows:
+        details, best, model_species, model_species_latin = _extract_detection_details(
             r["result_json"],
             species_overrides.get(str(r["id"]), []),
         )
-        model_species, model_species_latin = _extract_model_species(r["result_json"])
         effective_species = (
             best.species
             if best and best.species
@@ -918,60 +1174,66 @@ async def library_detail(request: Request, library_id: str) -> LibraryDetail:
         if analysis_status == "failed" and r["task_error"] is not None:
             analysis_error = str(r["task_error"])
             analysis_error_code = _classify_analysis_error(analysis_error)
-        photos.append(
-            PhotoRow(
-                id=str(r["id"]),
-                file_path=str(r["file_path"]),
-                file_name=str(r["file_name"]),
-                format=(str(r["format"]) if r["format"] is not None else None),
-                width=(int(r["width"]) if r["width"] is not None else None),
-                height=(int(r["height"]) if r["height"] is not None else None),
-                thumb_grid=(str(r["thumb_grid"]) if r["thumb_grid"] is not None else None),
-                thumb_preview=(str(r["thumb_preview"]) if r["thumb_preview"] is not None else None),
-                companion_path=(
-                    str(r["companion_path"]) if r["companion_path"] is not None else None
-                ),
-                companion_format=(
-                    str(r["companion_format"]) if r["companion_format"] is not None else None
-                ),
-                companion_size=(
-                    int(r["companion_size"]) if r["companion_size"] is not None else None
-                ),
-                country=(str(r["country"]) if r["country"] is not None else None),
-                province=(str(r["province"]) if r["province"] is not None else None),
-                city=(str(r["city"]) if r["city"] is not None else None),
-                district=(str(r["district"]) if r["district"] is not None else None),
-                place=(str(r["place"]) if r["place"] is not None else None),
-                created_at=str(r["created_at"]),
-                shot_at=_resolve_shot_at(r),
-                scene_id=(int(r["scene_id"]) if r["scene_id"] is not None else None),
-                pipeline_version=(
-                    str(r["pipeline_version"]) if r["pipeline_version"] is not None else None
-                ),
-                grade=(str(r["grade"]) if r["grade"] is not None else None),
-                quality_score=(
-                    float(r["quality_score"]) if r["quality_score"] is not None else None
-                ),
-                bird_count=(int(r["bird_count"]) if r["bird_count"] is not None else None),
-                species=effective_species,
-                species_latin=effective_species_latin,
-                manual_species=manual_species,
-                species_source=species_source,
-                model_species=model_species,
-                model_species_latin=model_species_latin,
-                decision=(str(r["decision"]) if r["decision"] is not None else None),
-                analysis_status=analysis_status,
-                analysis_error_code=analysis_error_code,
-                analysis_error=analysis_error,
-                exif=_parse_exif(r["exif_json"]),
-                best_detection=best,
-                detections=details,
-            )
+        photo = PhotoRow(
+            id=str(r["id"]),
+            file_path=str(r["file_path"]),
+            file_name=str(r["file_name"]),
+            format=(str(r["format"]) if r["format"] is not None else None),
+            width=(int(r["width"]) if r["width"] is not None else None),
+            height=(int(r["height"]) if r["height"] is not None else None),
+            thumb_grid=(str(r["thumb_grid"]) if r["thumb_grid"] is not None else None),
+            thumb_preview=(str(r["thumb_preview"]) if r["thumb_preview"] is not None else None),
+            companion_path=(str(r["companion_path"]) if r["companion_path"] is not None else None),
+            companion_format=(
+                str(r["companion_format"]) if r["companion_format"] is not None else None
+            ),
+            companion_size=(int(r["companion_size"]) if r["companion_size"] is not None else None),
+            country=(str(r["country"]) if r["country"] is not None else None),
+            province=(str(r["province"]) if r["province"] is not None else None),
+            city=(str(r["city"]) if r["city"] is not None else None),
+            district=(str(r["district"]) if r["district"] is not None else None),
+            place=(str(r["place"]) if r["place"] is not None else None),
+            created_at=str(r["created_at"]),
+            shot_at=_resolve_shot_at(r),
+            scene_id=(int(r["scene_id"]) if r["scene_id"] is not None else None),
+            pipeline_version=(
+                str(r["pipeline_version"]) if r["pipeline_version"] is not None else None
+            ),
+            grade=(str(r["grade"]) if r["grade"] is not None else None),
+            quality_score=(float(r["quality_score"]) if r["quality_score"] is not None else None),
+            bird_count=(int(r["bird_count"]) if r["bird_count"] is not None else None),
+            species=effective_species,
+            species_latin=effective_species_latin,
+            manual_species=manual_species,
+            species_source=species_source,
+            model_species=model_species,
+            model_species_latin=model_species_latin,
+            decision=(str(r["decision"]) if r["decision"] is not None else None),
+            analysis_status=analysis_status,
+            analysis_error_code=analysis_error_code,
+            analysis_error=analysis_error,
+            exif=_parse_exif(r["exif_json"]),
+            best_detection=best,
+            detections=details,
         )
+        photo_by_id[photo.id] = photo
 
-    _apply_group_species_consensus(photos)
+    _apply_group_species_consensus(list(photo_by_id.values()))
+    page_ids = [str(row["id"]) for row in rows]
+    photos = [photo_by_id[photo_id] for photo_id in page_ids if photo_id in photo_by_id]
 
-    return LibraryDetail(library=summary, photos=photos)
+    next_offset = None
+    if limit is not None and offset + len(rows) < photo_total:
+        next_offset = offset + len(rows)
+
+    return LibraryDetail(
+        library=summary,
+        photos=photos,
+        photo_total=photo_total,
+        photo_offset=offset,
+        photo_limit=limit,
+        next_offset=next_offset,
+    )
 
 
 @router.post("/photo/{photo_id}/thumbnail", status_code=200)

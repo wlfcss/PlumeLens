@@ -10,7 +10,7 @@
 
 <p align="center">
   <a href="https://github.com/wlfcss/PlumeLens/actions/workflows/mac-build.yml"><img alt="macOS build" src="https://github.com/wlfcss/PlumeLens/actions/workflows/mac-build.yml/badge.svg"></a>
-  <img alt="version" src="https://img.shields.io/badge/version-0.5.0-white">
+  <img alt="version" src="https://img.shields.io/badge/version-0.6.0-white">
   <img alt="platform" src="https://img.shields.io/badge/platform-macOS%20arm64-111111">
   <img alt="local inference" src="https://img.shields.io/badge/inference-local-74F69C">
   <a href="LICENSE"><img alt="license" src="https://img.shields.io/badge/license-GPL--3.0-FFD45A"></a>
@@ -30,6 +30,7 @@
 | 鸟种识别容易受角度影响   | DINOv3 species v3 给出候选，组内共识修正常见偏差 |
 | 选完以后还要整理输出     | 支持按文件夹别名导出、JPG/RAW 同伴文件、中文报告 |
 | 拍过哪些鸟很难长期沉淀   | 羽迹模块按物种、保护等级和地理位置形成长期图鉴   |
+| 源文件夹改名或挪走       | 保留缓存与筛选结果，提示重新关联新的源路径       |
 
 核心原则很朴素：**照片分析在本地完成，用户照片目录只读，人工判断永远优先于模型判断。**
 
@@ -39,6 +40,14 @@
 | ----------------------------------------------- | ------------------------------------------------------- | --------------------------------------------------- |
 | ![Start screen](assets/readme/start-screen.png) | ![Selection screen](assets/readme/selection-screen.png) | ![Archive screen](assets/readme/archive-screen.png) |
 
+## 0.6.0 更新重点
+
+- **源文件夹失联保护**：图库根目录被改名或挪走时标记为失联，缓存缩略图、评分和人工筛选结果仍可查看；分析、导出和外部编辑会暂停，用户可在界面中重新关联新路径。
+- **导出链路稳定化**：导出会话锁定启动时的文件夹快照，切换工作集不会改变正在导出的内容；支持多文件夹并行导出、收起侧栏、JPG/RAW companion、XMP sidecar 与中文报告。
+- **羽迹地理分布重构**：只统计有效入羽迹照片，按物理地点合并拍摄点，地点详情支持鸟种筛选，地图 tooltip 做 HTML escape。
+- **深度复核与外部编辑**：复核图像支持倍率选择、拖动、全屏查看；Topaz / Photoshop 检测与启动路径更稳。
+- **性能与可靠性**：大列表虚拟化、地图按需加载、缩略图缺失自动修复、IQA 非有限分数防护、队列并发和暂停/取消状态机修复。
+
 ## 核心能力
 
 - **本地 hybrid 推理**：ONNX Runtime 负责 YOLO 检测、姿态/可见性、双 IQA 画质评估；torch/transformers 负责 DINOv3 鸟种识别。
@@ -47,6 +56,7 @@
 - **场景共识**：同一场景内的单鸟照片可互相校正物种结果，降低单张照片角度/遮挡导致的误识别。
 - **导出工作流**：多文件夹并行导出，支持合并导出与按评级分类导出，JPG/RAW companion 同步复制，附中文 manifest/CSV 报告。
 - **羽迹图鉴**：1535 种物种墙、保护等级分组、物种详情、本地百科、拍摄时间线和地理分布。
+- **文件夹重关联**：源文件夹失联时可选择移动/改名后的新目录，保留既有照片身份、分析结果、人工决策和缩略图。
 - **桌面集成**：最近文件夹、Finder 打开、Topaz / Photoshop 外部编辑入口、macOS arm64 自动构建。
 
 ## 模型管线
@@ -124,6 +134,8 @@ PlumeLens 的模型不是一个单点分类器，而是一条以摄影筛选为�
 6. **导出交付**：合并导出为 `文件夹/照片`，或按评级分类为 `文件夹/评级/照片`。
 7. **沉淀羽迹**：跨文件夹查看已点亮鸟种、保护等级和拍摄地点。
 
+如果源文件夹被改名或移动，PlumeLens 会把工作集标记为 `路径失效`。此时历史缩略图和筛选结果仍可浏览；重新关联到移动后的目录后，原 photo id、分析记录、人工评级、人工鸟种和场景分组都会继续沿用。
+
 ## 开发启动
 
 ### 前置要求
@@ -187,7 +199,8 @@ GitHub Actions 当前只保留 macOS arm64 自动构建流程：
 ## 项目状态
 
 - 已完成：本地 hybrid 推理、选片工作台、深度复核、导出、羽迹物种墙、地理分布、macOS arm64 自动构建。
-- 持续优化：大图库性能、App.tsx 拆分、导出体验、连拍/场景业务讨论。
+- 已完成：源文件夹失联检测与重新关联、导出快照锁定、JPG/RAW/XMP 导出、中文报告、大列表虚拟化、缩略图自动修复。
+- 持续优化：App.tsx 拆分、连拍/场景业务讨论、更多真实相机样张覆盖。
 - 待验证：Windows 打包、更多相机品牌的 AF 对焦点解析、更多 RAW 组合样本。
 
 ## 许可证与模型版权

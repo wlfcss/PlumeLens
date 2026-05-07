@@ -55,7 +55,7 @@ def main() -> None:
     print(f"Total head slots: {len(all_sci)}")
     print(f"Trained species:  {len(trained_sci)}")
     print(f"Untrained slots:  {len(untrained_sci)}")
-    print(f"\nHead-weight L2 norm distribution:")
+    print("\nHead-weight L2 norm distribution:")
     print(f"  min={per_class_norm.min():.3f}, max={per_class_norm.max():.3f}")
     print(f"  median={np.median(per_class_norm):.3f}, threshold={NORM_THRESHOLD}")
 

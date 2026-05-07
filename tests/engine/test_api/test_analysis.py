@@ -212,6 +212,40 @@ class TestBatch:
         tasks = resp.json()
         assert len(tasks) == 2
 
+    async def test_batch_rejects_missing_source_root(self, client_with_lib) -> None:
+        client, lib_id, db, _ = client_with_lib
+        async with db.conn.execute(
+            "SELECT root_path FROM libraries WHERE id = ?",
+            (lib_id,),
+        ) as cur:
+            row = await cur.fetchone()
+        root = Path(str(row["root_path"]))
+        await asyncio.to_thread(root.rename, root.with_name("lib-moved"))
+
+        resp = await client.post("/analysis/batch", json={"library_id": lib_id})
+        assert resp.status_code == 409
+        assert "relink" in resp.json()["detail"]
+
+        detail = await client.get(f"/library/{lib_id}")
+        assert detail.json()["library"]["status"] == "path_missing"
+
+    async def test_batch_recovers_path_missing_when_source_root_returns(
+        self,
+        client_with_lib,
+    ) -> None:
+        client, lib_id, db, _ = client_with_lib
+        await db.conn.execute(
+            "UPDATE libraries SET status = 'path_missing' WHERE id = ?",
+            (lib_id,),
+        )
+        await db.conn.commit()
+
+        resp = await client.post("/analysis/batch", json={"library_id": lib_id})
+        assert resp.status_code == 200
+
+        detail = await client.get(f"/library/{lib_id}")
+        assert detail.json()["library"]["status"] in {"analyzing_partial", "ready"}
+
 
 class TestLifecycle:
     async def test_cancel(self, client_with_lib) -> None:

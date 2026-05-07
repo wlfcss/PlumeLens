@@ -9,7 +9,8 @@
     "selection": "选片",
     "archive": "羽迹",
     "primary": "主导航",
-    "search": "搜索文件夹、文件名或物种"
+    "search": "搜索文件夹、文件名或物种",
+    "loadingDisabled": "本地引擎加载完成后可用"
   },
   "common": {
     "export": "导出",
@@ -160,6 +161,16 @@
       "label": "文件夹操作",
       "openInFinder": "在 Finder 中打开"
     },
+    "sourceMissing": {
+      "short": "失联",
+      "title": "源文件夹已失联",
+      "body": "可以继续查看缓存的缩略图、评分和人工筛选结果；分析、导出和外部编辑需要先重新关联源文件夹。",
+      "relinkAction": "重新关联",
+      "relinking": "关联中…",
+      "relinkFailed": "关联失败：请选择原图库移动或改名后的文件夹。",
+      "disabledTooltip": "源文件夹失联，重新关联后可用",
+      "exportDisabled": "源文件夹失联，重新关联后可导出"
+    },
     "report": {
       "label": "文件夹报告",
       "title": "当前文件夹整体概览",
@@ -307,6 +318,7 @@
       "openInPhotoshop": "Photoshop",
       "error": {
         "not_installed": "未检测到外部编辑器",
+        "source_missing": "源文件夹已失联，重新关联后可外部编辑",
         "file_missing": "目标文件已不存在",
         "app_missing": "编辑器启动文件不存在",
         "spawn_failed": "启动外部编辑器失败"
@@ -539,7 +551,10 @@
     },
     "result": {
       "output": "输出目录",
-      "stats": "已导出 {{exported}} 张，附带 {{companions}} 个同伴文件，失败 {{failed}} 张"
+      "openFolder": "在 Finder 中打开",
+      "openFailed": "无法打开输出目录，请检查目录是否仍然存在",
+      "reset": "新建导出",
+      "stats": "已导出 {{exported}} 张，附带 {{companions}} 个同伴文件，生成 {{xmp}} 个 XMP，失败 {{failed}} 张"
     },
     "scope": {
       "label": "导出范围",
@@ -554,6 +569,24 @@
     "structure": {
       "label": "目录结构",
       "keep": "保留原始目录结构"
+    },
+    "content": {
+      "label": "导出内容",
+      "files": {
+        "label": "照片文件",
+        "short": "照片",
+        "hint": "复制符合条件的 JPG/RAW 文件"
+      },
+      "files_xmp": {
+        "label": "照片 + XMP",
+        "short": "照片 + XMP",
+        "hint": "复制照片，并在旁边生成编辑器可读的评级文件"
+      },
+      "xmp_only": {
+        "label": "仅 XMP",
+        "short": "XMP 清单",
+        "hint": "不复制照片，只生成镜像结构的 XMP sidecar 包"
+      }
     },
     "layout": {
       "label": "导出方式",

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import TypeAlias
 
 import numpy as np
@@ -18,6 +19,7 @@ OrtSession: TypeAlias = object  # onnxruntime.InferenceSession
 # （CLIPIQA+ 用 CLIP mean/std，HyperIQA 用 ImageNet mean/std）。
 # 这里仅负责把任意 crop 变成 raw RGB 0-1 的 224×224 tensor。
 IQA_INPUT_SIZE = 224
+IQA_NONFINITE_FALLBACK_SCORE = 0.5
 
 
 def _preprocess_for_iqa(crop: NDArray[np.float32]) -> NDArray[np.float32]:
@@ -27,6 +29,12 @@ def _preprocess_for_iqa(crop: NDArray[np.float32]) -> NDArray[np.float32]:
     arr = np.asarray(pil, dtype=np.float32) / 255.0
     chw = np.ascontiguousarray(arr.transpose(2, 0, 1))
     return chw[np.newaxis, ...]
+
+
+def _sanitize_iqa_score(value: float) -> float:
+    if not math.isfinite(value):
+        return IQA_NONFINITE_FALLBACK_SCORE
+    return max(0.0, min(1.0, value))
 
 
 class QualityAssessor:
@@ -92,9 +100,10 @@ class QualityAssessor:
         )
         hyper_score = float(hyper_out[0].flat[0])
 
-        # Clamp scores to [0, 1]
-        clip_score = max(0.0, min(1.0, clip_score))
-        hyper_score = max(0.0, min(1.0, hyper_score))
+        # Clamp scores to [0, 1]. NaN/Inf must be handled before max/min:
+        # Python comparisons leave NaN untouched, which would poison grading.
+        clip_score = _sanitize_iqa_score(clip_score)
+        hyper_score = _sanitize_iqa_score(hyper_score)
 
         combined = self._clipiqa_weight * clip_score + self._hyperiqa_weight * hyper_score
 

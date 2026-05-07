@@ -404,6 +404,30 @@ class TestStuckSweeper:
         assert t is not None
         assert t.status is TaskStatus.DEAD  # 不再无限重试
 
+    async def test_task_moved_by_worker_during_sweep_is_not_counted(
+        self,
+        db_with_photos: Database,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        db = db_with_photos
+        await enqueue_photos(db, "lib-1", ["photo-0"])
+        task_id = (await list_tasks(db))[0].id
+        await transition(db, task_id, TaskStatus.PROCESSING)
+        await db.conn.execute(
+            "UPDATE task_queue SET started_at = '2020-01-01T00:00:00+00:00' WHERE id = ?",
+            (task_id,),
+        )
+        await db.conn.commit()
+
+        async def already_moved(*_args: object, **_kwargs: object) -> None:
+            raise IllegalTransitionError("already completed")
+
+        monkeypatch.setattr("engine.services.queue.mark_failed_with_retry", already_moved)
+
+        handled = await mark_stuck_tasks_failed(db, threshold_sec=300)
+
+        assert handled == 0
+
 
 class TestBatchOps:
     async def test_pause_resume_library(

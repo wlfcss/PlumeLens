@@ -57,6 +57,23 @@ class TestQualityAssessor:
         assert scores.clipiqa == 1.0
         assert scores.hyperiqa == 0.0
 
+    def test_nonfinite_scores_fall_back_to_neutral(self) -> None:
+        clipiqa_session = _make_iqa_session(float("nan"), (1, 1))
+        hyperiqa_session = _make_iqa_session(float("inf"), (1, 1, 1))
+        assessor = QualityAssessor(
+            clipiqa_session,
+            hyperiqa_session,
+            clipiqa_weight=0.35,
+            hyperiqa_weight=0.65,
+        )
+
+        crop = np.random.rand(50, 50, 3).astype(np.float32)
+        scores = assessor.assess(crop)
+
+        assert scores.clipiqa == pytest.approx(0.5)
+        assert scores.hyperiqa == pytest.approx(0.5)
+        assert scores.combined == pytest.approx(0.5)
+
     def test_equal_weights(self) -> None:
         clipiqa_session = _make_iqa_session(0.5, (1, 1))
         hyperiqa_session = _make_iqa_session(0.5, (1, 1, 1))

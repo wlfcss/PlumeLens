@@ -20,7 +20,9 @@ class ExportLibraryRequest(BaseModel):
     )
     min_score: float | None = Field(default=None, ge=0, le=100)
     max_score: float | None = Field(default=None, ge=0, le=100)
+    copy_files: bool = True
     include_companions: bool = True
+    include_xmp_sidecars: bool = False
     layout: ExportLayout = "merged"
     preserve_structure: bool = True
     include_manifest: bool = True
@@ -43,6 +45,9 @@ class ExportLibraryRequest(BaseModel):
         ):
             msg = "min_score must be <= max_score"
             raise ValueError(msg)
+        if not self.copy_files and not self.include_xmp_sidecars:
+            msg = "At least one of copy_files or include_xmp_sidecars must be enabled"
+            raise ValueError(msg)
         return self
 
 
@@ -59,6 +64,7 @@ class ExportLibraryResponse(BaseModel):
     selected_count: int
     exported_count: int
     companion_count: int
+    xmp_count: int = 0
     skipped_missing: int
     failed_count: int
     manifest: ExportManifestPaths

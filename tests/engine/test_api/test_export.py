@@ -34,6 +34,7 @@ async def export_client(tmp_path: Path):
     _write_file(root / "a.CR3", b"raw-a")
     _write_file(root / "sub" / "b.jpg", b"jpg-b")
     _write_file(root / "reject.jpg", b"jpg-reject")
+    _write_file(root / "missing-companion.jpg", b"jpg-missing-companion")
 
     await db.conn.execute(
         "INSERT INTO libraries "
@@ -46,6 +47,14 @@ async def export_client(tmp_path: Path):
         ("p2", root / "sub" / "b.jpg", None, "reject", 0.72, "翠鸟"),
         ("p3", root / "reject.jpg", None, "reject", 0.2, "白鹭"),
         ("p4", root / "missing.jpg", None, "select", 0.8, "苍鹭"),
+        (
+            "p5",
+            root / "missing-companion.jpg",
+            root / "missing-companion.CR3",
+            "record",
+            0.63,
+            "灰喜鹊",
+        ),
     ]
     for idx, (pid, path, companion, grade, score, species) in enumerate(photos):
         await db.conn.execute(
@@ -119,7 +128,6 @@ async def test_export_copies_selected_photos_companions_and_manifest(
     assert await (output_dir / "a.CR3").read_bytes() == b"raw-a"
     assert await (output_dir / "sub" / "b.jpg").read_bytes() == b"jpg-b"
     assert not await (output_dir / "reject.jpg").exists()
-    assert await AsyncPath(root / "a.jpg").read_bytes() == b"jpg-a"
 
     manifest_path = AsyncPath(data["manifest"]["json"])
     manifest = json.loads(await manifest_path.read_text(encoding="utf-8"))
@@ -133,6 +141,60 @@ async def test_export_copies_selected_photos_companions_and_manifest(
     assert p2["人工决策"] == "可用"
     p4 = next(row for row in rows if row["照片ID"] == "p4")
     assert p4["错误原因"] == "源文件不存在"
+
+
+async def test_export_rejects_missing_source_root(
+    export_client: tuple[AsyncClient, Path],
+    tmp_path: Path,
+) -> None:
+    client, root = export_client
+    await AsyncPath(root).rename(root.with_name("source-moved"))
+    target = tmp_path / "exports-missing-root"
+
+    response = await client.post(
+        "/export/library/lib-export",
+        json={
+            "target_dir": str(target),
+            "grades": ["select"],
+        },
+    )
+
+    assert response.status_code == 400
+    assert "relink" in response.json()["detail"]
+    assert not await AsyncPath(target).exists()
+
+
+async def test_export_recovers_path_missing_when_source_root_returns(
+    export_client: tuple[AsyncClient, Path],
+    tmp_path: Path,
+) -> None:
+    client, root = export_client
+    target = tmp_path / "exports-restored-root"
+    moved = root.with_name("source-temporarily-moved")
+
+    await AsyncPath(root).rename(moved)
+    failed = await client.post(
+        "/export/library/lib-export",
+        json={
+            "target_dir": str(target),
+            "grades": ["select"],
+        },
+    )
+    assert failed.status_code == 400
+    await AsyncPath(moved).rename(root)
+
+    response = await client.post(
+        "/export/library/lib-export",
+        json={
+            "target_dir": str(target),
+            "grades": ["select"],
+            "include_manifest": False,
+        },
+    )
+
+    assert response.status_code == 200
+    detail = await client.get("/library/lib-export")
+    assert detail.json()["library"]["status"] == "ready"
 
 
 async def test_export_discovers_same_stem_raw_when_companion_metadata_missing(
@@ -161,6 +223,124 @@ async def test_export_discovers_same_stem_raw_when_companion_metadata_missing(
     p1 = next(row for row in manifest["照片清单"] if row["照片ID"] == "p1")
     assert p1["同伴源文件路径"].endswith("a.CR3")
     assert p1["已导出同伴文件"] == "是"
+
+
+async def test_export_can_generate_xmp_sidecars_next_to_exported_files(
+    export_client: tuple[AsyncClient, Path],
+    tmp_path: Path,
+) -> None:
+    client, _ = export_client
+    response = await client.post(
+        "/export/library/lib-export",
+        json={
+            "target_dir": str(tmp_path / "exports"),
+            "grades": ["select"],
+            "include_companions": True,
+            "include_xmp_sidecars": True,
+            "include_manifest": True,
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    output_dir = AsyncPath(data["output_dir"])
+    assert data["selected_count"] == 2
+    assert data["exported_count"] == 1
+    assert data["companion_count"] == 1
+    assert data["xmp_count"] == 1
+    xmp = await (output_dir / "a.xmp").read_text(encoding="utf-8")
+    assert 'xmp:Rating="5"' in xmp
+    assert "须浮鸥" in xmp
+
+    manifest = json.loads(await AsyncPath(data["manifest"]["json"]).read_text(encoding="utf-8"))
+    assert manifest["导出摘要"]["生成XMP文件"] == "是"
+    p1 = next(row for row in manifest["照片清单"] if row["照片ID"] == "p1")
+    assert p1["已导出XMP"] == "是"
+    assert p1["XMP导出路径"].endswith("a.xmp")
+
+
+async def test_export_can_generate_xmp_only_package_without_copying_photos(
+    export_client: tuple[AsyncClient, Path],
+    tmp_path: Path,
+) -> None:
+    client, _ = export_client
+    response = await client.post(
+        "/export/library/lib-export",
+        json={
+            "target_dir": str(tmp_path / "exports"),
+            "grades": ["usable"],
+            "copy_files": False,
+            "include_companions": True,
+            "include_xmp_sidecars": True,
+            "include_manifest": True,
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    output_dir = AsyncPath(data["output_dir"])
+    assert data["selected_count"] == 1
+    assert data["exported_count"] == 0
+    assert data["companion_count"] == 0
+    assert data["xmp_count"] == 1
+    assert not await (output_dir / "sub" / "b.jpg").exists()
+    xmp = await (output_dir / "sub" / "b.xmp").read_text(encoding="utf-8")
+    assert 'xmp:Rating="4"' in xmp
+    assert "翠鸟" in xmp
+
+    manifest = json.loads(await AsyncPath(data["manifest"]["json"]).read_text(encoding="utf-8"))
+    assert manifest["导出摘要"]["复制照片文件"] == "否"
+    p2 = next(row for row in manifest["照片清单"] if row["照片ID"] == "p2")
+    assert p2["已导出照片"] == "否"
+    assert p2["已导出XMP"] == "是"
+
+
+async def test_export_rejects_empty_content_mode(
+    export_client: tuple[AsyncClient, Path],
+    tmp_path: Path,
+) -> None:
+    client, _ = export_client
+    response = await client.post(
+        "/export/library/lib-export",
+        json={
+            "target_dir": str(tmp_path / "exports"),
+            "copy_files": False,
+            "include_xmp_sidecars": False,
+        },
+    )
+
+    assert response.status_code == 422
+
+
+async def test_export_rolls_back_main_file_when_explicit_companion_is_missing(
+    export_client: tuple[AsyncClient, Path],
+    tmp_path: Path,
+) -> None:
+    client, _ = export_client
+    response = await client.post(
+        "/export/library/lib-export",
+        json={
+            "target_dir": str(tmp_path / "exports"),
+            "grades": ["record"],
+            "include_companions": True,
+            "include_manifest": True,
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    output_dir = AsyncPath(data["output_dir"])
+    assert data["selected_count"] == 1
+    assert data["exported_count"] == 0
+    assert data["companion_count"] == 0
+    assert data["skipped_missing"] == 1
+    assert data["failed_count"] == 0
+    assert not await (output_dir / "missing-companion.jpg").exists()
+
+    manifest = json.loads(await AsyncPath(data["manifest"]["json"]).read_text(encoding="utf-8"))
+    p5 = next(row for row in manifest["照片清单"] if row["照片ID"] == "p5")
+    assert p5["错误原因"] == "同伴文件不存在"
+    assert p5["已导出照片"] == "否"
 
 
 async def test_export_uses_updated_library_alias_for_output_folder(

@@ -263,13 +263,29 @@ class PipelineManager:
         else:
             await logger.awarning("HyperIQA not found", path=str(hyperiqa_path))
 
-        if clipiqa_session is not None and hyperiqa_session is not None:
+        clipiqa_loaded = clipiqa_session is not None
+        hyperiqa_loaded = hyperiqa_session is not None
+        if clipiqa_loaded and hyperiqa_loaded:
             self._assessor = QualityAssessor(
                 clipiqa_session=clipiqa_session,
                 hyperiqa_session=hyperiqa_session,
                 clipiqa_weight=self._settings.clipiqa_weight,
                 hyperiqa_weight=self._settings.hyperiqa_weight,
             )
+        elif clipiqa_loaded or hyperiqa_loaded:
+            await logger.awarning(
+                "IQA assessor incomplete — releasing partial sessions",
+                clipiqa_loaded=clipiqa_loaded,
+                hyperiqa_loaded=hyperiqa_loaded,
+            )
+            clipiqa_session = None
+            hyperiqa_session = None
+            self._model_status["clipiqa"] = False
+            self._model_status["hyperiqa"] = False
+            self._model_providers.pop("clipiqa", None)
+            self._model_providers.pop("hyperiqa", None)
+            checksums.pop("clipiqa", None)
+            checksums.pop("hyperiqa", None)
 
         # Strict 模式：IQA 缺失则启动失败，避免用户拿到伪造 0.5 分 / grade=USABLE。
         # 仅 packaged 应用启用（process-manager 注入 PLUMELENS_REQUIRE_IQA=1）。
@@ -278,8 +294,8 @@ class PipelineManager:
                 "IQA assessor not loaded under strict mode — refusing to start",
                 clipiqa_path=str(clipiqa_path),
                 hyperiqa_path=str(hyperiqa_path),
-                clipiqa_loaded=clipiqa_session is not None,
-                hyperiqa_loaded=hyperiqa_session is not None,
+                clipiqa_loaded=clipiqa_loaded,
+                hyperiqa_loaded=hyperiqa_loaded,
             )
             raise RuntimeError(
                 "IQA models required but not loaded "
