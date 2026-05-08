@@ -69,16 +69,16 @@ function detach(mountPoint) {
   }
 }
 
-function applyDmgLayout(mountPoint, volumeName) {
+function applyDmgLayout(mountPoint, volumeName, bgFileName) {
   // AppleScript 通过 Finder 设置窗口外观 + 图标坐标 + 背景图。
   //
   // background picture 的稳定写法是 POSIX file → alias:
-  //   set bg to POSIX file "/Volumes/xxx/.background/background.png" as alias
+  //   set bg to POSIX file "/Volumes/xxx/.background/background.tiff" as alias
   //   set background picture of theViewOptions to bg
   // 直接用 "file '.background:background.png' of disk vol" 这种 Finder 老语法
   // 在 macOS 14+ 会被 Finder 当成"把 disk 设为文件",报"不能将 ... 设置为 ...",
   // 改用 POSIX 绝对路径就稳了。
-  const bgPosixPath = `${mountPoint}/.background/background.png`
+  const bgPosixPath = `${mountPoint}/.background/${bgFileName}`
   const script = `
 on run argv
   set vol to item 1 of argv
@@ -143,22 +143,35 @@ exports.default = async function (context) {
   console.log(`[build-dmg] staging in ${stagingDir}`)
   const volumeName = `鉴翎 ${pkgVersion}`
 
+  // 选择背景图源 — 优先 multi-rep TIFF(retina 用 @2× rep,字体清晰),
+  // tiffutil/sips 缺失时回落到 1× PNG。提到 try 块外 — 验证步骤在 finally
+  // 之后还需要引用 bgDestName。
+  const bgTiff = path.join(__dirname, '..', 'build', 'dmg-background.tiff')
+  const bgPng = path.join(__dirname, '..', 'build', 'dmg-background.png')
+  let bgSrc, bgDestName
+  if (fs.existsSync(bgTiff)) {
+    bgSrc = bgTiff
+    bgDestName = 'background.tiff'
+  } else if (fs.existsSync(bgPng)) {
+    console.log('[build-dmg] HiDPI TIFF missing, falling back to single-rep PNG')
+    bgSrc = bgPng
+    bgDestName = 'background.png'
+  } else {
+    throw new Error(
+      `dmg-background.{tiff,png} missing in build/. ` +
+        `Regenerate via: uv run python scripts/build_dmg_background.py`,
+    )
+  }
+
   try {
     // ditto 保留 ACL/xattr/签名
     execFileSync('ditto', [appPath, path.join(stagingDir, APP_NAME)], { stdio: 'inherit' })
     fs.symlinkSync('/Applications', path.join(stagingDir, 'Applications'))
-
-    // .background 目录 + 背景图
-    const bgSrc = path.join(__dirname, '..', 'build', 'dmg-background.png')
-    if (!fs.existsSync(bgSrc)) {
-      throw new Error(
-        `dmg-background.png missing at ${bgSrc}. ` +
-          `Regenerate via: uv run python scripts/build_dmg_background.py`,
-      )
-    }
     const bgDir = path.join(stagingDir, '.background')
     fs.mkdirSync(bgDir, { recursive: true })
-    fs.copyFileSync(bgSrc, path.join(bgDir, 'background.png'))
+    fs.copyFileSync(bgSrc, path.join(bgDir, bgDestName))
+    // .background 目录权限收紧 — Finder 不需要写权限
+    fs.chmodSync(bgDir, 0o755)
 
     // 1) 创建可读写 UDRW dmg
     console.log(`[build-dmg] hdiutil create UDRW → ${tmpDmg}`)
@@ -184,7 +197,7 @@ exports.default = async function (context) {
     const mountPoint = attachReadWrite(tmpDmg)
     try {
       console.log(`[build-dmg] applying Finder layout at ${mountPoint}`)
-      applyDmgLayout(mountPoint, volumeName)
+      applyDmgLayout(mountPoint, volumeName, bgDestName)
       // sync 确保 .DS_Store 落盘后再 detach,否则窗口配置丢失
       execFileSync('sync')
     } finally {
@@ -225,17 +238,18 @@ exports.default = async function (context) {
       throw new Error(`Electron Framework binary too small (${size}), likely corrupt`)
     }
     // 验证整个 .app 签名仍有效
-    execFileSync(
-      'codesign',
-      ['--verify', '--deep', '--strict', path.join(verifyMount, APP_NAME)],
-      { stdio: 'inherit' },
-    )
+    execFileSync('codesign', ['--verify', '--deep', '--strict', path.join(verifyMount, APP_NAME)], {
+      stdio: 'inherit',
+    })
     // 验证背景图也在 dmg 里
-    const bgInDmg = path.join(verifyMount, '.background', 'background.png')
+    const bgInDmg = path.join(verifyMount, '.background', bgDestName)
     if (!fs.existsSync(bgInDmg)) {
       throw new Error(`DMG background image missing at ${bgInDmg}`)
     }
-    console.log(`[build-dmg] verified: framework ${size} bytes, codesign valid, background present`)
+    console.log(
+      `[build-dmg] verified: framework ${size} bytes, codesign valid, ` +
+        `background ${bgDestName} present`,
+    )
   } finally {
     detach(verifyMount)
   }
