@@ -10,7 +10,7 @@ import structlog
 
 logger = structlog.stdlib.get_logger()
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 # SQL 放在模块常量里便于审阅与测试
 _SCHEMA_STATEMENTS: tuple[str, ...] = (
@@ -378,6 +378,21 @@ class Database:
                 "DB migrated",
                 from_version=prior_version,
                 added="performance_indexes_v9",
+            )
+        if prior_version < 10:
+            # v10:修正学名拼写 — canonical_extended.parquet 历史版本误把 v4
+            # extra 物种 "Lanius giganteus"(IOC/BirdLife/Przevalski 1887 标准)
+            # 拼成 "Lanius giganteu"(少 's')。canonical 表已修正,这里同步修
+            # 用户手动鸟种修正记录里的 sci 字段,避免老 override 与新 sci 不匹配。
+            await self._conn.execute(
+                "UPDATE photo_species_overrides SET canonical_sci = ? "
+                "WHERE canonical_sci = ?",
+                ("Lanius giganteus", "Lanius giganteu"),
+            )
+            await logger.ainfo(
+                "DB migrated",
+                from_version=prior_version,
+                changed="photo_species_overrides.canonical_sci typo fix",
             )
 
     async def get_schema_version(self) -> int:

@@ -348,6 +348,53 @@ class TestMigration:
         finally:
             await db.close()
 
+    async def test_v10_fixes_lanius_giganteu_typo(self, tmp_path: Path) -> None:
+        """v10 migration 把老 override 记录里的 'Lanius giganteu' 改写成 'Lanius giganteus'。
+
+        老用户在 v9 之前如果对青藏楔尾伯劳做过手动修正,记录里 sci 是错的,
+        canonical 表已修正后这条 override 就匹配不到任何当前 detection。
+        migration 上线时要把它原地升级。
+        """
+        import aiosqlite
+
+        db_path = tmp_path / "v9_typo.db"
+
+        # 模拟 v9 库:老 override 行用错拼写
+        async with aiosqlite.connect(str(db_path)) as conn:
+            await conn.execute(
+                "CREATE TABLE photo_species_overrides ("
+                "photo_id TEXT, bird_index INTEGER, "
+                "canonical_sci TEXT, canonical_zh TEXT, canonical_en TEXT, "
+                "bbox_x1 REAL, bbox_y1 REAL, bbox_x2 REAL, bbox_y2 REAL, "
+                "updated_at TEXT NOT NULL, PRIMARY KEY (photo_id, bird_index))"
+            )
+            await conn.execute(
+                "INSERT INTO photo_species_overrides "
+                "(photo_id, bird_index, canonical_sci, updated_at) "
+                "VALUES ('p1', 0, 'Lanius giganteu', '2026-01-01T00:00:00')"
+            )
+            await conn.execute(
+                "INSERT INTO photo_species_overrides "
+                "(photo_id, bird_index, canonical_sci, updated_at) "
+                "VALUES ('p2', 0, 'Cyanistes caeruleus', '2026-01-01T00:00:00')"
+            )
+            await conn.execute("PRAGMA user_version = 9")
+            await conn.commit()
+
+        db = Database(db_path)
+        await db.connect()
+        try:
+            assert await db.get_schema_version() == SCHEMA_VERSION
+            async with db.conn.execute(
+                "SELECT photo_id, canonical_sci FROM photo_species_overrides ORDER BY photo_id"
+            ) as cur:
+                rows = await cur.fetchall()
+            sci_by_photo = {row["photo_id"]: row["canonical_sci"] for row in rows}
+            assert sci_by_photo["p1"] == "Lanius giganteus", "v10 应把 typo 升级"
+            assert sci_by_photo["p2"] == "Cyanistes caeruleus", "其它 sci 不应被动"
+        finally:
+            await db.close()
+
     async def test_idempotent_reconnect(self, tmp_path: Path) -> None:
         """同一库连两次不应炸 — _migrate_from 的 ALTER TABLE 必须靠 'duplicate column'
         suppressor 兜底。这是基础不变量,任何版本都成立。"""
