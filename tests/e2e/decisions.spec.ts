@@ -94,7 +94,8 @@ async function mockBackend(page: Page): Promise<void> {
       openedFinderPaths
     ;(window as unknown as { plumelens: Record<string, unknown> }).plumelens = {
       getBackendUrl: async () => 'http://127.0.0.1:8000',
-      getBackendAuthToken: async () => null,
+      // playwright e2e 走 vite-served renderer,无 preload engineRequest;
+      // api-client 自动走 fallback fetch,本测试不验证 preload 内部。
       getAppVersion: async () => '0.1.0',
       openFolder: async () => null,
       selectExportDirectory: async () => '/tmp/plumelens-export',

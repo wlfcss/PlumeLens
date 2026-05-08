@@ -1,11 +1,12 @@
 import { app, BrowserWindow, ipcMain, dialog, net, protocol, session, shell } from 'electron'
 import { spawn } from 'child_process'
 import { pathToFileURL } from 'url'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
+import { chmodSync, existsSync, mkdirSync, readFileSync } from 'fs'
 import { realpath } from 'fs/promises'
-import { homedir } from 'os'
+import { homedir, platform as osPlatform } from 'os'
 import { join, resolve } from 'path'
 import { ProcessManager } from './process-manager'
+import { mergeUserSettings, readUserSettings, type UserSettings } from './user-settings'
 
 // plumelens:// 协议必须在 app ready 之前注册 scheme（标准 + secure），
 // 之后在 ready 后通过 protocol.handle 真正接管请求。
@@ -322,57 +323,14 @@ ipcMain.handle('open-path-in-finder', async (_event, targetPath: unknown) => {
   return { ok: true as const }
 })
 
-// 用户设置(reverse geocoding API keys 等)— 持久化到 userData/settings.json。
-// process-manager 启动 engine 时读这个文件注入 env var,所以保存后必须重启 engine
-// 才能生效。前端在保存后 invoke restart-engine。
-type UserSettings = {
-  amapKey?: string
-  baiduAk?: string
-  tencentKey?: string
-}
+// 用户设置(reverse geocoding API keys 等)— 持久化到 userData/settings.json,
+// 落盘前每个 key 都过 Electron safeStorage 加密(macOS Keychain / Win DPAPI /
+// Linux libsecret),详见 ./user-settings.ts。process-manager 启动 engine 时
+// 读这个文件解密后注入 env var,保存后须 restart-engine 才生效。
 
-function userSettingsPath(): string {
-  return join(app.getPath('userData'), 'settings.json')
-}
+ipcMain.handle('get-user-settings', () => readUserSettings())
 
-function readUserSettings(): UserSettings {
-  const path = userSettingsPath()
-  if (!existsSync(path)) return {}
-  try {
-    return JSON.parse(readFileSync(path, 'utf-8')) as UserSettings
-  } catch (err) {
-    process.stderr.write(`[main] settings.json parse failed: ${(err as Error).message}\n`)
-    return {}
-  }
-}
-
-function writeUserSettings(settings: UserSettings): void {
-  const path = userSettingsPath()
-  // 先确保 userData 目录存在(应用首次启动 / 数据被清后)
-  try {
-    mkdirSync(app.getPath('userData'), { recursive: true })
-  } catch {
-    /* ignore */
-  }
-  writeFileSync(path, JSON.stringify(settings, null, 2), 'utf-8')
-}
-
-ipcMain.handle('get-user-settings', () => {
-  return readUserSettings()
-})
-
-ipcMain.handle('save-user-settings', (_event, partial: UserSettings) => {
-  // merge: 只更新传入字段,空字符串视为"清掉这个 key"
-  const current = readUserSettings()
-  const merged: UserSettings = { ...current }
-  for (const [key, value] of Object.entries(partial) as [keyof UserSettings, string][]) {
-    if (value === undefined) continue
-    if (value === '') delete merged[key]
-    else merged[key] = value
-  }
-  writeUserSettings(merged)
-  return merged
-})
+ipcMain.handle('save-user-settings', (_event, partial: UserSettings) => mergeUserSettings(partial))
 
 // 重启 engine — settings 修改后调,让新 key 生效
 ipcMain.handle('restart-engine', async () => {
@@ -396,9 +354,44 @@ ipcMain.handle('open-logs-dir', async () => {
   return logsDir
 })
 
+/**
+ * userData 目录访问权限收紧到 owner-only (POSIX 0o700)。
+ *
+ * userData 包含: 鸟摄数据库 (plumelens.db, photos / decisions / archive),
+ * 缩略图 (derived/thumbnails),engine 日志 (logs/engine.jsonl 含路径 / EXIF /
+ * GPS),用户 settings (amapKey/baiduAk/tencentKey 短期还在 plain text JSON 中)。
+ * 默认 macOS userData (`~/Library/Application Support/plumelens`) 是 0o755 — 同
+ * 物理机其他登录账号(共享 Mac 多用户)能读 db 和日志。0o700 让 group/other
+ * 都没有 r/x 权限。
+ *
+ * Windows 没有 POSIX mode,chmod 是 no-op (也不抛),平台统一用同一段代码不分支。
+ * Linux 行为同 macOS。每次启动都强制设回(用户手动 chmod 改了我们再纠回来)。
+ */
+function lockdownUserData(userDataDir: string): void {
+  if (osPlatform() === 'win32') return
+  try {
+    chmodSync(userDataDir, 0o700)
+  } catch (err) {
+    // 不阻塞启动 — userData 目录可能在 NFS / 外置盘 chmod 不支持的情况下报错。
+    // 警告写到 stderr 让用户知道隐私保护没拿满。
+    process.stderr.write(`[main] failed to chmod userData to 0o700: ${(err as Error).message}\n`)
+  }
+}
+
 // Lifecycle
 app.whenReady().then(async () => {
-  const thumbnailsRoot = join(app.getPath('userData'), 'derived', 'thumbnails')
+  // 在写任何文件之前先确保 userData 存在 + 锁权限,避免 settings.json / logs 等
+  // 后续步骤把数据落到默认 0o755 目录上(权限收紧只对未来写入有意义,旧文件
+  // 已经落盘的话需要手动 chmod 一次)。
+  const userDataDir = app.getPath('userData')
+  try {
+    mkdirSync(userDataDir, { recursive: true })
+  } catch {
+    /* parent missing 等极端情况 — 后续具体步骤还会再 mkdir */
+  }
+  lockdownUserData(userDataDir)
+
+  const thumbnailsRoot = join(userDataDir, 'derived', 'thumbnails')
   const rootResolved = resolve(thumbnailsRoot)
   // 启动期一次性算 realpath(thumbnailsRoot) — userData 目录在应用运行期间不会变,
   // 之前每个 plumelens:// 请求都重新 realpath 这个根,大量并发缩略图加载时会让

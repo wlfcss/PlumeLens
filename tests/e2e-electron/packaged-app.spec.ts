@@ -32,7 +32,6 @@ const APP_PATH = join(
 
 let app: ElectronApplication
 let page: Page
-let backendAuthToken: string | null = null
 
 test.beforeAll(async () => {
   app = await _electron.launch({ executablePath: APP_PATH, timeout: 30_000 })
@@ -64,30 +63,43 @@ test.beforeAll(async () => {
   }
   if (!backendUrl) throw new Error('Engine URL never resolved within 30s')
   console.log('[E2E] engine URL =', backendUrl)
-  backendAuthToken = await page.evaluate(async () => {
-    const w = window as unknown as {
-      plumelens?: { getBackendAuthToken: () => Promise<string | null> }
-    }
-    return (await w.plumelens?.getBackendAuthToken()) ?? null
-  })
-  const authHeaders = backendAuthToken
-    ? { Authorization: `Bearer ${backendAuthToken}` }
-    : undefined
+
+  // 走 preload 的 engineRequest 而非 Playwright 直 fetch — H5 修复后 token 不
+  // 再暴露给 renderer / 测试代码,所有 engine API 调用必须经 preload(原生应用
+  // 的实际入口),保证测试覆盖与生产一致的鉴权链路。
+  type EngineResponse = { ok: boolean; status: number; body: string }
+  const callEngine = async (
+    path: string,
+    init: { method?: string; body?: string } = {},
+  ): Promise<EngineResponse> =>
+    page.evaluate(
+      async ({ path, init }) => {
+        const w = window as unknown as {
+          plumelens?: {
+            engineRequest?: (
+              p: string,
+              i?: { method?: string; body?: string | null; headers?: Record<string, string> },
+            ) => Promise<{ ok: boolean; status: number; body: string }>
+          }
+        }
+        if (!w.plumelens?.engineRequest) {
+          throw new Error('preload engineRequest not available')
+        }
+        return w.plumelens.engineRequest(path, init)
+      },
+      { path, init },
+    )
 
   // 只确保 plumelens-pkg-test (1 张) 的缩略图就绪 —— 本 spec 只断言这个 library。
   // engine lifespan 启动会后台扫所有 library 补缺，但大 library (n=783) 数十秒，
   // beforeAll 不能等。
-  const libs = await fetch(`${backendUrl}/library`, { headers: authHeaders }).then((r) =>
-    r.json() as Promise<{ id: string; display_name: string }[]>,
-  )
+  const libsRes = await callEngine('/library')
+  if (!libsRes.ok) throw new Error(`/library failed: ${libsRes.status} ${libsRes.body}`)
+  const libs = JSON.parse(libsRes.body) as { id: string; display_name: string }[]
   const target = libs.find((l) => l.display_name === 'plumelens-pkg-test')
   if (target) {
-    const r = await fetch(`${backendUrl}/library/${target.id}/thumbnails`, {
-      headers: authHeaders,
-      method: 'POST',
-    })
-    const j = await r.json()
-    console.log(`[E2E] thumbnails(${target.display_name}):`, JSON.stringify(j))
+    const r = await callEngine(`/library/${target.id}/thumbnails`, { method: 'POST' })
+    console.log(`[E2E] thumbnails(${target.display_name}):`, r.body)
   }
 })
 

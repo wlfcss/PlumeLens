@@ -14,6 +14,7 @@ from fastapi import FastAPI
 
 from engine.core.config import settings
 from engine.core.database import Database
+from engine.core.imaging import configure_pil_decompression_bomb_guard
 from engine.core.logging import setup_logging
 from engine.pipeline.manager import PipelineManager
 from engine.services.queue import mark_stuck_tasks_failed, recover_on_startup
@@ -231,6 +232,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         data_dir=str(settings.data_dir),
         logs_dir=str(settings.data_dir / "logs"),
     )
+
+    # 把 PIL 的 decompression bomb 上限提到 256 MP — 既能解码鸟摄高分辨率
+    # (Sony α7R V 61 MP)又挡住 zlib bomb 类恶意图(几亿像素 PNG/TIFF 直接
+    # OOM)。Image.open / load_image / 缩略图 / 扫描器全链路都依赖这个全局开关。
+    configure_pil_decompression_bomb_guard()
 
     # 启动预清理：杀掉所有除自己外的 plumelens-engine 孤儿进程，避免它们
     # 继续吃 RAM / 持有 db lock / 抢 MPS 资源。

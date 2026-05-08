@@ -133,9 +133,66 @@ def _safe_name(value: str) -> str:
     return cleaned or "PlumeLens_Export"
 
 
+# Windows-reserved 文件名 — 即使带扩展名 (CON.txt / NUL.jpg) Win32 API 也会
+# 路由到设备而不是创建文件,在 Mac 上写出去再 zip 回 Windows 解压会触发"未知错误"
+# 跨平台用户偶发踩坑。export 是用户期望"打包送朋友/上传"的场景,所以两端都净化。
+_WINDOWS_RESERVED_NAMES = frozenset(
+    {
+        "CON",
+        "PRN",
+        "AUX",
+        "NUL",
+        "COM1",
+        "COM2",
+        "COM3",
+        "COM4",
+        "COM5",
+        "COM6",
+        "COM7",
+        "COM8",
+        "COM9",
+        "LPT1",
+        "LPT2",
+        "LPT3",
+        "LPT4",
+        "LPT5",
+        "LPT6",
+        "LPT7",
+        "LPT8",
+        "LPT9",
+    }
+)
+
+
 def _safe_path_part(value: str, fallback: str = "未命名文件夹") -> str:
-    cleaned = re.sub(r"[/\\:]+", "_", value.strip()).strip(" .")
-    return cleaned if cleaned not in ("", ".", "..") else fallback
+    """Sanitize one path component for cross-platform export targets.
+
+    防御点(由用户可控字段进入路径的情形 — 文件名 / 文件夹别名):
+      * ``\\0`` null byte — Linux/macOS 路径中合法但会被部分 archiver 当字符串
+        终止符截断,导致 zip/tar 内文件提取后路径错位。
+      * ``\\x01-\\x1f`` 控制字符 — 同上,部分文件管理器渲染异常。
+      * ``/ \\ :`` 路径分隔符 — 导致 ``Path / value`` 实际跨多级目录(目录穿越)。
+      * Windows 保留字符 ``< > " | ? *`` — Win32 NTFS 拒绝创建,跨平台导出失败。
+      * Windows 保留名 ``CON / PRN / AUX / NUL / COM1-9 / LPT1-9`` — 即使带扩展名也
+        被路由到设备文件,文件本身写不出来。
+      * 末尾 ``.`` 或 `` `` — Windows 创建后会被静默 trim,跨平台后路径不匹配。
+      * ``""`` / ``.`` / ``..`` — 父目录穿越或空段。
+    """
+    if not value:
+        return fallback
+    # 1) 删 null + control 字符 (\x00-\x1f, \x7f)
+    cleaned = re.sub(r"[\x00-\x1f\x7f]+", "", value)
+    # 2) 替换路径分隔符 + Windows 保留符号为下划线
+    cleaned = re.sub(r'[/\\:<>"|?*]+', "_", cleaned)
+    # 3) 去首尾空白 + 末尾点(Windows 静默 trim)
+    cleaned = cleaned.strip().rstrip(" .")
+    if cleaned in ("", ".", ".."):
+        return fallback
+    # 4) Windows 保留名 — 完整(无扩展名)或前缀(带扩展名)都拦
+    stem = cleaned.split(".", 1)[0].upper()
+    if stem in _WINDOWS_RESERVED_NAMES:
+        return f"_{cleaned}"
+    return cleaned
 
 
 def _is_relative_to(path: Path, parent: Path) -> bool:

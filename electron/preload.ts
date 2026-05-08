@@ -14,9 +14,138 @@ export type EngineStatusPayload =
   | { kind: 'fatal'; message: string }
   | { kind: 'cpu-fallback' }
 
+/**
+ * Engine 单次请求的结果 — engineRequest 内部从 fetch 读完 .text() 后压成
+ * 可序列化的纯对象,通过 contextBridge 跨 isolated world 传给 renderer。
+ *
+ * `body` 永远是字符串(response.text()),renderer 侧 api-client 自行 JSON.parse。
+ * 二进制响应当前没有调用方,后续如有需求另开 engineRequestBlob。
+ */
+export interface EngineResponse {
+  ok: boolean
+  status: number
+  statusText: string
+  body: string
+  contentType: string | null
+}
+
+export interface EngineRequestInit {
+  method?: string
+  /** 已 JSON.stringify 过的 body 字符串;binary upload 暂不支持。 */
+  body?: string | null
+  /** caller 显式 headers,会与 preload 注入的 Authorization / Content-Type merge。 */
+  headers?: Record<string, string>
+  /** 单次请求超时(毫秒);默认 60000。caller 信号无法跨 contextBridge 传过来,所以
+   *  renderer 侧 caller 的 AbortSignal 不会传播;只能靠这里的本地超时兜底。 */
+  timeoutMs?: number
+}
+
+// 缓存 url + token,首次调用时通过 IPC 拉一次,engine 重启后清空让下次重取。
+// 关键点:这两个变量 *只存在于 preload 的 isolated context*,renderer JS
+// (window 上下文,即使 XSS)读不到 — 这是 H5 的核心:Bearer Token 不进渲染器。
+let cachedBackendUrl: string | null = null
+let cachedAuthToken: string | null = null
+let bootstrapPromise: Promise<void> | null = null
+
+async function bootstrapAuth(): Promise<void> {
+  // 加锁:多个并发 engineRequest 不会同时 invoke 两次 IPC。
+  if (cachedBackendUrl !== null && cachedAuthToken !== null) return
+  if (bootstrapPromise === null) {
+    bootstrapPromise = (async () => {
+      const [url, token] = await Promise.all([
+        ipcRenderer.invoke('get-backend-url') as Promise<string | null>,
+        ipcRenderer.invoke('get-backend-auth-token') as Promise<string | null>,
+      ])
+      cachedBackendUrl = url
+      cachedAuthToken = token
+    })().finally(() => {
+      bootstrapPromise = null
+    })
+  }
+  await bootstrapPromise
+}
+
+// engine 重启 → 旧 url / token 失效。监听 ready 事件清缓存,下次请求再取。
+ipcRenderer.on('engine-status', (_event, payload: EngineStatusPayload) => {
+  if (payload.kind === 'ready' || payload.kind === 'crashed' || payload.kind === 'fatal') {
+    cachedBackendUrl = null
+    cachedAuthToken = null
+  }
+})
+
+async function ensureUrl(): Promise<string> {
+  await bootstrapAuth()
+  if (!cachedBackendUrl) {
+    // 兜底再拉一次(engine 还没 ready)。renderer api-client 会重试。
+    cachedBackendUrl = (await ipcRenderer.invoke('get-backend-url')) as string | null
+  }
+  if (!cachedBackendUrl) {
+    throw new Error('Engine backend URL not available yet')
+  }
+  return cachedBackendUrl
+}
+
+async function performEngineRequest(
+  path: string,
+  init: EngineRequestInit = {},
+): Promise<EngineResponse> {
+  const url = await ensureUrl()
+  const headers = new Headers(init.headers ?? {})
+  if (cachedAuthToken && !headers.has('Authorization')) {
+    headers.set('Authorization', `Bearer ${cachedAuthToken}`)
+  }
+  if (init.body && !headers.has('Content-Type')) {
+    headers.set('Content-Type', 'application/json')
+  }
+  const ctrl = new AbortController()
+  const timer = setTimeout(() => ctrl.abort(), init.timeoutMs ?? 60_000)
+  try {
+    const res = await fetch(`${url}${path}`, {
+      method: init.method ?? 'GET',
+      headers,
+      body: init.body ?? undefined,
+      signal: ctrl.signal,
+    })
+    const body = await res.text()
+    return {
+      ok: res.ok,
+      status: res.status,
+      statusText: res.statusText,
+      body,
+      contentType: res.headers.get('content-type'),
+    }
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/**
+ * 给 SSE 消费者构造 EventSource URL(原生 EventSource 不支持自定义 header,
+ * 因此 token 必须以 query string 形式传到 server)。
+ *
+ * **已知限制:这一步会把 token 带回 renderer 上下文(URL string)。** 与
+ * engineRequest 的 token-not-in-renderer 模型不同,因为 native EventSource
+ * 只能接受 URL 参数。后续若做 IPC SSE bridge(main 主控 EventSource → 转发
+ * IPC event)可彻底切断;当前 trade-off:复用浏览器自带 reconnect / backoff,
+ * 简化 renderer 代码。
+ */
+async function performEngineSseUrl(path: string): Promise<string> {
+  const url = await ensureUrl()
+  const final = new URL(`${url}${path}`)
+  if (cachedAuthToken) final.searchParams.set('token', cachedAuthToken)
+  return final.toString()
+}
+
 contextBridge.exposeInMainWorld('plumelens', {
   getBackendUrl: (): Promise<string | null> => ipcRenderer.invoke('get-backend-url'),
-  getBackendAuthToken: (): Promise<string | null> => ipcRenderer.invoke('get-backend-auth-token'),
+  /**
+   * Engine API 请求 — 在 preload 的 isolated world 内完成 fetch,token 不进
+   * renderer JS。详见 H5 修复(security-batch-2)。
+   */
+  engineRequest: (path: string, init?: EngineRequestInit): Promise<EngineResponse> =>
+    performEngineRequest(path, init),
+  /** 构造 SSE URL(包含 token 的 query string,详见 performEngineSseUrl 注释)。 */
+  engineSseUrl: (path: string): Promise<string> => performEngineSseUrl(path),
   getAppVersion: (): Promise<string> => ipcRenderer.invoke('get-app-version'),
   openFolder: (): Promise<string | null> => ipcRenderer.invoke('dialog:open-folder'),
   selectExportDirectory: (): Promise<string | null> =>

@@ -40,10 +40,26 @@ CACHE_MAX = 1024
 # 1.0 度^2 ≈ 110km^2,合理:GeoNames cities1000 在大部分人居区域密度 < 100km。
 _OFFLINE_MAX_DIST_DEG2 = 1.0
 
+# 上送在线 provider(amap / baidu / tencent / nominatim)前对 GPS 做隐私模糊化:
+# 保留 3 位小数 ≈ 110m 精度。鸟摄反查只需"省/市/区"级别准确度,~100m 足以命中
+# 同一行政区,而 EXIF 原始 6+ 位小数(0.1m 级别)足以暴露用户家/常去拍鸟点位置
+# 给三方 API 服务商。Round-trip 后写回 db 的 country/province/city/place 字段
+# 是从 provider 回包派生的(行政区),lat/lon 字段保留原始精度(本地数据)。
+# 改这个常量请同步:
+#   - cache key 精度 (4 位 ≈ 11m,比 fuzz 精度更高 → fuzz 后仍能命中 cache)
+#   - 离线 provider (使用原始坐标,因为不发出网络)
+_NETWORK_GPS_PRECISION = 3
+
+
+def _fuzz_for_network(lat: float, lon: float) -> tuple[float, float]:
+    """Round to ~110m precision for outbound third-party API requests."""
+    return round(lat, _NETWORK_GPS_PRECISION), round(lon, _NETWORK_GPS_PRECISION)
+
 
 def _is_valid_coord(lat: float, lon: float) -> bool:
     """挡掉 NaN/Inf/越界/(0,0) Null Island — 损坏 EXIF 常见伪造值,污染 cache 即误。"""
     import math
+
     if not (math.isfinite(lat) and math.isfinite(lon)):
         return False
     if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
@@ -54,7 +70,7 @@ def _is_valid_coord(lat: float, lon: float) -> bool:
 
 class GeocodeResult(TypedDict):
     display_name: str  # 人类可读地址(各 provider 格式不同)
-    source: str        # provider 标识(amap / baidu / tencent / nominatim / offline)
+    source: str  # provider 标识(amap / baidu / tencent / nominatim / offline)
     lat: float
     lon: float
 
@@ -110,13 +126,17 @@ async def _provider_amap(lat: float, lon: float, lang: str) -> GeocodeResult | N
         return None
     # 注意:高德 location 是 "lon,lat" 顺序;坐标系默认 GCJ-02。WGS84 需要 coordsys 参数,
     # 但 amap reverse 不支持 — 鸟摄场景这点偏移(中国境内 ~50m)对城市级反查影响小。
-    params = urllib.parse.urlencode({
-        "key": key,
-        "location": f"{lon:.6f},{lat:.6f}",
-        "extensions": "base",
-        "output": "json",
-        "radius": "500",  # 米 — 取附近 500m 内的 POI / 街道
-    })
+    # 隐私模糊化:把上送的坐标 round 到 110m 精度,降低暴露给三方 API 的位置敏感度。
+    flat, flon = _fuzz_for_network(lat, lon)
+    params = urllib.parse.urlencode(
+        {
+            "key": key,
+            "location": f"{flon:.3f},{flat:.3f}",
+            "extensions": "base",
+            "output": "json",
+            "radius": "500",  # 米 — 取附近 500m 内的 POI / 街道
+        }
+    )
     url = f"https://restapi.amap.com/v3/geocode/regeo?{params}"
     data = await asyncio.to_thread(_http_get_json, url)
     if not data or data.get("status") != "1":
@@ -134,13 +154,17 @@ async def _provider_baidu(lat: float, lon: float, lang: str) -> GeocodeResult | 
     if not ak:
         return None
     # 百度默认 BD09 坐标系;coordtype=wgs84ll 让其内部转换
-    params = urllib.parse.urlencode({
-        "ak": ak,
-        "location": f"{lat:.6f},{lon:.6f}",
-        "coordtype": "wgs84ll",
-        "output": "json",
-        "extensions_poi": "0",
-    })
+    # 隐私模糊化:同 amap,上送 110m 精度。
+    flat, flon = _fuzz_for_network(lat, lon)
+    params = urllib.parse.urlencode(
+        {
+            "ak": ak,
+            "location": f"{flat:.3f},{flon:.3f}",
+            "coordtype": "wgs84ll",
+            "output": "json",
+            "extensions_poi": "0",
+        }
+    )
     url = f"https://api.map.baidu.com/reverse_geocoding/v3/?{params}"
     data = await asyncio.to_thread(_http_get_json, url)
     if not data or data.get("status") != 0:
@@ -159,11 +183,15 @@ async def _provider_tencent(lat: float, lon: float, lang: str) -> GeocodeResult 
     key = os.environ.get("PLUMELENS_TENCENT_KEY")
     if not key:
         return None
-    params = urllib.parse.urlencode({
-        "key": key,
-        "location": f"{lat:.6f},{lon:.6f}",
-        "get_poi": "0",
-    })
+    # 隐私模糊化:同 amap / baidu,上送 110m 精度。
+    flat, flon = _fuzz_for_network(lat, lon)
+    params = urllib.parse.urlencode(
+        {
+            "key": key,
+            "location": f"{flat:.3f},{flon:.3f}",
+            "get_poi": "0",
+        }
+    )
     url = f"https://apis.map.qq.com/ws/geocoder/v1/?{params}"
     data = await asyncio.to_thread(_http_get_json, url)
     if not data or data.get("status") != 0:
@@ -187,14 +215,18 @@ _nominatim_last_ts = 0.0
 async def _provider_nominatim(lat: float, lon: float, lang: str) -> GeocodeResult | None:
     """Nominatim (OpenStreetMap) — 无需 key,但国内访问可能慢/失败。"""
     global _nominatim_last_ts
-    params = urllib.parse.urlencode({
-        "format": "json",
-        "lat": f"{lat:.6f}",
-        "lon": f"{lon:.6f}",
-        "zoom": "16",
-        "addressdetails": "1",
-        "accept-language": lang,
-    })
+    # 隐私模糊化:OSM 公开数据但 IP 仍能被关联,仍走 110m fuzz。
+    flat, flon = _fuzz_for_network(lat, lon)
+    params = urllib.parse.urlencode(
+        {
+            "format": "json",
+            "lat": f"{flat:.3f}",
+            "lon": f"{flon:.3f}",
+            "zoom": "16",
+            "addressdetails": "1",
+            "accept-language": lang,
+        }
+    )
     url = f"https://nominatim.openstreetmap.org/reverse?{params}"
     # lock 覆盖整个: 节流等待 + HTTP 调用 + 时间戳更新 — 真正全局 1 req/s
     async with _nominatim_lock:
@@ -270,10 +302,7 @@ async def _provider_offline(lat: float, lon: float, lang: str) -> GeocodeResult 
     if dist_sq > _OFFLINE_MAX_DIST_DEG2:
         return None
     entry = meta[idx]
-    parts = [
-        str(entry.get(k, "")).strip()
-        for k in ("country", "admin1", "admin2", "name")
-    ]
+    parts = [str(entry.get(k, "")).strip() for k in ("country", "admin1", "admin2", "name")]
     parts = [p for p in parts if p]
     return GeocodeResult(
         display_name=" ".join(parts) if parts else "(unknown)",

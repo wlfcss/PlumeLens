@@ -79,7 +79,8 @@ beforeAll(() => {
   )
   window.plumelens = {
     getBackendUrl: async () => 'http://127.0.0.1:8000',
-    getBackendAuthToken: async () => null,
+    // app.test 测 React 集成,api-client 没有 preload engineRequest 时会自动
+    // fallback 直 fetch(测试用 msw 拦截),保持 stub 极简。
     getAppVersion: async () => '0.1.0',
     openFolder: async () => null,
     selectExportDirectory: async () => null,

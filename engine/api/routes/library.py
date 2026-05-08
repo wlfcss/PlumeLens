@@ -38,6 +38,7 @@ from engine.services.decisions import (
     list_species_overrides,
 )
 from engine.services.event_bus import (
+    TooManySubscribersError,
     publish_library_event,
     subscribe_library_events,
     unsubscribe_library_events,
@@ -558,7 +559,16 @@ async def library_events(request: Request, library_id: str) -> StreamingResponse
     if summary is None:
         raise HTTPException(status_code=404, detail="Library not found")
 
-    queue = subscribe_library_events(library_id)
+    try:
+        queue = subscribe_library_events(library_id)
+    except TooManySubscribersError as exc:
+        # 单 library 同时打开太多 SSE — renderer 泄漏 / 测试脚本 / 攻击。返
+        # 429,客户端节流后再试。Retry-After 给 5s,renderer 重连不会立刻打爆。
+        raise HTTPException(
+            status_code=429,
+            detail=f"Too many SSE subscribers for library (limit {exc.limit})",
+            headers={"Retry-After": "5"},
+        ) from exc
 
     async def _stream():
         try:

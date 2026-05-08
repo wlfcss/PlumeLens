@@ -49,8 +49,17 @@ router = APIRouter(prefix="/analysis", tags=["analysis"])
 # SSE 进度推送轮询间隔（秒）
 SSE_INTERVAL = 1.0
 
+# 单 library 同时允许的 progress SSE 长连接数。本地桌面 UI 正常 1 个,留 8 给
+# hot-reload / Playwright / 异常 renderer 缓冲;阻止失控调用方靠不停 open
+# EventSource 把 _progress_streams 拖大占用 ThreadPool / 阻塞队列推进。
+MAX_PROGRESS_SSE_PER_LIBRARY = 8
+
 # 单个 library 的 worker 状态（并发分析 + 取消标志）
 _workers: dict[str, asyncio.Task[None]] = {}
+
+# 当前各 library 活跃 progress SSE 连接计数 — incr / decr 都在协程内做,不需要 lock
+# (asyncio 单线程内修改 dict 是原子)。
+_progress_stream_counts: dict[str, int] = {}
 
 
 def _has_active_tasks(stats: dict[str, int]) -> bool:
@@ -432,12 +441,29 @@ async def _progress_stream(db: Database, library_id: str):
     except asyncio.CancelledError:
         # 客户端断开，正常退出
         return
+    finally:
+        # 无论怎么退(客户端断 / 异常),释放计数,不让后续合法 connect 误判限流。
+        remaining = _progress_stream_counts.get(library_id, 1) - 1
+        if remaining <= 0:
+            _progress_stream_counts.pop(library_id, None)
+        else:
+            _progress_stream_counts[library_id] = remaining
 
 
 @router.get("/library/{library_id}/progress")
 async def progress_stream(request: Request, library_id: str) -> StreamingResponse:
     """GET /analysis/library/{id}/progress — SSE progress stream."""
     db = await _db(request)
+    # 限流:同一 library 最多 MAX_PROGRESS_SSE_PER_LIBRARY 个并发 progress 流。
+    # 计数 incr 必须在 _progress_stream 里 try/finally decr,所以这里只检查 + ++。
+    current = _progress_stream_counts.get(library_id, 0)
+    if current >= MAX_PROGRESS_SSE_PER_LIBRARY:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Too many progress SSE subscribers (limit {MAX_PROGRESS_SSE_PER_LIBRARY})",
+            headers={"Retry-After": "5"},
+        )
+    _progress_stream_counts[library_id] = current + 1
     return StreamingResponse(
         _progress_stream(db, library_id),
         media_type="text/event-stream",

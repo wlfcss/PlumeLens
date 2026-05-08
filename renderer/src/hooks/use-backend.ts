@@ -64,15 +64,17 @@ export function useBackendHealth() {
     queryKey: ['backend-health', backendUrl],
     queryFn: async () => {
       if (!backendUrl) throw new Error('No backend URL')
-      const token =
-        typeof window !== 'undefined' && window.plumelens
-          ? await window.plumelens.getBackendAuthToken()
-          : null
+      // Electron 路径走 preload engineRequest — token 不进 renderer JS(H5)。
+      // vite dev / 测试无 preload 时直连 127.0.0.1 fallback,无 token。
+      if (typeof window !== 'undefined' && window.plumelens?.engineRequest) {
+        const res = await window.plumelens.engineRequest('/health', {
+          headers: { 'Content-Type': 'application/json' },
+        })
+        if (!res.ok) throw new Error(`HTTP ${res.status}`)
+        return JSON.parse(res.body) as BackendHealth
+      }
       const res = await fetch(`${backendUrl}/health`, {
-        headers: {
-          'Content-Type': 'application/json',
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        },
+        headers: { 'Content-Type': 'application/json' },
       })
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       return res.json() as Promise<BackendHealth>

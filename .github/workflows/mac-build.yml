@@ -165,6 +165,15 @@ jobs:
           version="${tag#v}"
           dmg="$(ls release/PlumeLens-*-arm64.dmg | head -n 1)"
 
+          # 算 SHA-256 + 写 sidecar — 用户下载后可对照校验。
+          # 这是 release tarball 中间人篡改的最直接抵抗:GitHub 即使被入侵推
+          # 篡改 DMG,sha256 文件和 release notes 内的 hash 不会自动跟着改
+          # (release notes 是这次 publish 的 commit 内容)。
+          dmg_basename="$(basename "$dmg")"
+          sha256_value="$(shasum -a 256 "$dmg" | awk '{print $1}')"
+          sha256_path="${dmg}.sha256"
+          printf '%s  %s\n' "$sha256_value" "$dmg_basename" > "$sha256_path"
+
           cat > release-notes.md <<EOF
           ## PlumeLens ${version}
 
@@ -194,6 +203,16 @@ jobs:
 
           - 本地已通过 ruff、pyright、pytest、typecheck、lint、vitest、Playwright 与 macOS DMG 打包校验。
           - Actions Release 产物会在构建过程中完成模型资产校验、PyInstaller 后端冻结、Electron 打包、codesign 校验与 DMG 内容校验。
+
+          ### DMG 校验
+
+          下载 \`${dmg_basename}\` 后,本地比对 SHA-256:
+
+          \`\`\`bash
+          shasum -a 256 ${dmg_basename}
+          # 应与下方完全一致(也可直接下载 ${dmg_basename}.sha256 调 \`shasum -a 256 -c\` 自动校验)
+          # ${sha256_value}
+          \`\`\`
           EOF
 
           if gh release view "$tag" >/dev/null 2>&1; then
@@ -201,4 +220,4 @@ jobs:
           else
             gh release create "$tag" --title "PlumeLens ${version}" --notes-file release-notes.md
           fi
-          gh release upload "$tag" "$dmg" --clobber
+          gh release upload "$tag" "$dmg" "$sha256_path" --clobber

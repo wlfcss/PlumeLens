@@ -14,9 +14,31 @@ export type EngineStatusPayload =
   | { kind: 'fatal'; message: string }
   | { kind: 'cpu-fallback' }
 
+/** Mirror of electron/preload.ts `EngineResponse`. body 永远是 string;若日后需
+ *  返回二进制再加 `engineRequestBlob`。 */
+export interface EngineResponse {
+  ok: boolean
+  status: number
+  statusText: string
+  body: string
+  contentType: string | null
+}
+
+export interface EngineRequestInit {
+  method?: string
+  body?: string | null
+  headers?: Record<string, string>
+  /** 单次请求超时(毫秒);默认 60000。 */
+  timeoutMs?: number
+}
+
 interface PlumeLensAPI {
   getBackendUrl(): Promise<string | null>
-  getBackendAuthToken(): Promise<string | null>
+  /** Engine API 请求 — 在 preload 内完成 fetch,token 不进 renderer JS(H5)。
+   *  vite-only / 单元测试可能没有这个 method;调用方 ?. 后 fallback 直连。 */
+  engineRequest?: (path: string, init?: EngineRequestInit) => Promise<EngineResponse>
+  /** 构造 SSE URL(包含 query token,native EventSource 限制)。 */
+  engineSseUrl?: (path: string) => Promise<string>
   getAppVersion(): Promise<string>
   openFolder(): Promise<string | null>
   selectExportDirectory(): Promise<string | null>
