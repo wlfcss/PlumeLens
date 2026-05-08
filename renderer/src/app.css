@@ -6026,6 +6026,50 @@ button.photo-stack-badge--button {
   align-items: baseline;
 }
 
+/* 折叠头:整行可点击切换 expanded;hover 提示。 */
+.species-editor__current--toggle {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  appearance: none;
+  background: transparent;
+  border: none;
+  padding: 6px 0;
+  text-align: left;
+  cursor: pointer;
+  color: inherit;
+  font: inherit;
+  border-radius: 4px;
+  transition: background-color var(--pl-motion-fast) var(--pl-ease);
+}
+
+.species-editor__current--toggle:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.species-editor__current--toggle > span {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  flex: 1;
+}
+
+.species-editor__chevron {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  color: var(--pl-fg-3);
+  opacity: 0.6;
+  transition: transform var(--pl-motion-fast) var(--pl-ease);
+}
+
+.species-editor__chevron--open {
+  transform: rotate(180deg);
+}
+
 .species-editor__current strong {
   min-width: 0;
   color: var(--pl-fg-0);
