@@ -76,7 +76,8 @@ function planGroups(libraryId: string, photos: PhotoRow[]): GroupPlan[] {
 
   for (const photo of photos) {
     const ts = Date.parse(photo.shot_at)
-    const safeTs = Number.isFinite(ts) ? ts : Date.parse(photo.created_at)
+    const createdTs = Date.parse(photo.created_at)
+    const safeTs = Number.isFinite(ts) ? ts : Number.isFinite(createdTs) ? createdTs : 0
     // 没分到场景的（后台分组未完成）每张单独一组，等下次 detail refetch 就修正
     const sceneKey =
       photo.scene_id !== null && photo.scene_id !== undefined
@@ -572,6 +573,10 @@ export function buildFragmentFromDetail(detail: LibraryDetail, t: Translate): De
       id: plan.id,
       folderId: folder.id,
       title: buildGroupTitle(plan, t),
+      sceneNumber: plan.sceneId >= 0 ? plan.sceneId + 1 : null,
+      startAt: new Date(plan.startMs).toISOString(),
+      endAt: new Date(plan.endMs).toISOString(),
+      originalPhotoCount: plan.photoIds.length,
       groupType: plan.photoIds.length >= 3 ? 'burst' : 'time',
       sceneTag: 'record_shot',
       primarySpecies,

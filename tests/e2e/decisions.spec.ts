@@ -105,7 +105,10 @@ async function mockBackend(page: Page): Promise<void> {
       },
       onBackendReady: () => {},
       onBackendError: () => {},
-      onEngineStatus: () => () => {},
+      onEngineStatus: (callback: (payload: { kind: 'ready'; url: string }) => void) => {
+        window.setTimeout(() => callback({ kind: 'ready', url: 'http://127.0.0.1:8000' }), 0)
+        return () => {}
+      },
       listEditors: async () => ({ topaz: null, photoshop: null }),
       openInEditor: async () => ({ ok: false, reason: 'not_installed' }),
       getUserSettings: async () => ({}),
@@ -404,6 +407,7 @@ async function mockBackend(page: Page): Promise<void> {
         selected_count: 2,
         exported_count: 2,
         companion_count: 0,
+        xmp_count: 2,
         skipped_missing: 0,
         failed_count: 0,
         manifest: {
@@ -483,8 +487,7 @@ test.describe('Photo decision flow (mock backend)', () => {
     await page.getByRole('button', { name: '编辑文件夹别名' }).click()
     await page.getByRole('textbox', { name: '文件夹别名' }).fill('洋湖湿地早晨')
     const updateRequest = page.waitForRequest(
-      (request) =>
-        request.method() === 'PATCH' && request.url().endsWith('/library/lib-test'),
+      (request) => request.method() === 'PATCH' && request.url().endsWith('/library/lib-test'),
     )
     await page.getByRole('button', { name: '保存文件夹别名' }).click()
 
@@ -503,7 +506,9 @@ test.describe('Photo decision flow (mock backend)', () => {
     await page.getByRole('menuitem', { name: '在 Finder 中打开' }).click()
     await expect
       .poll(() =>
-        page.evaluate(() => (window as unknown as { __openedFinderPaths: string[] }).__openedFinderPaths),
+        page.evaluate(
+          () => (window as unknown as { __openedFinderPaths: string[] }).__openedFinderPaths,
+        ),
       )
       .toContain('/tmp/lib-test')
 
@@ -512,7 +517,9 @@ test.describe('Photo decision flow (mock backend)', () => {
     await page.getByRole('menuitem', { name: '在 Finder 中打开' }).click()
     await expect
       .poll(() =>
-        page.evaluate(() => (window as unknown as { __openedFinderPaths: string[] }).__openedFinderPaths),
+        page.evaluate(
+          () => (window as unknown as { __openedFinderPaths: string[] }).__openedFinderPaths,
+        ),
       )
       .toContain('/tmp/lib-test')
   })
@@ -546,7 +553,9 @@ test.describe('Photo decision flow (mock backend)', () => {
     await expect(page.locator('.export-sidecar--collapsed')).toBeVisible()
     await expect(page.getByText('导出完成')).toBeVisible()
     await page.getByRole('button', { name: '展开' }).click()
-    await expect(page.getByText('已导出 2 张，附带 0 个同伴文件，失败 0 张')).toBeVisible()
+    await expect(
+      page.getByText('已导出 2 张，附带 0 个同伴文件，生成 2 个 XMP，失败 0 张'),
+    ).toBeVisible()
   })
 
   test('export running collapses and does not block space review shortcut', async ({ page }) => {
@@ -567,6 +576,7 @@ test.describe('Photo decision flow (mock backend)', () => {
           selected_count: 2,
           exported_count: 2,
           companion_count: 0,
+          xmp_count: 2,
           skipped_missing: 0,
           failed_count: 0,
           manifest: {
@@ -755,6 +765,7 @@ test.describe('Photo decision flow (mock backend)', () => {
     await page.locator('.photo-preview').first().dblclick()
     await expect(page.locator('.review-panel')).toBeVisible()
     await expect(page.locator('.review-heading h2')).toContainText('IMG_0003.JPG')
+    await expect(page.locator('.review-sequence--single')).toBeVisible()
     // 默认筛选只展示精选 / 可用 / 记录，淘汰照片不进入当前复审胶片条。
     await expect(page.locator('.review-filmstrip__item')).toHaveCount(3)
 
@@ -791,12 +802,19 @@ test.describe('Archive species panel (local wiki data)', () => {
   test('archive tab renders species cards', async ({ page }) => {
     await page.getByRole('button', { name: '羽迹', exact: true }).click()
     await page.getByRole('button', { name: '物种', exact: true }).click()
+    await page
+      .getByRole('button', { name: /已点亮/ })
+      .first()
+      .click()
     await expect(page.locator('.collection-card--lit').first()).toBeVisible({
       timeout: 5000,
     })
     await expect(page.locator('.collection-toolbar')).toHaveCount(0)
 
-    await page.getByRole('button', { name: /国家一级保护/ }).first().click()
+    await page
+      .getByRole('button', { name: /国家一级保护/ })
+      .first()
+      .click()
     await expect(page.locator('.archive-filter-cell--protected1')).toHaveAttribute(
       'aria-pressed',
       'true',
@@ -811,6 +829,10 @@ test.describe('Archive species panel (local wiki data)', () => {
   test('species detail panel shows Wikipedia link when available', async ({ page }) => {
     await page.getByRole('button', { name: '羽迹', exact: true }).click()
     await page.getByRole('button', { name: '物种', exact: true }).click()
+    await page
+      .getByRole('button', { name: /已点亮/ })
+      .first()
+      .click()
     await page.locator('.collection-card--lit').first().click()
     // mock-workspace 里首选物种（按分数排序）应是须浮鸥或翠鸟（Wikipedia 都有对应页）
     // 等待右侧详情面板出现 Wikipedia 外链

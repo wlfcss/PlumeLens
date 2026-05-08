@@ -9,6 +9,7 @@ import {
   Feather,
   FolderOpen,
   FolderSearch2,
+  Images,
   LibraryBig,
   PencilLine,
   RefreshCw,
@@ -101,6 +102,9 @@ import { subscribeEngineStatus, useEngineStore } from '@/stores/engine-store'
 const PHOTO_GRID_MIN_COLUMN_WIDTH = 260
 const PHOTO_GRID_GAP = 18
 const PHOTO_GROUP_ESTIMATED_HEIGHT = 460
+const BURST_SEGMENT_RAPID_GAP_MS = 1_200
+const BURST_SEGMENT_SOFT_GAP_MS = 3_000
+const BURST_SEGMENT_HARD_GAP_MS = 12_000
 const COLLECTION_GRID_MIN_COLUMN_WIDTH = 150
 const COLLECTION_GRID_GAP = 8
 const COLLECTION_HEADING_ESTIMATED_HEIGHT = 52
@@ -115,6 +119,25 @@ type SortMode = 'score' | 'shot_at' | 'name'
 type PhotoCategory = PhotoGrade | 'no_bird'
 type ExportLayout = 'merged' | 'by_grade'
 type ExportContentMode = 'files' | 'files_xmp' | 'xmp_only'
+
+type PhotoSegment = {
+  id: string
+  photos: PhotoRecord[]
+  coverPhoto: PhotoRecord
+}
+
+type NormalizedBBox = {
+  x1: number
+  y1: number
+  x2: number
+  y2: number
+}
+
+type BBoxContinuity = {
+  centerDistance: number
+  iou: number
+  sizeRatio: number
+}
 
 type FolderSummary = {
   newSpeciesCount: number
@@ -553,6 +576,324 @@ function sortPhotos(photos: PhotoRecord[], sortBy: SortMode): PhotoRecord[] {
     if (gradeDiff !== 0) return gradeDiff
     return (right.finalScore ?? -1) - (left.finalScore ?? -1)
   })
+}
+
+function bestPhotoForStack(photos: PhotoRecord[]): PhotoRecord | null {
+  let best: PhotoRecord | null = null
+  for (const photo of photos) {
+    if (!best) {
+      best = photo
+      continue
+    }
+    const scoreDiff = (photo.finalScore ?? -1) - (best.finalScore ?? -1)
+    if (scoreDiff > 0) {
+      best = photo
+      continue
+    }
+    if (scoreDiff === 0 && photo.shotAt.localeCompare(best.shotAt) < 0) best = photo
+  }
+  return best
+}
+
+function photoShotMs(photo: PhotoRecord): number | null {
+  const ts = Date.parse(photo.shotAt)
+  return Number.isFinite(ts) ? ts : null
+}
+
+function comparePhotosByShotTimeAsc(left: PhotoRecord, right: PhotoRecord): number {
+  const leftTs = photoShotMs(left)
+  const rightTs = photoShotMs(right)
+  if (leftTs !== null && rightTs !== null && leftTs !== rightTs) return leftTs - rightTs
+  if (leftTs !== null && rightTs === null) return -1
+  if (leftTs === null && rightTs !== null) return 1
+  return left.fileName.localeCompare(right.fileName)
+}
+
+function normalizedBestBBox(photo: PhotoRecord): NormalizedBBox | null {
+  const bbox = photo.bestBbox
+  if (
+    bbox &&
+    photo.imageWidth &&
+    photo.imageHeight &&
+    photo.imageWidth > 0 &&
+    photo.imageHeight > 0
+  ) {
+    return {
+      x1: bbox.x1 / photo.imageWidth,
+      y1: bbox.y1 / photo.imageHeight,
+      x2: bbox.x2 / photo.imageWidth,
+      y2: bbox.y2 / photo.imageHeight,
+    }
+  }
+
+  const box = photo.boxes[0]
+  if (!box) return null
+  return {
+    x1: box.x / 100,
+    y1: box.y / 100,
+    x2: (box.x + box.w) / 100,
+    y2: (box.y + box.h) / 100,
+  }
+}
+
+function bboxArea(box: NormalizedBBox): number {
+  return Math.max(0, box.x2 - box.x1) * Math.max(0, box.y2 - box.y1)
+}
+
+function bboxContinuity(leftPhoto: PhotoRecord, rightPhoto: PhotoRecord): BBoxContinuity | null {
+  const left = normalizedBestBBox(leftPhoto)
+  const right = normalizedBestBBox(rightPhoto)
+  if (!left || !right) return null
+
+  const interX1 = Math.max(left.x1, right.x1)
+  const interY1 = Math.max(left.y1, right.y1)
+  const interX2 = Math.min(left.x2, right.x2)
+  const interY2 = Math.min(left.y2, right.y2)
+  const interArea = Math.max(0, interX2 - interX1) * Math.max(0, interY2 - interY1)
+  const leftArea = bboxArea(left)
+  const rightArea = bboxArea(right)
+  const union = leftArea + rightArea - interArea
+  const leftCx = (left.x1 + left.x2) / 2
+  const leftCy = (left.y1 + left.y2) / 2
+  const rightCx = (right.x1 + right.x2) / 2
+  const rightCy = (right.y1 + right.y2) / 2
+  const centerDistance = Math.hypot(leftCx - rightCx, leftCy - rightCy) / Math.SQRT2
+  const minArea = Math.max(0.0001, Math.min(leftArea, rightArea))
+  const maxArea = Math.max(leftArea, rightArea)
+
+  return {
+    centerDistance,
+    iou: union > 0 ? interArea / union : 0,
+    sizeRatio: maxArea / minArea,
+  }
+}
+
+function segmentSpeciesKey(photo: PhotoRecord): string | null {
+  if ((photo.birdCount ?? 0) <= 0) return 'no-bird'
+  const latin = effectiveSpeciesLatinName(photo)
+  if (latin) return `latin:${latin}`
+  const name = effectiveSpeciesName(photo)
+  return name ? `name:${name}` : null
+}
+
+function hasSemanticSegmentBreak(left: PhotoRecord, right: PhotoRecord): boolean {
+  const leftHasBird = (left.birdCount ?? 0) > 0
+  const rightHasBird = (right.birdCount ?? 0) > 0
+  if (leftHasBird !== rightHasBird) return true
+
+  const leftSpecies = segmentSpeciesKey(left)
+  const rightSpecies = segmentSpeciesKey(right)
+  if (
+    leftSpecies &&
+    rightSpecies &&
+    leftSpecies !== 'no-bird' &&
+    rightSpecies !== 'no-bird' &&
+    leftSpecies !== rightSpecies
+  ) {
+    return true
+  }
+  return false
+}
+
+function hasStrongGeometryBreak(left: PhotoRecord, right: PhotoRecord): boolean {
+  const continuity = bboxContinuity(left, right)
+  if (!continuity) return false
+  return (
+    (continuity.iou < 0.03 && continuity.centerDistance > 0.3) ||
+    (continuity.centerDistance > 0.28 && continuity.sizeRatio > 2.4)
+  )
+}
+
+function hasWeakSubjectContinuity(left: PhotoRecord, right: PhotoRecord): boolean {
+  const leftSpecies = segmentSpeciesKey(left)
+  const rightSpecies = segmentSpeciesKey(right)
+  if (leftSpecies && leftSpecies === rightSpecies) return true
+
+  const continuity = bboxContinuity(left, right)
+  if (!continuity) return false
+  return continuity.iou >= 0.08 || (continuity.centerDistance <= 0.22 && continuity.sizeRatio <= 2)
+}
+
+function hasAccumulatedGeometryBreak(anchor: PhotoRecord, current: PhotoRecord): boolean {
+  const continuity = bboxContinuity(anchor, current)
+  if (!continuity) return false
+  return (
+    (continuity.iou < 0.04 && continuity.centerDistance > 0.24) ||
+    (continuity.centerDistance > 0.22 && continuity.sizeRatio > 1.8)
+  )
+}
+
+function shouldSplitPhotoSegment(
+  anchor: PhotoRecord,
+  previous: PhotoRecord,
+  current: PhotoRecord,
+): boolean {
+  const previousTs = photoShotMs(previous)
+  const currentTs = photoShotMs(current)
+  const gap = previousTs !== null && currentTs !== null ? Math.max(0, currentTs - previousTs) : null
+
+  if (hasSemanticSegmentBreak(previous, current)) return true
+  if (gap !== null && gap > BURST_SEGMENT_HARD_GAP_MS) return true
+
+  const birdCountDelta = Math.abs((previous.birdCount ?? 0) - (current.birdCount ?? 0))
+  if (
+    gap !== null &&
+    gap > BURST_SEGMENT_RAPID_GAP_MS &&
+    (birdCountDelta >= 1 || hasStrongGeometryBreak(previous, current))
+  ) {
+    return true
+  }
+
+  if (anchor.id !== previous.id && hasAccumulatedGeometryBreak(anchor, current)) return true
+
+  if (
+    gap !== null &&
+    gap > BURST_SEGMENT_SOFT_GAP_MS &&
+    !hasWeakSubjectContinuity(previous, current)
+  ) {
+    return true
+  }
+
+  return false
+}
+
+function createPhotoSegment(photos: PhotoRecord[], index: number): PhotoSegment | null {
+  if (photos.length === 0) return null
+  const first = photos[0]
+  const last = photos[photos.length - 1] ?? first
+  const coverPhoto = bestPhotoForStack(photos) ?? first
+  return {
+    id: `${first.groupId}:${first.id}:${last.id}:${photos.length}:${index}`,
+    photos,
+    coverPhoto,
+  }
+}
+
+function buildPhotoSegments(photos: PhotoRecord[]): PhotoSegment[] {
+  if (photos.length === 0) return []
+  const ordered = photos.toSorted(comparePhotosByShotTimeAsc)
+  const segments: PhotoSegment[] = []
+  let current: PhotoRecord[] = []
+  let previous: PhotoRecord | null = null
+  let anchor: PhotoRecord | null = null
+
+  for (const photo of ordered) {
+    const shouldSplit =
+      current.length > 0 &&
+      previous !== null &&
+      anchor !== null &&
+      shouldSplitPhotoSegment(anchor, previous, photo)
+
+    if (shouldSplit) {
+      const segment = createPhotoSegment(current, segments.length)
+      if (segment) segments.push(segment)
+      current = []
+      anchor = null
+    }
+
+    current.push(photo)
+    if (anchor === null) anchor = photo
+    previous = photo
+  }
+
+  const tail = createPhotoSegment(current, segments.length)
+  if (tail) segments.push(tail)
+  return segments
+}
+
+function formatGroupClock(value: string | null | undefined): string | null {
+  if (!value) return null
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return null
+  const hh = String(date.getHours()).padStart(2, '0')
+  const mm = String(date.getMinutes()).padStart(2, '0')
+  return `${hh}:${mm}`
+}
+
+function parseGroupTitleTime(title: string): string | null {
+  return title.match(/\b(\d{1,2}:\d{2})\b/)?.[1] ?? null
+}
+
+function parseGroupTitleScene(title: string): number | null {
+  const match = title.match(/(?:场景|Scene)\s*#(\d+)/i)
+  if (!match?.[1]) return null
+  const scene = Number.parseInt(match[1], 10)
+  return Number.isFinite(scene) ? scene : null
+}
+
+function groupSpanSeconds(group: PhotoGroupRecord): number | null {
+  if (!group.startAt || !group.endAt) return null
+  const start = Date.parse(group.startAt)
+  const end = Date.parse(group.endAt)
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return null
+  return Math.round((end - start) / 1000)
+}
+
+function visibleGroupTitle(
+  group: PhotoGroupRecord,
+  visiblePhotoCount: number,
+  t: ReturnType<typeof useTranslation>['t'],
+): string {
+  const time = formatGroupClock(group.startAt) ?? parseGroupTitleTime(group.title) ?? '--:--'
+  const originalPhotoCount = group.originalPhotoCount ?? visiblePhotoCount
+  const sceneNumber = group.sceneNumber ?? parseGroupTitleScene(group.title)
+
+  if (sceneNumber === null) {
+    if (visiblePhotoCount === 1 && originalPhotoCount <= 1) {
+      return t('selection.group.pendingTitle', { time })
+    }
+    return t('selection.group.pendingCountTitle', { count: visiblePhotoCount, time })
+  }
+
+  if (visiblePhotoCount === 1 && originalPhotoCount <= 1) {
+    return t('selection.group.singleTitle', { scene: sceneNumber, time })
+  }
+
+  const spanSec = groupSpanSeconds(group)
+  if (spanSec !== null && spanSec >= 60 && visiblePhotoCount === originalPhotoCount) {
+    return t('selection.group.durationTitle', {
+      count: visiblePhotoCount,
+      minutes: Math.round(spanSec / 60),
+      scene: sceneNumber,
+      time,
+    })
+  }
+
+  return t('selection.group.countTitle', {
+    count: visiblePhotoCount,
+    scene: sceneNumber,
+    time,
+  })
+}
+
+function reviewGroupKey(folderId: string, groupId: string): string {
+  return `${folderId}\u0000${groupId}`
+}
+
+function buildReviewSegmentPhotosByPhotoId(photos: PhotoRecord[]): Map<string, PhotoRecord[]> {
+  const groups = new Map<string, PhotoRecord[]>()
+  for (const photo of photos) {
+    const key = reviewGroupKey(photo.folderId, photo.groupId)
+    const groupPhotos = groups.get(key)
+    if (groupPhotos) {
+      groupPhotos.push(photo)
+    } else {
+      groups.set(key, [photo])
+    }
+  }
+
+  const segmentsByPhotoId = new Map<string, PhotoRecord[]>()
+  for (const groupPhotos of groups.values()) {
+    const segments = buildPhotoSegments(groupPhotos)
+    if (segments.length <= 1) continue
+
+    for (const segment of segments) {
+      for (const photo of segment.photos) {
+        segmentsByPhotoId.set(photo.id, segment.photos)
+      }
+    }
+  }
+  return segmentsByPhotoId
 }
 
 export function buildGroupStartMsMap(
@@ -1802,6 +2143,14 @@ export default function App() {
     if (source.some((photo) => photo.id === reviewPhoto.id)) return source
     return [reviewPhoto, ...source.filter((photo) => photo.id !== reviewPhoto.id)]
   }, [archivePhotos, flatSelectionPhotos, reviewPhoto, route])
+  const reviewSegmentPhotosByPhotoId = useMemo(
+    () => buildReviewSegmentPhotosByPhotoId(reviewPhotos),
+    [reviewPhotos],
+  )
+  const reviewGroupPhotos = useMemo(() => {
+    if (!reviewPhoto) return EMPTY_PHOTOS
+    return reviewSegmentPhotosByPhotoId.get(reviewPhoto.id) ?? EMPTY_PHOTOS
+  }, [reviewSegmentPhotosByPhotoId, reviewPhoto])
 
   const { data: realLibraries } = useLibraries()
   const allLibraryIds = useMemo(() => (realLibraries ?? []).map((l) => l.id), [realLibraries])
@@ -2340,6 +2689,7 @@ export default function App() {
       {reviewPhoto ? (
         <ReviewModal
           detail={{ photo: reviewPhoto, group: reviewGroup }}
+          groupPhotos={reviewGroupPhotos}
           onAddToCompare={toggleComparePhotoId}
           onClose={() => setReviewPhotoId(null)}
           onSelectPhoto={handleOpenReview}
@@ -2476,7 +2826,9 @@ function AppShell({
   t: ReturnType<typeof useTranslation>['t']
 }) {
   const disabledTitle = controlsDisabled ? t('nav.loadingDisabled') : undefined
-  const exportDisabledTitle = exportDisabled ? t('selection.sourceMissing.exportDisabled') : undefined
+  const exportDisabledTitle = exportDisabled
+    ? t('selection.sourceMissing.exportDisabled')
+    : undefined
   return (
     <div className="app-shell">
       <header className="command-bar">
@@ -3186,6 +3538,14 @@ function FolderRail({
       statuses: ['path_missing', 'error'],
     },
   ]
+  const selectCountByFolderId = useMemo(() => {
+    const counts = new Map<string, number>()
+    for (const photo of workspace.photos) {
+      if (photoCategory(photo) !== 'select') continue
+      counts.set(photo.folderId, (counts.get(photo.folderId) ?? 0) + 1)
+    }
+    return counts
+  }, [workspace.photos])
 
   return (
     <aside className="folder-rail selection-scroll">
@@ -3200,8 +3560,6 @@ function FolderRail({
           <section className="rail-section" key={section.key}>
             <SectionLabel label={t(section.titleKey)} />
             {sectionFolders.map((folder) => {
-              const photos = workspace.photos.filter((photo) => photo.folderId === folder.id)
-              const summary = buildFolderSummary(photos)
               return (
                 <button
                   className={cn(
@@ -3223,7 +3581,7 @@ function FolderRail({
                     {folder.status === 'path_missing' ? (
                       <span>{t('selection.sourceMissing.short')}</span>
                     ) : null}
-                    <span>{summary.gradeCounts.select}</span>
+                    <span>{selectCountByFolderId.get(folder.id) ?? 0}</span>
                   </span>
                 </button>
               )
@@ -3268,7 +3626,9 @@ function FolderTopline({
     : 0
   const progressLabel = hasProgress ? `${progressEvent.completed} / ${progressEvent.total}` : null
   const sourceMissing = activeFolder.status === 'path_missing'
-  const sourceDisabledTitle = sourceMissing ? t('selection.sourceMissing.disabledTooltip') : undefined
+  const sourceDisabledTitle = sourceMissing
+    ? t('selection.sourceMissing.disabledTooltip')
+    : undefined
   const [relinkError, setRelinkError] = useState<string | null>(null)
   useEffect(() => {
     if (!aliasEditing) {
@@ -3746,14 +4106,57 @@ function PhotoGroup({
   photos: PhotoRecord[]
   t: ReturnType<typeof useTranslation>['t']
 }) {
-  const bestScore = photos[0]?.finalScore ?? null
+  const groupRef = useRef<HTMLElement | null>(null)
+  const [expandedSegmentIds, setExpandedSegmentIds] = useState<Set<string>>(() => new Set())
+  const segments = useMemo(() => buildPhotoSegments(photos), [photos])
+  const segmentSignature = useMemo(
+    () => segments.map((segment) => segment.id).join('|'),
+    [segments],
+  )
+  const bestPhoto = useMemo(() => bestPhotoForStack(photos), [photos])
+  const bestScore = bestPhoto?.finalScore ?? null
+  const title = useMemo(() => visibleGroupTitle(group, photos.length, t), [group, photos.length, t])
+  const hasExpandedStacks = segments.some(
+    (segment) => segment.photos.length > 1 && expandedSegmentIds.has(segment.id),
+  )
+
+  useEffect(() => {
+    setExpandedSegmentIds(new Set())
+  }, [group.id, segmentSignature])
+
+  const expandStack = useCallback((segment: PhotoSegment, anchor: HTMLElement) => {
+    const scroller = anchor.closest('.selection-scroll')
+    const anchorTop = anchor.getBoundingClientRect().top
+    const coverPhotoId = segment.coverPhoto.id
+    const groupNode = groupRef.current
+
+    setExpandedSegmentIds((current) => {
+      if (current.has(segment.id)) return current
+      const next = new Set(current)
+      next.add(segment.id)
+      return next
+    })
+
+    if (!(scroller instanceof HTMLElement) || !coverPhotoId || !groupNode) return
+
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        const coverTile =
+          Array.from(groupNode.querySelectorAll<HTMLElement>('[data-photo-id]')).find(
+            (node) => node.dataset.photoId === coverPhotoId,
+          ) ?? groupNode
+        const delta = coverTile.getBoundingClientRect().top - anchorTop
+        if (Math.abs(delta) > 0.5) scroller.scrollTop += delta
+      })
+    })
+  }, [])
 
   return (
-    <section className="photo-group">
+    <section className="photo-group" ref={groupRef}>
       <div className="photo-group__header">
         <div>
           <SectionLabel label={t(sceneTagKey(group.sceneTag))} />
-          <h2>{group.title}</h2>
+          <h2>{title}</h2>
           <p>
             {photos.length} {t('selection.group.photos')}
             {bestScore !== null
@@ -3761,51 +4164,167 @@ function PhotoGroup({
               : ''}
           </p>
         </div>
-        {group.containsNewSpecies ? (
-          <span className="chip chip--accent">{t('selection.quickFilters.new_species')}</span>
-        ) : null}
+        <div className="photo-group__actions">
+          {hasExpandedStacks ? (
+            <button
+              className="text-button"
+              onClick={() => setExpandedSegmentIds(new Set())}
+              type="button"
+            >
+              {t('selection.group.collapseStack')}
+            </button>
+          ) : null}
+          {group.containsNewSpecies ? (
+            <span className="chip chip--accent">{t('selection.quickFilters.new_species')}</span>
+          ) : null}
+        </div>
       </div>
-      <PhotoGrid
+      <PhotoSegmentGrid
+        expandedSegmentIds={expandedSegmentIds}
         focusedPhotoId={focusedPhotoId}
+        group={group}
+        onExpandSegment={expandStack}
         onFocusPhoto={onFocusPhoto}
         onOpenReview={onOpenReview}
         onThumbnailLoadStatus={onThumbnailLoadStatus}
-        photos={photos}
+        segments={segments}
         t={t}
       />
     </section>
   )
 }
 
-function PhotoGrid({
+function PhotoSegmentGrid({
+  expandedSegmentIds,
   focusedPhotoId,
+  group,
+  onExpandSegment,
   onFocusPhoto,
   onOpenReview,
   onThumbnailLoadStatus,
-  photos,
+  segments,
   t,
 }: {
+  expandedSegmentIds: Set<string>
   focusedPhotoId: string | null
+  group: PhotoGroupRecord
+  onExpandSegment: (segment: PhotoSegment, anchor: HTMLElement) => void
   onFocusPhoto: (photoId: string | null) => void
   onOpenReview: (photoId: string) => void
   onThumbnailLoadStatus: (photoId: string, status: ThumbnailLoadStatus) => void
-  photos: PhotoRecord[]
+  segments: PhotoSegment[]
   t: ReturnType<typeof useTranslation>['t']
 }) {
+  const renderTile = (photo: PhotoRecord) => (
+    <PhotoTile
+      focused={focusedPhotoId === photo.id}
+      key={photo.id}
+      onFocusPhoto={onFocusPhoto}
+      onOpenReview={onOpenReview}
+      onThumbnailLoadStatus={onThumbnailLoadStatus}
+      photo={photo}
+      t={t}
+    />
+  )
+  const shouldFlatten = segments.length <= 1
+
   return (
     <div className="photo-grid">
-      {photos.map((photo) => (
-        <PhotoTile
-          focused={focusedPhotoId === photo.id}
-          key={photo.id}
-          onFocusPhoto={onFocusPhoto}
-          onOpenReview={onOpenReview}
-          onThumbnailLoadStatus={onThumbnailLoadStatus}
-          photo={photo}
-          t={t}
-        />
-      ))}
+      {segments.map((segment) => {
+        if (shouldFlatten) return segment.photos.map(renderTile)
+
+        const isStack = segment.photos.length > 1
+        const expanded = expandedSegmentIds.has(segment.id)
+        if (isStack && !expanded) {
+          return (
+            <PhotoStackTile
+              focused={segment.photos.some((photo) => photo.id === focusedPhotoId)}
+              group={group}
+              key={segment.id}
+              onExpand={(anchor) => onExpandSegment(segment, anchor)}
+              onFocusPhoto={onFocusPhoto}
+              onThumbnailLoadStatus={onThumbnailLoadStatus}
+              photo={segment.coverPhoto}
+              photoCount={segment.photos.length}
+              t={t}
+            />
+          )
+        }
+
+        return segment.photos.map(renderTile)
+      })}
     </div>
+  )
+}
+
+function PhotoStackTile({
+  focused,
+  group,
+  onExpand,
+  onFocusPhoto,
+  onThumbnailLoadStatus,
+  photoCount,
+  photo,
+  t,
+}: {
+  focused: boolean
+  group: PhotoGroupRecord
+  onExpand: (anchor: HTMLElement) => void
+  onFocusPhoto: (photoId: string | null) => void
+  onThumbnailLoadStatus: (photoId: string, status: ThumbnailLoadStatus) => void
+  photoCount: number
+  photo: PhotoRecord
+  t: ReturnType<typeof useTranslation>['t']
+}) {
+  const category = photoCategory(photo)
+  const displaySpecies = group.primarySpecies ?? formatPhotoSpeciesDisplay(photo, t)
+
+  return (
+    <article
+      className={cn('photo-tile photo-tile--stack', focused && 'photo-tile--focused')}
+      data-photo-id={photo.id}
+    >
+      <button
+        aria-expanded="false"
+        aria-label={t('selection.group.stackAria', { count: photoCount, file: photo.fileName })}
+        className="photo-preview photo-preview--stack"
+        data-selection-review-shortcut="true"
+        onClick={(event) => {
+          onFocusPhoto(photo.id)
+          onExpand(event.currentTarget)
+        }}
+        style={{ backgroundImage: photo.placeholderGradient ?? photo.previewGradient }}
+        type="button"
+      >
+        <span className="photo-stack-pages" aria-hidden="true">
+          <span />
+          <span />
+        </span>
+        <ThumbnailImage
+          alt={photo.fileName}
+          className="photo-preview__image"
+          onStatusChange={onThumbnailLoadStatus}
+          photoId={photo.id}
+          src={photo.thumbGridUrl}
+        />
+        <span className="photo-preview__top">
+          <StatusPill label={t(categoryLabelKey(category))} tone={categoryTone(category)} />
+        </span>
+        <span className="photo-stack-badge">
+          <Images className="h-3.5 w-3.5" />
+          <span>{t('selection.group.stackCount', { count: photoCount })}</span>
+        </span>
+        <span className="photo-preview__bottom">
+          <span>
+            <strong className="photo-preview__species">
+              <span>{displaySpecies}</span>
+            </strong>
+            <small>{t('selection.group.stackHint')}</small>
+          </span>
+          <b>{formatScore(photo.finalScore)}</b>
+        </span>
+      </button>
+    </article>
   )
 }
 
@@ -3838,6 +4357,7 @@ function PhotoTile({
         (photo.analysisStatus === 'pending' || photo.analysisStatus === 'running') &&
           'photo-tile--analyzing',
       )}
+      data-photo-id={photo.id}
     >
       <button
         aria-keyshortcuts="Space"
@@ -4883,11 +5403,11 @@ function ExportDrawer({
 
   const canStart = Boolean(
     sourceFolder &&
-      !sourceMissing &&
-      targetDir &&
-      exportPhotos.length > 0 &&
-      status === 'idle' &&
-      !controlsLocked,
+    !sourceMissing &&
+    targetDir &&
+    exportPhotos.length > 0 &&
+    status === 'idle' &&
+    !controlsLocked,
   )
   const statusText =
     status === 'running'
@@ -5153,7 +5673,7 @@ function ExportDrawer({
                 companions: result.companion_count,
                 exported: result.exported_count,
                 failed: result.failed_count,
-                xmp: result.xmp_count,
+                xmp: result.xmp_count ?? 0,
               })}
             </small>
           </div>

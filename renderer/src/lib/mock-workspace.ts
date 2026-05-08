@@ -43,6 +43,10 @@ export interface PhotoGroupRecord {
   id: string
   folderId: string
   title: string
+  sceneNumber?: number | null
+  startAt?: string | null
+  endAt?: string | null
+  originalPhotoCount?: number
   groupType: PhotoGroupType
   sceneTag: SceneTagId
   primarySpecies: string | null

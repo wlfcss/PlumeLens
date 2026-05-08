@@ -17,13 +17,23 @@ import {
   ChevronLeft,
   ChevronRight,
   Clock3,
+  Images,
   Maximize2,
   Search,
   Sparkles,
   Waypoints,
   X,
 } from 'lucide-react'
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { useVirtualizer } from '@tanstack/react-virtual'
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type ReactNode,
+} from 'react'
 import type { useTranslation } from 'react-i18next'
 
 import { ThumbnailImage, type ThumbnailLoadStatus } from '@/components/thumbnail-image'
@@ -56,9 +66,14 @@ import { cn } from '@/lib/utils'
 
 const REVIEW_ZOOM_OPTIONS = [1.5, 2.5, 4] as const
 const DEFAULT_REVIEW_ZOOM = 2.5
+const SEQUENCE_RAIL_MAX_DOTS = 64
+const REVIEW_FILMSTRIP_ITEM_WIDTH = 110
+const REVIEW_FILMSTRIP_ITEM_GAP = 7
+const REVIEW_FILMSTRIP_ITEM_ESTIMATE = REVIEW_FILMSTRIP_ITEM_WIDTH + REVIEW_FILMSTRIP_ITEM_GAP
 
 export function ReviewModal({
   detail,
+  groupPhotos,
   onAddToCompare,
   onClose,
   onSelectPhoto,
@@ -69,6 +84,7 @@ export function ReviewModal({
   t,
 }: {
   detail: ReviewDetail
+  groupPhotos: PhotoRecord[]
   onAddToCompare: (photoId: string) => void
   onClose: () => void
   onSelectPhoto: (photoId: string) => void
@@ -124,19 +140,48 @@ export function ReviewModal({
   const afOverlay = photo.bestAfArea ?? legacyAfPointToOverlay(photo.bestAfPoint ?? null)
 
   const previewSrc = photo.thumbPreviewUrl ?? null
-  const activeIndex = photos.findIndex((item) => item.id === photo.id)
-  const canGoPrevious = activeIndex > 0
-  const canGoNext = activeIndex >= 0 && activeIndex < photos.length - 1
+  const photoIndexById = useMemo(
+    () => new Map(photos.map((item, index) => [item.id, index] as const)),
+    [photos],
+  )
+  const activeIndex = photoIndexById.get(photo.id) ?? -1
+  const reviewGroupPhotos = groupPhotos.length > 0 ? groupPhotos : [photo]
+  const reviewGroupOrderById = useMemo(
+    () => new Map(reviewGroupPhotos.map((item, index) => [item.id, index] as const)),
+    [reviewGroupPhotos],
+  )
+  const isSequence = reviewGroupPhotos.length > 1
+  const sequenceIndex = reviewGroupOrderById.get(photo.id) ?? -1
+  const sequenceDisplayIndex = sequenceIndex >= 0 ? sequenceIndex + 1 : 1
+  const sequenceBestPhoto = useMemo(
+    () => bestReviewGroupPhoto(reviewGroupPhotos),
+    [reviewGroupPhotos],
+  )
+  const sequenceBestIndex = sequenceBestPhoto
+    ? (reviewGroupOrderById.get(sequenceBestPhoto.id) ?? -1)
+    : -1
+  const sequenceRailDots = useMemo(
+    () => buildSequenceRailDots(reviewGroupPhotos.length, sequenceIndex, sequenceBestIndex),
+    [reviewGroupPhotos.length, sequenceBestIndex, sequenceIndex],
+  )
+  const sequenceRank = useMemo(() => {
+    if (!isSequence) return null
+    return rankReviewGroupPhoto(reviewGroupPhotos, photo.id, sequenceIndex)
+  }, [isSequence, photo.id, reviewGroupPhotos, sequenceIndex])
+  const navigationPhotos = isSequence ? reviewGroupPhotos : photos
+  const navigationIndex = isSequence ? sequenceIndex : activeIndex
+  const canGoPrevious = navigationIndex > 0
+  const canGoNext = navigationIndex >= 0 && navigationIndex < navigationPhotos.length - 1
 
   const selectRelativePhoto = useCallback(
     (offset: -1 | 1) => {
-      if (activeIndex < 0) return
-      const nextIndex = Math.max(0, Math.min(photos.length - 1, activeIndex + offset))
-      const nextPhoto = photos[nextIndex]
+      if (navigationIndex < 0) return
+      const nextIndex = Math.max(0, Math.min(navigationPhotos.length - 1, navigationIndex + offset))
+      const nextPhoto = navigationPhotos[nextIndex]
       if (!nextPhoto || nextPhoto.id === photo.id) return
       onSelectPhoto(nextPhoto.id)
     },
-    [activeIndex, onSelectPhoto, photo.id, photos],
+    [navigationIndex, navigationPhotos, onSelectPhoto, photo.id],
   )
 
   useEffect(() => {
@@ -253,6 +298,53 @@ export function ReviewModal({
               >
                 <X className="h-4 w-4" />
               </IconButton>
+            </div>
+          </div>
+
+          <div
+            className={cn(
+              'review-sequence',
+              isSequence ? 'review-sequence--stack' : 'review-sequence--single',
+            )}
+          >
+            <div className="review-sequence__summary">
+              <span className="review-sequence__glyph" aria-hidden="true">
+                <Images className="h-3.5 w-3.5" />
+              </span>
+              <span className="review-sequence__label">
+                {isSequence
+                  ? t('selection.review.sequenceLabel')
+                  : t('selection.review.sequenceSingle')}
+              </span>
+              {isSequence ? (
+                <strong>
+                  {t('selection.review.sequencePosition', {
+                    count: reviewGroupPhotos.length,
+                    index: sequenceDisplayIndex,
+                  })}
+                </strong>
+              ) : null}
+            </div>
+            {isSequence ? (
+              <div className="review-sequence__rail" aria-hidden="true">
+                {sequenceRailDots.map((dotIndex, visualIndex) => (
+                  <i
+                    className={cn(
+                      dotIndex === sequenceIndex && 'is-current',
+                      dotIndex === sequenceBestIndex && 'is-best',
+                    )}
+                    key={`${dotIndex}-${visualIndex}`}
+                  />
+                ))}
+              </div>
+            ) : null}
+            <div className="review-sequence__meta">
+              {isSequence && sequenceRank !== null ? (
+                <span>{t('selection.review.sequenceRankShort', { rank: sequenceRank })}</span>
+              ) : null}
+              {isSequence && sequenceBestPhoto?.id === photo.id ? (
+                <b>{t('selection.review.sequenceBest')}</b>
+              ) : null}
             </div>
           </div>
 
@@ -374,6 +466,19 @@ export function ReviewModal({
 
           <CompactKV label={t('selection.metrics.scene')} value={group?.title ?? '--'} />
 
+          <CompactKV
+            label={t('selection.review.sequenceLabel')}
+            value={
+              isSequence
+                ? t('selection.review.sequenceValue', {
+                    count: reviewGroupPhotos.length,
+                    rank: sequenceRank ?? '--',
+                    score: formatScore(sequenceBestPhoto?.finalScore),
+                  })
+                : t('selection.review.sequenceSingleValue')
+            }
+          />
+
           {photo.companionFormat && photo.companionPath ? (
             <CompactKV
               label={t('selection.review.companion')}
@@ -453,10 +558,14 @@ export function ReviewModal({
         </aside>
 
         <ReviewFilmstrip
+          activePhotoIndex={isSequence ? sequenceIndex : activeIndex}
           activePhotoId={photo.id}
+          bestGroupPhotoId={sequenceBestPhoto?.id ?? null}
+          groupPhotoOrderById={reviewGroupOrderById}
           onThumbnailLoadStatus={onThumbnailLoadStatus}
           onSelectPhoto={onSelectPhoto}
-          photos={photos}
+          photos={isSequence ? reviewGroupPhotos : photos}
+          sequenceCount={reviewGroupPhotos.length}
           t={t}
         />
 
@@ -814,15 +923,18 @@ function ReviewImageStage({
     pointerStateRef.current = null
   }, [photoId])
 
-  const updateLoupePosition = useCallback((element: HTMLDivElement, clientX: number, clientY: number) => {
-    const rect = element.getBoundingClientRect()
-    const xPct = ((clientX - rect.left) / rect.width) * 100
-    const yPct = ((clientY - rect.top) / rect.height) * 100
-    setLoupePos({
-      xPct: Math.max(0, Math.min(100, xPct)),
-      yPct: Math.max(0, Math.min(100, yPct)),
-    })
-  }, [])
+  const updateLoupePosition = useCallback(
+    (element: HTMLDivElement, clientX: number, clientY: number) => {
+      const rect = element.getBoundingClientRect()
+      const xPct = ((clientX - rect.left) / rect.width) * 100
+      const yPct = ((clientY - rect.top) / rect.height) * 100
+      setLoupePos({
+        xPct: Math.max(0, Math.min(100, xPct)),
+        yPct: Math.max(0, Math.min(100, yPct)),
+      })
+    },
+    [],
+  )
 
   const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     if (!loupeEnabled || !previewSrc) return
@@ -1109,7 +1221,12 @@ function ReviewImageStage({
     ) : null
 
   return (
-    <div className={cn('review-stage__pane', variant === 'fullscreen' && 'review-stage__pane--fullscreen')}>
+    <div
+      className={cn(
+        'review-stage__pane',
+        variant === 'fullscreen' && 'review-stage__pane--fullscreen',
+      )}
+    >
       {showHeader ? (
         <div className="review-stage__head">
           <span className="review-stage__label">{label}</span>
@@ -1130,7 +1247,10 @@ function ReviewImageStage({
         </div>
       ) : null}
       <div
-        className={cn('review-image-frame', variant === 'fullscreen' && 'review-image-frame--fullscreen')}
+        className={cn(
+          'review-image-frame',
+          variant === 'fullscreen' && 'review-image-frame--fullscreen',
+        )}
         ref={frameRef}
       >
         <div
@@ -1241,59 +1361,158 @@ function ReviewFullscreenViewer({
   )
 }
 
+function bestReviewGroupPhoto(photos: PhotoRecord[]): PhotoRecord | null {
+  let best: PhotoRecord | null = null
+  for (const photo of photos) {
+    if (!best) {
+      best = photo
+      continue
+    }
+    const diff = (photo.finalScore ?? -1) - (best.finalScore ?? -1)
+    if (diff > 0 || (diff === 0 && photo.shotAt.localeCompare(best.shotAt) < 0)) best = photo
+  }
+  return best
+}
+
+function rankReviewGroupPhoto(
+  photos: PhotoRecord[],
+  activePhotoId: string,
+  activeSequenceIndex: number,
+): number | null {
+  const activePhoto = activeSequenceIndex >= 0 ? (photos[activeSequenceIndex] ?? null) : null
+  if (!activePhoto || activePhoto.id !== activePhotoId) return null
+  const activeScore = activePhoto.finalScore ?? -1
+  let rank = 1
+
+  for (let index = 0; index < photos.length; index += 1) {
+    if (index === activeSequenceIndex) continue
+    const score = photos[index]?.finalScore ?? -1
+    if (score > activeScore || (score === activeScore && index < activeSequenceIndex)) rank += 1
+  }
+  return rank
+}
+
+function buildSequenceRailDots(count: number, currentIndex: number, bestIndex: number): number[] {
+  if (count <= 0) return []
+  if (count <= SEQUENCE_RAIL_MAX_DOTS) return Array.from({ length: count }, (_, index) => index)
+  const dots = new Set<number>()
+  if (currentIndex >= 0 && currentIndex < count) dots.add(currentIndex)
+  if (bestIndex >= 0 && bestIndex < count) dots.add(bestIndex)
+  for (let index = 0; index < SEQUENCE_RAIL_MAX_DOTS; index += 1) {
+    dots.add(Math.round((index * (count - 1)) / (SEQUENCE_RAIL_MAX_DOTS - 1)))
+  }
+  return Array.from(dots).toSorted((left, right) => left - right)
+}
+
 function ReviewFilmstrip({
+  activePhotoIndex,
   activePhotoId,
+  bestGroupPhotoId,
+  groupPhotoOrderById,
   onThumbnailLoadStatus,
   onSelectPhoto,
   photos,
+  sequenceCount,
   t,
 }: {
+  activePhotoIndex: number
   activePhotoId: string
+  bestGroupPhotoId: string | null
+  groupPhotoOrderById: Map<string, number>
   onThumbnailLoadStatus: (photoId: string, status: ThumbnailLoadStatus) => void
   onSelectPhoto: (photoId: string) => void
   photos: PhotoRecord[]
+  sequenceCount: number
   t: ReturnType<typeof useTranslation>['t']
 }) {
-  const activeButtonRef = useRef<HTMLButtonElement | null>(null)
+  const trackRef = useRef<HTMLDivElement | null>(null)
+  const hasSequence = sequenceCount > 1
+  const virtualizer = useVirtualizer({
+    count: photos.length,
+    estimateSize: () => REVIEW_FILMSTRIP_ITEM_ESTIMATE,
+    getScrollElement: () => trackRef.current,
+    horizontal: true,
+    overscan: 12,
+  })
 
   useEffect(() => {
-    activeButtonRef.current?.scrollIntoView({
-      behavior: 'smooth',
-      block: 'nearest',
-      inline: 'center',
-    })
-  }, [activePhotoId])
+    if (activePhotoIndex < 0) return
+    virtualizer.scrollToIndex(activePhotoIndex, { align: 'center' })
+  }, [activePhotoIndex, virtualizer])
 
   return (
     <footer className="review-filmstrip" aria-label={t('selection.review.filmstripLabel')}>
-      <div className="review-filmstrip__track selection-scroll">
-        {photos.map((item) => (
-          <button
-            aria-current={item.id === activePhotoId ? 'true' : undefined}
-            className={cn(
-              'review-filmstrip__item',
-              item.id === activePhotoId && 'review-filmstrip__item--active',
-            )}
-            key={item.id}
-            onClick={() => onSelectPhoto(item.id)}
-            ref={item.id === activePhotoId ? activeButtonRef : null}
-            style={{ backgroundImage: item.placeholderGradient ?? item.previewGradient }}
-            type="button"
-          >
-            <ThumbnailImage
-              alt={item.fileName}
-              className="review-filmstrip__image"
-              onStatusChange={onThumbnailLoadStatus}
-              photoId={item.id}
-              src={item.thumbGridUrl}
-            />
-            <span className="review-filmstrip__shade" />
-            <span className="review-filmstrip__meta">
-              <strong>{formatScore(item.finalScore)}</strong>
-              <small>{item.fileName}</small>
-            </span>
-          </button>
-        ))}
+      <div className="review-filmstrip__track selection-scroll" ref={trackRef}>
+        <div className="review-filmstrip__spacer" style={{ width: virtualizer.getTotalSize() }}>
+          {virtualizer.getVirtualItems().map((virtualItem) => {
+            const item = photos[virtualItem.index]
+            if (!item) return null
+            const groupIndex = groupPhotoOrderById.get(item.id)
+            const isSequencePhoto = hasSequence && groupIndex !== undefined
+            const itemStyle: CSSProperties & { '--film-x': string } = {
+              '--film-x': `${virtualItem.start}px`,
+              backgroundImage: item.placeholderGradient ?? item.previewGradient,
+            }
+            return (
+              <button
+                aria-current={item.id === activePhotoId ? 'true' : undefined}
+                className={cn(
+                  'review-filmstrip__item',
+                  item.id === activePhotoId && 'review-filmstrip__item--active',
+                  isSequencePhoto && 'review-filmstrip__item--sequence',
+                  isSequencePhoto && groupIndex === 0 && 'review-filmstrip__item--sequence-start',
+                  isSequencePhoto &&
+                    groupIndex === sequenceCount - 1 &&
+                    'review-filmstrip__item--sequence-end',
+                  !isSequencePhoto &&
+                    sequenceCount > 1 &&
+                    'review-filmstrip__item--outside-sequence',
+                  hasSequence &&
+                    item.id === bestGroupPhotoId &&
+                    'review-filmstrip__item--sequence-best',
+                )}
+                key={item.id}
+                onClick={() => onSelectPhoto(item.id)}
+                style={itemStyle}
+                type="button"
+              >
+                <ThumbnailImage
+                  alt={item.fileName}
+                  className="review-filmstrip__image"
+                  onStatusChange={onThumbnailLoadStatus}
+                  photoId={item.id}
+                  src={item.thumbGridUrl}
+                />
+                <span className="review-filmstrip__shade" />
+                {isSequencePhoto ? (
+                  <span
+                    className={cn(
+                      'review-filmstrip__sequence-cue',
+                      item.id === activePhotoId && 'review-filmstrip__sequence-cue--active',
+                    )}
+                  >
+                    {item.id === activePhotoId
+                      ? t('selection.review.filmstripSequenceIndex', {
+                          count: sequenceCount,
+                          index: groupIndex + 1,
+                        })
+                      : null}
+                  </span>
+                ) : null}
+                {hasSequence && item.id === bestGroupPhotoId ? (
+                  <span
+                    aria-label={t('selection.review.sequenceBest')}
+                    className="review-filmstrip__best"
+                  />
+                ) : null}
+                <span className="review-filmstrip__meta">
+                  <strong>{formatScore(item.finalScore)}</strong>
+                  <small>{item.fileName}</small>
+                </span>
+              </button>
+            )
+          })}
+        </div>
       </div>
     </footer>
   )
