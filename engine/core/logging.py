@@ -108,6 +108,11 @@ def setup_logging(
         _install_crash_hook(crash_dir)
 
     root_logger = logging.getLogger()
+    for handler in root_logger.handlers:
+        with contextlib.suppress(Exception):
+            handler.flush()
+        with contextlib.suppress(Exception):
+            handler.close()
     root_logger.handlers.clear()
     for handler in handlers:
         root_logger.addHandler(handler)

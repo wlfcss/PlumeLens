@@ -1,11 +1,13 @@
 """FastAPI application lifespan management."""
 
 import asyncio
+import inspect
 import os
 import sys
 from collections.abc import AsyncGenerator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
+from typing import Any
 
 import structlog
 from fastapi import FastAPI
@@ -283,19 +285,28 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
 
     yield
 
+    async def _await_cancelled_task(task: asyncio.Task[Any], name: str) -> None:
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            await logger.aexception("Background task failed during shutdown", task=name)
+
     # Shutdown
     refresh_task.cancel()
     sweep_task.cancel()
     geocode_task.cancel()
-    import contextlib
 
-    with contextlib.suppress(asyncio.CancelledError, Exception):
-        await refresh_task
-    with contextlib.suppress(asyncio.CancelledError, Exception):
-        await sweep_task
-    with contextlib.suppress(asyncio.CancelledError, Exception):
-        await geocode_task
-    app.state.pipeline.close()
+    await _await_cancelled_task(refresh_task, "refresh_all_thumbnails")
+    await _await_cancelled_task(sweep_task, "sweep_stuck_tasks")
+    await _await_cancelled_task(geocode_task, "backfill_locations")
+
+    close_pipeline = getattr(app.state.pipeline, "close", None)
+    if callable(close_pipeline):
+        close_result = close_pipeline()
+        if inspect.isawaitable(close_result):
+            await close_result
     await app.state.db.close()
     thread_pool.shutdown(wait=False, cancel_futures=True)
     await logger.ainfo("PlumeLens Engine shutting down")
