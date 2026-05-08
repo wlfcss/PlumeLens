@@ -16,10 +16,10 @@ files:
 #     │   └── _internal/           （含 torch/transformers/onnxruntime 各 native lib）
 #     └── models/                  ← 推理模型 + 配套 metadata
 #         ├── yolo26l-bird-det.onnx
-#         ├── bird_visibility.onnx
+#         ├── bird_visibility11.onnx          （v2.0,11 关键点 pose）
 #         ├── clipiqa_plus.onnx
 #         ├── hyperiqa.onnx
-#         ├── bird_visibility_config.json
+#         ├── bird_visibility11_config.json   （含 best_body/tail/wings 校准）
 #         ├── species_wiki.parquet
 #         └── species/             ← v4 DINOv3 species（torch + transformers）
 #             ├── backbone/

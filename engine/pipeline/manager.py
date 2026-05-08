@@ -12,7 +12,7 @@ import structlog
 
 from engine.core.config import Settings
 from engine.pipeline.detector import BirdDetector
-from engine.pipeline.grader import apply_pose_penalty, grade
+from engine.pipeline.grader import apply_pose_adjustment, grade
 from engine.pipeline.models import (
     BirdAnalysis,
     PipelineResult,
@@ -198,17 +198,17 @@ class PipelineManager:
         else:
             await logger.awarning("YOLO detector not found", path=str(yolo_path))
 
-        # ---- bird_visibility (pose) ----
+        # ---- bird_visibility v2 (pose, 11 关键点) ----
         # YOLO26l-pose 与 YOLO 同架构家族（NMS-free + advanced indexing head），
         # 同样在 ANE 上有精度风险（官方 INTEGRATION_GUIDE §14.2 实测 worst KP
         # drift 8.13 px）。强制 CPUAndGPU 关 ANE，与 YOLO 一致。
-        pose_path = models_dir / "bird_visibility.onnx"
+        pose_path = models_dir / "bird_visibility11.onnx"
         if pose_path.exists():
             providers = resolve_providers(
                 self._settings.pose_provider,
                 coreml_compute_units=_COREML_NO_ANE,
             )
-            await logger.ainfo("Loading pose detector", path=str(pose_path))
+            await logger.ainfo("Loading pose detector v2", path=str(pose_path))
             try:
                 sess = ort.InferenceSession(str(pose_path), providers=providers)
                 self._pose = PoseDetector(
@@ -218,6 +218,9 @@ class PipelineManager:
                     eye_threshold=self._settings.pose_eye_threshold,
                     head_threshold=self._settings.pose_head_threshold,
                     head_eye_threshold=self._settings.pose_head_eye_threshold,
+                    body_threshold=self._settings.pose_body_threshold,
+                    tail_threshold=self._settings.pose_tail_threshold,
+                    wing_threshold=self._settings.pose_wing_threshold,
                     expanded_box_margin=self._settings.pose_expanded_margin,
                 )
                 self._model_status["bird_visibility"] = True
@@ -390,15 +393,20 @@ class PipelineManager:
         # IQA-specific expand crop (separate from pose crop)
         h.update(f"iqe:{self._settings.iqa_expand_ratio}".encode())
         h.update(f"iqar:{self._settings.iqa_max_aspect_ratio}".encode())
-        # 算法版本：bump 每当评分/降档逻辑变（pose penalty / grading / species 口径）。
-        # v6：species v4 LoRA/reject 三态，uncertain 不再写入自动物种结论。
-        # CLIPIQA/HyperIQA 图内已经做 ImageNet normalization，engine 只传 raw RGB 0-1。
-        h.update(b"alg:v6-iqa-raw-input-species-v4-tristate")
-        # Pose thresholds (5 项)
+        # 算法版本:bump 每当评分/降档逻辑变(pose penalty / grading / species 口径)。
+        # v7:bird_visibility v2(11 关键点) + grader 飞版升档(head+eye 可见 +
+        # posture=flying → +1 档);PoseInfo schema 加 6 关键点 + body/tail/wings + 3 posture。
+        # v6:species v4 LoRA/reject 三态,uncertain 不再写入自动物种结论。
+        # CLIPIQA/HyperIQA 图内已经做 ImageNet normalization,engine 只传 raw RGB 0-1。
+        h.update(b"alg:v7-pose-v2-fly-upgrade")
+        # Pose thresholds (8 项,v2 新增 body/tail/wing)
         h.update(f"pbt:{self._settings.pose_box_threshold}".encode())
         h.update(f"pet:{self._settings.pose_eye_threshold}".encode())
         h.update(f"pht:{self._settings.pose_head_threshold}".encode())
         h.update(f"phet:{self._settings.pose_head_eye_threshold}".encode())
+        h.update(f"pbody:{self._settings.pose_body_threshold}".encode())
+        h.update(f"ptail:{self._settings.pose_tail_threshold}".encode())
+        h.update(f"pwing:{self._settings.pose_wing_threshold}".encode())
         h.update(f"pem:{self._settings.pose_expanded_margin}".encode())
         h.update(f"pis:{self._settings.pose_input_size}".encode())
         # Species
@@ -577,8 +585,8 @@ class PipelineManager:
                 scores = QualityScores(clipiqa=0.5, hyperiqa=0.5, combined=0.5)
             t_iqa_ms += (time.perf_counter() - _t) * 1000
             iqa_grade = grade(scores.combined, self._settings.grade_thresholds)
-            # Step 3c: pose 降档（头不可见 -2 / 眼不可见 -1）
-            bird_grade = apply_pose_penalty(iqa_grade, pose_info)
+            # Step 3c: pose 调整(降档:头不可见 -2 / 眼不可见 -1;升档:头眼齐 + 飞版 +1)
+            bird_grade = apply_pose_adjustment(iqa_grade, pose_info)
 
             # Step 4: species classification (gated)
             species_candidates: list[SpeciesCandidate] = []

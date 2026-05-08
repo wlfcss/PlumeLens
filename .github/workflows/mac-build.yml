@@ -96,16 +96,18 @@ jobs:
         run: |
           set -euo pipefail
 
-          # v0.6.0 切换到 DINOv4 species:
-          # - 旧 species_list_1301.parquet 已删(canonical_extended.parquet 自带 class_id)
-          # - 旧 8-head ensemble (heads/seed*.pt) 已替换为 v4 LoRA 单文件 adapter
-          # - 必需新增:v4/seed42_adapter.pt + v4_calibration_policy.json
+          # v0.6.0+ 模型清单:
+          # - DINOv4 species:species_list_1301 已删,heads/seed*.pt 已替换为 v4 LoRA
+          #   单文件 adapter,新增 v4/seed42_adapter.pt + v4_calibration_policy.json
+          # - bird_visibility v2.0 (11 关键点):bird_visibility.onnx 已升级为
+          #   bird_visibility11.onnx + bird_visibility11_config.json (含 best_body /
+          #   best_tail / best_wings 校准段)。
           required=(
             "engine/models/yolo26l-bird-det.onnx"
-            "engine/models/bird_visibility.onnx"
+            "engine/models/bird_visibility11.onnx"
             "engine/models/clipiqa_plus.onnx"
             "engine/models/hyperiqa.onnx"
-            "engine/models/bird_visibility_config.json"
+            "engine/models/bird_visibility11_config.json"
             "engine/models/species/backbone/config.json"
             "engine/models/species/backbone/model.safetensors"
             "engine/models/species/canonical_extended.parquet"

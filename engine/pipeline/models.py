@@ -42,21 +42,43 @@ class Keypoint(BaseModel):
 
 
 class PoseInfo(BaseModel):
-    """Head/eye keypoints and derived visibility judgments.
+    """Full-body keypoints + visibility + posture analysis.
 
-    来源：bird_visibility v1.1（YOLO26l-pose 微调）
+    来源:bird_visibility v2.0(YOLO26l-pose,11 关键点)。
 
-    关键点顺序固定为 `bill, crown, nape, left_eye, right_eye`。
-    `flip_idx=[0,1,2,4,3]` 表示水平翻转时左右眼互换。
+    关键点顺序固定:
+        头部(5):bill, crown, nape, left_eye, right_eye
+        躯干(6):belly, breast, back, tail, left_wing, right_wing
+
+    flip_idx = [0, 1, 2, 4, 3, 5, 6, 7, 8, 10, 9](水平翻转时左右眼/翼互换)。
+
+    新增 v2 字段(身/尾/翼可见 + 视角/朝向/姿态)默认值兼容老 cache:
+    旧 v1 写入的 PipelineResult JSON 无此字段,Pydantic 反序列化时使用默认值。
     """
 
+    # 头部 5 关键点
     bill: Keypoint
     crown: Keypoint
     nape: Keypoint
     left_eye: Keypoint
     right_eye: Keypoint
+    # 躯干 6 关键点(v2 新增,默认占位 0,0,0 兼容旧 cache)
+    belly: Keypoint = Keypoint(x=0.0, y=0.0, confidence=0.0)
+    breast: Keypoint = Keypoint(x=0.0, y=0.0, confidence=0.0)
+    back: Keypoint = Keypoint(x=0.0, y=0.0, confidence=0.0)
+    tail: Keypoint = Keypoint(x=0.0, y=0.0, confidence=0.0)
+    left_wing: Keypoint = Keypoint(x=0.0, y=0.0, confidence=0.0)
+    right_wing: Keypoint = Keypoint(x=0.0, y=0.0, confidence=0.0)
+    # 5 项可见性
     head_visible: bool
     eye_visible: bool
+    body_visible: bool = False  # v2 新增
+    tail_visible: bool = False  # v2 新增
+    wings_visible: bool = False  # v2 新增
+    # 3 项姿态(基于关键点几何派生)
+    view_angle: str = "unknown"  # v2:frontal / side / back / unknown
+    facing: str = "unknown"  # v2:left / right / unknown(仅 view=side 有效)
+    posture: str = "unknown"  # v2:perched / flying / unknown
 
 
 class SpeciesCandidate(BaseModel):

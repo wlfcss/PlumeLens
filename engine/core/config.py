@@ -69,13 +69,17 @@ class Settings(BaseSettings):
     # 注意：实际最终档位还会经过 pose penalty（头不可见 -2 档，眼不可见 -1 档）。
     grade_thresholds: tuple[float, float, float] = (0.45, 0.60, 0.75)
 
-    # Pipeline — pose / visibility (bird_visibility v1.1)
+    # Pipeline — pose / visibility (bird_visibility v2.0, 11 关键点)
     # box_threshold 作用于 crop 输入下取最高置信度检测，不作过滤
+    # 阈值默认值取自 bird_visibility11_config.json 的 best_* 校准结果
     pose_input_size: int = 640
     pose_box_threshold: float = 0.05
     pose_eye_threshold: float = 0.45
-    pose_head_threshold: float = 0.35
-    pose_head_eye_threshold: float = 0.10
+    pose_head_threshold: float = 0.45  # v1 0.35 → v2 0.45(11 kpt 训练后头部判定可更严格)
+    pose_head_eye_threshold: float = 0.40  # v1 0.10 → v2 0.40
+    pose_body_threshold: float = 0.30  # 新增 v2:躯干 belly/breast/back 任一阈值
+    pose_tail_threshold: float = 0.40  # 新增 v2:尾羽阈值
+    pose_wing_threshold: float = 0.40  # 新增 v2:翅膀 left/right_wing 任一阈值
     pose_expanded_margin: float = 0.15
 
     # Pipeline — species classification (DINOv3 ViT-L + LoRA/reject adapter)

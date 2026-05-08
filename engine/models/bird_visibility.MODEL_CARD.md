@@ -1,355 +1,412 @@
-# Bird Visibility Detector v1.1
+# 鸟类全身姿态 + 可见性检测模型 v2.0 — 完整集成手册
 
-鸟类头部/眼睛可见性检测 — 跨平台部署包。
-
-> **本包同时提供 PyTorch (.pt) 和 ONNX (.onnx) 两种权重文件。**
-> 通过 `BirdVisibilityDetector.auto()` 自动按平台选择最优组合：
-> - macOS Apple Silicon → `.pt + MPS`（最快，~26 ms/图）
-> - Windows / Linux / 其他 → `.onnx + CPU`（跨平台，~170 ms/图）
+> **PlumeLens 集成笔记**(本仓库特定):
+> - 模型文件:`engine/models/bird_visibility11.{onnx,_config.json}`
+> - 推理走自实现 raw onnxruntime 后处理(`engine/pipeline/pose.py`),不依赖 ultralytics package(已从 PyInstaller 排除以缩 packaged binary)
+> - PoseInfo schema:`engine/pipeline/models.py` 含全部 11 关键点 + 5 visibility + 3 posture(view_angle / facing / posture)字段
+> - **产品规则:飞版自动升档**
+>   - grader 在头眼齐全(head_visible AND eye_visible)且 posture=='flying' 时,自动 +1 档
+>   - 实现:`engine/pipeline/grader.py::apply_pose_adjustment`
+>   - 鸟摄精选惯例:飞版需要技术 + 抓拍 + 运气,在画质相同时应给予更高认可
+>   - flying 判定故意严格(aspect>1.3 + 双翼可见 + 翼跨度 ≥ bbox 宽 50%),宁愿误判 perched 也不污染精选墙
 
 ---
 
-## 1. 快速开始（30 秒上手）
+## 1. 概述
 
-### 1.1 解压并安装依赖
+### 1.1 模型能力
 
-**macOS（Apple Silicon）：**
+输入一张照片，每只检测到的鸟输出：
 
-```bash
-pip install -r requirements.txt
+- bbox（检测框 + 置信度）
+- 11 个关键点（坐标 + 置信度）
+- 5 项可见性判定：头 / 眼 / 身 / 尾 / 翼
+- 视角方向（正面 / 侧面 / 背面）
+- 朝向（左 / 右）
+- 姿态（栖息 / 飞行）
+- 大小分级（tiny / small / medium / large）
+
+### 1.2 不能做什么
+
+- ❌ 鸟类物种识别（仅识别"鸟"这一类）
+- ❌ 像素级分割（输出 bbox，不是 mask）
+- ❌ 密集鸟群中每只鸟的精确分析（NABirds 训练数据为单鸟标注）
+
+---
+
+## 2. 模型规格
+
+| 项 | 值 |
+|----|-----|
+| 架构 | YOLO26l-pose |
+| 参数量 | 25.6M（fused，推理时） |
+| **关键点** | **11**（5 头 + 6 身）|
+| 类别 | 1 类（`bird`） |
+| 训练数据 | NABirds（48,562 张，555 种）|
+| 训练分辨率 | 640 |
+| flip_idx | `[0, 1, 2, 4, 3, 5, 6, 7, 8, 10, 9]` |
+
+### 关键点顺序与对称对
+
+| Idx | 名称 | 翻转后 | 备注 |
+|-----|------|------|------|
+| 0 | bill | 0 | 中线 |
+| 1 | crown | 1 | 中线 |
+| 2 | nape | 2 | 中线 |
+| 3 | left_eye | 4 | 与 right_eye 对称 |
+| 4 | right_eye | 3 | 与 left_eye 对称 |
+| 5 | belly | 5 | 中线 |
+| 6 | breast | 6 | 中线 |
+| 7 | back | 7 | 中线 |
+| 8 | tail | 8 | 中线 |
+| 9 | left_wing | 10 | 与 right_wing 对称 |
+| 10 | right_wing | 9 | 与 left_wing 对称 |
+
+### 验证集表现（NABirds 24,633 张）
+
+| 指标 | v2.0（11 kpt） | v1.x（5 kpt）| 备注 |
+|------|---------------|---------------|------|
+| Pose mAP50 | 99.45% | 99.41% | ≈ 持平 |
+| **Pose mAP50-95** | **88.83%** | 98.92% | v2 多 6 个躯干点更难 |
+| Det mAP50 | 99.39% | 99.35% | 略升 |
+| **Det mAP50-95** | **80.55%** | 79.92% | **+0.6** |
+
+### 校准阈值（自动加载于 config JSON）
+
+| 属性 | 阈值 | F1 |
+|------|------|-----|
+| eye_visible | 0.45 | 99.28% |
+| head_visible | head=0.45, eye=0.40 | 99.91% |
+| body_visible | 0.30 | 99.84% |
+| tail_visible | 0.40 | 96.90% |
+| wings_visible | 0.40 | 97.55% |
+
+---
+
+## 3. 决策规则
+
+### 3.1 可见性
+
+```
+eye_visible:
+  box_conf >= box_threshold
+  AND (left_eye 或 right_eye 任一 conf >= eye_threshold 且在框内)
+
+head_visible:
+  box_conf >= box_threshold
+  AND (
+    {bill, crown, nape} 中至少 2 个 conf >= head_threshold 在框内
+    OR
+    {bill, crown, nape} 中至少 1 个 + {left_eye, right_eye} 中至少 1 个
+  )
+
+body_visible:
+  box_conf >= box_threshold
+  AND ({belly, breast, back} 任一 conf >= body_threshold 在框内)
+
+tail_visible:
+  box_conf >= box_threshold
+  AND tail conf >= tail_threshold 在框内
+
+wings_visible:
+  box_conf >= box_threshold
+  AND ({left_wing, right_wing} 任一 conf >= wing_threshold 在框内)
+
+"在框内" 定义：
+  margin = 0.15
+  关键点 (x, y) 满足：
+    bbox_x1 - margin*w <= x <= bbox_x2 + margin*w
+    bbox_y1 - margin*h <= y <= bbox_y2 + margin*h
 ```
 
-**Windows / Linux（不需要 PyTorch）：**
-
-```bash
-pip install -r requirements_onnx.txt
-```
-
-### 1.2 命令行测试
-
-```bash
-python -m bird_visibility path/to/bird.jpg
-```
-
-输出样例：
+### 3.2 视角方向（基于关键点几何）
 
 ```
-Detected 1 bird(s):
-  #1  conf=0.927  head=YES  eye=YES  bbox=(303, 142, 964, 652)
-      keypoints: bill=1.00  crown=1.00  nape=1.00  left_eye=1.00  right_eye=0.00
+frontal:  双眼可见 + bill 在两眼水平之间
+back:     双眼不可见 + crown + nape 都可见
+side:     仅一只眼可见
+unknown:  其他
 ```
 
-### 1.3 三行代码集成
+### 3.3 朝向（仅在 view_angle == "side" 时有效）
+
+```
+若 bill.x < nape.x  → facing = "left"
+若 bill.x > nape.x  → facing = "right"
+否则                 → "unknown"
+```
+
+### 3.4 姿态（启发式规则，无 GT 标签）
+
+```
+flying:   bbox aspect (w/h) > 1.3
+          且双翼都可见
+          且翼跨度 / bbox 宽度 >= 0.5
+perched:  aspect < 1.05
+          或翼不全可见
+unknown:  其他
+```
+
+### 3.5 大小分级
+
+```
+tiny    : ratio < 2%
+small   : 2% ≤ ratio < 10%
+medium  : 10% ≤ ratio < 30%
+large   : ratio >= 30%
+其中 ratio = bbox_area / image_area
+```
+
+---
+
+## 4. 集成代码
+
+### 4.1 推荐方式：auto-detect
 
 ```python
 from bird_visibility import BirdVisibilityDetector
 
-detector = BirdVisibilityDetector.auto()  # 自动选 .pt+mps 或 .onnx+cpu
-for bird in detector.detect("photo.jpg"):
-    print(bird.head_visible, bird.eye_visible, bird.box_conf)
-```
-
----
-
-## 2. 包结构
-
-```
-bird_visibility_pkg/
-├── README.md                            ← 本文件
-├── INTEGRATION_GUIDE.md                 ← 完整集成手册
-├── requirements.txt                     ← 全功能依赖（含 PyTorch）
-├── requirements_onnx.txt                ← 仅 ONNX 推理依赖（更小）
-├── bird_visibility/                     ← Python 包本体
-│   ├── __init__.py
-│   ├── detector.py                      ← 核心 BirdVisibilityDetector 类
-│   └── __main__.py                      ← CLI 入口
-├── models/
-│   ├── bird_visibility.pt               ← 161 MB · PyTorch 权重（Mac 推荐）
-│   ├── bird_visibility.onnx             ← 98 MB · ONNX 权重（Windows 推荐）
-│   └── bird_visibility_config.json      ← 校准阈值配置
-└── examples/
-    ├── basic_usage.py                   ← 最小示例（auto-detect）
-    ├── batch_inference.py               ← 批量处理
-    └── filter_usable_photos.py          ← 实战：筛选可用图 + 裁剪
-```
-
----
-
-## 3. 选哪个文件？
-
-### 3.1 决策矩阵
-
-| 平台 | 文件 | 设备 | 中位延迟 | 备注 |
-|------|------|------|----------|------|
-| **macOS Apple Silicon** | `.pt` | `mps` | **~26 ms** | 最快 |
-| Windows / Linux x86 CPU | `.onnx` | `cpu` | ~170 ms | 跨平台首选 |
-| NVIDIA GPU 服务器 | `.onnx` | `cuda` | ~10-15 ms | 需装 onnxruntime-gpu |
-| iOS / iPadOS | `.onnx` 或自行转 CoreML | — | — | 移动端 |
-
-> 表中"中位延迟"为单图前向推理耗时，imgsz=640，batch=1，不含图像加载/前处理。
-
-### 3.2 自动选择（推荐）
-
-让 `auto()` 替你决定：
-
-```python
 detector = BirdVisibilityDetector.auto(models_dir="models")
-```
 
-内部逻辑：
-
-```
-是 macOS Apple Silicon 且找到 .pt？  → .pt + mps
-否则找到 .onnx？                     → .onnx + cpu
-否则找到 .pt？                       → .pt + cpu  (回退)
-都没有？                              → 抛 FileNotFoundError
-```
-
-### 3.3 显式指定
-
-```python
-# 强制 PyTorch
-detector = BirdVisibilityDetector(
-    weights="models/bird_visibility.pt",
-    device="mps",  # 或 "cpu" / "cuda:0"
-)
-
-# 强制 ONNX
-detector = BirdVisibilityDetector(
-    weights="models/bird_visibility.onnx",
-    device="cpu",  # ONNX 只支持 cpu/cuda 通过 onnxruntime 的 provider
-)
-```
-
----
-
-## 4. 核心 API
-
-### 4.1 `BirdVisibilityDetector`
-
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `weights` | str \| Path | — | 权重文件路径（`.pt` 或 `.onnx`） |
-| `config` | str \| Path \| None | None | 校准配置路径 |
-| `device` | str | `"cpu"` | `cpu` / `mps` / `cuda:0` |
-| `imgsz` | int | 640 | 推理分辨率 |
-| `box_threshold` | float \| None | None（用配置） | 检测置信度阈值（建议 0.25） |
-| `iou_threshold` | float | 0.3 | NMS IoU |
-
-### 4.2 类方法
-
-| 方法 | 返回 | 说明 |
-|------|------|------|
-| `BirdVisibilityDetector.auto(models_dir, config, **kwargs)` | `BirdVisibilityDetector` | 自动选最优配置 |
-
-### 4.3 实例方法
-
-| 方法 | 返回 | 说明 |
-|------|------|------|
-| `detect(source)` | `List[BirdDetection]` | 单张图（路径/PIL/numpy 均可） |
-| `detect_batch(sources)` | `List[List[BirdDetection]]` | 批量 |
-| `get_config()` | `Dict` | 当前阈值（调试） |
-
-### 4.4 `BirdDetection` 字段
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `box_conf` | float | 检测置信度 |
-| `box_xyxy` | tuple(x1,y1,x2,y2) | 像素坐标 |
-| `keypoints_xy` | dict | 5 关键点像素坐标 |
-| `keypoints_conf` | dict | 5 关键点置信度 |
-| `head_visible` | bool | 头部可见 |
-| `eye_visible` | bool | 眼睛可见 |
-| `to_dict()` | dict | 序列化为 JSON 兼容字典 |
-
----
-
-## 5. 完整示例
-
-### 5.1 单图分析
-
-```python
-from bird_visibility import BirdVisibilityDetector
-
-detector = BirdVisibilityDetector.auto()
-print("Active config:", detector.get_config())
-
-results = detector.detect("photo.jpg")
-print(f"Detected {len(results)} bird(s)")
-
-for i, bird in enumerate(results, 1):
-    print(f"\nBird #{i}")
-    print(f"  Confidence:    {bird.box_conf:.3f}")
-    print(f"  Head visible:  {bird.head_visible}")
-    print(f"  Eye visible:   {bird.eye_visible}")
-    print(f"  BBox:          {bird.box_xyxy}")
-    print(f"  Keypoints:")
-    for name in ("bill", "crown", "nape", "left_eye", "right_eye"):
-        x, y = bird.keypoints_xy[name]
-        c = bird.keypoints_conf[name]
-        print(f"    {name:10s} ({x:.0f}, {y:.0f})  conf={c:.3f}")
-```
-
-### 5.2 批量处理
-
-```python
-from pathlib import Path
-from bird_visibility import BirdVisibilityDetector
-
-detector = BirdVisibilityDetector.auto()
-
-photo_dir = Path("input_photos")
-photos = sorted(photo_dir.glob("*.jpg"))
-
-print(f"Processing {len(photos)} photos...")
-results = []
-for path in photos:
-    detections = detector.detect(path)
-    results.append({
-        "path": str(path),
-        "num_birds": len(detections),
-        "any_usable": any(d.head_visible and d.eye_visible for d in detections),
-        "detections": [d.to_dict() for d in detections],
-    })
-
-# 统计
-total = len(results)
-usable = sum(1 for r in results if r["any_usable"])
-print(f"\nUsable photos: {usable}/{total} ({usable/total*100:.1f}%)")
-```
-
-### 5.3 集成到下游物种分类
-
-```python
-from PIL import Image
-from bird_visibility import BirdVisibilityDetector
-
-detector = BirdVisibilityDetector.auto(box_threshold=0.30)
-
-def extract_usable_birds(image_path):
-    """筛选可用于物种分类的鸟体裁剪图。"""
-    img = Image.open(image_path).convert("RGB")
-    w, h = img.size
-    crops = []
-    for bird in detector.detect(image_path):
-        if not (bird.head_visible and bird.eye_visible):
-            continue
+for bird in detector.detect("photo.jpg"):
+    # 关键判定
+    if bird.head_visible and bird.eye_visible:
+        # 适合下游物种识别
         x1, y1, x2, y2 = bird.box_xyxy
-        # 加 10% padding 给后续分类器更多上下文
-        bw, bh = x2 - x1, y2 - y1
-        x1 = max(0, int(x1 - bw * 0.1))
-        y1 = max(0, int(y1 - bh * 0.1))
-        x2 = min(w, int(x2 + bw * 0.1))
-        y2 = min(h, int(y2 + bh * 0.1))
-        crops.append(img.crop((x1, y1, x2, y2)))
-    return crops
-
-# 用例
-for img_path in input_images:
-    bird_crops = extract_usable_birds(img_path)
-    for crop in bird_crops:
-        species = your_species_classifier(crop)  # 下游 DINOv3 等
-        print(f"{img_path}: {species}")
+        # 裁剪 + 喂分类器...
 ```
 
----
-
-## 6. 性能基准（实测）
-
-测试硬件：Apple M5 Max，128 GB RAM。50 张验证图，imgsz=640，warmup 5 次。
-
-| Backend | 中位延迟 | P95 延迟 | 吞吐 | 相对 PyTorch CPU | 精度（Box IoU vs 基准）|
-|---------|---------|----------|------|----------------|--------------------|
-| PyTorch CPU | 343.7 ms | 395.8 ms | 2.8 img/s | 1.0x | 1.0（基准） |
-| PyTorch MPS | 26.0 ms | 27.6 ms | 38.7 img/s | **13.2x** | 0.99999963 |
-| **ONNX CPU** | **170.9 ms** | **179.6 ms** | **5.8 img/s** | **2.0x** | **0.99999951** |
-
-> ONNX 与 PyTorch 的精度漂移仅 ~10⁻⁵ 像素（纯浮点噪声），可视为完全等价。
-
-详细 benchmark 数据见 [INTEGRATION_GUIDE.md](INTEGRATION_GUIDE.md) 第 8 节。
-
----
-
-## 7. 阈值调优
-
-### 7.1 默认值（生产推荐）
-
-| 阈值 | 默认 | 说明 |
-|------|------|------|
-| `box_threshold` | **0.25** | 检测置信度（多鸟场景的合理起点） |
-| `eye_threshold` | 0.45 | 眼睛关键点（校准最优） |
-| `head_threshold` | 0.35 | 头部关键点（校准最优） |
-| `head_eye_threshold` | 0.10 | head_visible 中辅助验证用 |
-| `margin` | 0.15 | 关键点几何检查边界 |
-
-### 7.2 不同场景
+### 4.2 显式指定
 
 ```python
-# 单鸟特写 / 高质量照片
-detector = BirdVisibilityDetector.auto(box_threshold=0.05)
+# Mac 强制 PyTorch + MPS
+detector = BirdVisibilityDetector(
+    weights="models/bird_visibility11.pt",
+    config="models/bird_visibility11_config.json",
+    device="mps",
+)
 
-# 多鸟野外照片（默认）
-detector = BirdVisibilityDetector.auto(box_threshold=0.25)
+# Windows 强制 ONNX + CPU
+detector = BirdVisibilityDetector(
+    weights="models/bird_visibility11.onnx",
+    config="models/bird_visibility11_config.json",
+    device="cpu",
+)
+```
 
-# 鸟群密集场景
-detector = BirdVisibilityDetector.auto(box_threshold=0.35, iou_threshold=0.2)
+### 4.3 阈值定制
 
-# 监控视频低分辨率
-detector = BirdVisibilityDetector.auto(box_threshold=0.15, imgsz=1024)
+```python
+# 提高检测灵敏度（捕获更多但可能假阳性）
+detector = BirdVisibilityDetector.auto(box_threshold=0.10)
+
+# 严格筛选（只要高置信度）
+detector = BirdVisibilityDetector.auto(
+    box_threshold=0.50,
+    iou_threshold=0.2,  # 更激进的 NMS 去重
+)
+
+# 推理时改 imgsz（不需要重训）
+detector = BirdVisibilityDetector.auto(imgsz=1024)
 ```
 
 ---
 
-## 8. 故障排查
+## 5. 完整输出样例
 
-### 8.1 ONNX 加载报错 `Unable to automatically guess model task`
+```python
+{
+    "box_conf": 0.927,
+    "box_xyxy": [491.0, 269.0, 697.0, 459.0],
+    "keypoints_xy": {
+        "bill":      [543.7, 333.4],
+        "crown":     [566.5, 305.2],
+        "nape":      [589.0, 303.0],
+        "left_eye":  [566.0, 320.4],
+        "right_eye": [0.0, 0.0],            # 未检测到 → 坐标置零
+        "belly":     [582.7, 462.4],
+        "breast":    [465.6, 356.0],
+        "back":      [593.8, 201.2],
+        "tail":      [926.5, 461.5],
+        "left_wing": [684.6, 298.2],
+        "right_wing": [613.3, 294.9],
+    },
+    "keypoints_conf": {
+        "bill":      0.953,
+        "crown":     0.977,
+        "nape":      0.988,
+        "left_eye":  0.997,
+        "right_eye": 0.004,                 # 接近 0 = 不可见
+        "belly":     0.997,
+        "breast":    0.995,
+        "back":      0.969,
+        "tail":      0.925,
+        "left_wing": 0.991,
+        "right_wing": 0.052,
+    },
+    "head_visible": True,
+    "eye_visible": True,
+    "body_visible": True,
+    "tail_visible": True,
+    "wings_visible": True,
+    "view_angle": "side",
+    "facing": "left",
+    "posture": "perched",
+    "bird_pixel_area_ratio": 0.457,
+    "bird_size_category": "large"
+}
+```
 
-ONNX 模型缺少 task 元数据，必须显式指定 `task="pose"`。本包已在 `BirdVisibilityDetector` 内部处理。如果你直接使用 Ultralytics：
+---
+
+## 6. 性能
+
+| Backend | 中位延迟 | 吞吐 | 备注 |
+|---------|---------|------|------|
+| PyTorch CPU | ~340 ms | 3 img/s | 通用，慢 |
+| **PyTorch MPS** | **~30 ms** | 33 img/s | Mac 首选 |
+| **ONNX CPU** | **~170 ms** | 6 img/s | Win/Linux 首选 |
+| ONNX CUDA GPU | ~12 ms | 80 img/s | 需 onnxruntime-gpu |
+
+> 测试：Apple M5 Max，imgsz=640，batch=1
+
+---
+
+## 7. 常见问题
+
+### 7.1 ONNX 加载报错 `Unable to automatically guess model task`
+
+`BirdVisibilityDetector` 内部已显式指定 `task="pose"`。如果你直接用 Ultralytics：
 
 ```python
 from ultralytics import YOLO
-model = YOLO("models/bird_visibility.onnx", task="pose")  # ← 必须加 task
+m = YOLO("bird_visibility11.onnx", task="pose")  # ← 必须加 task
 ```
 
-### 8.2 macOS 上 `MPSGraphExecutable: MLIR pass manager failed`
+### 7.2 view_angle 总是返回 unknown
 
-只发生在 CoreML 模型上。本包**不使用 CoreML**，应该不会遇到。如果你自行导出了 CoreML 模型遇到此问题，强制 CPU-only：
+可能原因：
+- 关键点置信度太低（鸟体过小、模糊、遮挡严重）
+- 不满足 frontal / side / back 的几何条件
 
-```python
-import coremltools as ct
-model = ct.models.MLModel("model.mlpackage", compute_units=ct.ComputeUnit.CPU_ONLY)
+可以通过单独检查 `eye_visible` 和 `head_visible` 来做更宽松的判定。
+
+### 7.3 posture 总是 unknown 或 perched
+
+`flying` 判定很严格（要求 aspect > 1.3 + 双翼可见 + 翼跨度大）。如果你的应用场景多飞鸟，可以读取原始关键点自行判断；或修改 `_derive_posture` 方法降低阈值。
+
+### 7.4 想用其他视觉特征做物种识别
+
+模型只产出 11 关键点 + bbox。物种识别建议用：
+
+```
+YOLO26 检测 → 取 bbox+10% padding 裁剪 → DINOv3 / ViT 分类器
 ```
 
-### 8.3 推理速度比预期慢
+`examples/filter_usable_photos.py` 已经做了筛选 + 裁剪的完整 pipeline。
 
-检查：
+### 7.5 同一张图 PyTorch 和 ONNX 结果不一致
 
-- `device` 是否正确（Mac 上应是 `"mps"`，Windows 应是 `"cpu"`）
-- `imgsz` 是否为 640（更高分辨率会等比例变慢）
-- 是否有 warmup（首次推理含编译开销）
-- ONNX Runtime provider 是否优化（CPU 上可设 `intra_op_num_threads`）
-
-### 8.4 检测不到鸟
-
-`box_threshold` 默认 0.25 过滤了较弱的检测。试着降低：
-
-```python
-detector.box_threshold = 0.05
-```
-
-或检查图片质量（极小目标、严重模糊都会降低置信度）。
+通常关键点位置漂移 ~10⁻⁵ 像素（浮点精度），可视为完全等价。如果差异大于 1 像素，检查：
+- imgsz 是否一致
+- 是否两边都用了 `task="pose"` 加载
 
 ---
 
-## 9. 版本
+## 8. 完全脱离 PyTorch（raw onnxruntime）
 
-- **v1.1.0** — 2026-04-26
-  - 新增 ONNX 权重和跨平台 `auto()` 自动选择
-  - 详细的部署性能基准
-- **v1.0.0** — 2026-04-21
-  - 首次发布，单 PyTorch 权重
-- 基础模型：YOLO26l-pose（28.6M 参数）
-- 训练数据：NABirds（48,562 张，555 种北美鸟类）
-- 验证集指标：Pose mAP50-95 = 98.92%, Eye F1 = 99.31%, Head F1 = 99.88%
+Windows 服务器可仅装 onnxruntime + numpy + pillow（无 torch）。但需要自己实现预/后处理：
 
-完整集成、调优、部署方案见 [INTEGRATION_GUIDE.md](INTEGRATION_GUIDE.md)。
+```python
+import json
+import numpy as np
+import onnxruntime as ort
+from PIL import Image
+
+PART_NAMES = ("bill", "crown", "nape", "left_eye", "right_eye",
+              "belly", "breast", "back", "tail", "left_wing", "right_wing")
+
+
+class RawOnnxDetector:
+    def __init__(self, onnx_path, imgsz=640):
+        self.imgsz = imgsz
+        self.sess = ort.InferenceSession(onnx_path, providers=["CPUExecutionProvider"])
+        self.input_name = self.sess.get_inputs()[0].name
+
+    def detect(self, image_path, box_threshold=0.25):
+        img = Image.open(image_path).convert("RGB")
+        orig_w, orig_h = img.size
+        img = img.resize((self.imgsz, self.imgsz), Image.BILINEAR)
+        arr = np.asarray(img, dtype=np.float32) / 255.0
+        chw = arr.transpose(2, 0, 1)[np.newaxis, ...]
+        out = self.sess.run(None, {self.input_name: chw})[0]  # (1, 300, 39)
+        sx, sy = orig_w / self.imgsz, orig_h / self.imgsz
+
+        results = []
+        for row in out[0]:
+            conf = float(row[4])
+            if conf < box_threshold:
+                continue
+            x1, y1, x2, y2 = (float(row[0])*sx, float(row[1])*sy,
+                              float(row[2])*sx, float(row[3])*sy)
+            kp = row[6:].reshape(11, 3)
+            kpts_xy = {n: (float(kp[i, 0])*sx, float(kp[i, 1])*sy)
+                       for i, n in enumerate(PART_NAMES)}
+            kpts_conf = {n: float(kp[i, 2]) for i, n in enumerate(PART_NAMES)}
+            results.append({
+                "box_conf": conf,
+                "box_xyxy": (x1, y1, x2, y2),
+                "keypoints_xy": kpts_xy,
+                "keypoints_conf": kpts_conf,
+            })
+        return results
+```
+
+ONNX 输出形状 `(1, 300, 39)`：300 个候选检测，每个 39 维 = 4 (xyxy) + 1 (conf) + 1 (cls) + 33 (11 kpts × 3)。
+
+---
+
+## 9. 限制与已知问题
+
+1. **单鸟训练偏差**：NABirds 每图 1 只鸟，多鸟场景检测多但训练时未优化区分
+2. **鸟种偏差**：仅北美 555 种，热带、水禽等可能弱
+3. **姿态偏差**：站立/栖息为主，极端姿态置信度偏低
+4. **躯干关键点不如头部精确**：背、腹的位置标注本身有歧义
+5. **posture 判定是启发式**：无 GT 标签，仅依赖几何规则
+6. **小目标**：rationale 占图 < 2% 时检测可能漏掉，可推理时传 `imgsz=1024`
+
+---
+
+## 10. 版本信息
+
+| 项 | 值 |
+|----|----|
+| 包版本 | v2.0.0 |
+| 训练完成 | 2026-05-08 |
+| 训练时长 | 7 小时（60 epoch + RTX 5090）|
+| 起点权重 | v1 best.pt（5kpt → 11kpt 迁移）|
+| Ultralytics 版本 | 8.4.47 |
+| ONNX opset | 13 |
+
+---
+
+## 11. 完整校准 JSON
+
+`models/bird_visibility11_config.json` 内容：
+
+```json
+{
+  "num_keypoints": 11,
+  "part_names": ["bill", "crown", "nape", "left_eye", "right_eye",
+                 "belly", "breast", "back", "tail", "left_wing", "right_wing"],
+  "box_threshold": 0.05,
+  "expanded_box_margin": 0.15,
+  "best_eye":   { "threshold": 0.45, "f1": 0.9928 },
+  "best_head":  { "head_threshold": 0.45, "eye_threshold": 0.40, "f1": 0.9991 },
+  "best_body":  { "threshold": 0.30, "f1": 0.9984 },
+  "best_tail":  { "threshold": 0.40, "f1": 0.9690 },
+  "best_wings": { "threshold": 0.40, "f1": 0.9755 }
+}
+```
+
+> `box_threshold=0.05` 是单鸟验证集校准值；生产环境 `BirdVisibilityDetector` 默认覆盖为 **0.25** 以适配多鸟场景。

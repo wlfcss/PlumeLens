@@ -7,7 +7,7 @@
 | 模型 | 文件 | 大小 | 用途 |
 |------|------|------|------|
 | YOLOv26l-bird-det v1.0 | `yolo26l-bird-det.onnx` | 99.9 MB | 鸟类目标检测 |
-| bird_visibility v1.1 | `bird_visibility.onnx` | 98.0 MB | 头部/眼睛关键点 + 可见性判定 |
+| bird_visibility v2.0 | `bird_visibility11.onnx` | 98.1 MB | 11 关键点(头 5 + 身 6) + 5 visibility + 3 posture(view/facing/posture) |
 | CLIPIQA+ | `clipiqa_plus.onnx` | 293 MB | 语义画质评估（含 CLIP ViT backbone） |
 | HyperIQA | `hyperiqa.onnx` | 104 MB | 技术画质评估（含 ResNet50 backbone + HyperNet forward_patch） |
 | DINOv3 species v4 backbone | `species/backbone/model.safetensors` | 578 MB | torch/transformers 鸟种特征提取（**不入 git**） |
@@ -17,7 +17,7 @@
 
 | 文件 | 大小 | 内容 |
 |------|------|------|
-| `bird_visibility_config.json` | 1 KB | 姿态模型校准阈值 |
+| `bird_visibility11_config.json` | 2 KB | v2 校准阈值(eye/head/body/tail/wings 五项 best_*) |
 | `species/canonical_extended.parquet` | 约 100 KB | 1591 类鸟类分类表（class_id + 中/拉丁/英文名 + IUCN + 保护等级） |
 | `species/v4_calibration_policy.json` | 12 KB | `balanced_v1` 三态阈值：recognized / uncertain / unrecognized |
 | `species_wiki.parquet` | 925 KB | 旧 1535 种 Wikipedia 首段介绍（v4 extra 物种暂用分类表 fallback） |
@@ -33,7 +33,7 @@
 原图
   ↓ YOLO det (1280, conf=0.5, letterbox 114) → 鸟类 bbox 列表
   ↓ 对每个 bbox 裁切（均基于原片）
-  ├─ bbox +10% padding → bird_visibility (640) → 头部/眼睛关键点 + head_visible / eye_visible
+  ├─ bbox +10% padding → bird_visibility11 (640) → 11 关键点 + 5 visibility(head/eye/body/tail/wings) + 3 posture(view_angle/facing/posture)
   ├─ bbox 2.5× 语义裁切 → CLIPIQA+
   ├─ bbox +10% 技术裁切 → HyperIQA → 综合画质分 → 4 档分级
   └─ grade 满足 species_min_grade 时：
@@ -54,23 +54,25 @@
 - **Test mAP@0.5**：0.9364，**Recall**：0.9021（353 张独立测试集）
 - **训练**：49,236 张，覆盖 1,495 种鸟类（China-bird-YOLO + dino 40w + 用户自拍 + hard negatives）
 
-### bird_visibility v1.1
+### bird_visibility v2.0
 
 完整规格见 [`bird_visibility.MODEL_CARD.md`](./bird_visibility.MODEL_CARD.md)。
 
-- **架构**：YOLO26l-pose（28.6M 参数）
+- **架构**：YOLO26l-pose（25.6M 参数 fused）
 - **输入**：float32 [1, 3, 640, 640]
-- **输出**：float32 [1, 300, 21]，每槽位 = 6 检测字段 + 5 关键点×3 (x, y, conf)
-- **关键点顺序**：`bill, crown, nape, left_eye, right_eye`
-- **flip_idx**：`[0, 1, 2, 4, 3]`
-- **校准阈值**（[`bird_visibility_config.json`](./bird_visibility_config.json)）：
-  - `box_threshold` = 0.05（单鸟集校准值，crop 输入下直接用此值取最高置信度）
-  - `eye_threshold` = 0.45
-  - `head_threshold` = 0.35
-  - `head_eye_threshold` = 0.10
+- **输出**：float32 [1, 300, 39],每槽位 = 6 检测字段 + 11 关键点×3 (x, y, conf)
+- **关键点顺序**(11):头部 5 `bill, crown, nape, left_eye, right_eye` + 躯干 6 `belly, breast, back, tail, left_wing, right_wing`
+- **flip_idx**：`[0, 1, 2, 4, 3, 5, 6, 7, 8, 10, 9]`
+- **派生 visibility**(5 项):head / eye / body / tail / wings
+- **派生 posture**(3 项):view_angle (frontal/side/back) / facing (left/right) / posture (perched/flying)
+- **校准阈值**([`bird_visibility11_config.json`](./bird_visibility11_config.json)):
+  - `box_threshold` = 0.05(crop 输入下取最高置信度)
+  - `eye_threshold` = 0.45 / `head_threshold` = 0.45 / `head_eye_threshold` = 0.40
+  - `body_threshold` = 0.30 / `tail_threshold` = 0.40 / `wing_threshold` = 0.40
   - `expanded_box_margin` = 0.15
-- **Val F1**：Eye 99.31%，Head 99.88%
-- **训练**：NABirds 48,562 张，555 种北美鸟类
+- **Val F1**:Eye 99.28%,Head 99.91%,Body 99.84%,Tail 96.90%,Wings 97.55%
+- **训练**:NABirds 48,562 张,555 种北美鸟类(60 epoch,起点权重 v1 best.pt 5kpt→11kpt 迁移)
+- **下游产品规则**:头眼齐全 + posture=flying → grader 上提一档(飞版自动升档,鸟摄精选惯例)
 
 ### DINOv3 鸟种分类
 
@@ -142,7 +144,7 @@ bug 从未被发现。本次修复 (commit `3daec3f`+) 重新导出为 inline-we
 
 ## 版权说明
 
-- **yolo26l-bird-det.onnx** / **bird_visibility.onnx** / **DINOv3 鸟种分类 adapter**：由 [wlfcss](https://github.com/wlfcss) 个人训练产出，他人使用需注明来源
+- **yolo26l-bird-det.onnx** / **bird_visibility11.onnx** / **DINOv3 鸟种分类 adapter**：由 [wlfcss](https://github.com/wlfcss) 个人训练产出，他人使用需注明来源
 - **DINOv3 backbone**：Meta 的 DINOv3 LVD-1689M 预训练权重，遵循 [DINOv3 License](./dinov3_species.MODEL_CARD.md)（非商业限制，商业使用需与 Meta 确认）
 - **CLIPIQA+** / **HyperIQA**：基于公开 IQA 研究模型的 ONNX 导出，遵循原始论文及代码仓库的许可协议
 - **species/canonical_extended.parquet**：基于《中国鸟类名录 v12.0》整理

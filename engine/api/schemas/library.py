@@ -110,15 +110,35 @@ class Keypoint(BaseModel):
 
 
 class PoseDetail(BaseModel):
-    """5 pose keypoints + visibility booleans."""
+    """11 keypoints (5 head + 6 body) + 5 visibility + 3 posture fields.
 
+    v2.0 schema(bird_visibility11)。所有新字段都有 default,旧 v1 cache JSON
+    反序列化时使用默认值,前端拿到 None/false/'unknown',兼容显示。
+    """
+
+    # 头部 5 关键点
     bill: Keypoint
     crown: Keypoint
     nape: Keypoint
     left_eye: Keypoint
     right_eye: Keypoint
+    # 躯干 6 关键点(v2 新增,默认占位)
+    belly: Keypoint = Keypoint(x=0.0, y=0.0, confidence=0.0)
+    breast: Keypoint = Keypoint(x=0.0, y=0.0, confidence=0.0)
+    back: Keypoint = Keypoint(x=0.0, y=0.0, confidence=0.0)
+    tail: Keypoint = Keypoint(x=0.0, y=0.0, confidence=0.0)
+    left_wing: Keypoint = Keypoint(x=0.0, y=0.0, confidence=0.0)
+    right_wing: Keypoint = Keypoint(x=0.0, y=0.0, confidence=0.0)
+    # 5 项可见性
     head_visible: bool
     eye_visible: bool
+    body_visible: bool = False  # v2 新增
+    tail_visible: bool = False  # v2 新增
+    wings_visible: bool = False  # v2 新增
+    # 3 项姿态(影响 grader 飞版升档)
+    view_angle: str = "unknown"  # frontal / side / back / unknown
+    facing: str = "unknown"  # left / right / unknown(仅 view=side 有效)
+    posture: str = "unknown"  # perched / flying / unknown
 
 
 class BestDetection(BaseModel):
