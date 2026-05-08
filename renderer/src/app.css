@@ -5784,6 +5784,64 @@ button:disabled {
   border-bottom-color: currentColor;
 }
 
+/* 飞版升档高亮:复核屏的姿态 KV 行,head+eye 齐全 + posture=flying 时显式提示
+   "飞版 · 自动升档",值用强调色让用户立刻知道这张照片享受了 grader 升档。 */
+.compact-kv--emphasis .compact-kv__value {
+  color: var(--pl-accent-warm, #f0a35a);
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.compact-kv--emphasis .compact-kv__label {
+  opacity: 1;
+  color: var(--pl-accent-warm, #f0a35a);
+}
+
+/* 姿态可见性 chip 行 — body / wings / tail 三项简化展示。head/eye 不在这里
+   (它们在 review-stats-grid 里以 stat 卡片形式凸显,影响降档逻辑)。 */
+.review-pose-chips {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--pl-border-0);
+}
+
+.review-pose-chips__label {
+  font-family: var(--pl-font-mono, 'Space Mono', monospace);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--pl-fg-2, var(--pl-fg-1));
+  opacity: 0.7;
+  margin-right: 4px;
+}
+
+.review-pose-chips__chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 500;
+  border: 1px solid transparent;
+  letter-spacing: 0.02em;
+}
+
+.review-pose-chips__chip--ok {
+  color: var(--pl-success, #4ec9b0);
+  background: color-mix(in srgb, var(--pl-success, #4ec9b0) 12%, transparent);
+  border-color: color-mix(in srgb, var(--pl-success, #4ec9b0) 30%, transparent);
+}
+
+.review-pose-chips__chip--warn {
+  color: color-mix(in srgb, var(--pl-fg-2, currentColor) 70%, transparent);
+  background: color-mix(in srgb, currentColor 8%, transparent);
+  opacity: 0.6;
+}
+
 /* 长地址(reverse geocoding 结果)允许换行,而不是被 ellipsis 截断 */
 .compact-kv--multiline {
   align-items: flex-start;

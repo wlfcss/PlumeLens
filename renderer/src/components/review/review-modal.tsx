@@ -464,6 +464,26 @@ export function ReviewModal({
             />
           </div>
 
+          {/* 姿态信息 — v2 模型新增 5 项 visibility + 3 项 posture。
+              head/eye 已在 grid 上方(影响降档,核心地位);
+              body/wings/tail 用 chips 行紧凑展示;
+              姿态(飞版/栖版 · 视角)用 KV 行,飞版强调 — 这是 grader 升档触发条件。 */}
+          {pose ? (
+            <>
+              <PoseChipsRow pose={pose} t={t} />
+              {(() => {
+                const { text, isFlying } = formatPostureLabel(pose, t)
+                return (
+                  <CompactKV
+                    label={t('selection.metrics.posture')}
+                    value={isFlying ? `${text} · ${t('selection.review.posture.flyBoost')}` : text}
+                    emphasis={isFlying}
+                  />
+                )
+              })()}
+            </>
+          ) : null}
+
           <CompactKV label={t('selection.metrics.scene')} value={group?.title ?? '--'} />
 
           <CompactKV
@@ -1605,14 +1625,98 @@ function formatBytes(bytes: number): string {
   return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`
 }
 
-/** 紧凑 key-value：单行，标签灰、值白 */
-function CompactKV({ label, value }: { label: string; value: string }) {
+/** 紧凑 key-value：单行，标签灰、值白；emphasis=true 时值高亮(用于飞版升档提示)。 */
+function CompactKV({
+  label,
+  value,
+  emphasis = false,
+}: {
+  label: string
+  value: string
+  emphasis?: boolean
+}) {
   return (
-    <div className="compact-kv">
+    <div className={cn('compact-kv', emphasis && 'compact-kv--emphasis')}>
       <span className="compact-kv__label">{label}</span>
       <span className="compact-kv__value">{value}</span>
     </div>
   )
+}
+
+/**
+ * 姿态可见性 chip 行 — body / wings / tail 三项。
+ * head/eye 仍在 review-stats-grid 显示(因为它们影响降档,核心地位)。
+ * body/wings/tail 不影响升降档,仅供查阅,所以用更轻量的 chip 行。
+ */
+function PoseChipsRow({
+  pose,
+  t,
+}: {
+  pose: PhotoRecord['bestPose']
+  t: ReturnType<typeof useTranslation>['t']
+}) {
+  if (!pose) return null
+  const items: Array<{ key: string; label: string; visible: boolean }> = [
+    { key: 'body', label: t('selection.metrics.body'), visible: pose.body_visible ?? false },
+    { key: 'wings', label: t('selection.metrics.wings'), visible: pose.wings_visible ?? false },
+    { key: 'tail', label: t('selection.metrics.tail'), visible: pose.tail_visible ?? false },
+  ]
+  return (
+    <div className="review-pose-chips">
+      <span className="review-pose-chips__label">{t('selection.metrics.bodyParts')}</span>
+      {items.map((it) => (
+        <span
+          key={it.key}
+          className={cn(
+            'review-pose-chips__chip',
+            it.visible
+              ? 'review-pose-chips__chip--ok'
+              : 'review-pose-chips__chip--warn',
+          )}
+        >
+          {it.label} {it.visible ? '✓' : '✗'}
+        </span>
+      ))}
+    </div>
+  )
+}
+
+/**
+ * 把 pose 的 view_angle / facing / posture 三个字段拼成一行人话文案。
+ * 例:
+ *   - "飞版 · 侧面朝左"
+ *   - "栖版 · 正面"
+ *   - "栖版"(view_angle 未识别时省略)
+ *   - "—"(三项都 unknown)
+ */
+function formatPostureLabel(
+  pose: PhotoRecord['bestPose'],
+  t: ReturnType<typeof useTranslation>['t'],
+): { text: string; isFlying: boolean } {
+  if (!pose) return { text: t('selection.review.posture.unknown'), isFlying: false }
+  const posture = pose.posture ?? 'unknown'
+  const viewAngle = pose.view_angle ?? 'unknown'
+  const facing = pose.facing ?? 'unknown'
+
+  const postureText =
+    posture === 'flying'
+      ? t('selection.review.posture.flying')
+      : posture === 'perched'
+        ? t('selection.review.posture.perched')
+        : null
+
+  let viewText: string | null = null
+  if (viewAngle === 'side' && (facing === 'left' || facing === 'right')) {
+    viewText = `${t('selection.review.viewAngle.side')}${t(`selection.review.facing.${facing}`)}`
+  } else if (viewAngle === 'frontal' || viewAngle === 'back' || viewAngle === 'side') {
+    viewText = t(`selection.review.viewAngle.${viewAngle}`)
+  }
+
+  const parts = [postureText, viewText].filter((p): p is string => Boolean(p))
+  return {
+    text: parts.length > 0 ? parts.join(' · ') : t('selection.review.posture.unknown'),
+    isFlying: posture === 'flying',
+  }
 }
 
 /** EXIF 信息面板（相机 / 镜头 / 曝光参数） */

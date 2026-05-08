@@ -195,6 +195,12 @@
       "group": "Group",
       "head": "Head",
       "eye": "Eye",
+      "body": "Body",
+      "tail": "Tail",
+      "wings": "Wings",
+      "bodyParts": "Torso",
+      "posture": "Posture",
+      "viewAngle": "View",
       "confidence": "Confidence",
       "scene": "Scene"
     },
@@ -353,6 +359,22 @@
       "sequenceValue": "{{count}} photos · rank #{{rank}} · best {{score}}",
       "sequenceSingleValue": "Single",
       "filmstripSequenceIndex": "{{index}}/{{count}}",
+      "posture": {
+        "flying": "Flying",
+        "perched": "Perched",
+        "unknown": "—",
+        "flyBoost": "Flying · auto-upgraded"
+      },
+      "viewAngle": {
+        "frontal": "Frontal",
+        "side": "Side",
+        "back": "Back",
+        "unknown": "—"
+      },
+      "facing": {
+        "left": "facing left",
+        "right": "facing right"
+      },
       "toggleBbox": "Detection box",
       "togglePose": "Pose points",
       "toggleAfPoint": "AF area / points",

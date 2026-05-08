@@ -68,14 +68,27 @@ export interface BirdDetectionRecord {
   bbox: { x1: number; y1: number; x2: number; y2: number; confidence: number }
   // 每个 detection 独立的 pose 信息（多鸟图深度复核时切换鸟会用到）。后端
   // BestDetection.pose / BirdDetectionDetail.pose 的镜像。
+  // v2 模型(11 关键点)新增字段都是可选,旧 cache 反序列化时为 undefined。
   pose?: {
     bill: { x: number; y: number; confidence: number }
     crown: { x: number; y: number; confidence: number }
     nape: { x: number; y: number; confidence: number }
     left_eye: { x: number; y: number; confidence: number }
     right_eye: { x: number; y: number; confidence: number }
+    belly?: { x: number; y: number; confidence: number }
+    breast?: { x: number; y: number; confidence: number }
+    back?: { x: number; y: number; confidence: number }
+    tail?: { x: number; y: number; confidence: number }
+    left_wing?: { x: number; y: number; confidence: number }
+    right_wing?: { x: number; y: number; confidence: number }
     head_visible: boolean
     eye_visible: boolean
+    body_visible?: boolean
+    tail_visible?: boolean
+    wings_visible?: boolean
+    view_angle?: 'frontal' | 'side' | 'back' | 'unknown'
+    facing?: 'left' | 'right' | 'unknown'
+    posture?: 'perched' | 'flying' | 'unknown'
   } | null
   speciesName: string | null
   speciesLatinName: string | null
@@ -172,14 +185,27 @@ export interface PhotoRecord {
   thumbPreviewUrl?: string | null
   exif?: Record<string, unknown> | null
   bestBbox?: { x1: number; y1: number; x2: number; y2: number; confidence: number } | null
+  // best detection 的 pose;v2 模型新增字段都是 optional 兼容旧 cache。
   bestPose?: {
     bill: { x: number; y: number; confidence: number }
     crown: { x: number; y: number; confidence: number }
     nape: { x: number; y: number; confidence: number }
     left_eye: { x: number; y: number; confidence: number }
     right_eye: { x: number; y: number; confidence: number }
+    belly?: { x: number; y: number; confidence: number }
+    breast?: { x: number; y: number; confidence: number }
+    back?: { x: number; y: number; confidence: number }
+    tail?: { x: number; y: number; confidence: number }
+    left_wing?: { x: number; y: number; confidence: number }
+    right_wing?: { x: number; y: number; confidence: number }
     head_visible: boolean
     eye_visible: boolean
+    body_visible?: boolean
+    tail_visible?: boolean
+    wings_visible?: boolean
+    view_angle?: 'frontal' | 'side' | 'back' | 'unknown'
+    facing?: 'left' | 'right' | 'unknown'
+    posture?: 'perched' | 'flying' | 'unknown'
   } | null
   // 对焦点（原图坐标系，Canon AFInfo MakerNote 解析得到）
   bestAfPoint?: { x: number; y: number } | null

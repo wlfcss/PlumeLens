@@ -195,6 +195,12 @@
       "group": "所在组",
       "head": "头",
       "eye": "眼",
+      "body": "身",
+      "tail": "尾",
+      "wings": "翼",
+      "bodyParts": "躯干",
+      "posture": "姿态",
+      "viewAngle": "视角",
       "confidence": "置信",
       "scene": "场景"
     },
@@ -353,6 +359,22 @@
       "sequenceValue": "{{count}} 张 · 当前排名 #{{rank}} · 最高 {{score}}",
       "sequenceSingleValue": "单张",
       "filmstripSequenceIndex": "{{index}}/{{count}}",
+      "posture": {
+        "flying": "飞版",
+        "perched": "栖版",
+        "unknown": "—",
+        "flyBoost": "飞版 · 自动升档"
+      },
+      "viewAngle": {
+        "frontal": "正面",
+        "side": "侧面",
+        "back": "背面",
+        "unknown": "—"
+      },
+      "facing": {
+        "left": "朝左",
+        "right": "朝右"
+      },
       "toggleBbox": "检测框",
       "togglePose": "姿态点",
       "toggleAfPoint": "对焦区域/合焦点",

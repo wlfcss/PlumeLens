@@ -124,13 +124,29 @@ export interface Keypoint {
 }
 
 export interface PoseDetail {
+  // 头部 5 关键点
   bill: Keypoint
   crown: Keypoint
   nape: Keypoint
   left_eye: Keypoint
   right_eye: Keypoint
+  // 躯干 6 关键点(v2 新增,旧 cache 反序列化时有 default 占位)
+  belly?: Keypoint
+  breast?: Keypoint
+  back?: Keypoint
+  tail?: Keypoint
+  left_wing?: Keypoint
+  right_wing?: Keypoint
+  // 5 项可见性
   head_visible: boolean
   eye_visible: boolean
+  body_visible?: boolean
+  tail_visible?: boolean
+  wings_visible?: boolean
+  // 3 项姿态(影响 grader 飞版升档)
+  view_angle?: 'frontal' | 'side' | 'back' | 'unknown'
+  facing?: 'left' | 'right' | 'unknown'
+  posture?: 'perched' | 'flying' | 'unknown'
 }
 
 export interface SpeciesCandidate {
