@@ -79,3 +79,4 @@ archive/**/*.parquet
 archive/**/*.zip
 archive/**/*.tar.gz
 .ruff_cache/
+tests/e2e-electron/fixtures/sample_photos/

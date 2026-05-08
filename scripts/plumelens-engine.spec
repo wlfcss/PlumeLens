@@ -138,6 +138,27 @@ def _keep_runtime_toc_item(item) -> bool:
 a.datas = [item for item in a.datas if _keep_runtime_toc_item(item)]
 a.pure = [item for item in a.pure if _keep_runtime_toc_item(item)]
 
+# 防御性闸门:engine.* 模块必须出现在 a.pure 中,否则打出来的 binary 会缺核心
+# 子模块(典型场景:某文件被引入语法错误 → PyInstaller 静态分析能记录 hidden
+# import 但实际收集时 SyntaxError 静默 drop → 出包 binary 启动即 ModuleNotFound)。
+# 这次踩过这个坑(全角冒号导致 lifespan.py 被 drop),加这道闸门防再发生。
+_engine_modules = [item[0] for item in a.pure if (item[0] or '').startswith('engine.')]
+_required_engine_modules = (
+    'engine.core.lifespan',
+    'engine.core.config',
+    'engine.core.database',
+    'engine.pipeline.manager',
+    'engine.services.queue',
+    'engine.api.routes.library',
+)
+_missing = [m for m in _required_engine_modules if m not in _engine_modules]
+if _missing:
+    raise SystemExit(
+        f"[spec] FATAL: required engine modules missing from a.pure: {_missing}\n"
+        f"This usually means SyntaxError in the .py file; check it imports cleanly with "
+        f"`uv run python -c 'import {_missing[0]}'`."
+    )
+
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
 exe = EXE(

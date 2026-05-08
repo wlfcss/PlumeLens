@@ -286,17 +286,24 @@ async def _refresh_all_thumbnails(db: Database) -> None:
 def _kill_orphan_engines(my_pid: int) -> int:
     """启动时杀掉除自己外的所有 plumelens-engine 进程。
 
-    场景：
-    - v0.1.0 时代 process-manager bug 留下了孤儿 engine（kill 不干净 + freeze_support
-      之前 spawn 的 helper 进程）
-    - 用户从 Activity Monitor 直接强杀 Electron，子进程 detached 后变孤儿
+    场景:
+    - v0.1.0 时代 process-manager bug 留下了孤儿 engine(kill 不干净 + freeze_support
+      之前 spawn 的 helper 进程)
+    - 用户从 Activity Monitor 直接强杀 Electron,子进程 detached 后变孤儿
     - dmg 升级时老进程没被 SIGTERM 干掉
 
     旧 engine 进程占着 ~/.plumelens 数据库 + 监听其他端口 + 吃 RAM。新启动一份没
-    冲突（uvicorn 用 port 0 自分配），但用户机器上累积多个进程吃几 GB RAM。
+    冲突(uvicorn 用 port 0 自分配),但用户机器上累积多个进程吃几 GB RAM。
+
+    PLUMELENS_SKIP_ORPHAN_KILL=1 旁路:e2e 测试场景下用户的 PlumeLens 可能正在
+    跑,e2e 自己的 engine 通过 --user-data-dir 隔离数据但 pgrep -f 看到的是同
+    binary 名 → 会误杀用户 app 的 engine。e2e setup 时设此 env 跳过即可。
 
     Returns: 杀掉的进程数。
     """
+    if os.environ.get("PLUMELENS_SKIP_ORPHAN_KILL") == "1":
+        return 0
+
     import signal
     import subprocess
 

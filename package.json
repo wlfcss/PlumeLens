@@ -10,7 +10,9 @@
     "start": "electron-vite dev",
     "build:engine": "node scripts/build-engine.cjs",
     "build": "electron-vite build",
-    "dist:mac": "npm run build && npx electron-builder --mac --arm64",
+    "dist:mac:bundle": "npm run build && npx electron-builder --mac --arm64",
+    "dist:mac:smoke": "uv run --no-sync --project engine python tests/e2e-electron/fixtures/generate_photos.py && npx playwright test --config=tests/e2e-electron/playwright.config.ts cold-start.spec.ts",
+    "dist:mac": "npm run dist:mac:bundle && npm run dist:mac:smoke",
     "preview": "electron-vite preview",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
@@ -18,6 +20,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "playwright test",
+    "test:e2e:packaged": "uv run --no-sync --project engine python tests/e2e-electron/fixtures/generate_photos.py && npx playwright test --config=tests/e2e-electron/playwright.config.ts",
     "format": "prettier --write .",
     "format:check": "prettier --check ."
   },
