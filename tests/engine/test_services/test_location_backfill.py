@@ -73,7 +73,7 @@ async def test_location_backfill_ignores_empty_gps_container(
 
     result = await location_backfill.backfill_library_locations(db, "lib-location")
 
-    assert result == {"total": 1, "filled": 1, "skipped": 0}
+    assert result == {"total": 1, "filled": 1, "skipped": 0, "unresolved": 0}
     assert len(calls) == 1
     async with db.conn.execute(
         "SELECT id, country FROM photos ORDER BY id",
@@ -83,6 +83,46 @@ async def test_location_backfill_ignores_empty_gps_container(
         ("empty-gps", None),
         ("valid-gps", "中国"),
     ]
+
+
+async def test_location_backfill_marks_unresolved_gps_once(
+    db: Database,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from engine.services import location_backfill
+    from engine.services.geo_constants import UNRESOLVED_COUNTRY
+
+    calls: list[tuple[float, float, str]] = []
+
+    async def fake_reverse(lat: float, lon: float, lang: str) -> dict[str, object] | None:
+        calls.append((lat, lon, lang))
+        return None
+
+    monkeypatch.setattr(location_backfill, "reverse", fake_reverse)
+
+    await _insert_photo(
+        db,
+        "unresolved-gps",
+        {
+            "GPSInfo": {
+                "GPSLatitudeRef": "N",
+                "GPSLatitude": [31, 14, 0],
+                "GPSLongitudeRef": "E",
+                "GPSLongitude": [121, 28, 0],
+            }
+        },
+    )
+    await db.conn.commit()
+
+    first = await location_backfill.backfill_library_locations(db, "lib-location")
+    second = await location_backfill.backfill_library_locations(db, "lib-location")
+
+    assert first == {"total": 1, "filled": 0, "skipped": 0, "unresolved": 1}
+    assert second == {"total": 0, "filled": 0, "skipped": 0, "unresolved": 0}
+    assert len(calls) == 1
+    async with db.conn.execute("SELECT country FROM photos WHERE id = 'unresolved-gps'") as cur:
+        row = await cur.fetchone()
+    assert row["country"] == UNRESOLVED_COUNTRY
 
 
 def test_location_gps_parser_accepts_exif_rationals() -> None:
@@ -108,3 +148,46 @@ def test_location_gps_parser_accepts_exif_rationals() -> None:
     assert coords is not None
     assert coords[0] == pytest.approx(31.2416666667)
     assert coords[1] == pytest.approx(121.4708333333)
+
+
+def test_location_gps_parser_rejects_missing_refs() -> None:
+    from engine.services.location_backfill import _parse_gps_from_exif
+
+    coords = _parse_gps_from_exif(
+        json.dumps(
+            {
+                "GPSInfo": {
+                    "GPSLatitude": [31, 14, 30],
+                    "GPSLongitude": [121, 28, 15],
+                }
+            }
+        )
+    )
+
+    assert coords is None
+
+
+async def test_location_backfill_marks_broken_gps_once(db: Database) -> None:
+    from engine.services import location_backfill
+    from engine.services.geo_constants import UNRESOLVED_COUNTRY
+
+    await _insert_photo(
+        db,
+        "broken-gps",
+        {
+            "GPSInfo": {
+                "GPSLatitude": [31, 14, 30],
+                "GPSLongitude": [121, 28, 15],
+            }
+        },
+    )
+    await db.conn.commit()
+
+    first = await location_backfill.backfill_library_locations(db, "lib-location")
+    second = await location_backfill.backfill_library_locations(db, "lib-location")
+
+    assert first == {"total": 1, "filled": 0, "skipped": 0, "unresolved": 1}
+    assert second == {"total": 0, "filled": 0, "skipped": 0, "unresolved": 0}
+    async with db.conn.execute("SELECT country FROM photos WHERE id = 'broken-gps'") as cur:
+        row = await cur.fetchone()
+    assert row["country"] == UNRESOLVED_COUNTRY

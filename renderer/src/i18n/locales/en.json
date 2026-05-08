@@ -504,6 +504,7 @@
       "statsLabel": "Location stats",
       "statsMapped": "Mapped",
       "statsPending": "Pending",
+      "statsUnresolved": "Unresolved",
       "statsNoGps": "No GPS",
       "statProvinces": "{{count}} provinces with photos",
       "statCities": "{{count}} cities with photos",
@@ -526,6 +527,8 @@
       "loadingProvince": "Loading provincial map…",
       "backfillProgress": "Resolving locations {{resolved}}/{{total}}…",
       "unmapped": "{{count}} photos lack GPS and are hidden from the map",
+      "unresolved": "{{count}} photos have unresolved coordinates and are hidden from the map",
+      "unmappedMixed": "{{noGps}} photos lack GPS and {{unresolved}} have unresolved coordinates, so they are hidden from the map",
       "allMapped": "All GPS photos placed on the map",
       "unknownPlace": "Unnamed location"
     },

@@ -41,6 +41,7 @@ from engine.services.event_bus import (
     subscribe_library_events,
     unsubscribe_library_events,
 )
+from engine.services.geo_constants import UNRESOLVED_COUNTRY
 from engine.services.scanner import backfill_hashes, scan_library
 from engine.services.thumbnail import (
     ensure_thumbnails_for_photo,
@@ -1229,7 +1230,11 @@ async def library_detail(
                 str(r["companion_format"]) if r["companion_format"] is not None else None
             ),
             companion_size=(int(r["companion_size"]) if r["companion_size"] is not None else None),
-            country=(str(r["country"]) if r["country"] is not None else None),
+            country=(
+                None
+                if r["country"] is None or str(r["country"]) == UNRESOLVED_COUNTRY
+                else str(r["country"])
+            ),
             province=(str(r["province"]) if r["province"] is not None else None),
             city=(str(r["city"]) if r["city"] is not None else None),
             district=(str(r["district"]) if r["district"] is not None else None),

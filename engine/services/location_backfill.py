@@ -6,27 +6,47 @@ geocoding(走 services/geocoder 的 provider chain),结果写回 photos 表对�
 之后羽迹页面三级地图直接 SQL 聚合,不再 round-trip 调 reverse geocoding。
 
 幂等:已经填充过(country IS NOT NULL)的照片跳过。GPS 缺失的照片 country=NULL
-保留(无法解析,不重试)。
+保留；有 GPS 但 provider 链路无法解析时写入内部哨兵值,避免每次启动重复重试。
 """
 
 from __future__ import annotations
 
 import contextlib
-from typing import Any
+import json
+from collections.abc import Mapping
+from typing import Any, Literal
 
 import structlog
 
 from engine.core.database import Database
+from engine.services.geo_constants import UNRESOLVED_COUNTRY
 from engine.services.geocoder import reverse
 from engine.services.gps import parse_gps_from_exif
 
 logger = structlog.stdlib.get_logger()
+BackfillStatus = Literal["filled", "unresolved", "skipped"]
 
 
 def _parse_gps_from_exif(exif_json: str | None) -> tuple[float, float] | None:
     """从 photos.exif_json 提取 (lat, lon) WGS84 十进制度。
     无 GPS / 解析失败返回 None。"""
     return parse_gps_from_exif(exif_json)
+
+
+def _looks_like_broken_gps(exif_json: str | None) -> bool:
+    """EXIF 声明了经纬度字段但解析失败，说明 GPS 元数据不完整/不可用。"""
+    if not exif_json:
+        return False
+    try:
+        raw: object = json.loads(exif_json)
+    except Exception:
+        return False
+    if not isinstance(raw, Mapping):
+        return False
+    gps = raw.get("GPSInfo")
+    if not isinstance(gps, Mapping):
+        return False
+    return ("GPSLatitude" in gps or "2" in gps) and ("GPSLongitude" in gps or "4" in gps)
 
 
 def _split_components(display_name: str) -> dict[str, str | None]:
@@ -143,20 +163,40 @@ async def backfill_one(
     lang: str = "zh-CN",
     *,
     commit: bool = True,
-) -> bool:
-    """对一张照片执行 reverse geocoding 并写回。返回 True = 成功填充,
-    False = 无 GPS / 查询失败(都不重试)。
+) -> BackfillStatus:
+    """对一张照片执行 reverse geocoding 并写回。
+
+    返回:
+    - filled: 成功填充地理字段
+    - unresolved: 有 GPS,但 provider 链路无法解析;写哨兵值避免启动期反复重试
+    - skipped: 无 GPS / EXIF 不可解析
 
     commit=False 时只 execute 不 commit — 调用方批量处理后统一 commit
     (减少千张照片 ×千次 fsync 的 I/O 开销 + 写锁占用时间)。
     """
     coords = _parse_gps_from_exif(exif_json)
     if coords is None:
-        return False
+        if _looks_like_broken_gps(exif_json):
+            await db.conn.execute(
+                "UPDATE photos SET country = ?, province = NULL, city = NULL, "
+                "district = NULL, place = NULL WHERE id = ?",
+                (UNRESOLVED_COUNTRY, photo_id),
+            )
+            if commit:
+                await db.conn.commit()
+            return "unresolved"
+        return "skipped"
     lat, lon = coords
     result = await reverse(lat, lon, lang)
     if result is None:
-        return False
+        await db.conn.execute(
+            "UPDATE photos SET country = ?, province = NULL, city = NULL, "
+            "district = NULL, place = NULL WHERE id = ?",
+            (UNRESOLVED_COUNTRY, photo_id),
+        )
+        if commit:
+            await db.conn.commit()
+        return "unresolved"
     parts = _split_components(result["display_name"])
     await db.conn.execute(
         "UPDATE photos SET country = ?, province = ?, city = ?, district = ?, place = ? "
@@ -172,7 +212,7 @@ async def backfill_one(
     )
     if commit:
         await db.conn.commit()
-    return True
+    return "filled"
 
 
 async def backfill_library_locations(
@@ -183,8 +223,8 @@ async def backfill_library_locations(
     batch_size: int = 50,
 ) -> dict[str, int]:
     """扫一个 library 内所有 country IS NULL 但有 exif_json 的 photo,逐张调
-    reverse_geocoding 写回。Provider chain 自动 fallback,链路全失败时该照片
-    保持 NULL,下次启动可重试(只要 country 仍 NULL)。"""
+    reverse_geocoding 写回。Provider chain 自动 fallback；链路全失败时写入
+    内部哨兵值,避免启动期反复重试永久无解坐标。"""
     conn = db.conn
     # 关键预过滤:只挑 EXIF 里真有经纬度字段的照片。
     # 老逻辑只看 `country IS NULL AND exif_json IS NOT NULL`,会把 photos 表里
@@ -195,26 +235,30 @@ async def backfill_library_locations(
         "SELECT id, exif_json FROM photos "
         "WHERE library_id = ? AND country IS NULL "
         "AND exif_json IS NOT NULL "
-        "AND exif_json LIKE '%GPSLatitude%' "
-        "AND exif_json LIKE '%GPSLongitude%'",
+        "AND exif_json LIKE '%\"GPSLatitude\"%' "
+        "AND exif_json LIKE '%\"GPSLongitude\"%'",
         (library_id,),
     ) as cur:
         rows = list(await cur.fetchall())  # 实化成 list 才能 len()/enumerate 二次遍历
 
     if not rows:
-        return {"total": 0, "filled": 0, "skipped": 0}
+        return {"total": 0, "filled": 0, "skipped": 0, "unresolved": 0}
 
     filled = 0
     skipped = 0
+    unresolved = 0
     total = len(rows)
     pending_writes = 0
     # batch commit:每 batch_size 张才 commit 一次 — 减少 千次 fsync + 长时间持有写锁
     # (WAL 模式下 writer 持锁期间 reader 可读但其他 writer 全部阻塞)。
     for i, row in enumerate(rows):
         try:
-            ok = await backfill_one(db, str(row["id"]), row["exif_json"], commit=False)
-            if ok:
+            status = await backfill_one(db, str(row["id"]), row["exif_json"], commit=False)
+            if status == "filled":
                 filled += 1
+                pending_writes += 1
+            elif status == "unresolved":
+                unresolved += 1
                 pending_writes += 1
             else:
                 skipped += 1
@@ -242,8 +286,9 @@ async def backfill_library_locations(
         total=total,
         filled=filled,
         skipped=skipped,
+        unresolved=unresolved,
     )
-    return {"total": total, "filled": filled, "skipped": skipped}
+    return {"total": total, "filled": filled, "skipped": skipped, "unresolved": unresolved}
 
 
 async def backfill_all_libraries(db: Database) -> None:

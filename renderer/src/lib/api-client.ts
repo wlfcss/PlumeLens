@@ -521,6 +521,7 @@ export interface GeoSummary {
   total_with_gps: number
   resolved: number
   pending: number
+  unresolved_count: number
   photos_without_gps: number
 }
 

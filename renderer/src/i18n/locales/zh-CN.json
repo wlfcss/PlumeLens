@@ -504,6 +504,7 @@
       "statsLabel": "地理统计",
       "statsMapped": "已上图",
       "statsPending": "待解析",
+      "statsUnresolved": "无法解析",
       "statsNoGps": "无坐标",
       "statProvinces": "{{count}} 个省份有照片",
       "statCities": "{{count}} 个城市有照片",
@@ -526,6 +527,8 @@
       "loadingProvince": "加载省级地图中…",
       "backfillProgress": "解析地理位置 {{resolved}}/{{total}}…",
       "unmapped": "{{count}} 张照片缺少 GPS，未在地图中展示",
+      "unresolved": "{{count}} 张照片坐标无法解析，未在地图中展示",
+      "unmappedMixed": "{{noGps}} 张照片缺少 GPS，{{unresolved}} 张坐标无法解析，未在地图中展示",
       "allMapped": "所有 GPS 照片均已上图",
       "unknownPlace": "未命名拍摄点"
     },

@@ -84,6 +84,7 @@ async def archive_client(tmp_path: Path):
     from engine.core.config import settings
     from engine.core.database import Database
     from engine.main import create_app
+    from engine.services.geo_constants import UNRESOLVED_COUNTRY
 
     settings.data_dir = tmp_path
     app = create_app()
@@ -141,6 +142,13 @@ async def archive_client(tmp_path: Path):
         (json.dumps({"Make": "Canon"}),),
     )
     await db.conn.execute(
+        "INSERT INTO photos (id, file_path, file_name, file_size, file_mtime, file_hash, "
+        "exif_json, country, created_at, library_id) "
+        "VALUES ('p-unresolved', '/tmp/archive/unresolved.jpg', 'unresolved.jpg', 100, "
+        "'2026-04-24T00:12:00', 'hash-unresolved', ?, ?, '2026-04-24', 'lib-archive')",
+        (_gps(20, 20), UNRESOLVED_COUNTRY),
+    )
+    await db.conn.execute(
         "INSERT INTO photo_species_overrides (photo_id, bird_index, canonical_sci, canonical_zh, "
         "canonical_en, bbox_x1, bbox_y1, bbox_x2, bbox_y2, updated_at) "
         "VALUES ('p4', 0, 'Zosterops simplex', '暗绿绣眼鸟', 'Swinhoe''s white-eye', "
@@ -176,9 +184,10 @@ async def test_geo_summary_ignores_empty_gps_container(
 ) -> None:
     summary = (await archive_client.get("/archive/geo/summary")).json()
     assert summary == {
-        "total_with_gps": 4,
+        "total_with_gps": 5,
         "resolved": 4,
         "pending": 0,
+        "unresolved_count": 1,
         "photos_without_gps": 2,
     }
 

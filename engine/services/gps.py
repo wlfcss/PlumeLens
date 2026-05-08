@@ -62,8 +62,13 @@ def gps_coordinate_to_decimal(value: object, ref: object) -> float | None:
     decimal = _gps_part_to_decimal(value)
     if decimal is None:
         return None
-    if _ref_text(ref) in {"S", "W"}:
+    ref_text = _ref_text(ref)
+    if ref is None or not ref_text or ref_text == "NONE":
+        return None
+    if ref_text in {"S", "W"}:
         return -decimal
+    if ref_text not in {"N", "E"}:
+        return None
     return decimal
 
 

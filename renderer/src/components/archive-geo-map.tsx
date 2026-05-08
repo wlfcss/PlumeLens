@@ -511,6 +511,7 @@ export function ArchiveGeoMap({ onOpenPhoto }: ArchiveGeoMapProps): ReactElement
   const hasSummary = Boolean(summary.data)
   const mappedCount = summary.data?.resolved ?? 0
   const pendingCount = summary.data?.pending ?? 0
+  const unresolvedCount = summary.data?.unresolved_count ?? 0
   const noGpsCount = summary.data?.photos_without_gps ?? 0
   const currentTitle = activeCity ?? activeProvince ?? t('archive.geo.country')
   const childCount =
@@ -635,6 +636,10 @@ export function ArchiveGeoMap({ onOpenPhoto }: ArchiveGeoMapProps): ReactElement
           <small>{t('archive.geo.statsPending')}</small>
         </span>
         <span>
+          <b>{unresolvedCount}</b>
+          <small>{t('archive.geo.statsUnresolved')}</small>
+        </span>
+        <span>
           <b>{noGpsCount}</b>
           <small>{t('archive.geo.statsNoGps')}</small>
         </span>
@@ -689,8 +694,12 @@ export function ArchiveGeoMap({ onOpenPhoto }: ArchiveGeoMapProps): ReactElement
       </div>
 
       <p className="archive-geo__note">
-        {summary.data && summary.data.photos_without_gps > 0
-          ? t('archive.geo.unmapped', { count: summary.data.photos_without_gps })
+        {summary.data && noGpsCount > 0 && unresolvedCount > 0
+          ? t('archive.geo.unmappedMixed', { noGps: noGpsCount, unresolved: unresolvedCount })
+          : summary.data && unresolvedCount > 0
+            ? t('archive.geo.unresolved', { count: unresolvedCount })
+            : summary.data && noGpsCount > 0
+              ? t('archive.geo.unmapped', { count: noGpsCount })
           : t('archive.geo.allMapped')}
       </p>
 

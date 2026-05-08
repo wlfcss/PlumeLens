@@ -30,6 +30,7 @@ from engine.api.routes.library import _apply_group_species_consensus, _match_ove
 from engine.api.schemas.library import BestDetection, BirdDetectionDetail, PhotoRow
 from engine.core.database import Database
 from engine.services.decisions import SpeciesOverride, SpeciesOverrideRecord
+from engine.services.geo_constants import UNRESOLVED_COUNTRY
 from engine.services.gps import parse_gps_from_exif
 
 router = APIRouter(prefix="/archive", tags=["archive"])
@@ -101,8 +102,9 @@ class GeoSummary(BaseModel):
     "解析地理位置 120/300..." 进度条。"""
 
     total_with_gps: int  # 有可用经纬度的照片总数
-    resolved: int  # 有可用经纬度且 country IS NOT NULL 的(已 backfill)
+    resolved: int  # 有可用经纬度且已解析到真实地名的照片数
     pending: int  # 有可用经纬度但未填充地名
+    unresolved_count: int = 0  # 有可用经纬度但 provider 链路无法解析
     photos_without_gps: int  # 没有可用经纬度的
 
 
@@ -573,24 +575,31 @@ async def geo_summary(request: Request) -> GeoSummary:
         total_row = await cur.fetchone()
     async with db.conn.execute(
         "SELECT exif_json, country FROM photos "
-        "WHERE exif_json LIKE '%GPSLatitude%' OR country IS NOT NULL",
+        "WHERE (exif_json LIKE '%\"GPSLatitude\"%' "
+        "AND exif_json LIKE '%\"GPSLongitude\"%') "
+        "OR country IS NOT NULL",
     ) as cur:
         rows = await cur.fetchall()
 
     total = int(total_row["total"] or 0) if total_row is not None else 0
     has_gps = 0
     resolved = 0
+    unresolved = 0
     for row in rows:
         if _gps_from_exif(str(row["exif_json"]) if row["exif_json"] is not None else None) is None:
             continue
         has_gps += 1
-        if row["country"] is not None:
+        country = str(row["country"]) if row["country"] is not None else None
+        if country == UNRESOLVED_COUNTRY:
+            unresolved += 1
+        elif country is not None:
             resolved += 1
-    pending = max(0, has_gps - resolved)
+    pending = max(0, has_gps - resolved - unresolved)
     return GeoSummary(
         total_with_gps=has_gps,
         resolved=resolved,
         pending=pending,
+        unresolved_count=unresolved,
         photos_without_gps=total - has_gps,
     )
 
