@@ -1109,12 +1109,29 @@ async def library_detail(
                     "confidence": float(kp.get("confidence", 0)),
                 }
 
-            kpts = {n: _kp(n) for n in ("bill", "crown", "nape", "left_eye", "right_eye")}
-            if all(kpts.values()):
+            # v2 schema:11 关键点(5 头 + 6 身) + 5 visibility + 3 posture。
+            # 历史 bug:这里只取 5 头部点 + head/eye_visible,躯干点和 posture 全丢,
+            # 前端 PoseDetail schema 用默认值(0,0,0 / false / "unknown")兜底,
+            # 导致飞版升档徽标 / 躯干 chips / 躯干关键点叠加全部失效。
+            head_keys = ("bill", "crown", "nape", "left_eye", "right_eye")
+            torso_keys = ("belly", "breast", "back", "tail", "left_wing", "right_wing")
+            head_kpts = {n: _kp(n) for n in head_keys}
+            if all(head_kpts.values()):
+                # 躯干点对老 v1 cache 可能缺失(数据迁移期),逐项 fallback 到默认占位。
+                # 对 v2 数据,pose_d 一定 11 项齐全 → 全部填充正确值。
+                placeholder_kp = {"x": 0.0, "y": 0.0, "confidence": 0.0}
+                torso_kpts = {n: (_kp(n) or placeholder_kp) for n in torso_keys}
                 pose = {
-                    **kpts,
+                    **head_kpts,
+                    **torso_kpts,
                     "head_visible": bool(pose_d.get("head_visible", False)),
                     "eye_visible": bool(pose_d.get("eye_visible", False)),
+                    "body_visible": bool(pose_d.get("body_visible", False)),
+                    "tail_visible": bool(pose_d.get("tail_visible", False)),
+                    "wings_visible": bool(pose_d.get("wings_visible", False)),
+                    "view_angle": str(pose_d.get("view_angle", "unknown")),
+                    "facing": str(pose_d.get("facing", "unknown")),
+                    "posture": str(pose_d.get("posture", "unknown")),
                 }
 
         species, latin, manual = _display_species(detection, override)

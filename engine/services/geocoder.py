@@ -33,6 +33,10 @@ logger = structlog.stdlib.get_logger()
 
 # 公共配置
 TIMEOUT_SEC = 2.5
+# Nominatim 的 1.1s 全局节流锁让排队 caller 必然超过普通 3s timeout(队列第 2 个就
+# 会触发:1.1s 等锁 + 2.5s HTTP = 3.6s > 3.0s 普通 budget)。10s 允许 ~7 个并发
+# caller 通过排队拿到结果,溢出 fall through 到 offline cities1000。
+NOMINATIM_QUEUE_TIMEOUT_SEC = 10.0
 USER_AGENT = "PlumeLens/0.6.0 (rev-geocoding)"
 CACHE_MAX = 1024
 # 离线兜底距离上限(经度差^2 + 纬度差^2 加权,单位约等于度^2)。
@@ -342,14 +346,24 @@ async def reverse(lat: float, lon: float, lang: str = "zh-CN") -> GeocodeResult 
         return cached  # type: ignore[return-value]
 
     for provider in _CHAIN:
+        # Per-provider timeout:Nominatim 在 1.1s 全局节流锁后才能发 HTTP,并发场景
+        # 下排队等待 N×1.1s + 2.5s HTTP 远超普通 3s timeout(N>=1 即触发)。给它单
+        # 独 10s 预算,允许 ~7 个并发 caller 通过排队成功;超出仍旧 fall through 到
+        # offline。其他 provider 直接 HTTP,3s 足够。
+        timeout = (
+            NOMINATIM_QUEUE_TIMEOUT_SEC
+            if provider is _provider_nominatim
+            else TIMEOUT_SEC + 0.5
+        )
         try:
-            result = await asyncio.wait_for(provider(lat, lon, lang), timeout=TIMEOUT_SEC + 0.5)
+            result = await asyncio.wait_for(provider(lat, lon, lang), timeout=timeout)
         except TimeoutError:
             await logger.awarning(
                 "Geocoding provider timeout",
                 provider=provider.__name__,
                 lat=lat,
                 lon=lon,
+                timeout_sec=timeout,
             )
             continue
         except Exception:

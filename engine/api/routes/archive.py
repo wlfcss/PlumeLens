@@ -122,8 +122,17 @@ class _GeoPhoto:
     exif_json: str | None
     province: str | None
     city: str | None
+    district: str | None
     place: str | None
     thumb_grid: str | None
+
+
+# 直辖市 / 特别行政区:province == city,二级地图必须按 district 而非 city 聚合,
+# 否则只有一个跟省同名的桶,无法下钻。location_backfill._split_components 已显式
+# 把这几个 province 写成 city = province。
+_DIRECT_CONTROLLED_PROVINCES: frozenset[str] = frozenset(
+    {"北京市", "上海市", "天津市", "重庆市", "香港特别行政区", "澳门特别行政区"}
+)
 
 
 def _parse_json(raw: object) -> dict[str, Any]:
@@ -235,12 +244,27 @@ def _build_detection_detail(
                 "confidence": float(kp.get("confidence", 0)),
             }
 
-        kpts = {n: _kp(n) for n in ("bill", "crown", "nape", "left_eye", "right_eye")}
-        if all(kpts.values()):
+        # 与 routes/library.py::_build_detection_detail 完全对齐 — 11 关键点 +
+        # 5 visibility + 3 posture 都透传到 PoseDetail。原历史 bug 只送 5 头部点
+        # + head/eye_visible,前端 PoseDetail schema 用默认值兜底,导致躯干 chips /
+        # 飞版徽标 / 躯干叠加层全部失效。
+        head_keys = ("bill", "crown", "nape", "left_eye", "right_eye")
+        torso_keys = ("belly", "breast", "back", "tail", "left_wing", "right_wing")
+        head_kpts = {n: _kp(n) for n in head_keys}
+        if all(head_kpts.values()):
+            placeholder_kp = {"x": 0.0, "y": 0.0, "confidence": 0.0}
+            torso_kpts = {n: (_kp(n) or placeholder_kp) for n in torso_keys}
             pose = {
-                **kpts,
+                **head_kpts,
+                **torso_kpts,
                 "head_visible": bool(pose_d.get("head_visible", False)),
                 "eye_visible": bool(pose_d.get("eye_visible", False)),
+                "body_visible": bool(pose_d.get("body_visible", False)),
+                "tail_visible": bool(pose_d.get("tail_visible", False)),
+                "wings_visible": bool(pose_d.get("wings_visible", False)),
+                "view_angle": str(pose_d.get("view_angle", "unknown")),
+                "facing": str(pose_d.get("facing", "unknown")),
+                "posture": str(pose_d.get("posture", "unknown")),
             }
 
     species, latin, _english, manual = _display_species(detection, override)
@@ -401,7 +425,7 @@ async def _load_geo_photos(
         "SELECT p.id, p.library_id, p.file_path, p.file_name, p.format, p.width, p.height, "
         "p.thumb_grid, p.thumb_preview, p.created_at, p.file_mtime, p.exif_json, "
         "p.scene_id, p.companion_path, p.companion_format, p.companion_size, "
-        "p.province, p.city, p.place, "
+        "p.province, p.city, p.district, p.place, "
         "ar.pipeline_version, ar.grade, ar.quality_score, ar.bird_count, ar.species, "
         "ar.result_json, pd.decision "
         "FROM photos p "
@@ -424,6 +448,7 @@ async def _load_geo_photos(
             exif_json=(str(row["exif_json"]) if row["exif_json"] is not None else None),
             province=(str(row["province"]) if row["province"] is not None else None),
             city=(str(row["city"]) if row["city"] is not None else None),
+            district=(str(row["district"]) if row["district"] is not None else None),
             place=(str(row["place"]) if row["place"] is not None else None),
             thumb_grid=(str(row["thumb_grid"]) if row["thumb_grid"] is not None else None),
         )
@@ -631,22 +656,39 @@ async def geo_cities(
     request: Request,
     province: str = Query(..., description="省名(如 '江苏省')"),
 ) -> list[GeoCityRow]:
-    """二级地图:某省内每个市的照片数 + 鸟种数。"""
+    """二级地图:某省内每个市的照片数 + 鸟种数。
+
+    直辖市 / 特别行政区(province == city,如"北京市/上海市/香港特别行政区")按
+    district 聚合 — 否则只有一个跟省同名的桶,完全失去市级分辨力。
+    GeoCityRow.city 字段在直辖市分支下实际承载的是 district 名(如"朝阳区"),
+    前端把 city 当做"二级桶名"用,语义上兼容。
+    """
     db = await _db(request)
     cache_key = f"{db.path}:cities:{province}"
     cached = _get_geo_cache(cache_key)
     if cached is not None:
         return cached
 
-    photos = await _load_geo_photos(db, "p.province = ? AND p.city IS NOT NULL", (province,))
-    by_city: dict[str, dict[str, Any]] = {}
+    is_direct = province in _DIRECT_CONTROLLED_PROVINCES
+    if is_direct:
+        # 直辖市/特别行政区:按 district 聚合,放到 GeoCityRow.city 里返回。
+        # district 缺失时回退到一个明确的"未知区域"桶,而不是丢弃。
+        photos = await _load_geo_photos(db, "p.province = ?", (province,))
+    else:
+        photos = await _load_geo_photos(db, "p.province = ? AND p.city IS NOT NULL", (province,))
+
+    by_bucket: dict[str, dict[str, Any]] = {}
     for item in photos:
-        if not item.city:
-            continue
+        if is_direct:
+            bucket_key = item.district or "未知区域"
+        else:
+            if not item.city:
+                continue
+            bucket_key = item.city
         species = _archive_species_for_photo(item.photo)
         if not species:
             continue
-        bucket = by_city.setdefault(item.city, {"species": set(), "photos": 0})
+        bucket = by_bucket.setdefault(bucket_key, {"species": set(), "photos": 0})
         bucket["photos"] += 1
         for entry in species:
             bucket["species"].add(_species_key(entry))
@@ -655,11 +697,11 @@ async def geo_cities(
         cache_key,
         [
             GeoCityRow(
-                city=city,
+                city=name,
                 photo_count=int(b["photos"]),
                 species_count=len(b["species"]),
             )
-            for city, b in sorted(by_city.items(), key=lambda x: -int(x[1]["photos"]))
+            for name, b in sorted(by_bucket.items(), key=lambda x: -int(x[1]["photos"]))
         ],
     )
 
@@ -676,6 +718,9 @@ async def geo_spots(
     聚合口径是"物理地点优先":同一个 place 名下的照片合成一个 GeoSpot,
     用于回答"洋湖国家湿地公园有哪些鸟"。只有 place 缺失时,才按 GPS
     4 位小数 round 兜底生成临时点位。
+
+    直辖市分支:`city` 参数实际是 district 名(geo_cities 直辖市路径返回的是 district
+    伪装成 city),这里 SQL 过滤要按 district 字段。
     """
     db = await _db(request)
     cache_key = f"{db.path}:spots:{province}:{city}:{max_photos_per_spot}"
@@ -683,7 +728,22 @@ async def geo_spots(
     if cached is not None:
         return cached
 
-    photos = await _load_geo_photos(db, "p.province = ? AND p.city = ?", (province, city))
+    if province in _DIRECT_CONTROLLED_PROVINCES:
+        if city == province:
+            # 兼容老调用方式(直辖市 city = province):返回该省所有照片,不做 district
+            # 二级过滤。新前端会传 district 名作 city 实现真正的市级钻取。
+            photos = await _load_geo_photos(db, "p.province = ?", (province,))
+        elif city == "未知区域":
+            # geo_cities 把 district IS NULL 的归到"未知区域"桶,这里反向匹配
+            photos = await _load_geo_photos(
+                db, "p.province = ? AND p.district IS NULL", (province,)
+            )
+        else:
+            photos = await _load_geo_photos(
+                db, "p.province = ? AND p.district = ?", (province, city)
+            )
+    else:
+        photos = await _load_geo_photos(db, "p.province = ? AND p.city = ?", (province, city))
 
     spots: dict[str, dict[str, Any]] = {}
     for item in photos:
