@@ -95,8 +95,8 @@ def main(folder: str) -> None:
     iqa = QualityAssessor(
         make_session(MODELS_DIR / "clipiqa_plus.onnx"),
         make_session(MODELS_DIR / "hyperiqa.onnx"),
-        clipiqa_weight=0.55,
-        hyperiqa_weight=0.45,
+        clipiqa_weight=0.40,
+        hyperiqa_weight=0.60,
     )
     print("模型加载完成")
 
