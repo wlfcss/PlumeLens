@@ -53,11 +53,18 @@ interface EngineStore {
   reset: () => void
 }
 
-// 初始 'reconnecting' — Electron 冷启 1-2s 期间 engine 还没就绪,banner 显示
-// "正在连接后端"(lastCrash=null 时走这条文案),engine 'ready' 推送后消失。
-// dev shell / 测试环境无 IPC,subscribeEngineStatus 直接把 state 设 'ready' 跳过。
+// 初值按环境分流:
+// - Electron(window.plumelens 存在):'reconnecting'。冷启 1-2s 期间 engine 还
+//   没就绪,banner 显示"正在连接后端"(lastCrash=null 时走这条文案),engine 'ready'
+//   推送后消失。
+// - Dev shell / 测试 / vite preview(无 IPC):直接 'ready'。否则 App 首帧就会因
+//   `appInteractive=false` 把顶部 nav/搜索/导出/设置全 disable,出现一帧灰色闪烁;
+//   原版只在 useEffect 内才 setState 'ready',太晚。
+const _initialEngineState: EngineState =
+  typeof window !== 'undefined' && window.plumelens ? 'reconnecting' : 'ready'
+
 const INITIAL_STATE = {
-  state: 'reconnecting' as EngineState,
+  state: _initialEngineState,
   lastCrash: null,
   restartCount: 0,
   maxRestarts: 3,

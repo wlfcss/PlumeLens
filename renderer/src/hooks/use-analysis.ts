@@ -92,6 +92,13 @@ export function useAnalysisProgress(
         .then((url) => {
           if (cancelled) return
           source = new EventSource(url)
+          // 每次连接 / 重连成功立刻 invalidate library detail + libraries 列表 —
+          // 5s backoff 期间发生的 progress 事件不会带 Last-Event-ID 重发,通过强制
+          // refetch 让 UI 同步到当前真实状态(分析卡死 / 已完成 / 物种识别更新)。
+          source.onopen = () => {
+            qc.invalidateQueries({ queryKey: LIBRARY_DETAIL_KEY(libraryId) })
+            qc.invalidateQueries({ queryKey: LIBRARIES_KEY })
+          }
           source.onmessage = (msg) => {
             try {
               const parsed = JSON.parse(msg.data) as AnalysisProgressEvent

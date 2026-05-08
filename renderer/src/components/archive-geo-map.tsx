@@ -172,7 +172,8 @@ export function ArchiveGeoMap({ onOpenPhoto }: ArchiveGeoMapProps): ReactElement
   const [selectedSpot, setSelectedSpot] = useState<GeoSpot | null>(null)
 
   const summary = useGeoSummary()
-  const provincesQ = useGeoProvinces()
+  // 把 backfill pending 传给 provinces hook → 完成后自动停掉 10s 轮询
+  const provincesQ = useGeoProvinces(summary.data?.pending)
   const citiesQ = useGeoCities(level !== 'country' ? activeProvince : null)
   const spotsQ = useGeoSpots(
     level === 'city' ? activeProvince : null,

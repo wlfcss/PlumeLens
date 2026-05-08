@@ -80,7 +80,10 @@ export function useBackendHealth() {
       return res.json() as Promise<BackendHealth>
     },
     enabled: !!backendUrl,
-    refetchInterval: 10000,
+    // 30s 轮询 /health(只用于读 pipeline ready / 模型加载状态)。
+    // 引擎崩溃 / 重启等状态变化由 engineStore 的 SSE 通道实时推送,这里不需要 10s 高
+    // 频拉。模型加载完成后 /health 输出基本稳定不变,30s 足够。
+    refetchInterval: 30000,
     retry: false,
   })
 
