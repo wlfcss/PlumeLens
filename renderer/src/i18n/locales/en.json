@@ -567,7 +567,10 @@
     },
     "result": {
       "output": "Output folder",
-      "stats": "{{exported}} exported, {{companions}} companion files, {{failed}} failed"
+      "openFolder": "Open in Finder",
+      "openFailed": "Cannot open the output folder. Make sure it still exists.",
+      "reset": "New export",
+      "stats": "{{exported}} exported, {{companions}} companion files, {{xmp}} XMP, {{failed}} failed"
     },
     "scope": {
       "label": "Scope",
@@ -582,6 +585,24 @@
     "structure": {
       "label": "Structure",
       "keep": "Keep original folder structure"
+    },
+    "content": {
+      "label": "Export content",
+      "files": {
+        "label": "Photo files",
+        "short": "Photos",
+        "hint": "Copy matching JPG/RAW files"
+      },
+      "files_xmp": {
+        "label": "Photos + XMP",
+        "short": "Photos + XMP",
+        "hint": "Copy photos and generate editor-readable rating sidecars"
+      },
+      "xmp_only": {
+        "label": "XMP only",
+        "short": "XMP manifest",
+        "hint": "Skip photo copying; generate a mirrored XMP sidecar bundle"
+      }
     },
     "layout": {
       "label": "Export mode",

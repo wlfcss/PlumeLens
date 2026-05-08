@@ -20,7 +20,6 @@ import re
 import unicodedata
 from collections import Counter
 from dataclasses import dataclass
-from time import monotonic
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -29,6 +28,7 @@ from pydantic import BaseModel, Field
 from engine.api.routes.library import _apply_group_species_consensus, _match_overrides_to_detections
 from engine.api.schemas.library import BestDetection, BirdDetectionDetail, PhotoRow
 from engine.core.database import Database
+from engine.services import archive_cache
 from engine.services.decisions import SpeciesOverride, SpeciesOverrideRecord
 from engine.services.geo_constants import UNRESOLVED_COUNTRY
 from engine.services.gps import parse_gps_from_exif
@@ -113,8 +113,6 @@ class GeoSummary(BaseModel):
 # ---------------------------------------------------------------------------
 ARCHIVE_GRADES = {"select", "usable", "record"}
 ARCHIVE_SPECIES_SOURCES = {"manual", "model", "group_consensus"}
-_ARCHIVE_GEO_CACHE_TTL_SECONDS = 10.0
-_archive_geo_cache: dict[str, tuple[float, Any]] = {}
 
 
 @dataclass
@@ -440,22 +438,11 @@ async def _load_geo_photos(
 
 
 def _get_geo_cache(key: str) -> Any | None:
-    cached = _archive_geo_cache.get(key)
-    if cached is None:
-        return None
-    created_at, value = cached
-    if monotonic() - created_at > _ARCHIVE_GEO_CACHE_TTL_SECONDS:
-        _archive_geo_cache.pop(key, None)
-        return None
-    return value
+    return archive_cache.get(key)
 
 
 def _set_geo_cache(key: str, value: Any) -> Any:
-    _archive_geo_cache[key] = (monotonic(), value)
-    if len(_archive_geo_cache) > 64:
-        oldest = min(_archive_geo_cache.items(), key=lambda item: item[1][0])[0]
-        _archive_geo_cache.pop(oldest, None)
-    return value
+    return archive_cache.put(key, value)
 
 
 def _species_from_candidate(

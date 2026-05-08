@@ -23,6 +23,7 @@ import structlog
 
 from engine.core.database import Database
 from engine.pipeline.models import PipelineResult
+from engine.services import archive_cache
 
 logger = structlog.stdlib.get_logger()
 
@@ -140,6 +141,9 @@ async def store_result(
         )
 
     await conn.commit()
+    # 新分析结果落地 → 羽迹聚合可能受影响(species/grade 变了),清缓存让下次
+    # archive 请求重算,避免 30s 内仍看到旧聚合数据。
+    archive_cache.invalidate()
     await logger.ainfo(
         "Stored analysis result",
         photo_id=photo_id,
@@ -182,6 +186,8 @@ async def invalidate_photo(db: Database, photo_id: str) -> int:
     ) as cur:
         deleted = cur.rowcount or 0
     await db.conn.commit()
+    if deleted:
+        archive_cache.invalidate()
     return int(deleted)
 
 

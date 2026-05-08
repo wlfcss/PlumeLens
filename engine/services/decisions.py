@@ -15,6 +15,7 @@ from typing import TypedDict
 import structlog
 
 from engine.core.database import Database
+from engine.services import archive_cache
 
 logger = structlog.stdlib.get_logger()
 
@@ -109,6 +110,8 @@ async def set_decision(db: Database, photo_id: str, decision: Decision | None) -
     if decision is None:
         await db.conn.execute("DELETE FROM photo_decisions WHERE photo_id = ?", (photo_id,))
         await db.conn.commit()
+        # 用户清除决策影响 archive 聚合(grade=NULL → 不进精选/可用/记录桶)
+        archive_cache.invalidate()
         await logger.ainfo("Decision cleared", photo_id=photo_id)
         return None
 
@@ -122,6 +125,8 @@ async def set_decision(db: Database, photo_id: str, decision: Decision | None) -
         (photo_id, decision.value, now),
     )
     await db.conn.commit()
+    # decision 影响 ARCHIVE_GRADES 过滤,需 invalidate 让羽迹立即反映新评级
+    archive_cache.invalidate()
     await logger.ainfo("Decision set", photo_id=photo_id, decision=decision.value)
     return decision
 
@@ -156,6 +161,9 @@ async def set_decisions_batch(
             clear_ids,
         )
     await db.conn.commit()
+    # 批量决策(连拍组"keep best 1")会大量翻 grade,必须 invalidate 否则
+    # 用户切到羽迹页面看到的还是 10s TTL 内的旧聚合。
+    archive_cache.invalidate()
     return len(updates)
 
 
@@ -294,6 +302,8 @@ async def set_species_override(
             (photo_id, target_bird_index),
         )
         await db.conn.commit()
+        # species 修正影响 archive 物种墙 + 三级地图聚合,清缓存让下次请求重算。
+        archive_cache.invalidate()
         await logger.ainfo(
             "Species override cleared",
             photo_id=photo_id,
@@ -335,6 +345,9 @@ async def set_species_override(
         ),
     )
     await db.conn.commit()
+    # 手动鸟种修正后 archive 聚合需要 reflect — 用户改完一只鸟种后切到羽迹
+    # 应该立即看到新分类,不能等 10s TTL。
+    archive_cache.invalidate()
     await logger.ainfo(
         "Species override set",
         photo_id=photo_id,

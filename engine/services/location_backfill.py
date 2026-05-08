@@ -19,6 +19,7 @@ from typing import Any, Literal
 import structlog
 
 from engine.core.database import Database
+from engine.services import archive_cache
 from engine.services.geo_constants import UNRESOLVED_COUNTRY
 from engine.services.geocoder import reverse
 from engine.services.gps import parse_gps_from_exif
@@ -279,6 +280,12 @@ async def backfill_library_locations(
     if progress_cb:
         with contextlib.suppress(Exception):
             await progress_cb(library_id, total, total)
+
+    # backfill 完整跑完单 library 后清 archive 聚合缓存 — backfill 期间不每张
+    # invalidate(写入太频繁,缓存命中率会归零),完成时一次清空让羽迹页面看到
+    # 最新的省/市/点分布。filled+unresolved=0 时无写入,跳过避免不必要清缓存。
+    if filled or unresolved:
+        archive_cache.invalidate()
 
     await logger.ainfo(
         "Location backfill done",
