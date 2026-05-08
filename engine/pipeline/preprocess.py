@@ -254,10 +254,13 @@ def expand_for_iqa(
     fx1 = max(0.0, fx1)
     fy1 = max(0.0, fy1)
 
-    ix1 = int(fx1)
-    iy1 = int(fy1)
-    ix2 = int(fx2)
-    iy2 = int(fy2)
+    # 与 resize_letterbox 一致用 round 而非 int 截断 — int() 系统性向 0 截断导致
+    # 边角 1-2 px 偏移,后续 pose `_in_box` 判定边界鸟头/眼时可能误判 not visible,
+    # 直接降两档(usable→reject)。round 把舍入分散到 ±0.5 px,无系统性偏置。
+    ix1 = int(round(fx1))
+    iy1 = int(round(fy1))
+    ix2 = int(round(fx2))
+    iy2 = int(round(fy2))
     if ix2 <= ix1 or iy2 <= iy1:
         return image[0:1, 0:1, :]
     return image[iy1:iy2, ix1:ix2, :].copy()
@@ -293,11 +296,13 @@ def crop_bbox(
         x2 = cx + bw / 2
         y2 = cy + bh / 2
 
-    # Clamp to image bounds
-    ix1 = max(0, int(x1))
-    iy1 = max(0, int(y1))
-    ix2 = min(w, int(x2))
-    iy2 = min(h, int(y2))
+    # Clamp to image bounds. 与 resize_letterbox 一致用 round 而非 int 截断 —
+    # 截断系统性向 0 偏移 1 px,与训练 pipeline / letterbox 不一致;边角鸟在 pose
+    # `_in_box` 边界时会被误判 not visible 从而降档。
+    ix1 = max(0, int(round(x1)))
+    iy1 = max(0, int(round(y1)))
+    ix2 = min(w, int(round(x2)))
+    iy2 = min(h, int(round(y2)))
 
     if ix2 <= ix1 or iy2 <= iy1:
         # Degenerate box, return 1x1 pixel

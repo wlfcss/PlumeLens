@@ -95,14 +95,58 @@ async def _sweep_stuck_tasks(app: FastAPI, db: Database) -> None:
     """
     from engine.api.routes.analysis import _workers, start_library_worker
 
+    sweep_interval_sec = 15
+
     while True:
         try:
-            await asyncio.sleep(30)
+            await asyncio.sleep(sweep_interval_sec)
+        except asyncio.CancelledError:
+            raise
+
+        # ---- step 1: stuck PROCESSING → FAILED → PENDING/DEAD ----
+        # 单独 try/except,DB 异常不会掐断后续 step。
+        try:
             await mark_stuck_tasks_failed(db)
-            # 孤儿 PENDING 兜底
-            pipeline = getattr(app.state, "pipeline", None)
-            if not isinstance(pipeline, PipelineManager) or not pipeline.is_ready:
-                continue
+        except Exception:
+            logger.exception("Sweeper step1 (mark_stuck_tasks_failed) failed")
+
+        pipeline = getattr(app.state, "pipeline", None)
+        if not isinstance(pipeline, PipelineManager) or not pipeline.is_ready:
+            continue
+
+        # ---- step 2: 死 worker + PROCESSING 行 → 立即重置 PENDING ----
+        # 真实场景下"5.5 min 黑洞"的正解:worker task 因异常 done(),其名下的
+        # task_queue 行还停在 PROCESSING,普通的 STUCK_THRESHOLD 路径要等 5 min
+        # 才会动它。死 worker 配 PROCESSING 行可以判定为孤儿并立刻回收 — 不用等
+        # 5 min 阈值,下面 step3 的 worker 重启接管。
+        try:
+            async with db.conn.execute(
+                "SELECT library_id, COUNT(*) AS n FROM task_queue "
+                "WHERE status = 'processing' GROUP BY library_id",
+            ) as cur:
+                processing_rows = await cur.fetchall()
+            for row in processing_rows:
+                library_id = str(row["library_id"])
+                worker = _workers.get(library_id)
+                if worker is not None and not worker.done():
+                    continue
+                count = int(row["n"])
+                await db.conn.execute(
+                    "UPDATE task_queue SET status='pending', started_at=NULL "
+                    "WHERE library_id=? AND status='processing'",
+                    (library_id,),
+                )
+                await db.conn.commit()
+                await logger.awarning(
+                    "Sweeper: dead worker with PROCESSING tasks — fast-reset to pending",
+                    library_id=library_id,
+                    count=count,
+                )
+        except Exception:
+            logger.exception("Sweeper step2 (dead worker fast-reset) failed")
+
+        # ---- step 3: 孤儿 PENDING (含 step 2 刚刚重置的) → 重启 worker ----
+        try:
             async with db.conn.execute(
                 "SELECT library_id, COUNT(*) AS n FROM task_queue "
                 "WHERE status = 'pending' GROUP BY library_id",
@@ -119,10 +163,8 @@ async def _sweep_stuck_tasks(app: FastAPI, db: Database) -> None:
                     pending=int(row["n"]),
                 )
                 start_library_worker(db, pipeline, library_id, settings.analysis_concurrency)
-        except asyncio.CancelledError:
-            raise
         except Exception:
-            logger.exception("Stuck task sweeper iteration failed")
+            logger.exception("Sweeper step3 (orphan PENDING revival) failed")
 
 
 async def _refresh_all_thumbnails(db: Database) -> None:

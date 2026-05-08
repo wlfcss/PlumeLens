@@ -132,7 +132,9 @@ class Settings(BaseSettings):
     # v7: detector 输出加 IoU 0.85 dedup — YOLO26 NMS-free 在密集场景仍 over-detect
     #     同一只鸟，bbox 几乎完全重叠的视为 ghost duplicate，保留 conf 最高的
     # v8: species 切换到 v4 384×384 LoRA/reject adapter，1591 类，uncertain 不写入自动物种结论
-    preprocess_version: int = 8
+    # v9: crop_bbox + expand_for_iqa 统一 int(round()) 取代 int() 截断，与 letterbox 对齐;
+    #     边角 1-2 px 系统性偏移消除,pose 在边缘鸟头/眼判定 _in_box 时不再误判 not visible
+    preprocess_version: int = 9
 
     # Pipeline — concurrency
     # 每个 task 内部 ONNX 推理会 to_thread 释放 GIL，多 worker 并发 = 多张图同时跑 ONNX。
