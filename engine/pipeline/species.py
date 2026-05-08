@@ -32,6 +32,7 @@ import torch.nn as nn
 from numpy.typing import NDArray
 from PIL import Image
 
+from engine.core.manifest import verify_manifest
 from engine.pipeline.models import SpeciesCandidate
 
 RecognitionState = Literal["recognized", "uncertain", "unrecognized"]
@@ -375,6 +376,14 @@ class SpeciesClassifier:
             msg = f"DINOv3 v4 adapter not found: {adapter_path}"
             raise FileNotFoundError(msg)
 
+        # 防御性 manifest 校验:正常路径下 manager.initialize() 已经核对过整批
+        # SHA-256(verify_manifest 同进程缓存),这里 cache fast path,不重复哈希。
+        # 离开 manager 单独构造 SpeciesClassifier(测试 / 脚本)时仍走完整校验,
+        # 不让 torch.load(weights_only=False) 在未验证的 pickle 上反序列化。
+        verify_manifest(self.deploy_dir.parent)
+
+        # weights_only=False 是 v4 adapter 必需(checkpoint 含 EMA shadow / args
+        # 等非张量对象);上面的 manifest SHA-256 pin 是阻断 pickle RCE 的最后一道闸。
         ckpt = torch.load(str(adapter_path), map_location="cpu", weights_only=False)
         model_args = ckpt.get("args") or {}
         trained_input_size = int(model_args.get("input_size") or self.image_size)

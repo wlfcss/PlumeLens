@@ -27,16 +27,16 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 20
           cache: npm
 
       - name: Setup uv
-        uses: astral-sh/setup-uv@v6
+        uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff # v6
         with:
           enable-cache: true
 
@@ -125,16 +125,35 @@ jobs:
           done
           exit "$missing"
 
+      - name: Verify model manifest SHA-256
+        # 供应链整完整性闸门 — 把打包前模型文件的 SHA-256 与 git-tracked
+        # engine/models/manifest.json 比对,任一不一致直接 fail build。
+        # 拦截两类风险:(1) Release tarball 被中间人替换,(2) 仓库内 manifest
+        # 被篡改但未同步真实模型(开发期忘记重跑 build_model_manifest.py)。
+        # 引擎运行时也会做同样校验(engine/core/manifest.py),CI 这一步是双保险。
+        run: |
+          uv run python - <<'PY'
+          from pathlib import Path
+
+          from engine.core.manifest import ManifestError, verify_manifest
+
+          try:
+              verified = verify_manifest(Path("engine/models"))
+          except ManifestError as exc:
+              raise SystemExit(f"::error::{exc}") from exc
+          print(f"manifest verified: {len(verified)} entries")
+          PY
+
       - name: Build macOS DMG
         run: npm run dist:mac
 
       - name: Upload DMG artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: PlumeLens-macOS-arm64-${{ github.sha }}
           path: release/PlumeLens-*-arm64.dmg
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 7
 
       - name: Publish tagged release asset
         if: startsWith(github.ref, 'refs/tags/v')

@@ -73,6 +73,13 @@ export class ProcessManager extends EventEmitter {
     return this.authToken
   }
 
+  /** 当前 engine 子进程 PID(spawn 时 detached:true,pgid == pid)。
+   * 'exit' handler 用此 PID 走同步 process.kill(-pid, 'SIGKILL') —
+   * 事件循环已停的场景下,异步 setTimeout 兜底不会 fire,只能同步杀。 */
+  getEnginePid(): number | undefined {
+    return this.process?.pid
+  }
+
   /** 确保 logs/ 目录存在；返回 true 表示可以写文件日志。失败不阻断启动。 */
   private ensureLogsDir(): boolean {
     try {
@@ -91,8 +98,16 @@ export class ProcessManager extends EventEmitter {
     try {
       if (existsSync(logPath) && statSync(logPath).size > ELECTRON_LOG_MAX_BYTES) {
         const archive = `${logPath}.old`
-        try { unlinkSync(archive) } catch { /* ignore: file may not exist */ }
-        try { renameSync(logPath, archive) } catch { /* ignore */ }
+        try {
+          unlinkSync(archive)
+        } catch {
+          /* ignore: file may not exist */
+        }
+        try {
+          renameSync(logPath, archive)
+        } catch {
+          /* ignore */
+        }
       }
       const ts = new Date().toISOString()
       appendFileSync(logPath, `${ts} ${message}\n`, 'utf-8')
@@ -110,7 +125,11 @@ export class ProcessManager extends EventEmitter {
         .map((f) => ({ name: f, mtime: statSync(join(this.logsDir, f)).mtime.getTime() }))
         .sort((a, b) => b.mtime - a.mtime) // 最新在前
       for (const old of files.slice(MAX_STARTUP_LOGS)) {
-        try { unlinkSync(join(this.logsDir, old.name)) } catch { /* ignore */ }
+        try {
+          unlinkSync(join(this.logsDir, old.name))
+        } catch {
+          /* ignore */
+        }
       }
     } catch {
       /* ignore */
@@ -287,7 +306,9 @@ export class ProcessManager extends EventEmitter {
           `\n# === engine exit @ ${new Date().toISOString()} code=${code} signal=${signal} ===\n`,
         )
         stderrStream?.end()
-      } catch { /* ignore */ }
+      } catch {
+        /* ignore */
+      }
 
       // 关键防竞态:如果 this.process 已被 restart() 换成新 proc,这次 exit 是
       // 老 proc 的迟到事件,别去清新 proc 的 url/health/etc。早返回即可。
@@ -317,7 +338,12 @@ export class ProcessManager extends EventEmitter {
       const abnormal = (code !== null && code !== 0) || signal !== null
       if (abnormal && wasReady) {
         // 已就绪后崩溃 → 进入重启,UI 显示 "正在重连"
-        this.emit('crashed', { code, signal, restartCount: this.restartCount + 1, maxRestarts: this.maxRestarts })
+        this.emit('crashed', {
+          code,
+          signal,
+          restartCount: this.restartCount + 1,
+          maxRestarts: this.maxRestarts,
+        })
         this.handleCrash()
       } else if (abnormal) {
         // 启动期 fail(端口未广播) → 立即报错,UI 显示致命错误
@@ -392,7 +418,7 @@ export class ProcessManager extends EventEmitter {
     const proc = this.process
     if (!proc) return
     this.clearReadyTimer(proc)
-    this.process = null  // 先解引用，防止 'exit' handler 触发 handleCrash
+    this.process = null // 先解引用，防止 'exit' handler 触发 handleCrash
     if (proc.killed || proc.exitCode !== null) return
 
     const pid = proc.pid
@@ -405,7 +431,11 @@ export class ProcessManager extends EventEmitter {
       if (pid !== undefined) process.kill(-pid, 'SIGTERM')
     } catch {
       // 兜底：直接信号主 PID
-      try { proc.kill('SIGTERM') } catch { /* ignore */ }
+      try {
+        proc.kill('SIGTERM')
+      } catch {
+        /* ignore */
+      }
     }
     const killTimer = setTimeout(() => {
       if (!proc.killed && proc.exitCode === null) {
@@ -415,7 +445,11 @@ export class ProcessManager extends EventEmitter {
         try {
           if (pid !== undefined) process.kill(-pid, 'SIGKILL')
         } catch {
-          try { proc.kill('SIGKILL') } catch { /* ignore */ }
+          try {
+            proc.kill('SIGKILL')
+          } catch {
+            /* ignore */
+          }
         }
       }
     }, 3000)
@@ -450,7 +484,9 @@ export class ProcessManager extends EventEmitter {
     if (this.restartCount < this.maxRestarts) {
       const delay = delays[this.restartCount] ?? 10000
       this.restartCount++
-      this.writeElectronLog(`restart scheduled in ${delay}ms (attempt ${this.restartCount}/${this.maxRestarts})`)
+      this.writeElectronLog(
+        `restart scheduled in ${delay}ms (attempt ${this.restartCount}/${this.maxRestarts})`,
+      )
       // 记录 timer，stop() 能取消；timer 触发时再次检查 stopped 防竞态
       this.restartTimer = setTimeout(() => {
         this.restartTimer = null
@@ -492,7 +528,9 @@ export class ProcessManager extends EventEmitter {
           consecutiveFailures = 0
           this.stopHealthCheck()
           this.url = null
-          this.writeElectronLog(`engine connected ${FAIL_THRESHOLD} health failures, triggering restart`)
+          this.writeElectronLog(
+            `engine connected ${FAIL_THRESHOLD} health failures, triggering restart`,
+          )
           this.emit('crashed', {
             code: null,
             signal: 'HEALTH_FAILURE',

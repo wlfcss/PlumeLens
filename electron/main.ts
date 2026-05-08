@@ -537,11 +537,42 @@ app.on('before-quit', () => {
   processManager?.stop()
 })
 
-// 兜底：Node 进程意外退出（崩溃 / 被 kill）时也尝试杀 engine。
-// detached: true 的子进程不会随 Electron 死，必须显式 cleanup。
+// 兜底:Node 进程意外退出(崩溃 / 被 kill)时杀 engine。
+// detached: true 的子进程不会随 Electron 死,必须显式 cleanup。
+//
+// process.on('exit') 触发时事件循环已停 — stop() 内部的 setTimeout 不会 fire,
+// 异步 SIGTERM→SIGKILL 兜底链全部失效。这里走同步 process.kill(-pid, 'SIGKILL')
+// 直接杀进程组(spawn 时 detached:true,pgid == pid)。
 process.on('exit', () => {
-  processManager?.stop()
+  const pid = processManager?.getEnginePid()
+  if (pid !== undefined) {
+    try {
+      process.kill(-pid, 'SIGKILL')
+    } catch {
+      try {
+        process.kill(pid, 'SIGKILL')
+      } catch {
+        /* ignore — proc already dead */
+      }
+    }
+  }
 })
+
+// uncaughtException / unhandledRejection 兜底 — 没这两个 handler 时崩溃路径
+// 不触发 before-quit / SIGTERM,stop() 永不调用,Python engine 残留。
+process.on('uncaughtException', (err) => {
+  process.stderr.write(`[main] uncaughtException: ${err.message}\n${err.stack ?? ''}\n`)
+  try {
+    processManager?.stop()
+  } catch {
+    /* ignore — best effort */
+  }
+  app.quit()
+})
+process.on('unhandledRejection', (reason) => {
+  process.stderr.write(`[main] unhandledRejection: ${String(reason)}\n`)
+})
+
 process.on('SIGTERM', () => {
   processManager?.stop()
   app.quit()

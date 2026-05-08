@@ -1,0 +1,23 @@
+# Dependabot 配置 — 自动维护已 pin 到 commit SHA 的 GitHub Actions。
+#
+# .github/workflows/*.yml 内 actions 已 pin 到 commit SHA(C5: 阻断供应链
+# 攻击 — 第三方 Action 篡改 floating tag 不会影响 PlumeLens CI)。
+# Dependabot 周期性检查上游 release,自动 PR 升级 SHA + 注释里的 vX.Y.Z。
+
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: chore(ci)
+      include: scope
+    groups:
+      actions-minor-and-patch:
+        applies-to: version-updates
+        update-types:
+          - minor
+          - patch

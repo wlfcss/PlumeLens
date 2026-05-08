@@ -11,6 +11,7 @@ from pathlib import Path
 import structlog
 
 from engine.core.config import Settings
+from engine.core.manifest import verify_manifest
 from engine.pipeline.detector import BirdDetector
 from engine.pipeline.grader import apply_pose_adjustment, grade
 from engine.pipeline.models import (
@@ -153,6 +154,18 @@ class PipelineManager:
         import onnxruntime as ort
 
         models_dir = self._settings.models_dir
+
+        # 供应链整完整性闸门 — 在加载任何模型前先核对 manifest.json 的 SHA-256。
+        # species/v4/seed42_adapter.pt 走 torch.load(weights_only=False) 反序列
+        # 化 pickle,如果攻击者替换该文件可任意执行代码;ONNX/safetensors 替换会
+        # 让推理结果被悄悄改写。manifest 不一致直接抛 ManifestError 拒绝启动。
+        verified = verify_manifest(models_dir)
+        await logger.ainfo(
+            "Model manifest verified",
+            entries=len(verified),
+            models_dir=str(models_dir),
+        )
+
         checksums: dict[str, str] = {}
 
         # ---- YOLO detector ----

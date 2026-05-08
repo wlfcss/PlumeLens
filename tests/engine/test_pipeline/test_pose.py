@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 from engine.pipeline.models import PoseInfo
 from engine.pipeline.pose import (
+    _ROW_WIDTH,
     BODY_PARTS,
     EYE_PARTS,
     HEAD_PARTS,
@@ -13,7 +14,6 @@ from engine.pipeline.pose import (
     TAIL_PART,
     WING_PARTS,
     PoseDetector,
-    _ROW_WIDTH,
 )
 
 # v2 ONNX 输出维度:6 + 11×3 = 39。从 pose.py 内部常量 import 防止 PART_NAMES
@@ -52,7 +52,10 @@ def _make_raw_row(
     return row
 
 
-def _kpts_uniform(conf: float, xy: tuple[float, float] = (320, 320)) -> list[tuple[float, float, float]]:
+def _kpts_uniform(
+    conf: float,
+    xy: tuple[float, float] = (320, 320),
+) -> list[tuple[float, float, float]]:
     """所有 11 个关键点用同一 conf + 同一 xy。"""
     return [(xy[0], xy[1], conf) for _ in range(_NUM_KPTS)]
 

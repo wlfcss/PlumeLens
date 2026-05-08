@@ -1,0 +1,47 @@
+{
+  "manifest_version": 1,
+  "generated_at": "2026-05-08T11:20:19+00:00",
+  "comment": "Model asset SHA-256 pin. Engine startup refuses to load if hashes don't match. species/v4/seed42_adapter.pt 是 pickle (torch.load weights_only=False), SHA pin 是阻断供应链 RCE 的最后一道闸。Regenerate via `uv run python scripts/build_model_manifest.py` after training updates.",
+  "assets": {
+    "yolo26l-bird-det.onnx": {
+      "size": 99872889,
+      "sha256": "e98f38808858375c6a48a7a18d45bb95140f0dc1a3d3074cb096b39a0d074555"
+    },
+    "bird_visibility11.onnx": {
+      "size": 102901634,
+      "sha256": "46ea48da31ba595ad621551478119c2847b59ce34c5d4af3d5d2dffcb115f167"
+    },
+    "bird_visibility11_config.json": {
+      "size": 2338,
+      "sha256": "ccc39bf7ceceb53c10df7be588d56489f425e5f1c02f2fc16d049a7e58aa015c"
+    },
+    "clipiqa_plus.onnx": {
+      "size": 306969322,
+      "sha256": "ee547048f547c7527aa1b61897736652c86d983d182e6e89b508ba1454d3ee63"
+    },
+    "hyperiqa.onnx": {
+      "size": 109440322,
+      "sha256": "347c0509a420221666d1f712be523c7d88d8189b7bb458558773bdc62bed1426"
+    },
+    "species/backbone/config.json": {
+      "size": 734,
+      "sha256": "880de4b39824ab10f21ca9bf91944b01cec97e8557ed337f87a52e7bba1dfa45"
+    },
+    "species/backbone/model.safetensors": {
+      "size": 606300376,
+      "sha256": "9c4f572f6688b7e7cf78b46a8826341e42c9e89bc9131781a3aa1a6f36c68b9d"
+    },
+    "species/canonical_extended.parquet": {
+      "size": 81326,
+      "sha256": "a3b4519e84900a7cb10b0f8a1fa807c330ace5f0fea29a7688c400722d818d64"
+    },
+    "species/v4_calibration_policy.json": {
+      "size": 10464,
+      "sha256": "b6d983acfda39200b1e91bb6dd0bbbf63f1413ba3740066e7790074ef8394021"
+    },
+    "species/v4/seed42_adapter.pt": {
+      "size": 33095483,
+      "sha256": "3bc01a33439efc4dcf634f1025206859c97fd63d98573f80344f5b54010a792b"
+    }
+  }
+}
