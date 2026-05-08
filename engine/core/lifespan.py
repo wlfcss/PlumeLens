@@ -80,17 +80,45 @@ async def _backfill_locations(db: Database) -> None:
         logger.exception("Location backfill task failed")
 
 
-async def _sweep_stuck_tasks(db: Database) -> None:
-    """周期性扫 PROCESSING 超时 task,强制 fail 让队列推进。
+async def _sweep_stuck_tasks(app: FastAPI, db: Database) -> None:
+    """周期性扫 PROCESSING 超时 task → 失败重试,并兜底启动孤儿 PENDING 的 worker。
 
-    对应场景:某个 worker 卡死(MPS hang / 死锁) — 整个进程没崩,但单个 task 永远
-    不会完成。前端看进度条不动,以为是后端崩了。30s 周期 + 5min 阈值能覆盖正常
-    抖动而不误杀。
+    对应场景:
+    1. 某个 worker 卡死(MPS hang / 死锁) — 整个进程没崩,单个 task 永远不会完成。
+       30s 周期 + 5min 阈值覆盖正常抖动而不误杀。sweeper mark failed → 自动 retry
+       回 PENDING(attempts<MAX)或 DEAD(>=MAX)。
+    2. **孤儿 pending tasks**:worker pool 因为某个未捕获异常 / 重试逻辑漏洞退出,
+       但 task_queue 里仍有 PENDING 行。原 _drain_queue 已经看不到任务退出,没人
+       再 pick_next。结果就是进度条卡住到天荒地老(用户实测见过 1664/1668 卡 4 张)。
+       每个 sweep 周期顺手扫:有 PENDING 的 library 但 _workers 里没活跃 task →
+       重启 worker 兜底。复用 _resume_pending_workers 同款 query。
     """
+    from engine.api.routes.analysis import _workers, start_library_worker
+
     while True:
         try:
             await asyncio.sleep(30)
             await mark_stuck_tasks_failed(db)
+            # 孤儿 PENDING 兜底
+            pipeline = getattr(app.state, "pipeline", None)
+            if not isinstance(pipeline, PipelineManager) or not pipeline.is_ready:
+                continue
+            async with db.conn.execute(
+                "SELECT library_id, COUNT(*) AS n FROM task_queue "
+                "WHERE status = 'pending' GROUP BY library_id",
+            ) as cur:
+                rows = await cur.fetchall()
+            for row in rows:
+                library_id = str(row["library_id"])
+                worker = _workers.get(library_id)
+                if worker is not None and not worker.done():
+                    continue
+                await logger.awarning(
+                    "Reviving worker for orphaned PENDING tasks",
+                    library_id=library_id,
+                    pending=int(row["n"]),
+                )
+                start_library_worker(db, pipeline, library_id, settings.analysis_concurrency)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -280,7 +308,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     refresh_task = asyncio.create_task(_refresh_all_thumbnails(db))
 
     # Background：周期性把卡死 (PROCESSING > 5min) 的 task 标记 failed,让队列继续推进
-    sweep_task = asyncio.create_task(_sweep_stuck_tasks(db))
+    sweep_task = asyncio.create_task(_sweep_stuck_tasks(app, db))
 
     # Background：reverse geocoding 全库 backfill(GPS → 省市区地名),
     # 羽迹三级地图聚合用。一次性后台扫,完成后该 library 所有有 GPS 的照片都填充好。
