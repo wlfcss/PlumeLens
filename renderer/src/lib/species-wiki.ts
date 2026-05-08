@@ -5,10 +5,10 @@
  * 由 scripts/build_species_wiki_json.py 导出为 `species-wiki.json`。
  *
  * 收录范围：species v4 canonical_extended 全部 1591 种。
- *   - `is_trained = true`：DINOv3 分类模型可自动识别
+ *   - `is_trained = true`：DINOv4 分类模型可自动识别
  *   - `is_trained = false`：legacy taxonomy 下训练样本不足，**仅支持用户手动标注**
  *
- * Wikipedia 覆盖率 zh 99.3% / en 99.9%（个别稀有种可能都没有 extract）。
+ * Wikipedia 覆盖率 zh 98.1% / en 99.9%（个别稀有种可能没有 extract）。
  */
 // Vite 支持 JSON 直接 import；tsconfig.web.json 已开 resolveJsonModule
 import data from './species-wiki.json'
@@ -67,7 +67,7 @@ export function speciesWikiCount(): number {
 }
 
 /**
- * Is this species automatically recognisable by the DINOv3 classifier?
+ * Is this species automatically recognisable by the DINOv4 classifier?
  * Returns `false` for both untrained species and completely unknown names.
  */
 export function isAutoRecognisable(canonicalSci: string): boolean {
