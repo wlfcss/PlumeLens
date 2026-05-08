@@ -13,6 +13,7 @@ import csv
 import json
 import re
 import shutil
+import unicodedata
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -180,8 +181,13 @@ def _safe_path_part(value: str, fallback: str = "未命名文件夹") -> str:
     """
     if not value:
         return fallback
-    # 1) 删 null + control 字符 (\x00-\x1f, \x7f)
-    cleaned = re.sub(r"[\x00-\x1f\x7f]+", "", value)
+    # 0) Unicode NFC 归一 — 同一字符可能用 base + 组合记号(NFD)写两遍,先归到
+    #    NFC,后续 regex 才能稳定匹配 reserved char/name 的 bytes 形态(否则攻击
+    #    者用 "ÇON" 这种 NFD 形式就能绕过 reserved-name 检测)。
+    cleaned = unicodedata.normalize("NFC", value)
+    # 1) 删 null + control 字符 (\x00-\x1f, \x7f) + Unicode line/paragraph 分隔符
+    #    ( /  在部分 Windows 文本工具会被当 newline 截断)。
+    cleaned = re.sub(r"[\x00-\x1f\x7f  ]+", "", cleaned)
     # 2) 替换路径分隔符 + Windows 保留符号为下划线
     cleaned = re.sub(r'[/\\:<>"|?*]+', "_", cleaned)
     # 3) 去首尾空白 + 末尾点(Windows 静默 trim)

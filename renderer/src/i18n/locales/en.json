@@ -31,6 +31,9 @@
     "saveHint": "The engine will restart so new keys take effect",
     "savedRestarted": "Saved. Engine restarting…",
     "saveFailed": "Save failed: {{error}}",
+    "error": {
+      "safeStorageUnavailable": "Secure storage is unavailable on this system (macOS Keychain / Windows DPAPI / Linux libsecret). API keys were NOT saved to avoid writing them in plain text. Please install a keyring service or use a supported platform."
+    },
     "geocoding": {
       "title": "Geocoding providers",
       "hint": "Used to resolve photo GPS coordinates to place names. Fill any one — falls back to OpenStreetMap online and offline city DB.",

@@ -46,3 +46,23 @@ def test_passes_normal_name() -> None:
 
 def test_passes_chinese_name() -> None:
     assert _safe_path_part("山麻雀-001.jpg") == "山麻雀-001.jpg"
+
+
+def test_unicode_nfc_normalization_blocks_decomposed_reserved_name() -> None:
+    # NFD 分解形式的 "Ç" = "C" + U+0327 (combining cedilla)。
+    # 不归一就只有规则 base "C" 才会触发 reserved-name; 但 NFD "Ç" 实际看到的是
+    # 两个 codepoint,不会被 reserved 检测拦。归一到 NFC 后变成单字符 "Ç" (U+00C7),
+    # 不在 reserved 集合里,所以不触发 _ 前缀。这条 case 主要锁定归一行为本身。
+    nfd = "ÇON.txt"
+    nfc = _safe_path_part(nfd)
+    # NFC 归一后 != 原 NFD 字符串(unicode bytes 长度变了)
+    assert nfc != nfd
+    # 归一后是合法名字,不被前缀
+    assert not nfc.startswith("_")
+
+
+def test_unicode_line_separator_stripped() -> None:
+    # U+2028 line separator / U+2029 paragraph separator 被部分 Windows 文本工具
+    # 当 newline 截断 — exporter 的目标是跨平台稳定,删掉这两个码位。
+    assert _safe_path_part("foo bar.jpg") == "foobar.jpg"
+    assert _safe_path_part("foo bar.jpg") == "foobar.jpg"

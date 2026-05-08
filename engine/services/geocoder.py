@@ -76,13 +76,18 @@ class GeocodeResult(TypedDict):
 
 
 # ---------------------------------------------------------------------------
-# LRU cache: round 坐标到 4 位小数(~11m 精度)做 key,同场景照片共用
+# LRU cache: 与上送在线 provider 的 fuzz 精度对齐(3 位小数 ≈ 110m),让落到
+# 同一 110m bucket 的多张照片共享一次 API 请求 — 之前 4 位小数(11m)cache key
+# 比 fuzz 精度更细,导致两张实际给 API 一样请求的照片各跑一次 round-trip,
+# 浪费 amap/baidu/tencent 配额(audit-batch-2 P2)。
 # ---------------------------------------------------------------------------
 _cache: OrderedDict[tuple[int, int, str], GeocodeResult | None] = OrderedDict()
 
 
 def _cache_key(lat: float, lon: float, lang: str) -> tuple[int, int, str]:
-    return (round(lat * 10000), round(lon * 10000), lang)
+    # 10 ** _NETWORK_GPS_PRECISION 把 round(lat, 3) 转成整数 key,避免 float 比较坑。
+    scale = 10**_NETWORK_GPS_PRECISION
+    return (round(lat * scale), round(lon * scale), lang)
 
 
 def _cache_get(key: tuple[int, int, str]) -> GeocodeResult | None | object:

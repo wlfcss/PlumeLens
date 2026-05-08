@@ -411,6 +411,11 @@ async def _progress_stream(db: Database, library_id: str):
     用户点击「开始分析」后 task 入队但前端永远看不到（SSE 已死），button 卡在
     "开始分析"。
     """
+    # 限流计数 incr/decr 全部在 generator 内做 — 如果 ASGI 永远不 iterate
+    # generator (Starlette response writer 异常等极端边缘),incr 不发生,counter
+    # 不会泄漏。route handler 的 429 检查只读不写,有 race 时最多多放过 1-2 个连接,
+    # 远好于槽位永久泄漏。
+    _progress_stream_counts[library_id] = _progress_stream_counts.get(library_id, 0) + 1
     last_payload: str | None = None
     try:
         while True:
@@ -454,16 +459,16 @@ async def _progress_stream(db: Database, library_id: str):
 async def progress_stream(request: Request, library_id: str) -> StreamingResponse:
     """GET /analysis/library/{id}/progress — SSE progress stream."""
     db = await _db(request)
-    # 限流:同一 library 最多 MAX_PROGRESS_SSE_PER_LIBRARY 个并发 progress 流。
-    # 计数 incr 必须在 _progress_stream 里 try/finally decr,所以这里只检查 + ++。
-    current = _progress_stream_counts.get(library_id, 0)
-    if current >= MAX_PROGRESS_SSE_PER_LIBRARY:
+    # 限流: 单 library 最多 MAX_PROGRESS_SSE_PER_LIBRARY 个并发 progress 流。
+    # check 只读不写; 实际 incr 落在 generator 第一行,避免 StreamingResponse 因
+    # 异常未被 iterate 时 counter 永久泄漏(P1, audit-batch-2)。两个并发请求都
+    # 通过 check 时最多多放过 1 个连接,后续就稳定 reject — 可接受。
+    if _progress_stream_counts.get(library_id, 0) >= MAX_PROGRESS_SSE_PER_LIBRARY:
         raise HTTPException(
             status_code=429,
             detail=f"Too many progress SSE subscribers (limit {MAX_PROGRESS_SSE_PER_LIBRARY})",
             headers={"Retry-After": "5"},
         )
-    _progress_stream_counts[library_id] = current + 1
     return StreamingResponse(
         _progress_stream(db, library_id),
         media_type="text/event-stream",

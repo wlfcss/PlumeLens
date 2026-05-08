@@ -31,6 +31,9 @@
     "saveHint": "保存后会重启后端引擎让新配置生效",
     "savedRestarted": "已保存，后端正在重启…",
     "saveFailed": "保存失败：{{error}}",
+    "error": {
+      "safeStorageUnavailable": "当前系统不支持安全存储（macOS Keychain / Windows DPAPI / Linux libsecret）。为避免 API Key 以明文保存，未写入设置。请安装对应的密钥服务或在受支持的平台上重试。"
+    },
     "geocoding": {
       "title": "地理信息提供商",
       "hint": "用于把照片 GPS 坐标解析为地名（如「江苏省苏州市姑苏区」）。任填一个即可，未填时退回 OpenStreetMap 在线服务和离线城市数据库。",

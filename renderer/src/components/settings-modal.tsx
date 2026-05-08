@@ -88,11 +88,21 @@ export function SettingsModal(): ReactElement | null {
     setSaving(true)
     setSaveError(null)
     try {
-      await window.plumelens?.saveUserSettings?.({
+      const result = await window.plumelens?.saveUserSettings?.({
         amapKey: amapKey.trim(),
         baiduAk: baiduAk.trim(),
         tencentKey: tencentKey.trim(),
       })
+      // 主进程加密失败(safe_storage_unavailable on Linux 无 libsecret)→ surface
+      // 给用户,不静默继续 — 之前的 silent fallback 会让 plain key 写到 disk。
+      if (result && result.ok === false) {
+        if (result.reason === 'safe_storage_unavailable') {
+          setSaveError(t('settings.error.safeStorageUnavailable'))
+        } else {
+          setSaveError(result.message)
+        }
+        return
+      }
       // 让新 key 立刻生效:重启 engine。expensive 但用户配 key 是低频操作。
       await window.plumelens?.restartEngine?.()
       setSavedHint(true)
@@ -105,7 +115,7 @@ export function SettingsModal(): ReactElement | null {
     } finally {
       setSaving(false)
     }
-  }, [amapKey, baiduAk, tencentKey])
+  }, [amapKey, baiduAk, tencentKey, t])
 
   if (!open) return null
 
@@ -179,12 +189,7 @@ export function SettingsModal(): ReactElement | null {
           <button className="button-ghost" onClick={() => setOpen(false)} type="button">
             {t('common.close')}
           </button>
-          <button
-            className="button-primary"
-            disabled={saving}
-            onClick={handleSave}
-            type="button"
-          >
+          <button className="button-primary" disabled={saving} onClick={handleSave} type="button">
             <Save className="h-4 w-4" />
             {saving ? t('settings.saving') : t('settings.save')}
           </button>

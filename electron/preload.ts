@@ -46,16 +46,24 @@ export interface EngineRequestInit {
 let cachedBackendUrl: string | null = null
 let cachedAuthToken: string | null = null
 let bootstrapPromise: Promise<void> | null = null
+// Generation 计数器:engine 每次 ready/crashed/fatal 都 ++。bootstrapAuth 在 IPC
+// 拉数据期间 capture 当前 generation,完成时如果 generation 已变,说明 engine 中
+// 途重启了,这次拿到的 url/token 已经是旧 process 的,丢弃不写回 cache。否则会
+// 出现"engine 重启完了 cache 却被旧 IPC 结果覆盖回 stale URL"的赛跑(audit-batch-2 P1)。
+let cacheGeneration = 0
 
 async function bootstrapAuth(): Promise<void> {
   // 加锁:多个并发 engineRequest 不会同时 invoke 两次 IPC。
   if (cachedBackendUrl !== null && cachedAuthToken !== null) return
   if (bootstrapPromise === null) {
+    const generation = cacheGeneration
     bootstrapPromise = (async () => {
       const [url, token] = await Promise.all([
         ipcRenderer.invoke('get-backend-url') as Promise<string | null>,
         ipcRenderer.invoke('get-backend-auth-token') as Promise<string | null>,
       ])
+      // engine 重启过 → 抛弃 stale 结果,下一次请求会重新 bootstrap(因为 cache 还是 null)。
+      if (generation !== cacheGeneration) return
       cachedBackendUrl = url
       cachedAuthToken = token
     })().finally(() => {
@@ -65,9 +73,11 @@ async function bootstrapAuth(): Promise<void> {
   await bootstrapPromise
 }
 
-// engine 重启 → 旧 url / token 失效。监听 ready 事件清缓存,下次请求再取。
+// engine 重启 → 旧 url / token 失效。监听事件清缓存 + bump generation,
+// 让 in-flight bootstrap 不会把旧值覆盖回 cache。
 ipcRenderer.on('engine-status', (_event, payload: EngineStatusPayload) => {
   if (payload.kind === 'ready' || payload.kind === 'crashed' || payload.kind === 'fatal') {
+    cacheGeneration += 1
     cachedBackendUrl = null
     cachedAuthToken = null
   }

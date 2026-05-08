@@ -6,7 +6,12 @@ import { realpath } from 'fs/promises'
 import { homedir, platform as osPlatform } from 'os'
 import { join, resolve } from 'path'
 import { ProcessManager } from './process-manager'
-import { mergeUserSettings, readUserSettings, type UserSettings } from './user-settings'
+import {
+  mergeUserSettings,
+  readUserSettings,
+  SafeStorageUnavailableError,
+  type UserSettings,
+} from './user-settings'
 
 // plumelens:// 协议必须在 app ready 之前注册 scheme（标准 + secure），
 // 之后在 ready 后通过 protocol.handle 真正接管请求。
@@ -330,7 +335,27 @@ ipcMain.handle('open-path-in-finder', async (_event, targetPath: unknown) => {
 
 ipcMain.handle('get-user-settings', () => readUserSettings())
 
-ipcMain.handle('save-user-settings', (_event, partial: UserSettings) => mergeUserSettings(partial))
+// save-user-settings 返回 discriminated union:
+//   { ok: true, settings }              — 正常
+//   { ok: false, reason: 'safe_storage_unavailable', message } — Linux 无 libsecret 等
+//   { ok: false, reason: 'unknown', message } — 其他 IO 错误
+// 让 renderer 在 settings 弹窗里显式提示用户加密不可用,而不是 silently 继续以为已存。
+ipcMain.handle('save-user-settings', (_event, partial: UserSettings) => {
+  try {
+    return { ok: true as const, settings: mergeUserSettings(partial) }
+  } catch (err) {
+    if (err instanceof SafeStorageUnavailableError) {
+      return {
+        ok: false as const,
+        reason: 'safe_storage_unavailable' as const,
+        message: err.message,
+      }
+    }
+    const message = err instanceof Error ? err.message : String(err)
+    process.stderr.write(`[main] save-user-settings failed: ${message}\n`)
+    return { ok: false as const, reason: 'unknown' as const, message }
+  }
+})
 
 // 重启 engine — settings 修改后调,让新 key 生效
 ipcMain.handle('restart-engine', async () => {

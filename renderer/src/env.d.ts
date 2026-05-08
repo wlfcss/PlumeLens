@@ -67,8 +67,15 @@ interface PlumeLensAPI {
   >
   /** 读用户设置(API keys 等),持久化在 userData/settings.json */
   getUserSettings(): Promise<UserSettings>
-  /** 保存设置 — 空字符串视为清除该 key;merge 不动未传入字段 */
-  saveUserSettings(partial: UserSettings): Promise<UserSettings>
+  /** 保存设置 — 空字符串视为清除该 key;merge 不动未传入字段。
+   *  失败时返回 ok=false + reason 让 UI 提示("safe_storage_unavailable" 表示
+   *  Linux 平台缺 keyring,值不会被存,UI 应隐藏 settings 表单)。 */
+  saveUserSettings(
+    partial: UserSettings,
+  ): Promise<
+    | { ok: true; settings: UserSettings }
+    | { ok: false; reason: 'safe_storage_unavailable' | 'unknown'; message: string }
+  >
   /** 重启 engine — settings 改后调让新 key 注入生效 */
   restartEngine(): Promise<boolean>
 }

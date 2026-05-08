@@ -35,6 +35,8 @@ export interface UserSettings {
 }
 
 type EncryptedField = { enc: string }
+// SettingsOnDisk 反映"读"端 — 老版本可能存的是 plain string,新版本是 EncryptedField。
+// 写端只产生 EncryptedField (encryptValue 不再返回 string)。
 type SettingsOnDisk = Partial<Record<keyof UserSettings, string | EncryptedField>>
 
 const SETTINGS_KEYS: (keyof UserSettings)[] = ['amapKey', 'baiduAk', 'tencentKey']
@@ -51,24 +53,29 @@ function isEncryptedField(value: unknown): value is EncryptedField {
   )
 }
 
-function encryptValue(plain: string): string | EncryptedField {
+/** 错误类:saveUserSettings 加密失败时主动抛,IPC handler 让 UI surface 给用户,
+ *  比 silent-fallback-plaintext 让用户以为已经加密了要安全。 */
+export class SafeStorageUnavailableError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'SafeStorageUnavailableError'
+  }
+}
+
+function encryptValue(plain: string): EncryptedField {
+  // 严格策略(P1, audit-batch-2):平台不支持 safeStorage / 加密失败 → 主动 throw。
+  // 上一个版本静默退化到 plain text 会让用户以为 key 已加密保存,下次同步 userData
+  // 到 NAS / 云盘就泄露了 — 这种场景不接受 silent fallback,必须 surface 给用户。
+  // Linux 缺 libsecret 的极少数用户需要装 keyring 或干脆不存这些 key。
   if (!safeStorage.isEncryptionAvailable()) {
-    process.stderr.write(
-      `[user-settings] safeStorage encryption unavailable on this platform; ` +
-        `falling back to plain text for new keys\n`,
+    throw new SafeStorageUnavailableError(
+      'Secure storage is not available on this platform — install gnome-keyring / ' +
+        'libsecret on Linux, or upgrade to a supported macOS/Windows release. ' +
+        'Refusing to write API keys in plain text.',
     )
-    return plain
   }
-  try {
-    const buf = safeStorage.encryptString(plain)
-    return { enc: buf.toString('base64') }
-  } catch (err) {
-    process.stderr.write(
-      `[user-settings] safeStorage encryptString failed: ${(err as Error).message}; ` +
-        `falling back to plain text\n`,
-    )
-    return plain
-  }
+  const buf = safeStorage.encryptString(plain)
+  return { enc: buf.toString('base64') }
 }
 
 function decryptValue(value: string | EncryptedField | undefined): string | undefined {
@@ -135,7 +142,10 @@ export function readUserSettings(): UserSettings {
   return out
 }
 
-/** 写盘前对所有 key 做 encrypt,并保证 userData 存在。 */
+/** 写盘前对所有 key 做 encrypt,并保证 userData 存在。
+ *
+ *  encryptValue 失败时会 throw SafeStorageUnavailableError;调用方(IPC handler)
+ *  把异常转成 result.ok=false 让 UI surface,绝不会留下半加密半明文的 settings.json。 */
 export function writeUserSettings(settings: UserSettings): void {
   const path = settingsPath()
   try {
@@ -147,7 +157,7 @@ export function writeUserSettings(settings: UserSettings): void {
   for (const key of SETTINGS_KEYS) {
     const value = settings[key]
     if (value === undefined || value === '') continue
-    onDisk[key] = encryptValue(value)
+    onDisk[key] = encryptValue(value) // 失败 throw,整个 write 中止
   }
   writeFileSync(path, JSON.stringify(onDisk, null, 2), 'utf-8')
 }
