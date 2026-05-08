@@ -4456,7 +4456,8 @@ button:disabled {
 }
 
 .settings-panel__hint,
-.settings-panel__saved {
+.settings-panel__saved,
+.settings-panel__error {
   flex: 1;
   font-size: 11px;
   color: var(--pl-fg-2);
@@ -4464,6 +4465,11 @@ button:disabled {
 
 .settings-panel__saved {
   color: #84cc16;
+}
+
+.settings-panel__error {
+  color: #f87171;
+  font-weight: 500;
 }
 
 .species-photo-panel {
@@ -5123,6 +5129,17 @@ button:disabled {
 /* 已弃用：不再用颜色区分眼/喙/冠，统一白点。保留 class 不报错。 */
 .pose-point--eye {
   /* 与 .pose-point 完全一致 */
+}
+
+/* v2 模型躯干 6 关键点(belly/breast/back/tail/left_wing/right_wing) — 弱化样式,
+   头部 5 点仍是主信号(影响降档),躯干点是辅助信号(影响升档),视觉权重应低。 */
+.pose-point--torso {
+  width: 4px;
+  height: 4px;
+  margin-left: -2px;
+  margin-top: -2px;
+  background: rgba(180, 200, 230, 0.7);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.5);
 }
 
 .af-area {

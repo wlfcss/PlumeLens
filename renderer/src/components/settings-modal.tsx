@@ -83,8 +83,10 @@ export function SettingsModal(): ReactElement | null {
     }
   }, [open])
 
+  const [saveError, setSaveError] = useState<string | null>(null)
   const handleSave = useCallback(async () => {
     setSaving(true)
+    setSaveError(null)
     try {
       await window.plumelens?.saveUserSettings?.({
         amapKey: amapKey.trim(),
@@ -95,6 +97,11 @@ export function SettingsModal(): ReactElement | null {
       await window.plumelens?.restartEngine?.()
       setSavedHint(true)
       setTimeout(() => setSavedHint(false), 2400)
+    } catch (err) {
+      // IPC 失败/engine 重启失败必须给用户反馈,否则"保存"按钮按了无反应,
+      // 用户以为成功但实际 key 未持久化或新 key 未注入到 engine env。
+      const message = err instanceof Error ? err.message : String(err)
+      setSaveError(message)
     } finally {
       setSaving(false)
     }
@@ -160,7 +167,11 @@ export function SettingsModal(): ReactElement | null {
         </section>
 
         <footer className="settings-panel__foot">
-          {savedHint ? (
+          {saveError ? (
+            <span className="settings-panel__error" role="alert">
+              {t('settings.saveFailed', { error: saveError })}
+            </span>
+          ) : savedHint ? (
             <span className="settings-panel__saved">{t('settings.savedRestarted')}</span>
           ) : (
             <span className="settings-panel__hint">{t('settings.saveHint')}</span>

@@ -525,6 +525,12 @@ def _run_export(
     if _is_relative_to(target, root):
         msg = "Export target must not be inside the source library"
         raise ExportError(msg)
+    # 反向包含同样要拦:target=/Volumes/dst, root=/Volumes/dst/lib 时 target 是 root
+    # 的祖先,导出会在祖先目录下创建子目录,虽不直接覆写源文件,但仍违反"导出与源
+    # 隔离"的语义。target == root 一并拦下(导出到同一根目录)。
+    if target == root or _is_relative_to(root, target):
+        msg = "Export target must not contain the source library"
+        raise ExportError(msg)
 
     selected = [photo for photo in photos if _matches_request(photo, body)]
     _ensure_target_has_space(target, _estimate_export_bytes(selected, body))

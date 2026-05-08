@@ -1,7 +1,9 @@
 """Application configuration via Pydantic Settings."""
 
 from pathlib import Path
+from typing import Self
 
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -92,6 +94,30 @@ class Settings(BaseSettings):
     # UI 显示"不全 · 待审"标签，用户确认后才进羽迹（HANDOVER §11.2）。
     # 代价：每张多 30-80% 物种推理时间；DINOv3 ~150ms/张。
     species_min_grade: str = "reject"  # "reject" / "record" / "usable" / "select"
+
+    @field_validator("species_min_grade")
+    @classmethod
+    def _validate_species_min_grade(cls, value: str) -> str:
+        """env var PLUMELENS_SPECIES_MIN_GRADE 拼错时提早报错,而非默默放宽 gate。"""
+        allowed = {"reject", "record", "usable", "select"}
+        if value not in allowed:
+            msg = f"species_min_grade must be one of {sorted(allowed)}; got {value!r}"
+            raise ValueError(msg)
+        return value
+
+    @model_validator(mode="after")
+    def _validate_grade_thresholds_monotonic(self) -> Self:
+        """grade_thresholds 必须严格递增 (reject<record<usable<select 边界),
+        否则 grader 比较逻辑会反向给所有照片 SELECT 档。env var
+        PLUMELENS_GRADE_THRESHOLDS 拼错(如 1.0,0.5,0.2)能在启动期被这个验证拦下。"""
+        a, b, c = self.grade_thresholds
+        if not (0.0 <= a < b < c <= 1.0):
+            msg = (
+                f"grade_thresholds must be strictly increasing in [0, 1]; "
+                f"got ({a}, {b}, {c})"
+            )
+            raise ValueError(msg)
+        return self
 
     # Pipeline — preprocess code version (bump manually when resize/normalize/color changes)
     # v2: letterbox fill 0.5 → 114/255 (YOLO standard, matches training)

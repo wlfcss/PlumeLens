@@ -30,6 +30,7 @@
     "saving": "Saving…",
     "saveHint": "The engine will restart so new keys take effect",
     "savedRestarted": "Saved. Engine restarting…",
+    "saveFailed": "Save failed: {{error}}",
     "geocoding": {
       "title": "Geocoding providers",
       "hint": "Used to resolve photo GPS coordinates to place names. Fill any one — falls back to OpenStreetMap online and offline city DB.",

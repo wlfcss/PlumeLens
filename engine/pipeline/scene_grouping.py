@@ -112,8 +112,15 @@ def compute_similarity(
 
         m_arr = np.array([m.distance for m, n in valid])
         n_arr = np.array([n.distance for m, n in valid])
-        good = int(np.sum(m_arr < 0.7 * n_arr))
-        feat_sim = good / ((len(kp1) + len(kp2)) / 2) if (len(kp1) + len(kp2)) > 0 else 0.0
+        # Lowe's ratio test 要求第二近邻距离 > 0;n_arr=0 时 m < 0.7*0 永真假,
+        # 把这种 degenerate 配对从计数中剔除而非误算。
+        ratio_mask = (n_arr > 0) & (m_arr < 0.7 * n_arr)
+        good = int(np.sum(ratio_mask))
+        # 用 min(len(kp1), len(kp2)) 做分母避免单边 keypoint 数量碾压另一边的不对称
+        # (img1=100kp / img2=10kp 的 5/55=9.1% vs img1=10kp / img2=10kp 的 5/10=50%
+        # 不应被同等惩罚)。匹配上限是 min,所以用 min 做归一更符合"匹配率"语义。
+        denom = min(len(kp1), len(kp2))
+        feat_sim = good / denom if denom > 0 else 0.0
 
         return SimilarityResult(
             feature_similarity=float(feat_sim),

@@ -1085,6 +1085,8 @@ function ReviewImageStage({
         if (left < -2 || left > 102 || top < -2 || top > 102) return null
         return { left, top }
       }
+      // imgW/imgH 在 EXIF 损坏或后端 bug 下可能是 0,会算出 Infinity 渲染到 -Inf 像素位置。
+      if (imgW <= 0 || imgH <= 0) return null
       return { left: (x / imgW) * 100, top: (y / imgH) * 100 }
     }
 
@@ -1107,10 +1109,13 @@ function ReviewImageStage({
         )
       }
     }
-    // pose 关键点
+    // pose 关键点 — v2 模型 11 关键点(5 头 + 6 身)
+    // 头部点保留原 .pose-point / .pose-point--eye 高亮样式(影响降档,核心地位)
+    // 躯干点用 .pose-point--torso 弱化样式(信号丰富但视觉不抢主体)
     if (pose) {
-      const keys = ['bill', 'crown', 'nape', 'left_eye', 'right_eye'] as const
-      for (const key of keys) {
+      const headKeys = ['bill', 'crown', 'nape', 'left_eye', 'right_eye'] as const
+      const torsoKeys = ['belly', 'breast', 'back', 'tail', 'left_wing', 'right_wing'] as const
+      for (const key of headKeys) {
         const kp = pose[key]
         if (kp.confidence < 0.05) continue
         const p = toLocalPoint(kp.x, kp.y)
@@ -1121,6 +1126,21 @@ function ReviewImageStage({
               'pose-point',
               (key === 'left_eye' || key === 'right_eye') && 'pose-point--eye',
             )}
+            key={`pose-${key}`}
+            style={{ left: `${p.left}%`, top: `${p.top}%` }}
+            title={`${key}  ${(kp.confidence * 100).toFixed(0)}%`}
+          />,
+        )
+      }
+      for (const key of torsoKeys) {
+        // 躯干点是 v2 新增 optional 字段,旧 cache 反序列化时为 undefined → 跳过
+        const kp = pose[key]
+        if (!kp || kp.confidence < 0.05) continue
+        const p = toLocalPoint(kp.x, kp.y)
+        if (!p) continue
+        overlays.push(
+          <span
+            className="pose-point pose-point--torso"
             key={`pose-${key}`}
             style={{ left: `${p.left}%`, top: `${p.top}%` }}
             title={`${key}  ${(kp.confidence * 100).toFixed(0)}%`}

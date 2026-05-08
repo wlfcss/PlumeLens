@@ -480,6 +480,11 @@ class SpeciesClassifier:
 
         if probs is None or reject_score is None or not np.isfinite(probs).all():
             return []
+        # reject_score 走 .item() 后是 Python float,可能是 NaN/Inf(极端 logits 输入)。
+        # SpeciesPolicy.decide 内有兜底但会静默把 NaN 当 unrecognized,丢失 top-K
+        # 候选不入复核。这里 log + 早 return 避免无声失败。
+        if not math.isfinite(reject_score):
+            return []
 
         probs[~self._trained_mask] = 0.0
         k = min(self._top_k, probs.shape[0])

@@ -198,10 +198,18 @@ function withConsensusCandidate(row: PhotoRow, candidates: SpeciesCandidate[]): 
   if (row.species_source !== 'group_consensus' || !row.group_species || !row.group_species_latin) {
     return candidates
   }
+  // group_consensus 是后端 read-time 派生的"组内共识"伪候选 — 优先放最前。
+  // 若同一拉丁名也在原 candidates 里(共识来自候选自身),保留原 candidate 的
+  // recognitionState / rejectScore / top1Top2Margin 三个 v6 字段;否则共识作为
+  // 单独条目入栈,这三个字段没有数据来源,留 undefined 由 UI 兜底("--")。
+  const matched = candidates.find((c) => c.latinName === row.group_species_latin)
   const consensus: SpeciesCandidate = {
     name: row.group_species,
     latinName: row.group_species_latin,
     confidence: row.group_species_confidence ?? 0,
+    recognitionState: matched?.recognitionState,
+    rejectScore: matched?.rejectScore,
+    top1Top2Margin: matched?.top1Top2Margin,
   }
   return [
     consensus,

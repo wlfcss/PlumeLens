@@ -31,6 +31,7 @@ from engine.api.schemas.library import (
 )
 from engine.core.config import settings as app_settings
 from engine.core.database import Database
+from engine.services import archive_cache
 from engine.services.decisions import (
     SpeciesOverride,
     SpeciesOverrideRecord,
@@ -1339,8 +1340,17 @@ async def delete_library(request: Request, library_id: str) -> None:
     if row is None:
         raise HTTPException(status_code=404, detail="Library not found")
 
-    await db.conn.execute("DELETE FROM libraries WHERE id = ?", (library_id,))
+    async with db.conn.execute(
+        "DELETE FROM libraries WHERE id = ?", (library_id,),
+    ) as cur:
+        deleted = cur.rowcount or 0
     await db.conn.commit()
+    if deleted == 0:
+        # 上面已检查过 row 存在,DELETE 的 rowcount 为 0 表示约束阻止删除(外键
+        # 缺 CASCADE / 触发器拦下等)。返回 500 而非静默成功 — 用户可能看到删除
+        # 按钮按了无反应,需要排查。
+        raise HTTPException(status_code=500, detail="Library deletion failed (constraint)")
+    archive_cache.invalidate()
     await logger.ainfo("Library deleted", library_id=library_id)
 
 

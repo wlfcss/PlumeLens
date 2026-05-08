@@ -553,7 +553,9 @@ function archivePhotoSearchParts(photo: PhotoRecord): Array<string | null | unde
 
 function filterPhotoByQuickFilters(photo: PhotoRecord, filters: QuickFilter[]): boolean {
   if (photo.analysisStatus !== 'done') return true
-  if (filters.length === 0) return false
+  // 空 filter = "未应用任何过滤" = 显示全部(行业惯例 + 用户取消所有 chip 的直觉)。
+  // 旧实现 `return false` 让"全清 chip"变成"全部隐藏",对用户语义反转。
+  if (filters.length === 0) return true
   return filters.includes(photoCategory(photo))
 }
 

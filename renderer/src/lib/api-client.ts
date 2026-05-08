@@ -54,6 +54,10 @@ export class ApiError extends Error {
   }
 }
 
+// 默认 60s 超时 — 大库 detail/SSE setup 可能需要 30s+,留足余量。
+// 调用方传入的 init.signal 会被合并到 timeout signal,任一触发都中断。
+const REQUEST_TIMEOUT_MS = 60_000
+
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const base = await getBackendUrl()
   const url = `${base}${path}`
@@ -65,7 +69,22 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   if (token && !headers.has('Authorization')) {
     headers.set('Authorization', `Bearer ${token}`)
   }
-  const res = await fetch(url, { ...init, headers })
+  // 合并 caller signal + 超时 signal — 任一中断都断 fetch,避免无限挂起。
+  const timeoutCtrl = new AbortController()
+  const timer = setTimeout(() => timeoutCtrl.abort(), REQUEST_TIMEOUT_MS)
+  const callerSignal = init.signal
+  const onCallerAbort = (): void => timeoutCtrl.abort(callerSignal?.reason)
+  if (callerSignal) {
+    if (callerSignal.aborted) timeoutCtrl.abort(callerSignal.reason)
+    else callerSignal.addEventListener('abort', onCallerAbort, { once: true })
+  }
+  let res: Response
+  try {
+    res = await fetch(url, { ...init, headers, signal: timeoutCtrl.signal })
+  } finally {
+    clearTimeout(timer)
+    callerSignal?.removeEventListener('abort', onCallerAbort)
+  }
   if (!res.ok) {
     let detail: unknown
     try {
