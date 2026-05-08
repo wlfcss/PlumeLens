@@ -69,6 +69,36 @@ function detach(mountPoint) {
   }
 }
 
+/**
+ * 打包前 detach 所有挂着的 "鉴翎 *" volume,避免名字冲突让 macOS 自动加数字
+ * 后缀(鉴翎 0.6.0 1 / 2 / 3 ...),用户开 dmg 时 Finder 不识别 DS_Store 里的
+ * layout(按 volume 名缓存),只显示默认黑底布局。
+ *
+ * 注意:这只清开发机器上的 stale mount,用户机器上的 mount 我们管不着;用户装
+ * 新 dmg 前应该先 eject 旧的(README 应注明)。
+ */
+function detachStaleVolumes() {
+  let mountOutput = ''
+  try {
+    mountOutput = execFileSync('mount').toString()
+  } catch {
+    return
+  }
+  // 匹配形如:`/dev/disk7s2 on /Volumes/鉴翎 0.6.0 (hfs, ...)`
+  const lines = mountOutput.split('\n').filter((l) => l.includes('/Volumes/鉴翎'))
+  for (const line of lines) {
+    const m = line.match(/on (\/Volumes\/鉴翎[^(]*?) \(/)
+    if (!m) continue
+    const volume = m[1].trim()
+    try {
+      execFileSync('hdiutil', ['detach', volume, '-force', '-quiet'])
+      console.log(`[build-dmg] pre-detach stale volume: ${volume}`)
+    } catch (err) {
+      console.warn(`[build-dmg] pre-detach failed for ${volume}:`, err.message)
+    }
+  }
+}
+
 function applyDmgLayout(mountPoint, volumeName, bgFileName) {
   // AppleScript 通过 Finder 设置窗口外观 + 图标坐标 + 背景图。
   //
@@ -138,6 +168,10 @@ exports.default = async function (context) {
   const tmpDmg = path.join(context.outDir, `.PlumeLens-${pkgVersion}-arm64.rw.dmg`)
   if (fs.existsSync(dmgPath)) fs.rmSync(dmgPath)
   if (fs.existsSync(tmpDmg)) fs.rmSync(tmpDmg)
+
+  // 防御:detach 任何挂着的同名/旧 dmg volume,避免 macOS 自动加数字后缀
+  // 让 Finder 不识别新 dmg 的 DS_Store layout。
+  detachStaleVolumes()
 
   const stagingDir = fs.mkdtempSync(path.join(os.tmpdir(), 'plumelens-dmg-'))
   console.log(`[build-dmg] staging in ${stagingDir}`)
