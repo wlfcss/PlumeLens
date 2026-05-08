@@ -16,8 +16,16 @@ export function useGeoSummary() {
   return useQuery<GeoSummary>({
     queryKey: ['archive', 'geo', 'summary'],
     queryFn: () => api.geoSummary(),
-    // backfill 进行中(pending>0)继续 5s 轮询;否则停止轮询(false)。
-    refetchInterval: (query) => (query.state.data?.pending ?? 0) > 0 ? 5_000 : false,
+    // 数据未拿到(冷启失败 / 首次请求中) → 持续 5s 轮询直到拿到。
+    // backfill 进行中(data.pending > 0) → 继续 5s 轮询。
+    // 已完成(data 存在且 pending=0) → 停轮询(false)。
+    // 如果直接用 `query.state.data?.pending ?? 0` 推 0,query fail 后 data 永远
+    // undefined → refetchInterval=false → 永久不重试,只能靠 App 层 invalidate 救。
+    refetchInterval: (query) => {
+      const data = query.state.data
+      if (!data) return 5_000
+      return data.pending > 0 ? 5_000 : false
+    },
     staleTime: 0,
   })
 }

@@ -69,15 +69,31 @@ async def _backfill_locations(db: Database) -> None:
     幂等 — 已填充的跳过。reverse_geocoding 走 services/geocoder 的 provider chain,
     在线失败也会 fallback offline。本任务可能耗时几分钟到几十分钟(取决于 amap
     qps + 总数),整个 backfill 期间应用功能不受影响,羽迹页面会渐进显示数据。
+
+    永久 retry-loop:外层异常(db locked / provider chain 全跪等)不应让整个回填
+    任务静默死亡。失败后 sleep + 重试,backoff 60s→300s,最长 5 分钟;CancelledError
+    照例 propagate 让 lifespan shutdown 干净退出。
     """
-    try:
-        from engine.services.location_backfill import backfill_all_libraries
-        await asyncio.sleep(2)  # 等 lifespan 其他启动步骤(scene grouping/refresh thumb 等)先跑完
-        await backfill_all_libraries(db)
-    except asyncio.CancelledError:
-        raise
-    except Exception:
-        logger.exception("Location backfill task failed")
+    from engine.services.location_backfill import backfill_all_libraries
+
+    await asyncio.sleep(2)  # 等 lifespan 其他启动步骤先跑完
+    backoff = 60
+    while True:
+        try:
+            await backfill_all_libraries(db)
+            return  # 成功完成 → 退出 task
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception(
+                "Location backfill task failed, will retry",
+                retry_in_sec=backoff,
+            )
+            try:
+                await asyncio.sleep(backoff)
+            except asyncio.CancelledError:
+                raise
+            backoff = min(backoff * 2, 300)  # cap 5 分钟
 
 
 async def _sweep_stuck_tasks(app: FastAPI, db: Database) -> None:
@@ -168,14 +184,38 @@ async def _sweep_stuck_tasks(app: FastAPI, db: Database) -> None:
 
 
 async def _refresh_all_thumbnails(db: Database) -> None:
-    """启动后扫所有 library：补缩略图 + 补 scene_id + 补缺失 EXIF（曝光参数）。"""
+    """启动后扫所有 library：补缩略图 + 补 scene_id + 补缺失 EXIF（曝光参数）。
+
+    顶层 SELECT 失败时(db locked / 进程被 SIGTERM 中途等)以前直接 return,所有
+    library 的缩略图/scene/EXIF 补齐永久不再发生 — 用户清过 cache 目录后只能等
+    下次启动。改成 3 次 retry + 短 backoff,扛过瞬态错误。内层 per-library 异常
+    依旧吞掉跳过(单个库挂不影响其他)。
+    """
     cache_root = thumbnail_cache_root(settings.data_dir)
     # 延迟 import 避免循环依赖
     from engine.services.scanner import refresh_library_exif
 
+    rows = None
+    for attempt in range(3):
+        try:
+            async with db.conn.execute("SELECT id FROM libraries") as cur:
+                rows = await cur.fetchall()
+            break
+        except Exception as e:
+            logger.warning(
+                "Startup library list fetch failed, will retry",
+                attempt=attempt + 1,
+                error=str(e),
+            )
+            try:
+                await asyncio.sleep(2 ** attempt)  # 1s/2s/4s
+            except asyncio.CancelledError:
+                raise
+    if rows is None:
+        logger.warning("Startup library refresh aborted after 3 retries")
+        return
+
     try:
-        async with db.conn.execute("SELECT id FROM libraries") as cur:
-            rows = await cur.fetchall()
         for row in rows:
             library_id = str(row["id"])
             try:

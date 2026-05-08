@@ -209,6 +209,12 @@ export function useImportLibrary() {
     onSuccess: (_data: LibrarySummary) => {
       qc.invalidateQueries({ queryKey: LIBRARIES_KEY })
     },
+    onError: () => {
+      // 失败时也 invalidate 让前端 useLibraries refetch — 后端可能已经 partial
+      // import(import 流程半截抛错前已写入 libraries 行)前端不刷新会看不到。
+      // 与 useSetDecision/useSetSpeciesOverride 同款乐观 UI 兜底模式。
+      qc.invalidateQueries({ queryKey: LIBRARIES_KEY })
+    },
   })
 }
 

@@ -39,14 +39,24 @@ export function useBackendHealth() {
       let cancelled = false
       const poll = (): void => {
         if (cancelled) return
-        plumelens.getBackendUrl().then((url) => {
-          if (cancelled) return
-          if (url) {
-            setBackendUrl(url)
-          } else {
+        plumelens
+          .getBackendUrl()
+          .then((url) => {
+            if (cancelled) return
+            if (url) {
+              setBackendUrl(url)
+            } else {
+              setTimeout(poll, 500)
+            }
+          })
+          .catch((err) => {
+            // IPC reject(main 进程 crash / electron HMR 断接)— 不要让链断掉永久
+            // 卡 null,继续 backoff 重试。否则 EnginePanel 永远 loading,backendUrl
+            // 永远 null,所有走 IPC 的 query 都接不上后端。
+            if (cancelled) return
+            console.warn('getBackendUrl IPC failed, retrying:', err)
             setTimeout(poll, 500)
-          }
-        })
+          })
       }
       poll()
       const unsubscribeReady = plumelens.onBackendReady((url) => {

@@ -148,7 +148,16 @@ async def _provider_amap(lat: float, lon: float, lang: str) -> GeocodeResult | N
     )
     url = f"https://restapi.amap.com/v3/geocode/regeo?{params}"
     data = await asyncio.to_thread(_http_get_json, url)
-    if not data or data.get("status") != "1":
+    if not data:
+        return None
+    if data.get("status") != "1":
+        # API 返回 200 + status=0 → 配额满 / key 错(USERKEY_PLAT_NOMATCH)等业务错。
+        # 静默 fallback 让用户永远不知道 key 配错,日志单独 warn 帮诊断。
+        logger.warning(
+            "amap reverse failed",
+            info=str(data.get("info"))[:80],
+            infocode=str(data.get("infocode"))[:32],
+        )
         return None
     regeo = data.get("regeocode") or {}
     formatted = regeo.get("formatted_address")
@@ -176,7 +185,14 @@ async def _provider_baidu(lat: float, lon: float, lang: str) -> GeocodeResult | 
     )
     url = f"https://api.map.baidu.com/reverse_geocoding/v3/?{params}"
     data = await asyncio.to_thread(_http_get_json, url)
-    if not data or data.get("status") != 0:
+    if not data:
+        return None
+    if data.get("status") != 0:
+        logger.warning(
+            "baidu reverse failed",
+            status=data.get("status"),
+            message=str(data.get("message"))[:80],
+        )
         return None
     result = data.get("result") or {}
     formatted = result.get("formatted_address")
@@ -203,7 +219,14 @@ async def _provider_tencent(lat: float, lon: float, lang: str) -> GeocodeResult 
     )
     url = f"https://apis.map.qq.com/ws/geocoder/v1/?{params}"
     data = await asyncio.to_thread(_http_get_json, url)
-    if not data or data.get("status") != 0:
+    if not data:
+        return None
+    if data.get("status") != 0:
+        logger.warning(
+            "tencent reverse failed",
+            status=data.get("status"),
+            message=str(data.get("message"))[:80],
+        )
         return None
     result = data.get("result") or {}
     formatted = result.get("address") or ""
@@ -258,6 +281,9 @@ async def _provider_nominatim(lat: float, lon: float, lang: str) -> GeocodeResul
 # Offline provider:GeoNames cities1000 brute-force nearest-city
 # ---------------------------------------------------------------------------
 _offline_data: tuple[np.ndarray, list[dict[str, Any]]] | None = None
+# 加载失败哨兵 — 防止反复试加载坏掉的 npz(每次 reverse() 调用都进 load lock 重试,
+# 每次抛 + log,会刷爆日志同时拖慢链路)。一次失败即标记,后续 short-circuit 返 None。
+_offline_load_failed: bool = False
 _offline_load_lock = asyncio.Lock()
 
 
@@ -288,11 +314,17 @@ def _load_offline() -> tuple[np.ndarray, list[dict[str, Any]]] | None:
 async def _provider_offline(lat: float, lon: float, lang: str) -> GeocodeResult | None:
     """Brute-force nearest-city lookup over cities1000(~150K entries,
     numpy 广播单次 query ~5ms。一次进程内只 load 一次。"""
-    global _offline_data
+    global _offline_data, _offline_load_failed
+    if _offline_load_failed:
+        return None  # 一次失败即放弃,不再 hammer load
     if _offline_data is None:
         async with _offline_load_lock:
-            if _offline_data is None:
-                _offline_data = await asyncio.to_thread(_load_offline)
+            if _offline_data is None and not _offline_load_failed:
+                loaded = await asyncio.to_thread(_load_offline)
+                if loaded is None:
+                    _offline_load_failed = True
+                    return None
+                _offline_data = loaded
     if _offline_data is None:
         return None
     coords, meta = _offline_data
