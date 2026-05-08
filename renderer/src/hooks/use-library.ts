@@ -24,6 +24,73 @@ export const LIBRARIES_KEY = ['libraries'] as const
 export const LIBRARY_DETAIL_KEY = (id: string) => ['library', id] as const
 
 const EVENT_REFRESH_DEBOUNCE_MS = 150
+const ALL_LIBRARY_DETAIL_CONCURRENCY = 4
+
+/**
+ * Module-level singleton limiter: archive/species-wall can mount multiple aggregating
+ * hooks, but all library detail requests should share one small concurrency budget.
+ */
+const libraryDetailQueue: Array<() => void> = []
+let activeLibraryDetailRequests = 0
+
+export function __resetLibraryDetailLimiterForTesting(): void {
+  libraryDetailQueue.splice(0, libraryDetailQueue.length)
+  activeLibraryDetailRequests = 0
+}
+
+function abortError(): DOMException {
+  return new DOMException('Library detail request aborted', 'AbortError')
+}
+
+function drainLibraryDetailQueue(): void {
+  while (
+    activeLibraryDetailRequests < ALL_LIBRARY_DETAIL_CONCURRENCY &&
+    libraryDetailQueue.length > 0
+  ) {
+    const run = libraryDetailQueue.shift()
+    run?.()
+  }
+}
+
+function limitedLibraryDetail(id: string, signal?: AbortSignal): Promise<LibraryDetail> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(abortError())
+      return
+    }
+
+    let started = false
+    const run = (): void => {
+      started = true
+      if (signal) signal.removeEventListener('abort', onAbort)
+      if (signal?.aborted) {
+        reject(abortError())
+        drainLibraryDetailQueue()
+        return
+      }
+
+      activeLibraryDetailRequests += 1
+      api
+        .libraryDetail(id, { signal })
+        .then(resolve, reject)
+        .finally(() => {
+          activeLibraryDetailRequests = Math.max(0, activeLibraryDetailRequests - 1)
+          drainLibraryDetailQueue()
+        })
+    }
+
+    const onAbort = (): void => {
+      if (started) return
+      const index = libraryDetailQueue.indexOf(run)
+      if (index >= 0) libraryDetailQueue.splice(index, 1)
+      reject(abortError())
+    }
+
+    if (signal) signal.addEventListener('abort', onAbort, { once: true })
+    libraryDetailQueue.push(run)
+    drainLibraryDetailQueue()
+  })
+}
 
 export function useLibraries() {
   return useQuery({
@@ -36,7 +103,7 @@ export function useLibraries() {
 export function useLibraryDetail(libraryId: string | null | undefined) {
   return useQuery({
     queryKey: LIBRARY_DETAIL_KEY(libraryId ?? ''),
-    queryFn: () => api.libraryDetail(libraryId!),
+    queryFn: ({ signal }) => api.libraryDetail(libraryId!, { signal }),
     enabled: Boolean(libraryId),
     staleTime: 2_000,
   })
@@ -50,7 +117,7 @@ export function useAllLibraryDetails(libraryIds: string[], enabled = true): Libr
   const results = useQueries({
     queries: libraryIds.map((id) => ({
       queryKey: LIBRARY_DETAIL_KEY(id),
-      queryFn: () => api.libraryDetail(id),
+      queryFn: ({ signal }) => limitedLibraryDetail(id, signal),
       enabled,
       staleTime: 2_000,
     })),

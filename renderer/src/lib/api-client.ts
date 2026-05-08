@@ -278,6 +278,7 @@ export interface ImportLibraryRequest {
 export interface LibraryDetailOptions {
   limit?: number
   offset?: number
+  signal?: AbortSignal
 }
 
 export interface UpdateLibraryRequest {
@@ -401,7 +402,9 @@ export const api = {
     if (options.limit !== undefined) params.set('limit', String(options.limit))
     if (options.offset !== undefined) params.set('offset', String(options.offset))
     const query = params.toString()
-    return request<LibraryDetail>(`/library/${id}${query ? `?${query}` : ''}`)
+    return request<LibraryDetail>(`/library/${id}${query ? `?${query}` : ''}`, {
+      signal: options.signal,
+    })
   },
   updateLibrary: (id: string, body: UpdateLibraryRequest) =>
     request<LibrarySummary>(`/library/${id}`, {
