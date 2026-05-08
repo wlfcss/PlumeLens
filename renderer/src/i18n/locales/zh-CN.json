@@ -272,7 +272,10 @@
       "conflict": "组内分歧",
       "conflictDetail": "组内分歧，保留单张高置信结果",
       "unconfirmed": "不全 · 待审",
-      "unconfirmedDetail": "鸟头不可见，识别置信度受限，需在深度复核确认后才进羽迹",
+      "unconfirmedDetail": "识别置信度受限，需在深度复核确认后才进羽迹",
+      "unconfirmedUncertainDetail": "模型识别置信度不足（reject head 判定为 uncertain），需在深度复核确认后才进羽迹",
+      "unconfirmedHeadDetail": "鸟头不可见，识别置信度受限，需在深度复核确认后才进羽迹",
+      "unconfirmedGenericDetail": "识别置信度受限，需在深度复核确认后才进羽迹",
       "partialUnconfirmed": "部分待审"
     },
     "poseTags": {

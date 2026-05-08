@@ -272,7 +272,10 @@
       "conflict": "Group conflict",
       "conflictDetail": "Group conflict; keeping the high-confidence single-frame result",
       "unconfirmed": "Partial · Pending review",
-      "unconfirmedDetail": "Bird head not visible; model confidence is limited until you confirm in the deep review",
+      "unconfirmedDetail": "Model confidence is limited; confirm in the deep review before this enters Plumetrail",
+      "unconfirmedUncertainDetail": "Model rejected the top candidate (reject head: uncertain); confirm in the deep review before this enters Plumetrail",
+      "unconfirmedHeadDetail": "Bird head not visible; model confidence is limited until you confirm in the deep review",
+      "unconfirmedGenericDetail": "Model confidence is limited; confirm in the deep review before this enters Plumetrail",
       "partialUnconfirmed": "Partial pending review"
     },
     "poseTags": {

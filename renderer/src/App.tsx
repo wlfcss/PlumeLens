@@ -1040,7 +1040,26 @@ export function speciesSourceDetail(
     return t('selection.speciesSource.conflictDetail')
   }
   if (source === 'model_unconfirmed') {
-    return t('selection.speciesSource.unconfirmedDetail')
+    // model_unconfirmed 在 engine 端有两条独立成因(api/routes/library.py
+    // _build_detection_detail 1131/1134):
+    //   (1) v4 reject head 给出 candidate.recognitionState === 'uncertain'
+    //       — 模型识别本身置信不足,即便 head 完全可见
+    //   (2) head_confirmed === false — pose 模型判定鸟头不可见,识别凭线索
+    //       不足
+    // 之前只用一条"鸟头不可见..."文案,导致情形 (1) 下展示与 head ✓ 直接矛盾
+    // (用户截图实测),分开渲染对应文案才不会误导用户。
+    const top = detection?.speciesCandidates?.[0]
+    const recognitionState = top?.recognitionState
+    const headInvisible = detection?.pose ? !detection.pose.head_visible : true
+    if (recognitionState === 'uncertain') {
+      return t('selection.speciesSource.unconfirmedUncertainDetail')
+    }
+    if (headInvisible) {
+      return t('selection.speciesSource.unconfirmedHeadDetail')
+    }
+    // 兜底:两者皆否(理论上不会进 model_unconfirmed,但留一份安全网避免出
+    // 错误归因)。
+    return t('selection.speciesSource.unconfirmedGenericDetail')
   }
   if (source === 'manual' || manualSpecies) {
     return t('selection.speciesSource.manualDetail')
