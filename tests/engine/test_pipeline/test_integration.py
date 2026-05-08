@@ -19,7 +19,7 @@ MODELS_DIR = Path(__file__).resolve().parents[3] / "engine" / "models"
 
 CORE_MODELS = [
     "yolo26l-bird-det.onnx",
-    "bird_visibility.onnx",
+    "bird_visibility11.onnx",  # v2 (11 关键点),v1 旧文件 bird_visibility.onnx 已弃用
     "clipiqa_plus.onnx",
     "hyperiqa.onnx",
 ]
@@ -82,7 +82,7 @@ class TestRealONNXLoad:
         from engine.pipeline.pose import PoseDetector
 
         sess = ort.InferenceSession(
-            str(MODELS_DIR / "bird_visibility.onnx"),
+            str(MODELS_DIR / "bird_visibility11.onnx"),
             providers=["CPUExecutionProvider"],
         )
         detector = PoseDetector(sess, input_size=640)

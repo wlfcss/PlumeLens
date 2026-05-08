@@ -91,12 +91,12 @@ def main(folder: str) -> None:
     detector = BirdDetector(
         make_session(MODELS_DIR / "yolo26l-bird-det.onnx"), input_size=1280,
     )
-    pose = PoseDetector(make_session(MODELS_DIR / "bird_visibility.onnx"), input_size=640)
+    pose = PoseDetector(make_session(MODELS_DIR / "bird_visibility11.onnx"), input_size=640)
     iqa = QualityAssessor(
         make_session(MODELS_DIR / "clipiqa_plus.onnx"),
         make_session(MODELS_DIR / "hyperiqa.onnx"),
-        clipiqa_weight=0.35,
-        hyperiqa_weight=0.65,
+        clipiqa_weight=0.55,
+        hyperiqa_weight=0.45,
     )
     print("模型加载完成")
 

@@ -45,7 +45,8 @@ def load_iqa() -> QualityAssessor:
         so,
         providers=["CPUExecutionProvider"],
     )
-    return QualityAssessor(clipiqa, hyperiqa, clipiqa_weight=0.35, hyperiqa_weight=0.65)
+    # benchmark 默认用与 prod 一致的权重(v0.6.0 后 0.55/0.45,语义/构图主导)
+    return QualityAssessor(clipiqa, hyperiqa, clipiqa_weight=0.55, hyperiqa_weight=0.45)
 
 
 def hist_summary(name: str, scores: list[float]) -> None:

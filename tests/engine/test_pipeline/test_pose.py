@@ -13,11 +13,12 @@ from engine.pipeline.pose import (
     TAIL_PART,
     WING_PARTS,
     PoseDetector,
+    _ROW_WIDTH,
 )
 
-# v2 ONNX 输出维度:6 + 11×3 = 39
-_ROW_WIDTH = 39
-_NUM_KPTS = 11
+# v2 ONNX 输出维度:6 + 11×3 = 39。从 pose.py 内部常量 import 防止 PART_NAMES
+# 长度未来变更(如 v3 加点)时测试硬编码漂移 — 改 PART_NAMES 后 test 会自动跟随。
+_NUM_KPTS = len(PART_NAMES)
 
 
 def _make_mock_session(raw_output: np.ndarray) -> MagicMock:

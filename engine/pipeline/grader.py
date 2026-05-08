@@ -23,7 +23,7 @@ def grade(
     """Map a combined quality score (0-1) to a 4-tier grade.
 
     Args:
-        score: Combined IQA score (0.35 * CLIPIQA+ + 0.65 * HyperIQA).
+        score: Combined IQA score (0.55 * CLIPIQA+ + 0.45 * HyperIQA).
         thresholds: (reject_max, record_max, usable_max). Scores >= usable_max are SELECT.
 
     Returns:

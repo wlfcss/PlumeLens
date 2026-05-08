@@ -292,7 +292,10 @@ class PoseDetector:
         bx1, by1, bx2, by2 = bbox
         bbox_w = bx2 - bx1
         bbox_h = by2 - by1
-        if bbox_w < 1 or bbox_h < 1:
+        # 极小 bbox(< 32px)是检测噪声/远距离微小目标,不应参与飞版判定 —
+        # 32px 以下的鸟连翼形都难以解析,wing_span/bbox_w 比值在数像素差异下抖动剧烈,
+        # 几个像素的差就能让比值跨过 0.5 阈值。32px 来自实测最小可识别飞版的经验下限。
+        if bbox_w < 32 or bbox_h < 1:
             return "unknown"
         aspect = bbox_w / bbox_h
 

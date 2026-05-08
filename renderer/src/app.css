@@ -5837,6 +5837,16 @@ button:disabled {
   opacity: 0.6;
 }
 
+/* muted: 旧 cache 未检测此字段(pose v1 → v2 升级窗口期),与 warn 区分 —
+   warn=明确不可见(模型说没看到),muted=未检测(老数据没这字段)。 */
+.review-pose-chips__chip--muted {
+  color: var(--pl-fg-3, var(--pl-fg-2));
+  background: transparent;
+  border-style: dashed;
+  border-color: var(--pl-border-0);
+  opacity: 0.5;
+}
+
 /* 长地址(reverse geocoding 结果)允许换行,而不是被 ellipsis 截断 */
 .compact-kv--multiline {
   align-items: flex-start;

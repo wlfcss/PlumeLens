@@ -29,8 +29,8 @@ class TestQualityAssessor:
         assessor = QualityAssessor(
             clipiqa_session,
             hyperiqa_session,
-            clipiqa_weight=0.35,
-            hyperiqa_weight=0.65,
+            clipiqa_weight=0.55,
+            hyperiqa_weight=0.45,
         )
 
         crop = np.random.rand(100, 100, 3).astype(np.float32)
@@ -38,7 +38,7 @@ class TestQualityAssessor:
 
         assert scores.clipiqa == pytest.approx(0.8)
         assert scores.hyperiqa == pytest.approx(0.6)
-        assert scores.combined == pytest.approx(0.35 * 0.8 + 0.65 * 0.6)
+        assert scores.combined == pytest.approx(0.55 * 0.8 + 0.45 * 0.6)
 
     def test_scores_clamped(self) -> None:
         # Simulate model returning slightly out of range
@@ -47,8 +47,8 @@ class TestQualityAssessor:
         assessor = QualityAssessor(
             clipiqa_session,
             hyperiqa_session,
-            clipiqa_weight=0.35,
-            hyperiqa_weight=0.65,
+            clipiqa_weight=0.55,
+            hyperiqa_weight=0.45,
         )
 
         crop = np.random.rand(50, 50, 3).astype(np.float32)
@@ -63,8 +63,8 @@ class TestQualityAssessor:
         assessor = QualityAssessor(
             clipiqa_session,
             hyperiqa_session,
-            clipiqa_weight=0.35,
-            hyperiqa_weight=0.65,
+            clipiqa_weight=0.55,
+            hyperiqa_weight=0.45,
         )
 
         crop = np.random.rand(50, 50, 3).astype(np.float32)
@@ -94,8 +94,8 @@ class TestQualityAssessor:
         assessor = QualityAssessor(
             clipiqa_session,
             hyperiqa_session,
-            clipiqa_weight=0.35,
-            hyperiqa_weight=0.65,
+            clipiqa_weight=0.55,
+            hyperiqa_weight=0.45,
         )
 
         semantic_crop = np.zeros((120, 180, 3), dtype=np.float32)

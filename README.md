@@ -69,7 +69,7 @@ PlumeLens 的模型不是一个单点分类器，而是一条以摄影筛选为�
 | ------------- | ------------------------ | --------------------------------- | ------------------------------------------------- |
 | 1. 原片解码   | Pillow / rawpy           | RAW/JPEG → EXIF 转正 RGB 图像     | 读取照片、补齐元数据、生成可分析图像              |
 | 2. 鸟类检测   | `YOLOv26l-bird-det v1.0` | `1280×1280` letterbox → bird bbox | 找到照片中的鸟类主体，支持多鸟图                  |
-| 3. 姿态可见性 | `bird_visibility v1.1`   | bbox crop → 5 个头部关键点        | 判断头部/眼睛是否可见，给复核和鸟种可信度提供证据 |
+| 3. 姿态可见性 | `bird_visibility v2.0`   | bbox crop → 11 关键点(5 头+6 身) | 输出 5 项 visibility(头/眼/身/尾/翼) + 3 项 posture(view_angle/facing/perched\|flying);头眼齐 + 飞版自动升档 |
 | 4. 语义画质   | `CLIPIQA+`               | 2.5× 语义裁切 → 0-1 分            | 判断构图、主体语义质量和整体观感                  |
 | 5. 技术画质   | `HyperIQA`               | bbox +10% 技术裁切 → 0-1 分       | 判断清晰度、噪声、曝光和主体技术质量              |
 | 6. 鸟种识别   | `DINOv3 species v4`      | 384px crop → 1591 类 top-K + reject | 输出识别 / 待确认 / 拒识三态，接入保护等级与百科 |
@@ -80,11 +80,11 @@ PlumeLens 的模型不是一个单点分类器，而是一条以摄影筛选为�
 | 模型资产                   | 文件                                                  | 规模      | 状态                       |
 | -------------------------- | ----------------------------------------------------- | --------- | -------------------------- |
 | YOLOv26l-bird-det v1.0     | `engine/models/yolo26l-bird-det.onnx`                 | 约 100 MB | 入仓                       |
-| bird_visibility v1.1       | `engine/models/bird_visibility.onnx`                  | 约 98 MB  | 入仓                       |
+| bird_visibility v2.0       | `engine/models/bird_visibility11.onnx`                | 约 98 MB  | 入仓                       |
 | CLIPIQA+                   | `engine/models/clipiqa_plus.onnx`                     | 约 293 MB | 大文件，打包时由模型包恢复 |
 | HyperIQA                   | `engine/models/hyperiqa.onnx`                         | 约 104 MB | 大文件，打包时由模型包恢复 |
-| DINOv3 species v4 backbone | `engine/models/species/backbone/model.safetensors`    | 约 578 MB | 大文件，不入 git           |
-| DINOv3 species v4 adapter  | `engine/models/species/v4/seed42_adapter.pt`          | 约 32 MB  | 大文件，不入 git           |
+| DINOv4 species backbone    | `engine/models/species/backbone/model.safetensors`    | 约 578 MB | 大文件，不入 git           |
+| DINOv4 species adapter     | `engine/models/species/v4/seed42_adapter.pt`          | 约 32 MB  | 大文件，不入 git           |
 | 分类与百科元数据           | `canonical_extended.parquet` / `species_wiki.parquet` | 1591 种   | 入仓                       |
 
 更多模型细节见 [engine/models/README.md](engine/models/README.md)、[YOLO model card](engine/models/yolo26l-bird-det.MODEL_CARD.md) 和 [bird visibility model card](engine/models/bird_visibility.MODEL_CARD.md)。
@@ -93,7 +93,7 @@ species v4 使用 dino 项目校准出的 `balanced_v1` 策略：只有 `recogni
 
 ### 分级口径
 
-综合分由 `0.35 × CLIPIQA+ + 0.65 × HyperIQA` 得到，再结合姿态可见性与人工决策进入业务层。
+综合分由 `0.55 × CLIPIQA+ + 0.45 × HyperIQA` 得到（语义/构图主导,符合鸟摄"主体清晰且构图舒服 > 像素锐度"的口径），再结合姿态可见性与人工决策进入业务层。pose v2 模型在头眼齐全且识别为飞版时,自动上提一档以认可飞版的抓拍价值。
 
 | 档位 | 分数范围      | 含义                   |
 | ---- | ------------- | ---------------------- |
@@ -211,7 +211,7 @@ GitHub Actions 当前只保留 macOS arm64 自动构建流程：
 
 模型与数据资产遵循各自来源许可：
 
-- `yolo26l-bird-det.onnx`、`bird_visibility.onnx`、DINOv3 species adapter 由项目作者训练产出，使用时需注明来源。
+- `yolo26l-bird-det.onnx`、`bird_visibility11.onnx`、DINOv3 species v4 adapter 由项目作者训练产出，使用时需注明来源。
 - DINOv3 backbone 遵循 Meta DINOv3 许可，商业使用需自行确认许可边界。
 - CLIPIQA+ / HyperIQA 基于公开 IQA 研究模型导出，需遵循原始论文与代码仓库许可。
 - 分类表基于《中国鸟类名录 v12.0》整理。

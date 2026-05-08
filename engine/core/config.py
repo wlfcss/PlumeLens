@@ -60,8 +60,8 @@ class Settings(BaseSettings):
     iqa_max_aspect_ratio: float = 2.0  # 长边/短边上限，超过则补短边降比例
 
     # Pipeline — IQA fusion weights
-    clipiqa_weight: float = 0.35
-    hyperiqa_weight: float = 0.65
+    clipiqa_weight: float = 0.55
+    hyperiqa_weight: float = 0.45
 
     # Pipeline — grading thresholds (reject_max, record_max, usable_max)
     # 2026-04-27 三组实拍校准（new / new1 / new2）后采用较严格口径：

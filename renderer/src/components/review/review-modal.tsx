@@ -1645,27 +1645,30 @@ function PoseChipsRow({
   t: ReturnType<typeof useTranslation>['t']
 }) {
   if (!pose) return null
-  const items: Array<{ key: string; label: string; visible: boolean }> = [
-    { key: 'body', label: t('selection.metrics.body'), visible: pose.body_visible ?? false },
-    { key: 'wings', label: t('selection.metrics.wings'), visible: pose.wings_visible ?? false },
-    { key: 'tail', label: t('selection.metrics.tail'), visible: pose.tail_visible ?? false },
+  // 三态:true=明确可见(ok),false=明确不可见(warn),undefined=旧 cache 未检测(muted)。
+  // pipeline_version bump 后旧 cache 自动失效重分析,但用户首次升级窗口期会有混合状态。
+  // 不能简单 ?? false,会让"未检测"显示成警告色误导用户。
+  const items: Array<{ key: string; label: string; visible: boolean | undefined }> = [
+    { key: 'body', label: t('selection.metrics.body'), visible: pose.body_visible },
+    { key: 'wings', label: t('selection.metrics.wings'), visible: pose.wings_visible },
+    { key: 'tail', label: t('selection.metrics.tail'), visible: pose.tail_visible },
   ]
   return (
     <div className="review-pose-chips">
       <span className="review-pose-chips__label">{t('selection.metrics.bodyParts')}</span>
-      {items.map((it) => (
-        <span
-          key={it.key}
-          className={cn(
-            'review-pose-chips__chip',
-            it.visible
-              ? 'review-pose-chips__chip--ok'
-              : 'review-pose-chips__chip--warn',
-          )}
-        >
-          {it.label} {it.visible ? '✓' : '✗'}
-        </span>
-      ))}
+      {items.map((it) => {
+        const tone =
+          it.visible === true ? 'ok' : it.visible === false ? 'warn' : 'muted'
+        const symbol = it.visible === true ? '✓' : it.visible === false ? '✗' : '–'
+        return (
+          <span
+            key={it.key}
+            className={cn('review-pose-chips__chip', `review-pose-chips__chip--${tone}`)}
+          >
+            {it.label} {symbol}
+          </span>
+        )
+      })}
     </div>
   )
 }

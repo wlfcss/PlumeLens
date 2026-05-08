@@ -129,7 +129,7 @@ bbox crop → square expand(+15%, no forced min side) → Resize(short edge=384)
 - **输入**：float32 [1, 3, 224, 224]，RGB raw 0-1
 - **输出**：[1, 1] score 0-1
 - **裁切口径**：CLIPIQA+ 使用 bbox 2.5× 语义/构图裁切；HyperIQA 使用 bbox +10% padding 的主体技术裁切
-- **融合权重**：0.35 × CLIPIQA+ + 0.65 × HyperIQA（在 `engine/core/config.py`）
+- **融合权重**：0.55 × CLIPIQA+ + 0.45 × HyperIQA（在 `engine/core/config.py`）— 语义/构图主导,符合"主体清晰且构图舒服 > 像素锐度"的鸟摄口径
 - **分级阈值**：`<0.45` 淘汰 / `0.45-0.60` 记录 / `0.60-0.75` 可用 / `≥0.75` 精选
 
 **重要**：`engine/pipeline/quality.py` 的 `QualityAssessor` 只做 resize + CHW。

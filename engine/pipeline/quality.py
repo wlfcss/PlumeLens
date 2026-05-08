@@ -52,8 +52,8 @@ class QualityAssessor:
         self,
         clipiqa_session: OrtSession,
         hyperiqa_session: OrtSession,
-        clipiqa_weight: float = 0.35,
-        hyperiqa_weight: float = 0.65,
+        clipiqa_weight: float = 0.55,
+        hyperiqa_weight: float = 0.45,
     ) -> None:
         self._clipiqa = clipiqa_session
         self._hyperiqa = hyperiqa_session

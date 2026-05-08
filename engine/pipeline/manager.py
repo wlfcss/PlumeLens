@@ -394,11 +394,13 @@ class PipelineManager:
         h.update(f"iqe:{self._settings.iqa_expand_ratio}".encode())
         h.update(f"iqar:{self._settings.iqa_max_aspect_ratio}".encode())
         # 算法版本:bump 每当评分/降档逻辑变(pose penalty / grading / species 口径)。
+        # v8:综合分权重重平衡 0.55 CLIPIQA / 0.45 HyperIQA(原 0.35/0.65)— 加权后
+        # 语义/构图主导评分,与鸟摄"主体清晰且构图舒服 > 像素锐度"的产品口径对齐。
         # v7:bird_visibility v2(11 关键点) + grader 飞版升档(head+eye 可见 +
         # posture=flying → +1 档);PoseInfo schema 加 6 关键点 + body/tail/wings + 3 posture。
         # v6:species v4 LoRA/reject 三态,uncertain 不再写入自动物种结论。
         # CLIPIQA/HyperIQA 图内已经做 ImageNet normalization,engine 只传 raw RGB 0-1。
-        h.update(b"alg:v7-pose-v2-fly-upgrade")
+        h.update(b"alg:v8-iqa-weights-rebalance")
         # Pose thresholds (8 项,v2 新增 body/tail/wing)
         h.update(f"pbt:{self._settings.pose_box_threshold}".encode())
         h.update(f"pet:{self._settings.pose_eye_threshold}".encode())

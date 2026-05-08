@@ -21,7 +21,7 @@ class QualityScores(BaseModel):
 
     clipiqa: float
     hyperiqa: float
-    combined: float  # weighted: 0.35 * clipiqa + 0.65 * hyperiqa
+    combined: float  # weighted: 0.55 * clipiqa + 0.45 * hyperiqa
 
 
 class QualityGrade(StrEnum):
