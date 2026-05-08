@@ -188,6 +188,7 @@
       "selectPhotos": "精选",
       "usablePhotos": "可用",
       "recordPhotos": "记录",
+      "failedPhotos": "失败",
       "newSpeciesCount": "新增种",
       "selectCount": "精选",
       "usableCount": "可用",
@@ -216,7 +217,8 @@
       "reject": "淘汰",
       "new_species": "新增种",
       "bird": "有鸟",
-      "no_bird": "无鸟"
+      "no_bird": "无鸟",
+      "failed": "失败"
     },
     "companion": {
       "tile": "+{{format}}"

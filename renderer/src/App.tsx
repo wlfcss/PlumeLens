@@ -142,6 +142,7 @@ type FolderSummary = {
   newSpeciesCount: number
   birdPhotoCount: number
   noBirdCount: number
+  failedCount: number
   speciesCount: number
   gradeCounts: Record<PhotoGrade, number>
 }
@@ -200,6 +201,7 @@ const EMPTY_FOLDER_SUMMARY: FolderSummary = {
   newSpeciesCount: 0,
   birdPhotoCount: 0,
   noBirdCount: 0,
+  failedCount: 0,
   speciesCount: 0,
   gradeCounts: { reject: 0, record: 0, usable: 0, select: 0 },
 }
@@ -221,7 +223,7 @@ const THUMBNAIL_REPAIR_MAX_CONCURRENT = 4
 // 仍先给 query/SSE 一个很短窗口,避免和后台 thumbnail batch 完全撞车。
 const THUMBNAIL_MISSING_REPAIR_DELAY_MS = 600
 
-const quickFilters: QuickFilter[] = ['select', 'usable', 'record', 'reject', 'no_bird']
+const quickFilters: QuickFilter[] = ['select', 'usable', 'record', 'reject', 'no_bird', 'failed']
 
 const archiveTabs: ArchiveTab[] = ['species', 'map']
 type SpeciesCollectionFilter = 'all' | 'collected' | SpeciesCollectionGroupId
@@ -402,6 +404,12 @@ export function shouldIgnoreSelectionReviewShortcutTarget(target: EventTarget | 
 function buildFolderSummary(photos: PhotoRecord[]): FolderSummary {
   return photos.reduce<FolderSummary>(
     (acc, photo) => {
+      // 失败照片单独计数,不进 grade buckets / 有鸟无鸟分类(它们的 birdCount/grade
+      // 是无效结果,混入会让"有鸟照片 943"这类统计被无效行污染)。
+      if (photo.analysisStatus === 'failed') {
+        acc.failedCount += 1
+        return acc
+      }
       const category = photoCategory(photo)
       if (category !== 'no_bird') acc.gradeCounts[category] += 1
       if (photo.isNewSpecies) acc.newSpeciesCount += 1
@@ -413,6 +421,7 @@ function buildFolderSummary(photos: PhotoRecord[]): FolderSummary {
       newSpeciesCount: 0,
       birdPhotoCount: 0,
       noBirdCount: 0,
+      failedCount: 0,
       speciesCount: new Set(
         photos.flatMap((photo) => (photo.speciesName ? [photo.speciesName] : [])),
       ).size,
@@ -611,6 +620,11 @@ function archivePhotoSearchParts(photo: PhotoRecord): Array<string | null | unde
 }
 
 function filterPhotoByQuickFilters(photo: PhotoRecord, filters: QuickFilter[]): boolean {
+  // 失败照片:仅在显式包含 'failed' filter 时显示。源文件损坏 / 解码错的照片
+  // 没有有效分析结果(birdCount=0 / grade 默认),混在场景组里只会让用户困惑("为
+  // 什么这张是空的"),默认隐藏,quickFilter 切到"失败"才查看。
+  if (photo.analysisStatus === 'failed') return filters.includes('failed')
+  // 还在分析中(pending / running): 始终显示,用户能看到分析进度。
   if (photo.analysisStatus !== 'done') return true
   // 空 filter = "未应用任何过滤" = 显示全部(行业惯例 + 用户取消所有 chip 的直觉)。
   // 旧实现 `return false` 让"全清 chip"变成"全部隐藏",对用户语义反转。
@@ -3820,16 +3834,18 @@ function FolderTopline({
           <StatusDot tone={statusTone(activeFolder.status)} />
           {t(statusLabelKey(activeFolder.status))}
         </span>
-        {hasProgress ? (
+        {/* 进度只在分析进行中(pending+processing > 0)显示 — 老逻辑停止后仍展示
+            "已分析 0 / 3" 会让用户误以为还有 N 张待分析,实际可能是 N 张全部永久失
+            败 (broken_image / 解码错)。永久失败的照片由 metric-strip 的"失败"cell
+            统一展示;quickFilter 切到"失败"能查看具体哪些。 */}
+        {hasProgress && running ? (
           <span
             className="folder-status"
             style={{ minWidth: 120, justifyContent: 'flex-end' }}
             aria-label="analysis-progress"
           >
             <span className="text-[11px] text-white/60">
-              {running
-                ? t('selection.folderHeader.analyzingProgress', { progress: progressLabel })
-                : t('selection.folderHeader.analyzedProgress', { progress: progressLabel })}
+              {t('selection.folderHeader.analyzingProgress', { progress: progressLabel })}
             </span>
           </span>
         ) : null}
@@ -3906,6 +3922,15 @@ function MetricStrip({
         tone="accent"
         value={summary.gradeCounts.reject}
       />
+      {/* 失败 cell 仅在有失败照片时显示 — 0 不占视觉位,避免常态噪音。
+          tone='accent' 与"淘汰"同色调红警告;失败的源文件没法分析,本质是"硬错"。 */}
+      {summary.failedCount > 0 ? (
+        <MetricCell
+          label={t('selection.metrics.failedPhotos')}
+          tone="accent"
+          value={summary.failedCount}
+        />
+      ) : null}
     </section>
   )
 }

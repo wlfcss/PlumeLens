@@ -5,9 +5,11 @@ import type { AppRoute, ArchiveTab, PhotoGrade } from '@/lib/mock-workspace'
 export { useShallow } from 'zustand/react/shallow'
 
 export type ViewMode = 'grouped' | 'flat'
-// QuickFilter = 4 个质量档位 + "无鸟" 独立筛选状态。"无鸟" 不是第五档，
-// 是与档位正交的过滤维度，因此显式从 PhotoGrade 派生避免未来漂移。
-export type QuickFilter = PhotoGrade | 'no_bird'
+// QuickFilter = 4 个质量档位 + "无鸟" + "失败" 独立筛选维度。"无鸟" / "失败" 都
+// 不是档位,与档位正交;显式从 PhotoGrade 派生避免未来漂移。
+// "失败"是分析永久失败(broken_image / 解码错等)的照片,默认不放进 active filters,
+// 选片屏不展示;用户主动 toggle 才查看。
+export type QuickFilter = PhotoGrade | 'no_bird' | 'failed'
 
 interface UIState {
   route: AppRoute

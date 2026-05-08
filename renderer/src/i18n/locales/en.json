@@ -186,6 +186,7 @@
       "totalPhotos": "Total photos",
       "birdPhotos": "Bird frames",
       "selectPhotos": "Top selects",
+      "failedPhotos": "Failed",
       "usablePhotos": "Usable",
       "recordPhotos": "Record",
       "newSpeciesCount": "New species",
@@ -216,7 +217,8 @@
       "reject": "Reject",
       "new_species": "New species",
       "bird": "Bird",
-      "no_bird": "No bird"
+      "no_bird": "No bird",
+      "failed": "Failed"
     },
     "companion": {
       "tile": "+{{format}}"
