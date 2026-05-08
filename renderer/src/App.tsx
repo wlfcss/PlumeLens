@@ -5542,8 +5542,12 @@ function BackgroundTaskBar({
   return (
     <footer className="background-taskbar">
       <span>{t(statusLabelKey(activeFolder.status))}</span>
+      {/* 进度条本身用 success(绿色)而非 statusTone — 状态文案仍由
+          statusLabelKey 控制(分析进行中 / 扫描中 / 哈希中),颜色语义在
+          glyph-matrix 上单独表达"已经完成的进度",绿色更直观;breathing 动画
+          见 app.css `.glyph-matrix .tone-success`,提示仍在运行。 */}
       <GlyphMatrix
-        tone={statusTone(activeFolder.status)}
+        tone="success"
         value={Math.max(
           3,
           Math.round((activeFolder.analyzedCount / Math.max(activeFolder.totalCount, 1)) * 12),

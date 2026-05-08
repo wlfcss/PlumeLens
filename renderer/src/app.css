@@ -6729,6 +6729,11 @@ button:disabled {
 
 .glyph-matrix .tone-success {
   background: var(--pl-success);
+  /* BackgroundTaskBar 在分析中走 tone-success 表示"已完成的进度",breathing
+     仍提示"还在跑"。其他静态 success 用法目前没有(GlyphMatrix 当前只在
+     taskbar 一处用),后续如果加新调用方需要纯静态绿点,把动画下放到
+     专门的 modifier class。 */
+  animation: pl-glyph-breathe 1.6s var(--pl-ease) infinite;
 }
 
 .glyph-matrix .tone-warning {
