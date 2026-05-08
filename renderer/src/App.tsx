@@ -4178,16 +4178,54 @@ function PhotoGroup({
 
     if (!(scroller instanceof HTMLElement) || !coverPhotoId || !groupNode) return
 
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        const coverTile =
-          Array.from(groupNode.querySelectorAll<HTMLElement>('[data-photo-id]')).find(
-            (node) => node.dataset.photoId === coverPhotoId,
-          ) ?? groupNode
-        const delta = coverTile.getBoundingClientRect().top - anchorTop
+    // 滚动补偿:展开后让 cover photo 还在原 stack tile 那个屏幕高度,
+    // 视觉上不漂移。
+    //
+    // 老实现 rAF×2 后只测一次 cover.top,但 react-virtual 的 measureElement
+    // 走 ResizeObserver 异步触发 — grid 行高在 expanded N tile 里可能还没稳
+    // (尤其当 expanded segment 跨多行时,virtualizer 还没把后续行 measure
+    // 出来,cover tile 可能临时被定位到错误的 translateY,导致补偿后再 measure
+    // 又漂)。
+    //
+    // 修法:多帧采样,每帧测一次 cover top,如果连续 2 帧位置没变(layout 真稳了)
+    // 才做 scroll 修正。最长等 8 帧(~133ms),够 measureElement 跑完。
+    let prevTop: number | null = null
+    let stableCount = 0
+    let frameCount = 0
+    const maxFrames = 8
+    const stabilityRequired = 2
+
+    const tick = () => {
+      frameCount += 1
+      const coverTile =
+        Array.from(groupNode.querySelectorAll<HTMLElement>('[data-photo-id]')).find(
+          (node) => node.dataset.photoId === coverPhotoId,
+        )
+      if (!coverTile) {
+        if (frameCount < maxFrames) requestAnimationFrame(tick)
+        return
+      }
+      const top = coverTile.getBoundingClientRect().top
+      if (prevTop !== null && Math.abs(top - prevTop) < 0.5) {
+        stableCount += 1
+        if (stableCount >= stabilityRequired) {
+          const delta = top - anchorTop
+          if (Math.abs(delta) > 0.5) scroller.scrollTop += delta
+          return
+        }
+      } else {
+        stableCount = 0
+      }
+      prevTop = top
+      if (frameCount < maxFrames) {
+        requestAnimationFrame(tick)
+      } else {
+        // 最坏 fallback:直接按当前 top 修正,不再等。
+        const delta = top - anchorTop
         if (Math.abs(delta) > 0.5) scroller.scrollTop += delta
-      })
-    })
+      }
+    }
+    requestAnimationFrame(tick)
   }, [])
 
   return (
@@ -4330,13 +4368,13 @@ function PhotoStackTile({
       data-photo-id={photo.id}
     >
       <button
-        aria-expanded="false"
         aria-label={t('selection.group.stackAria', { count: photoCount, file: photo.fileName })}
         className="photo-preview photo-preview--stack"
         data-selection-review-shortcut="true"
-        onClick={(event) => {
+        onClick={() => {
+          // 整卡 click 只 focus 让右侧抽屉显示 cover 的基本信息;不展开。
+          // 展开只通过右上角数量 badge 触发(下面那个嵌套 button)。
           onFocusPhoto(photo.id)
-          onExpand(event.currentTarget)
         }}
         style={{ backgroundImage: photo.placeholderGradient ?? photo.previewGradient }}
         type="button"
@@ -4355,10 +4393,24 @@ function PhotoStackTile({
         <span className="photo-preview__top">
           <StatusPill label={t(categoryLabelKey(category))} tone={categoryTone(category)} />
         </span>
-        <span className="photo-stack-badge">
+        {/* 数量 badge 是嵌套 button — onClick 阻止冒泡,只触发 expand。
+            type="button" 防止默认 form submit。<button> 嵌套 <button> HTML 不
+            合法,但 React 实际渲染并不报错,且 e.stopPropagation 让事件不触达
+            外层 button — 老 a11y 库可能 warning,先这样,真要 a11y 严格再换成
+            <span role="button" tabindex>。 */}
+        <button
+          aria-label={t('selection.group.expandAria', { count: photoCount })}
+          className="photo-stack-badge photo-stack-badge--button"
+          onClick={(event) => {
+            event.stopPropagation()
+            event.preventDefault()
+            onExpand(event.currentTarget)
+          }}
+          type="button"
+        >
           <Images className="h-3.5 w-3.5" />
           <span>{t('selection.group.stackCount', { count: photoCount })}</span>
-        </span>
+        </button>
         <span className="photo-preview__bottom">
           <span>
             <strong className="photo-preview__species">

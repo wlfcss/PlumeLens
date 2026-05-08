@@ -2181,6 +2181,36 @@ button:disabled {
   transform: translateY(-1px);
 }
 
+/* badge 改成可点击 button 后,hover 动画提示"我能点 → 触发展开"。
+   - cursor:pointer 区别于整卡(后者也 pointer 但语义不同)
+   - hover 时 badge 单独额外发光 + scale 放大,引导用户视觉
+   - 整卡 hover 时 badge 已有 +translateY,叠加效果让 badge 凸出更明显 */
+button.photo-stack-badge--button {
+  cursor: pointer;
+  appearance: none;
+  font: inherit;
+  /* 重置 button 默认背景 — .photo-stack-badge 已经设了透明黑底 */
+  -webkit-tap-highlight-color: transparent;
+}
+
+.photo-stack-badge--button:hover {
+  border-color: rgba(238, 242, 246, 0.5);
+  background: rgba(20, 20, 20, 0.92);
+  transform: translateY(-2px) scale(1.05);
+  box-shadow:
+    0 14px 28px rgba(0, 0, 0, 0.45),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.12);
+}
+
+.photo-stack-badge--button:active {
+  transform: translateY(0) scale(0.98);
+}
+
+.photo-stack-badge--button:focus-visible {
+  outline: 2px solid rgba(238, 242, 246, 0.6);
+  outline-offset: 2px;
+}
+
 /* 分析中状态：tile 上显示 shimmer 扫描线，给用户视觉提示模型在跑 */
 .photo-tile--analyzing .photo-preview {
   filter: brightness(0.85);
