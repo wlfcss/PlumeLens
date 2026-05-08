@@ -27,8 +27,10 @@ interface PlumeLensAPI {
     | { ok: true }
     | { ok: false; reason: 'invalid_path' | 'path_missing' | 'open_failed'; message?: string }
   >
-  onBackendReady(cb: (url: string) => void): void
-  onBackendError(cb: (msg: string) => void): void
+  /** 兼容老 channel；调用方必须在 unmount 时调用返回的 unsubscribe。 */
+  onBackendReady(cb: (url: string) => void): () => void
+  /** 兼容老 channel；调用方必须在 unmount 时调用返回的 unsubscribe。 */
+  onBackendError(cb: (msg: string) => void): () => void
   /** 订阅 engine 状态变化(ready/unhealthy/crashed/fatal)。返回 unsubscribe。 */
   onEngineStatus(cb: (payload: EngineStatusPayload) => void): () => void
   /** 启动期探测的外部编辑器解析名;null = 未安装,UI 应隐藏对应按钮。 */

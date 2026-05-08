@@ -35,6 +35,7 @@ import { join } from 'path'
 
 const MAX_STARTUP_LOGS = 10
 const ELECTRON_LOG_MAX_BYTES = 5 * 1024 * 1024
+const ENGINE_READY_TIMEOUT_MS = 90_000
 
 export class ProcessManager extends EventEmitter {
   private process: ChildProcess | null = null
@@ -43,6 +44,7 @@ export class ProcessManager extends EventEmitter {
   private readonly maxRestarts = 3
   private healthInterval: ReturnType<typeof setInterval> | null = null
   private restartTimer: ReturnType<typeof setTimeout> | null = null
+  private readyTimer: { proc: ChildProcess; timer: ReturnType<typeof setTimeout> } | null = null
   private readonly authToken = randomBytes(32).toString('hex')
   // 关停标志：stop() 设为 true，handleCrash 与 setTimeout 都会检查，
   // 防止应用关闭中残留的 setTimeout 触发 spawn 出孤儿 engine。
@@ -134,6 +136,13 @@ export class ProcessManager extends EventEmitter {
     }
   }
 
+  private clearReadyTimer(proc?: ChildProcess): void {
+    if (!this.readyTimer) return
+    if (proc && this.readyTimer.proc !== proc) return
+    clearTimeout(this.readyTimer.timer)
+    this.readyTimer = null
+  }
+
   async start(): Promise<void> {
     const isDev = !app.isPackaged
 
@@ -216,6 +225,22 @@ export class ProcessManager extends EventEmitter {
     this.process = proc
 
     let pendingUrl: string | null = null
+    const readyTimer = setTimeout(() => {
+      if (this.readyTimer?.proc === proc) this.readyTimer = null
+      if (this.process !== proc || this.url) return
+      const message = `Engine 启动超时（${Math.round(ENGINE_READY_TIMEOUT_MS / 1000)} 秒内未就绪），请打开诊断日志查看模型加载或初始化卡死原因。`
+      this.writeElectronLog(
+        `engine startup timeout waiting for PLUMELENS_READY pendingUrl=${pendingUrl ?? 'none'}`,
+      )
+      stderrStream?.write(
+        `\n# === startup timeout @ ${new Date().toISOString()} pendingUrl=${pendingUrl ?? 'none'} ===\n`,
+      )
+      this.killCurrentProcess('startup timeout')
+      this.url = null
+      this.emit('error', message)
+    }, ENGINE_READY_TIMEOUT_MS)
+    this.readyTimer = { proc, timer: readyTimer }
+    const clearReadyTimer = (): void => this.clearReadyTimer(proc)
     const handleChunk = (data: Buffer): void => {
       // 1. 完整复制到持久化文件（崩溃时唯一可查的 raw stderr / stdout）
       stderrStream?.write(data)
@@ -229,6 +254,7 @@ export class ProcessManager extends EventEmitter {
       // PLUMELENS_READY（lifespan startup 完成、uvicorn 真 listen 后 print）：才 emit ready
       // 避免 IPC 早一步返回 URL → renderer 立即 fetch → ECONNREFUSED 失败
       if (text.includes('PLUMELENS_READY') && pendingUrl && !this.url) {
+        clearReadyTimer()
         this.url = pendingUrl
         // 启动成功 → 重置 restartCount。否则应用长时间运行后才崩溃，
         // restartCount 已经爆 maxRestarts，不会再重启（恢复能力降为 0）。
@@ -241,6 +267,7 @@ export class ProcessManager extends EventEmitter {
       // Fallback：uvicorn 老 banner（同时兼具 listen 完成的语义）
       const uvicornMatch = text.match(/Uvicorn running on (http:\/\/127\.0\.0\.1:\d+)/)
       if (uvicornMatch && !this.url) {
+        clearReadyTimer()
         this.url = uvicornMatch[1]
         this.restartCount = 0
         this.writeElectronLog(`engine ready (uvicorn fallback) url=${this.url}`)
@@ -253,6 +280,7 @@ export class ProcessManager extends EventEmitter {
     proc.stderr?.on('data', handleChunk)
 
     proc.on('exit', (code, signal) => {
+      clearReadyTimer()
       // 总是关掉本次 spawn 自己的 stream — 不论是不是当前 active proc
       try {
         stderrStream?.write(
@@ -299,6 +327,7 @@ export class ProcessManager extends EventEmitter {
     })
 
     proc.on('error', (err) => {
+      clearReadyTimer()
       this.writeElectronLog(`engine spawn error: ${err.message}`)
       // ENOENT(binary 不存在) / EACCES 之类 — 'error' 触发后 'exit' 不一定到。
       // 必须主动清状态:否则 this.process 还指向僵死引用,下次 start() 跳过 logsDir
@@ -315,6 +344,7 @@ export class ProcessManager extends EventEmitter {
   stop(): void {
     this.stopped = true
     this.stopHealthCheck()
+    this.clearReadyTimer()
     if (this.restartTimer) {
       clearTimeout(this.restartTimer)
       this.restartTimer = null
@@ -361,6 +391,7 @@ export class ProcessManager extends EventEmitter {
   private killCurrentProcess(reason: string): void {
     const proc = this.process
     if (!proc) return
+    this.clearReadyTimer(proc)
     this.process = null  // 先解引用，防止 'exit' handler 触发 handleCrash
     if (proc.killed || proc.exitCode !== null) return
 

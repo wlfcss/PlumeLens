@@ -54,11 +54,21 @@ contextBridge.exposeInMainWorld('plumelens', {
     path: string,
   ): Promise<{ ok: true; app: string } | { ok: false; reason: string }> =>
     ipcRenderer.invoke('open-in-editor', { tool, path }),
-  onBackendReady: (cb: (url: string) => void): void => {
-    ipcRenderer.on('backend-ready', (_event, url: string) => cb(url))
+  /** 兼容老 channel；调用方必须保存返回值并在 unmount 时调用，避免 listener 泄漏。 */
+  onBackendReady: (cb: (url: string) => void): (() => void) => {
+    const handler = (_event: unknown, url: string): void => cb(url)
+    ipcRenderer.on('backend-ready', handler)
+    return (): void => {
+      ipcRenderer.removeListener('backend-ready', handler)
+    }
   },
-  onBackendError: (cb: (msg: string) => void): void => {
-    ipcRenderer.on('backend-error', (_event, msg: string) => cb(msg))
+  /** 兼容老 channel；调用方必须保存返回值并在 unmount 时调用，避免 listener 泄漏。 */
+  onBackendError: (cb: (msg: string) => void): (() => void) => {
+    const handler = (_event: unknown, msg: string): void => cb(msg)
+    ipcRenderer.on('backend-error', handler)
+    return (): void => {
+      ipcRenderer.removeListener('backend-error', handler)
+    }
   },
   // 统一的 engine 状态推送 — renderer 用 zustand store 订阅这里转发的事件,
   // 整个 UI 一处响应(进度条/toast/SSE 重连触发)。

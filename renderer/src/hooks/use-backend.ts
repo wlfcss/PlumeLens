@@ -49,12 +49,13 @@ export function useBackendHealth() {
         })
       }
       poll()
-      plumelens.onBackendReady((url) => {
+      const unsubscribeReady = plumelens.onBackendReady((url) => {
         cancelled = true
         setBackendUrl(url)
       })
       return () => {
         cancelled = true
+        if (typeof unsubscribeReady === 'function') unsubscribeReady()
       }
     }
   }, [])

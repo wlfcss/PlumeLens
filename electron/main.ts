@@ -447,7 +447,9 @@ app.whenReady().then(async () => {
         return new Response('Forbidden (symlink escape)', { status: 403 })
       }
       return await net.fetch(pathToFileURL(realFile).toString())
-    } catch {
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      process.stderr.write(`[thumb] failed rel=${rel} resolved=${resolved} error=${message}\n`)
       return new Response('Not found', { status: 404 })
     }
   })
