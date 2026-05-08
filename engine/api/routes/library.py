@@ -76,7 +76,7 @@ def _classify_analysis_error(error_msg: str) -> str:
 
 
 async def _backfill_then_thumbnails(db: Database, library_id: str) -> None:
-    """阶段 2/3/4：补 SHA-256 + 生成缩略图 + 跑场景分组。"""
+    """阶段 2/3/4/5：补 SHA-256 + 生成缩略图 + 跑场景分组 + GPS reverse geocoding。"""
     await backfill_hashes(db, library_id)
     cache_root = thumbnail_cache_root(app_settings.data_dir)
     await generate_library_thumbnails(db, library_id, cache_root)
@@ -90,6 +90,18 @@ async def _backfill_then_thumbnails(db: Database, library_id: str) -> None:
         # cv2 未安装/library import 失败不影响其他流程
         await logger.aexception("scene grouping failed", library_id=library_id)
         _ = e
+
+    # 阶段 5：reverse geocoding。之前只有 lifespan 启动期跑过一次,新 import 的
+    # library 要等用户下次开应用才有省/市/区字段(羽迹页显示「未解析地点」)。
+    # 现在 import 完成后就在 BackgroundTasks 里跑 — 不阻塞响应,完成时通过
+    # archive_cache.invalidate 刷新羽迹聚合缓存(backfill_library_locations 内部
+    # 已处理)。失败被 try/except 吞,不影响其他 import 流程。
+    try:
+        from engine.services.location_backfill import backfill_library_locations
+
+        await backfill_library_locations(db, library_id)
+    except Exception:
+        await logger.aexception("post-import location backfill failed", library_id=library_id)
 
 
 async def _db(request: Request) -> Database:

@@ -132,6 +132,7 @@ export function useLibraryEvents(libraryId: string | null | undefined, enabled =
   useEffect(() => {
     if (!libraryId || !enabled) return undefined
     let source: EventSource | null = null
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null
     let cancelled = false
 
     const flushRefresh = () => {
@@ -145,33 +146,52 @@ export function useLibraryEvents(libraryId: string | null | undefined, enabled =
       refreshTimerRef.current = window.setTimeout(flushRefresh, EVENT_REFRESH_DEBOUNCE_MS)
     }
 
-    api
-      .libraryEventsUrl(libraryId)
-      .then((url) => {
-        if (cancelled) return
-        source = new EventSource(url)
-        source.onopen = scheduleRefresh
-        source.onmessage = scheduleRefresh
-        ;[
-          'library_snapshot',
-          'thumbnail_batch',
-          'thumbnail_ready',
-          'thumbnail_failed',
-          'thumbnail_complete',
-          'scene_groups_ready',
-        ].forEach((eventName) => {
-          source?.addEventListener(eventName, scheduleRefresh)
+    const connect = (): void => {
+      if (cancelled) return
+      api
+        .libraryEventsUrl(libraryId)
+        .then((url) => {
+          if (cancelled) return
+          source = new EventSource(url)
+          source.onopen = scheduleRefresh
+          source.onmessage = scheduleRefresh
+          ;[
+            'library_snapshot',
+            'thumbnail_batch',
+            'thumbnail_ready',
+            'thumbnail_failed',
+            'thumbnail_complete',
+            'scene_groups_ready',
+          ].forEach((eventName) => {
+            source?.addEventListener(eventName, scheduleRefresh)
+          })
+          // 原生 EventSource 不对 4xx(429 SSE 限流)自动重连 — CLOSED 状态走
+          // 手动 5s backoff 重连,避免 library 事件流静默断掉导致缩略图就绪 /
+          // 场景分组完成等通知漏到。CONNECTING(1) 走浏览器原生重连。
+          source.onerror = (event) => {
+            if (cancelled || !source) return
+            if (source.readyState === EventSource.CLOSED) {
+              console.warn('Library event stream closed (likely 4xx), retrying in 5s')
+              source.close()
+              source = null
+              reconnectTimer = setTimeout(connect, 5000)
+            } else {
+              console.warn('Library event stream error (browser auto-reconnecting):', event)
+            }
+          }
         })
-        source.onerror = (event) => {
-          console.warn('Library event stream error (browser will reconnect):', event)
-        }
-      })
-      .catch((error) => {
-        console.warn('Failed to resolve library event URL:', error)
-      })
+        .catch((error) => {
+          if (cancelled) return
+          console.warn('Failed to resolve library event URL, retrying in 5s:', error)
+          reconnectTimer = setTimeout(connect, 5000)
+        })
+    }
+
+    connect()
 
     return () => {
       cancelled = true
+      if (reconnectTimer !== null) clearTimeout(reconnectTimer)
       source?.close()
       source = null
       if (refreshTimerRef.current !== null) {
