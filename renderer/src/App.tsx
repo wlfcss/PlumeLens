@@ -89,7 +89,6 @@ import type {
   PhotoRecord,
   ProblemTagId,
   PoseTagId,
-  SceneTagId,
   SelectionDecision,
   SpeciesRecord,
   WorkspaceSnapshot,
@@ -1331,10 +1330,6 @@ function poseTagKey(tag: PoseTagId) {
 
 function problemTagKey(tag: ProblemTagId) {
   return `selection.problemTags.${tag}` as const
-}
-
-function sceneTagKey(tag: SceneTagId) {
-  return `selection.sceneTags.${tag}` as const
 }
 
 function routeLabelKey(route: AppRoute) {
@@ -4199,8 +4194,17 @@ function PhotoGroup({
     <section className="photo-group" ref={groupRef}>
       <div className="photo-group__header">
         <div>
-          <SectionLabel label={t(sceneTagKey(group.sceneTag))} />
-          <h2>{title}</h2>
+          {/* "记录片" 这种 sceneTag SectionLabel 对每个 group 都是同一个固定值,
+              没承载任何区分性信息,纯视觉噪音,删掉。如果未来有 sceneTag 实际多
+              态(精彩瞬间 / 罕见物种 / 等),再回来加。 */}
+          <h2 className="photo-group__title">
+            <span>{title}</span>
+            {group.containsNewSpecies ? (
+              <span className="chip chip--accent photo-group__new-species">
+                {t('selection.quickFilters.new_species')}
+              </span>
+            ) : null}
+          </h2>
           <p>
             {photos.length} {t('selection.group.photos')}
             {bestScore !== null
@@ -4217,9 +4221,6 @@ function PhotoGroup({
             >
               {t('selection.group.collapseStack')}
             </button>
-          ) : null}
-          {group.containsNewSpecies ? (
-            <span className="chip chip--accent">{t('selection.quickFilters.new_species')}</span>
           ) : null}
         </div>
       </div>

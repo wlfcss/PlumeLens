@@ -1983,6 +1983,20 @@ button:disabled {
   white-space: nowrap;
 }
 
+/* 标题行内置 "新增种" chip — 跟在 "场景 #130 · 10:11" 之后,字号缩小不抢主体,
+   inline-flex 让 chip 与标题文本垂直居中。 */
+.photo-group__title {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: baseline;
+}
+
+.photo-group__new-species {
+  font-size: 11px;
+  vertical-align: baseline;
+}
+
 .photo-group__header p {
   margin: 7px 0 0;
   color: var(--pl-fg-3);
