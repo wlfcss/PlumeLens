@@ -1676,9 +1676,9 @@ function CompactKV({
 }
 
 /**
- * 姿态可见性 chip 行 — body / wings / tail 三项。
- * head/eye 仍在 review-stats-grid 显示(因为它们影响降档,核心地位)。
- * body/wings/tail 不影响升降档,仅供查阅,所以用更轻量的 chip 行。
+ * 姿态可见性 chip 行 — head / eye / body / wings / tail 五项。
+ * head/eye 影响降档(核心地位)但不再独占 stats-grid 卡片;与 body/wings/tail
+ * 同属 visibility 维度,统一在 chip 行展示更紧凑(详见 PoseChipsRow 内联说明)。
  */
 function PoseChipsRow({
   pose,

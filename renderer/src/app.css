@@ -1975,26 +1975,35 @@ button:disabled {
 
 .photo-group__header h2 {
   margin: 6px 0 0;
-  overflow: hidden;
   color: var(--pl-fg-0);
   font-size: 22px;
   font-weight: 500;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 /* 标题行内置 "新增种" chip — 跟在 "场景 #130 · 10:11" 之后,字号缩小不抢主体,
-   inline-flex 让 chip 与标题文本垂直居中。 */
+   inline-flex 让 chip 与标题文本垂直居中。
+   注:inline-flex 让父级 ellipsis 失效(变成 flex 容器不能直接 text-overflow),
+   把 ellipsis 下沉到 inner span(.photo-group__title-text)处理。 */
 .photo-group__title {
-  display: inline-flex;
+  display: flex;
   flex-wrap: wrap;
   gap: 8px;
   align-items: baseline;
+  max-width: 100%;
+  min-width: 0;
+}
+
+.photo-group__title-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .photo-group__new-species {
   font-size: 11px;
   vertical-align: baseline;
+  flex: none;
 }
 
 .photo-group__header p {
@@ -2069,9 +2078,18 @@ button:disabled {
   overflow: visible;
   border-color: rgba(255, 255, 255, 0.3);
   transform-origin: 50% 50%;
+  /* 现在是 div+role=button,需要显式恢复原生 button 的 cursor/select 行为 */
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
   box-shadow:
     0 0 0 1px rgba(255, 255, 255, 0.06),
     0 16px 38px rgba(0, 0, 0, 0.3);
+}
+
+.photo-preview--stack:focus-visible {
+  outline: 1px solid rgba(255, 255, 255, 0.72);
+  outline-offset: 2px;
 }
 
 .photo-preview--stack:hover {

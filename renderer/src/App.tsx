@@ -4236,7 +4236,7 @@ function PhotoGroup({
               没承载任何区分性信息,纯视觉噪音,删掉。如果未来有 sceneTag 实际多
               态(精彩瞬间 / 罕见物种 / 等),再回来加。 */}
           <h2 className="photo-group__title">
-            <span>{title}</span>
+            <span className="photo-group__title-text">{title}</span>
             {group.containsNewSpecies ? (
               <span className="chip chip--accent photo-group__new-species">
                 {t('selection.quickFilters.new_species')}
@@ -4362,22 +4362,30 @@ function PhotoStackTile({
   const category = photoCategory(photo)
   const displaySpecies = group.primarySpecies ?? formatPhotoSpeciesDisplay(photo, t)
 
+  // 用 div+role="button" 而不是真 <button>,因为内部还要嵌一个真 button(数量
+   // badge 触发展开)。HTML 不允许 button 嵌 button(React DEV 模式会 warn,且
+   // 某些 a11y 工具栏会读错)。div+role+tabIndex+键盘事件 = 等价交互行为。
+  const handleActivate = () => onFocusPhoto(photo.id)
   return (
     <article
       className={cn('photo-tile photo-tile--stack', focused && 'photo-tile--focused')}
       data-photo-id={photo.id}
     >
-      <button
+      <div
         aria-label={t('selection.group.stackAria', { count: photoCount, file: photo.fileName })}
         className="photo-preview photo-preview--stack"
         data-selection-review-shortcut="true"
-        onClick={() => {
-          // 整卡 click 只 focus 让右侧抽屉显示 cover 的基本信息;不展开。
-          // 展开只通过右上角数量 badge 触发(下面那个嵌套 button)。
-          onFocusPhoto(photo.id)
+        onClick={handleActivate}
+        onKeyDown={(event) => {
+          // a11y:Enter / Space 等价 click(原生 button 行为)
+          if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault()
+            handleActivate()
+          }
         }}
+        role="button"
         style={{ backgroundImage: photo.placeholderGradient ?? photo.previewGradient }}
-        type="button"
+        tabIndex={0}
       >
         <span className="photo-stack-pages" aria-hidden="true">
           <span />
@@ -4393,18 +4401,25 @@ function PhotoStackTile({
         <span className="photo-preview__top">
           <StatusPill label={t(categoryLabelKey(category))} tone={categoryTone(category)} />
         </span>
-        {/* 数量 badge 是嵌套 button — onClick 阻止冒泡,只触发 expand。
-            type="button" 防止默认 form submit。<button> 嵌套 <button> HTML 不
-            合法,但 React 实际渲染并不报错,且 e.stopPropagation 让事件不触达
-            外层 button — 老 a11y 库可能 warning,先这样,真要 a11y 严格再换成
-            <span role="button" tabindex>。 */}
+        {/* 真 button — 现在外层是 div+role,允许内嵌 button。stopPropagation
+            阻止冒泡到外层 div onClick,展开操作不会再触发 focus。 */}
         <button
           aria-label={t('selection.group.expandAria', { count: photoCount })}
           className="photo-stack-badge photo-stack-badge--button"
           onClick={(event) => {
             event.stopPropagation()
             event.preventDefault()
-            onExpand(event.currentTarget)
+            // anchor 必须传外层 stack tile,不能传 badge 本身 — badge 是 absolute
+            // 定位在 tile 右上(top:12px right:12px),getBoundingClientRect().top
+            // 比 tile 顶部低 12px。expandStack 用 anchorTop 做 scroll 补偿,如果
+            // 拿 badge 的 top 会让 cover tile 滚到 badge 原位 → 整个 grid 视觉上
+            // 往下漂 12px。closest 兜底到 .photo-preview--stack(button 元素)
+            // 也没问题,只要不是 badge 本身就对。
+            const anchor =
+              event.currentTarget.closest<HTMLElement>('.photo-tile--stack') ??
+              event.currentTarget.closest<HTMLElement>('.photo-preview--stack') ??
+              event.currentTarget
+            onExpand(anchor)
           }}
           type="button"
         >
@@ -4420,7 +4435,7 @@ function PhotoStackTile({
           </span>
           <b>{formatScore(photo.finalScore)}</b>
         </span>
-      </button>
+      </div>
     </article>
   )
 }
