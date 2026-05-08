@@ -47,6 +47,7 @@ import { useAnalysisProgress, useStartBatch } from '@/hooks/use-analysis'
 import { useBackendHealth } from '@/hooks/use-backend'
 import { useSetDecision, useSetSpeciesOverride } from '@/hooks/use-decisions'
 import {
+  LIBRARIES_KEY,
   LIBRARY_DETAIL_KEY,
   useAllLibraryDetails,
   useBuildPhotoThumbnail,
@@ -2275,6 +2276,19 @@ export default function App() {
   const [sseRestartKey, setSseRestartKey] = useState(0)
   // engine 重启后端口可能变 — engineStore 在 'ready' 事件时也 bump 一次,两边相加。
   const engineSseKey = useEngineStore((s) => s.sseRestartKey)
+
+  // 引擎 cold-start 时 useLibraries 等 query 在 ~5s 模型加载窗口内多次失败(全局
+  // retry=1 不足以扛过冷启)→ 永远卡在 error state,recent folders 不显示。
+  // engineSseKey 在 engine 每次 'ready' 事件都自增,我们用它做触发器,把核心 query
+  // 强制 invalidate 让 react-query 重 fetch。libraries / decisions / archive 数据
+  // 都没自带 refetchInterval(SSE 不轮询原则),这里是它们"engine 就绪后回血"的唯一
+  // 机会;否则 ready 之前 fail 的 query 会永远卡在 error state。
+  useEffect(() => {
+    if (engineSseKey === 0) return // initial render,engine 还没发过 'ready' 事件
+    queryClient.invalidateQueries({ queryKey: LIBRARIES_KEY })
+    queryClient.invalidateQueries({ queryKey: ['decisions'] })
+    queryClient.invalidateQueries({ queryKey: ['archive'] })
+  }, [engineSseKey, queryClient])
   const progressEvent = useAnalysisProgress(
     activeFolderId,
     Boolean(activeFolderId),
