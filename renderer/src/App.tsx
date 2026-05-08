@@ -19,7 +19,6 @@ import {
   Sparkles,
   Trophy,
   Wand2,
-  Waypoints,
   X,
 } from 'lucide-react'
 import {
@@ -46,7 +45,7 @@ import { SettingsModal } from '@/components/settings-modal'
 import { ThumbnailImage, type ThumbnailLoadStatus } from '@/components/thumbnail-image'
 import { useAnalysisProgress, useStartBatch } from '@/hooks/use-analysis'
 import { useBackendHealth } from '@/hooks/use-backend'
-import { useBatchSetDecisions, useSetDecision, useSetSpeciesOverride } from '@/hooks/use-decisions'
+import { useSetDecision, useSetSpeciesOverride } from '@/hooks/use-decisions'
 import {
   LIBRARY_DETAIL_KEY,
   useAllLibraryDetails,
@@ -1047,7 +1046,7 @@ export function speciesSourceDetail(
   return null
 }
 
-// 多鸟图按 detection 维度聚合的物种摘要 — tile / 对比页 / 物种照片浏览统一
+// 多鸟图按 detection 维度聚合的物种摘要 — tile / 物种照片浏览统一
 // 使用，避免 photo.speciesName（best 那只）淹没其他鸟的物种信息。
 //
 // 仅聚合"已可信"的 detection（manual / model / group_consensus）；
@@ -1123,7 +1122,7 @@ export function effectiveSpeciesSummary(photo: PhotoRecord): SpeciesSummary {
   }
 }
 
-// 选片 tile / 对比 / 物种照片浏览 统一用的物种文本格式化函数。
+// 选片 tile / 物种照片浏览统一用的物种文本格式化函数。
 // 把 effectiveSpeciesSummary 的纯数据 + photo 状态 + i18n 拼成可显示字符串。
 export function formatPhotoSpeciesDisplay(
   photo: PhotoRecord,
@@ -1879,9 +1878,7 @@ export default function App() {
     viewMode,
     searchQuery,
     focusedPhotoId,
-    comparePhotoIds,
     reviewPhotoId,
-    compareOpen,
     setRoute,
     setArchiveTab,
     setActiveFolderId,
@@ -1892,10 +1889,7 @@ export default function App() {
     setSearchQuery,
     setFocusedPhotoId,
     setReviewPhotoId,
-    setCompareOpen,
     setSettingsOpen,
-    toggleComparePhotoId,
-    clearCompare,
   } = useUIStore(
     useShallow((state) => ({
       route: state.route,
@@ -1907,9 +1901,7 @@ export default function App() {
       viewMode: state.viewMode,
       searchQuery: state.searchQuery,
       focusedPhotoId: state.focusedPhotoId,
-      comparePhotoIds: state.comparePhotoIds,
       reviewPhotoId: state.reviewPhotoId,
-      compareOpen: state.compareOpen,
       setRoute: state.setRoute,
       setArchiveTab: state.setArchiveTab,
       setActiveFolderId: state.setActiveFolderId,
@@ -1920,10 +1912,7 @@ export default function App() {
       setSearchQuery: state.setSearchQuery,
       setFocusedPhotoId: state.setFocusedPhotoId,
       setReviewPhotoId: state.setReviewPhotoId,
-      setCompareOpen: state.setCompareOpen,
       setSettingsOpen: state.setSettingsOpen,
-      toggleComparePhotoId: state.toggleComparePhotoId,
-      clearCompare: state.clearCompare,
     })),
   )
 
@@ -1935,7 +1924,7 @@ export default function App() {
   )
 
   // TODO: Replace mock workspace mutations with backend API + TanStack Query mutations
-  // once scan, decision, compare, and export endpoints are wired.
+  // once scan, decision, and export endpoints are wired.
   useEffect(() => {
     if (workspace.folders.length === 0) {
       if (activeFolderId !== null) setActiveFolderId(null)
@@ -2091,13 +2080,6 @@ export default function App() {
   const focusedPhoto = focusedPhotoId ? (photoById.get(focusedPhotoId) ?? null) : null
   const reviewPhoto = reviewPhotoId ? (photoById.get(reviewPhotoId) ?? null) : null
   const reviewGroup = reviewPhoto?.groupId ? (groupById.get(reviewPhoto.groupId) ?? null) : null
-  const comparePhotos = useMemo(
-    () =>
-      comparePhotoIds
-        .map((id) => photoById.get(id) ?? null)
-        .filter((photo): photo is PhotoRecord => photo !== null),
-    [comparePhotoIds, photoById],
-  )
   const activeSpecies = useMemo(
     () =>
       speciesRecords.find((species) => species.id === activeSpeciesId) ??
@@ -2229,7 +2211,6 @@ export default function App() {
     sseRestartKey + engineSseKey,
   )
   const setDecisionMutation = useSetDecision(activeFolderId)
-  const batchSetDecisionsMutation = useBatchSetDecisions(activeFolderId)
   const setSpeciesOverrideMutation = useSetSpeciesOverride(activeFolderId)
 
   const handleThumbnailLoadStatus = useCallback(
@@ -2559,7 +2540,7 @@ export default function App() {
   }
 
   useEffect(() => {
-    if (route !== 'selection' || reviewPhotoId !== null || compareOpen) return
+    if (route !== 'selection' || reviewPhotoId !== null) return
     if (!focusedPhotoId || !flatSelectionPhotos.some((photo) => photo.id === focusedPhotoId)) return
 
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -2571,46 +2552,7 @@ export default function App() {
 
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [compareOpen, flatSelectionPhotos, focusedPhotoId, reviewPhotoId, route])
-
-  function handleOpenCompare() {
-    if (comparePhotos.length >= 2) {
-      startTransition(() => setCompareOpen(true))
-    }
-  }
-
-  function handleKeepBestOne() {
-    const bestPhoto = comparePhotos.toSorted(
-      (left, right) => (right.finalScore ?? -1) - (left.finalScore ?? -1),
-    )[0]
-    if (!bestPhoto) return
-
-    const updates: Array<[string, DecisionValue]> = comparePhotoIds.map((pid) => [
-      pid,
-      pid === bestPhoto.id ? 'select' : 'reject',
-    ])
-
-    // 乐观更新
-    startTransition(() => {
-      setWorkspace((current) => ({
-        ...current,
-        photos: current.photos.map((photo) => {
-          if (!comparePhotoIds.includes(photo.id)) return photo
-          return {
-            ...photo,
-            decision: photo.id === bestPhoto.id ? 'select' : 'reject',
-          }
-        }),
-      }))
-      clearCompare()
-    })
-    // 批量落库
-    batchSetDecisionsMutation.mutate(updates, {
-      onError: (err) => {
-        console.warn('Failed to persist batch decisions:', err)
-      },
-    })
-  }
+  }, [flatSelectionPhotos, focusedPhotoId, reviewPhotoId, route])
 
   return (
     <AppShell
@@ -2631,8 +2573,6 @@ export default function App() {
           activeQuickFilters={activeQuickFilters}
           activeSort={activeSort}
           analysisStarting={startBatch.isPending}
-          compareCount={comparePhotoIds.length}
-          compareEnabled={comparePhotos.length >= 2}
           filteredGroups={folderGroups}
           flatPhotos={flatSelectionPhotos}
           focusedPhoto={focusedPhoto}
@@ -2641,7 +2581,6 @@ export default function App() {
           folders={visibleFolders}
           onThumbnailLoadStatus={handleThumbnailLoadStatus}
           onOpenFolderContextMenu={openFolderContextMenu}
-          onOpenCompare={handleOpenCompare}
           onOpenExport={openExportForActiveFolder}
           onOpenReview={handleOpenReview}
           onRelinkFolder={handleRelinkFolder}
@@ -2649,7 +2588,6 @@ export default function App() {
           onSelectFolder={handleSelectFolder}
           onSetDecision={handleSetDecision}
           onStartAnalysis={handleStartAnalysis}
-          onToggleCompare={toggleComparePhotoId}
           progressEvent={progressEvent}
           relinkingFolderId={relinkingFolderId}
           setActiveQuickFilter={setActiveQuickFilter}
@@ -2690,23 +2628,12 @@ export default function App() {
         <ReviewModal
           detail={{ photo: reviewPhoto, group: reviewGroup }}
           groupPhotos={reviewGroupPhotos}
-          onAddToCompare={toggleComparePhotoId}
           onClose={() => setReviewPhotoId(null)}
           onSelectPhoto={handleOpenReview}
           onSetDecision={handleSetDecision}
           onSetSpeciesOverride={handleSetSpeciesOverride}
           onThumbnailLoadStatus={handleThumbnailLoadStatus}
           photos={reviewPhotos}
-          t={t}
-        />
-      ) : null}
-
-      {compareOpen ? (
-        <CompareModal
-          onClose={clearCompare}
-          onKeepBestOne={handleKeepBestOne}
-          onSetDecision={handleSetDecision}
-          photos={comparePhotos}
           t={t}
         />
       ) : null}
@@ -3341,15 +3268,12 @@ function SelectionScreen({
   activeQuickFilters,
   activeSort,
   analysisStarting,
-  compareCount,
-  compareEnabled,
   filteredGroups,
   flatPhotos,
   focusedPhoto,
   focusedPhotoId,
   folderPhotos,
   folders,
-  onOpenCompare,
   onOpenExport,
   onOpenFolderContextMenu,
   onOpenReview,
@@ -3359,7 +3283,6 @@ function SelectionScreen({
   onSetDecision,
   onStartAnalysis,
   onThumbnailLoadStatus,
-  onToggleCompare,
   progressEvent,
   relinkingFolderId,
   setActiveQuickFilter,
@@ -3376,15 +3299,12 @@ function SelectionScreen({
   activeQuickFilters: QuickFilter[]
   activeSort: SortMode
   analysisStarting: boolean
-  compareCount: number
-  compareEnabled: boolean
   filteredGroups: Array<{ group: PhotoGroupRecord; photos: PhotoRecord[] }>
   flatPhotos: PhotoRecord[]
   focusedPhoto: PhotoRecord | null
   focusedPhotoId: string | null
   folderPhotos: PhotoRecord[]
   folders: FolderRecord[]
-  onOpenCompare: () => void
   onOpenExport: () => void
   onOpenFolderContextMenu: (folder: FolderRecord, event: ReactMouseEvent<HTMLElement>) => void
   onOpenReview: (photoId: string) => void
@@ -3394,7 +3314,6 @@ function SelectionScreen({
   onSetDecision: (photoId: string, decision: SelectionDecision) => void
   onStartAnalysis: () => void
   onThumbnailLoadStatus: (photoId: string, status: ThumbnailLoadStatus) => void
-  onToggleCompare: (photoId: string) => void
   progressEvent: AnalysisProgressEventLite | null
   relinkingFolderId: string | null
   setActiveQuickFilter: (filter: QuickFilter) => void
@@ -3460,9 +3379,6 @@ function SelectionScreen({
         <SelectionControls
           activeQuickFilters={activeQuickFilters}
           activeSort={activeSort}
-          compareCount={compareCount}
-          compareEnabled={compareEnabled}
-          onOpenCompare={onOpenCompare}
           setActiveQuickFilter={setActiveQuickFilter}
           setActiveSort={setActiveSort}
           setViewMode={setViewMode}
@@ -3498,7 +3414,6 @@ function SelectionScreen({
       <InspectorPanel
         onOpenReview={onOpenReview}
         onSetDecision={onSetDecision}
-        onToggleCompare={onToggleCompare}
         photo={focusedPhoto}
         setFocusedPhotoId={setFocusedPhotoId}
         sourceMissing={activeFolder.status === 'path_missing'}
@@ -3878,9 +3793,6 @@ function MetricStrip({
 function SelectionControls({
   activeQuickFilters,
   activeSort,
-  compareCount,
-  compareEnabled,
-  onOpenCompare,
   setActiveQuickFilter,
   setActiveSort,
   setViewMode,
@@ -3889,9 +3801,6 @@ function SelectionControls({
 }: {
   activeQuickFilters: QuickFilter[]
   activeSort: SortMode
-  compareCount: number
-  compareEnabled: boolean
-  onOpenCompare: () => void
   setActiveQuickFilter: (filter: QuickFilter) => void
   setActiveSort: (sort: SortMode) => void
   setViewMode: (mode: ViewMode) => void
@@ -3937,16 +3846,6 @@ function SelectionControls({
             </button>
           ))}
         </div>
-        <button
-          className="button-ghost button-compact"
-          disabled={!compareEnabled}
-          onClick={onOpenCompare}
-          type="button"
-        >
-          <Waypoints className="h-4 w-4" />
-          {t('selection.compare.action')}
-          <span>{compareCount}</span>
-        </button>
       </div>
     </section>
   )
@@ -4543,7 +4442,6 @@ function ExternalEditorActions({
 function InspectorPanel({
   onOpenReview,
   onSetDecision,
-  onToggleCompare,
   photo,
   setFocusedPhotoId,
   sourceMissing,
@@ -4551,7 +4449,6 @@ function InspectorPanel({
 }: {
   onOpenReview: (photoId: string) => void
   onSetDecision: (photoId: string, decision: SelectionDecision) => void
-  onToggleCompare: (photoId: string) => void
   photo: PhotoRecord | null
   setFocusedPhotoId: (photoId: string | null) => void
   sourceMissing: boolean
@@ -4633,14 +4530,6 @@ function InspectorPanel({
             >
               <X className="h-4 w-4" />
               {t('selection.actions.reject')}
-            </button>
-            <button
-              className="button-ghost"
-              onClick={() => onToggleCompare(photo.id)}
-              type="button"
-            >
-              <Waypoints className="h-4 w-4" />
-              {t('selection.actions.compare')}
             </button>
             <button className="text-button" onClick={() => onOpenReview(photo.id)} type="button">
               {t('selection.review.label')}
@@ -5176,85 +5065,6 @@ function SpeciesPhotosModal({
         ) : (
           <p className="archive-map-empty">{t('archive.photos.empty')}</p>
         )}
-      </div>
-    </div>
-  )
-}
-
-function CompareModal({
-  onClose,
-  onKeepBestOne,
-  onSetDecision,
-  photos,
-  t,
-}: {
-  onClose: () => void
-  onKeepBestOne: () => void
-  onSetDecision: (photoId: string, decision: SelectionDecision) => void
-  photos: PhotoRecord[]
-  t: ReturnType<typeof useTranslation>['t']
-}) {
-  return (
-    <div className="overlay-backdrop">
-      <div className="compare-panel">
-        <div className="modal-heading">
-          <div>
-            <SectionLabel label={t('selection.compare.label')} />
-            <h2>{t('selection.compare.title')}</h2>
-          </div>
-          <div className="action-row">
-            <button className="button-primary button-compact" onClick={onKeepBestOne} type="button">
-              <Check className="h-4 w-4" />
-              {t('selection.compare.keepBest')}
-            </button>
-            <IconButton label={t('common.close')} onClick={onClose}>
-              <X className="h-4 w-4" />
-            </IconButton>
-          </div>
-        </div>
-        <div className="compare-grid">
-          {photos.map((photo) => (
-            <article className="compare-card" key={photo.id}>
-              <div
-                className="archive-card__image"
-                style={{ backgroundImage: photo.previewGradient }}
-              />
-              <div className="compare-card__body">
-                <div>
-                  <strong>{formatPhotoSpeciesDisplay(photo, t)}</strong>
-                  <small>{photo.fileName}</small>
-                </div>
-                <b>{formatScore(photo.finalScore)}</b>
-                <div className="action-row">
-                  <IconButton
-                    label={t('selection.actions.select')}
-                    onClick={() => onSetDecision(photo.id, 'select')}
-                  >
-                    <Sparkles className="h-4 w-4" />
-                  </IconButton>
-                  <IconButton
-                    label={t('selection.actions.usable')}
-                    onClick={() => onSetDecision(photo.id, 'usable')}
-                  >
-                    <Check className="h-4 w-4" />
-                  </IconButton>
-                  <IconButton
-                    label={t('selection.actions.record')}
-                    onClick={() => onSetDecision(photo.id, 'record')}
-                  >
-                    <Clock3 className="h-4 w-4" />
-                  </IconButton>
-                  <IconButton
-                    label={t('selection.actions.reject')}
-                    onClick={() => onSetDecision(photo.id, 'reject')}
-                  >
-                    <X className="h-4 w-4" />
-                  </IconButton>
-                </div>
-              </div>
-            </article>
-          ))}
-        </div>
       </div>
     </div>
   )

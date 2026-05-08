@@ -1428,8 +1428,7 @@ button:disabled {
 
 .folder-line small,
 .folder-rail-item small,
-.archive-card small,
-.compare-card small {
+.archive-card small {
   display: block;
   margin-top: 5px;
   overflow: hidden;
@@ -2000,8 +1999,7 @@ button:disabled {
 }
 
 .photo-grid,
-.archive-grid,
-.compare-grid {
+.archive-grid {
   display: grid;
   gap: 18px;
 }
@@ -2426,8 +2424,7 @@ button:disabled {
 }
 
 .photo-preview__bottom strong,
-.archive-card strong,
-.compare-card strong {
+.archive-card strong {
   display: block;
   color: var(--pl-fg-0);
   font-size: 16px;
@@ -2494,8 +2491,7 @@ button:disabled {
 }
 
 .photo-preview__bottom b,
-.archive-card b,
-.compare-card b {
+.archive-card b {
   flex: none;
   color: var(--pl-fg-0);
   font-family: var(--pl-font-data);
@@ -4319,7 +4315,6 @@ button:disabled {
 
 .review-panel,
 .species-photo-panel,
-.compare-panel,
 .export-drawer,
 .settings-panel {
   overflow: hidden;
@@ -6187,37 +6182,6 @@ button:disabled {
 .review-detail .review-reason {
   font-size: 14px;
   line-height: 1.55;
-}
-
-.compare-panel {
-  width: min(1240px, calc(100vw - 48px));
-  max-height: calc(100vh - 72px);
-  padding: 24px;
-}
-
-.compare-grid {
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  margin-top: 22px;
-}
-
-.compare-card {
-  overflow: hidden;
-  border: 1px solid var(--pl-border-0);
-  border-radius: var(--pl-radius-lg);
-  transition:
-    border-color var(--pl-motion-fast) var(--pl-ease),
-    transform var(--pl-motion-fast) var(--pl-ease);
-}
-
-.compare-card:hover {
-  border-color: rgba(255, 255, 255, 0.4);
-  transform: translateY(-2px);
-}
-
-.compare-card__body {
-  display: grid;
-  gap: 14px;
-  padding: 14px;
 }
 
 .export-drawer {

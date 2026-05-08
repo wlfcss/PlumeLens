@@ -19,10 +19,8 @@ interface UIState {
   viewMode: ViewMode
   searchQuery: string
   focusedPhotoId: string | null
-  comparePhotoIds: string[]
   reviewPhotoId: string | null
   inspectorOpen: boolean
-  compareOpen: boolean
   settingsOpen: boolean
   reportExpanded: boolean
   setRoute: (route: AppRoute) => void
@@ -37,11 +35,8 @@ interface UIState {
   setFocusedPhotoId: (photoId: string | null) => void
   setReviewPhotoId: (photoId: string | null) => void
   setInspectorOpen: (open: boolean) => void
-  setCompareOpen: (open: boolean) => void
   setSettingsOpen: (open: boolean) => void
   toggleReportExpanded: () => void
-  toggleComparePhotoId: (photoId: string) => void
-  clearCompare: () => void
 }
 
 export const useUIStore = create<UIState>()((set) => ({
@@ -54,10 +49,8 @@ export const useUIStore = create<UIState>()((set) => ({
   viewMode: 'grouped',
   searchQuery: '',
   focusedPhotoId: null,
-  comparePhotoIds: [],
   reviewPhotoId: null,
   inspectorOpen: true,
-  compareOpen: false,
   settingsOpen: false,
   reportExpanded: false,
   setRoute: (route) => set({ route }),
@@ -67,8 +60,6 @@ export const useUIStore = create<UIState>()((set) => ({
       activeFolderId,
       focusedPhotoId: null,
       reviewPhotoId: null,
-      comparePhotoIds: [],
-      compareOpen: false,
     }),
   setActiveSpeciesId: (activeSpeciesId) => set({ activeSpeciesId }),
   setActiveQuickFilter: (filter) =>
@@ -85,14 +76,6 @@ export const useUIStore = create<UIState>()((set) => ({
   setFocusedPhotoId: (focusedPhotoId) => set({ focusedPhotoId }),
   setReviewPhotoId: (reviewPhotoId) => set({ reviewPhotoId }),
   setInspectorOpen: (inspectorOpen) => set({ inspectorOpen }),
-  setCompareOpen: (compareOpen) => set({ compareOpen }),
   setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
   toggleReportExpanded: () => set((state) => ({ reportExpanded: !state.reportExpanded })),
-  toggleComparePhotoId: (photoId) =>
-    set((state) => ({
-      comparePhotoIds: state.comparePhotoIds.includes(photoId)
-        ? state.comparePhotoIds.filter((id) => id !== photoId)
-        : [...state.comparePhotoIds, photoId].slice(-4),
-    })),
-  clearCompare: () => set({ comparePhotoIds: [], compareOpen: false }),
 }))

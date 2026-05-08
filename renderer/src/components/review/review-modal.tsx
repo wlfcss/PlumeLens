@@ -21,7 +21,6 @@ import {
   Maximize2,
   Search,
   Sparkles,
-  Waypoints,
   X,
 } from 'lucide-react'
 import { useVirtualizer } from '@tanstack/react-virtual'
@@ -74,7 +73,6 @@ const REVIEW_FILMSTRIP_ITEM_ESTIMATE = REVIEW_FILMSTRIP_ITEM_WIDTH + REVIEW_FILM
 export function ReviewModal({
   detail,
   groupPhotos,
-  onAddToCompare,
   onClose,
   onSelectPhoto,
   onSetDecision,
@@ -85,7 +83,6 @@ export function ReviewModal({
 }: {
   detail: ReviewDetail
   groupPhotos: PhotoRecord[]
-  onAddToCompare: (photoId: string) => void
   onClose: () => void
   onSelectPhoto: (photoId: string) => void
   onSetDecision: (photoId: string, decision: SelectionDecision) => void
@@ -240,15 +237,11 @@ export function ReviewModal({
         onSetDecision(photo.id, 'reject')
         return
       }
-      if (event.key.toLowerCase() === 'c') {
-        event.preventDefault()
-        onAddToCompare(photo.id)
-      }
     }
 
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [fullscreenOpen, onAddToCompare, onClose, onSetDecision, photo.id, selectRelativePhoto])
+  }, [fullscreenOpen, onClose, onSetDecision, photo.id, selectRelativePhoto])
 
   // IQA 裁切框（与后端 expand_for_iqa 一致：2.5× + 比例约束 + cap + shift）
   const iqaCrop = useMemo(() => {
@@ -569,10 +562,6 @@ export function ReviewModal({
             >
               <X className="h-4 w-4" />
               {t('selection.actions.reject')}
-            </button>
-            <button className="button-ghost" onClick={() => onAddToCompare(photo.id)} type="button">
-              <Waypoints className="h-4 w-4" />
-              {t('selection.actions.compare')}
             </button>
           </div>
         </aside>

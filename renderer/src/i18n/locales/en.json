@@ -307,8 +307,7 @@
       "select": "Select",
       "usable": "Usable",
       "record": "Record",
-      "reject": "Reject",
-      "compare": "Compare"
+      "reject": "Reject"
     },
     "inspector": {
       "label": "Inspector",
@@ -411,12 +410,6 @@
       "manualOnly": "Manual",
       "noLatin": "No scientific name",
       "search": "Search Chinese, English, or scientific name"
-    },
-    "compare": {
-      "label": "Compare mode",
-      "title": "Compare similar frames side by side",
-      "action": "Open compare",
-      "keepBest": "Keep best 1"
     },
     "exif": {
       "shutter": "Shutter",

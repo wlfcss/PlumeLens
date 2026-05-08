@@ -307,8 +307,7 @@
       "select": "精选",
       "usable": "可用",
       "record": "记录",
-      "reject": "淘汰",
-      "compare": "加入对比"
+      "reject": "淘汰"
     },
     "inspector": {
       "label": "信息抽屉",
@@ -411,12 +410,6 @@
       "manualOnly": "手动",
       "noLatin": "无拉丁名",
       "search": "搜索中文名、英文名或拉丁名"
-    },
-    "compare": {
-      "label": "对比模式",
-      "title": "相似照片并排对比",
-      "action": "进入对比",
-      "keepBest": "保留最佳 1 张"
     },
     "exif": {
       "shutter": "快门",
