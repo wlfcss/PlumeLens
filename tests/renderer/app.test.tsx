@@ -131,10 +131,10 @@ describe('App', () => {
     const allSpecies = listAllSpecies()
     const modelExtras = allSpecies.filter((species) => species.in_china_v12 === false)
 
-    expect(allSpecies).toHaveLength(1535)
-    expect(modelExtras).toHaveLength(19)
+    expect(allSpecies).toHaveLength(1591)
+    expect(modelExtras).toHaveLength(77)
     expect(modelExtras.every((species) => species.is_trained)).toBe(true)
-    expect(modelExtras.map((species) => species.canonical_sci)).toContain('Pygoscelis papua')
+    expect(modelExtras.map((species) => species.canonical_sci)).toContain('Agapornis fischeri')
   })
 
   it('resolves only safe canonical aliases', () => {
@@ -637,8 +637,8 @@ describe('App', () => {
 
     expect(groupIds.slice(0, 2)).toEqual(['protected1', 'protected2'])
     expect(groupIds.indexOf('regular')).toBeGreaterThan(groupIds.indexOf('protected2'))
-    expect(groups.find((group) => group.id === 'protected1')?.species).toHaveLength(90)
-    expect(groups.find((group) => group.id === 'protected2')?.species).toHaveLength(300)
+    expect(groups.find((group) => group.id === 'protected1')?.species).toHaveLength(87)
+    expect(groups.find((group) => group.id === 'protected2')?.species).toHaveLength(295)
     expect(groups.find((group) => group.id === 'regular')?.litCount).toBe(1)
   })
 

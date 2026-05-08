@@ -1,6 +1,6 @@
 # PlumeLens Model Assets
 
-本目录包含 PlumeLens 鸟类照片分析管线所使用的 ONNX 模型、torch species v3 资产与配套元数据。
+本目录包含 PlumeLens 鸟类照片分析管线所使用的 ONNX 模型、torch species v4 资产与配套元数据。
 
 ## 模型总览
 
@@ -10,22 +10,22 @@
 | bird_visibility v1.1 | `bird_visibility.onnx` | 98.0 MB | 头部/眼睛关键点 + 可见性判定 |
 | CLIPIQA+ | `clipiqa_plus.onnx` | 293 MB | 语义画质评估（含 CLIP ViT backbone） |
 | HyperIQA | `hyperiqa.onnx` | 104 MB | 技术画质评估（含 ResNet50 backbone + HyperNet forward_patch） |
-| DINOv3 species v3 backbone | `species/backbone/model.safetensors` | 578 MB | torch/transformers 鸟种特征提取（**不入 git**） |
-| DINOv3 species v3 heads | `species/heads/seed*.pt` × 8 | 267 MB | 8-head 集成 → 1535 类 softmax（1301 训练类） |
+| DINOv3 species v4 backbone | `species/backbone/model.safetensors` | 578 MB | torch/transformers 鸟种特征提取（**不入 git**） |
+| DINOv3 species v4 adapter | `species/v4/seed42_adapter.pt` | 31.6 MB | LoRA + species head + reject head → 1591 类三态识别（**不入 git**） |
 
 配套元数据：
 
 | 文件 | 大小 | 内容 |
 |------|------|------|
 | `bird_visibility_config.json` | 1 KB | 姿态模型校准阈值 |
-| `species/canonical_extended.parquet` | 44 KB | 1535 类鸟类分类表（中/拉丁/英文名 + IUCN + 保护等级） |
-| `species/species_list_1301.parquet` | 52 KB | 1301 个有训练数据的 model_output_id mask |
-| `species_wiki.parquet` | 925 KB | 1535 种 Wikipedia 首段介绍（zh + en + 缩略图 URL，zh 99%+ 覆盖） |
+| `species/canonical_extended.parquet` | 约 100 KB | 1591 类鸟类分类表（class_id + 中/拉丁/英文名 + IUCN + 保护等级） |
+| `species/v4_calibration_policy.json` | 12 KB | `balanced_v1` 三态阈值：recognized / uncertain / unrecognized |
+| `species_wiki.parquet` | 925 KB | 旧 1535 种 Wikipedia 首段介绍（v4 extra 物种暂用分类表 fallback） |
 | `*.MODEL_CARD.md` | — | 各模型交付文档 |
 
 `species_wiki.parquet` schema：`canonical_sci` (主键与 taxonomy 对齐) + `zh_title/zh_extract/zh_url` + `en_title/en_extract/en_url` + `image_url` + `updated_at`。由 [`scripts/fetch_species_wiki.py`](../../scripts/fetch_species_wiki.py) 通过 MediaWiki action API 批量爬取。
 
-**合计：~1.4 GB**
+**合计：~1.2 GB**
 
 ## 管线调用顺序
 
@@ -36,9 +36,9 @@
   ├─ bbox +10% padding → bird_visibility (640) → 头部/眼睛关键点 + head_visible / eye_visible
   ├─ bbox 2.5× 语义裁切 → CLIPIQA+
   ├─ bbox +10% 技术裁切 → HyperIQA → 综合画质分 → 4 档分级
-  └─ head_visible && eye_visible 时：
-     ↓ DINOv3 ViT-L/16 torch backbone (480px) → 2048-d 特征
-     ↓ 8 个 torch head softmax 平均 → 1535 类 top-K（ghost 类由 trained_mask 清零）
+  └─ grade 满足 species_min_grade 时：
+     ↓ DINOv3 ViT-L/16 torch backbone (384px) + LoRA → 2048-d 特征
+     ↓ species head + reject head → 1591 类 top-K + 三态识别
 ```
 
 ## 各模型详情
@@ -76,44 +76,49 @@
 
 完整规格见 [`dinov3_species.MODEL_CARD.md`](./dinov3_species.MODEL_CARD.md)。
 
-- **架构**：DINOv3-ViT-L/16 (frozen) + 8-head ensemble
+- **架构**：DINOv3-ViT-L/16 (frozen) + q/v LoRA adapter + species head + reject head
 - **训练数据**：photos_v4_full + GBIF + eBird/Macaulay + 多学术数据集
-- **Test top-1**：约 91.5%
-- **覆盖**：1535 类输出，其中 1301 类有训练数据；234 个 ghost 类由 trained mask 清零防误命中
+- **Test top-1**：seed42 top-1 94.30%，top-5 98.50%，macro 93.90%，reject AUC 0.9106
+- **覆盖**：1591 类输出，class_id 与 `canonical_extended.parquet` 一一对应
 
 **推理流程**：
 
 ```
-bbox crop → square expand(+15%, min side 30%) → Resize(short edge=480)+CenterCrop
+bbox crop → square expand(+15%, no forced min side) → Resize(short edge=384)+CenterCrop
   → ImageNet normalize → transformers AutoModel(DINOv3 ViT-L/16)
   → CLS token ⊕ mean(patch tokens) = 2048-d 特征
-  → 8 个 HeadOnlyClassifier(.pt) softmax 平均
-  → trained_mask 清零 ghost 类
+  → species head softmax + reject head sigmoid
+  → balanced_v1 policy → recognized / uncertain / unrecognized
   → top-K → species/canonical_extended.parquet 查询元数据
 ```
 
 **分类表字段**（`species/canonical_extended.parquet`）：
 - `canonical_sci` / `canonical_zh` / `canonical_en` — 拉丁名/中文名/英文名
+- `class_id` / `scope` — v4 模型输出下标 / v12 或 extra
 - `order_sci` / `family_sci` / `family_zh` — 目/科（拉丁 + 中文）
 - `iucn` — LC/NT/VU/EN/CR/NR/DD
 - `protect_level` — 一级 / 二级 / null
 - `note` — 备注
 
-**重要**：species_head 输出 1535 维，但只有 **1301 种有训练数据**。未训练的 ghost 类由 `species_list_1301.parquet` 生成的 trained mask 清零，前端 top-K 仍建议过滤 confidence < 0.01。
+**重要**：v4 输出是业务三态，不只是 top-1 概率：
 
-**为什么 species v3 不走 ONNX**：
+- `recognized`：可作为自动物种结论。
+- `uncertain`：只作为复核候选，API 标记为 `model_unconfirmed`，不进入羽迹有效物种。
+- `unrecognized`：拒识，不返回物种候选。
+
+**为什么 species v4 不走 ONNX**：
 
 - RoPE fp16 路径会 NaN，纯 ONNX 导出后准确率明显退化
 - CoreML EP 对 ViT 覆盖度差，且旧双尺度 ONNX 路线在 Mac 上慢
 - 当前正式路线：torch + transformers，MPS/CUDA 用 bf16，CPU 用 fp32
 
-**为什么 species v3 大文件不入 git**：
+**为什么 species v4 大文件不入 git**：
 
-`species/backbone/model.safetensors`（578 MB）与 `species/heads/*.pt`（共 267 MB）超过 GitHub 常规体积预期。我们选择不用 LFS，分发时由 `electron-builder` 通过 `extraResources` 打包：
+`species/backbone/model.safetensors`（578 MB）与 `species/v4/seed42_adapter.pt`（31.6 MB）超过 GitHub 常规体积预期。我们选择不用 LFS，分发时由 `electron-builder` 通过 `extraResources` 打包：
 
 - 开发机本地放在 `engine/models/species/`
 - 打包后放在 `Resources/models/species/`
-- `.gitignore` 排除 backbone safetensors 与 head ckpt
+- `.gitignore` 排除 backbone safetensors 与 adapter ckpt
 
 ### CLIPIQA+ / HyperIQA
 
@@ -137,7 +142,7 @@ bug 从未被发现。本次修复 (commit `3daec3f`+) 重新导出为 inline-we
 
 ## 版权说明
 
-- **yolo26l-bird-det.onnx** / **bird_visibility.onnx** / **DINOv3 鸟种分类 heads**：由 [wlfcss](https://github.com/wlfcss) 个人训练产出，他人使用需注明来源
+- **yolo26l-bird-det.onnx** / **bird_visibility.onnx** / **DINOv3 鸟种分类 adapter**：由 [wlfcss](https://github.com/wlfcss) 个人训练产出，他人使用需注明来源
 - **DINOv3 backbone**：Meta 的 DINOv3 LVD-1689M 预训练权重，遵循 [DINOv3 License](./dinov3_species.MODEL_CARD.md)（非商业限制，商业使用需与 Meta 确认）
 - **CLIPIQA+** / **HyperIQA**：基于公开 IQA 研究模型的 ONNX 导出，遵循原始论文及代码仓库的许可协议
 - **species/canonical_extended.parquet**：基于《中国鸟类名录 v12.0》整理

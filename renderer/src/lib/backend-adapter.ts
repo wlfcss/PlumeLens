@@ -283,6 +283,9 @@ export function buildPhotoRecordFromRow(
         latinName: candidate.canonical_sci ?? null,
         englishName: candidate.canonical_en ?? null,
         confidence: candidate.confidence ?? 0,
+        recognitionState: candidate.recognition_state,
+        rejectScore: candidate.reject_score,
+        top1Top2Margin: candidate.top1_top2_margin,
       }))
       .filter((candidate) => candidate.name.length > 0) ?? [],
   )
@@ -384,6 +387,9 @@ function buildBirdDetections(row: PhotoRow): PhotoRecord['birdDetections'] {
           latinName: candidate.canonical_sci ?? null,
           englishName: candidate.canonical_en ?? null,
           confidence: candidate.confidence ?? 0,
+          recognitionState: candidate.recognition_state,
+          rejectScore: candidate.reject_score,
+          top1Top2Margin: candidate.top1_top2_margin,
         }))
         .filter((candidate) => candidate.name.length > 0) ?? []
     const useConsensus =

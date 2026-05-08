@@ -16,8 +16,8 @@ dependencies = [
     "structlog>=25.0.0",
     # 场景分组：AKAZE 特征匹配 + HSV/LAB 颜色直方图（lingjian-v2 算法）
     "opencv-python-headless>=4.10.0",
-    # DINOv3 species v3：torch + transformers 直接 inference（safetensors backbone +
-    # .pt heads）。原 ONNX 路线已验证不可行（RoPE fp16 NaN + CoreML EP ViT 覆盖差，
+    # DINOv3 species v4：torch + transformers 直接 inference（safetensors backbone +
+    # LoRA/reject adapter）。原 ONNX 路线已验证不可行（RoPE fp16 NaN + CoreML EP ViT 覆盖差，
     # 转 ONNX 后准确率显著下降）。bf16 on MPS/CUDA, fp32 on CPU。
     "torch>=2.5.0",
     "torchvision>=0.20.0",

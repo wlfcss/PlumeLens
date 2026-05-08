@@ -62,8 +62,8 @@ class PoseInfo(BaseModel):
 class SpeciesCandidate(BaseModel):
     """One entry in the Top-K species classification result.
 
-    `confidence` 来自 ensemble softmax 平均后的概率。物种元数据查自
-    `species/canonical_extended.parquet`。
+    `confidence` 来自 species softmax 概率。v4 会附带 reject head 校准后的
+    recognition_state；只有 recognized 能作为自动物种结论，uncertain 仅供复核参考。
     """
 
     canonical_sci: str  # 拉丁学名（唯一 ID）
@@ -75,6 +75,9 @@ class SpeciesCandidate(BaseModel):
     iucn: str | None = None  # LC / NT / VU / EN / CR / NR / DD
     protect_level: str | None = None  # "一级" / "二级" / None
     confidence: float
+    recognition_state: str | None = None  # recognized / uncertain；unrecognized 不返回候选
+    reject_score: float | None = None
+    top1_top2_margin: float | None = None
 
 
 class BirdAnalysis(BaseModel):

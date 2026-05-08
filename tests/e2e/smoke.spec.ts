@@ -64,7 +64,7 @@ async function mockBackend(page: Page, state: MockState = { libraries: [DEFAULT_
             bird_visibility: { loaded: true, provider: 'CPUExecutionProvider' },
             clipiqa: { loaded: true, provider: 'CPUExecutionProvider' },
             hyperiqa: { loaded: true, provider: 'CPUExecutionProvider' },
-            dinov3_species_v3: { loaded: true, provider: 'torch:mps:torch.bfloat16' },
+            dinov3_species_v4: { loaded: true, provider: 'torch:mps:torch.bfloat16' },
           },
         },
       }),

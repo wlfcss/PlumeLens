@@ -138,6 +138,9 @@ export interface SpeciesCandidate {
   canonical_zh?: string
   canonical_en?: string
   confidence?: number
+  recognition_state?: 'recognized' | 'uncertain' | 'unrecognized'
+  reject_score?: number
+  top1_top2_margin?: number
 }
 
 export interface AfOverlayPoint {

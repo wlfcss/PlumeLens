@@ -21,14 +21,14 @@ files:
 #         ├── hyperiqa.onnx
 #         ├── bird_visibility_config.json
 #         ├── species_wiki.parquet
-#         └── species/             ← v3 DINOv3 species（torch + transformers）
+#         └── species/             ← v4 DINOv3 species（torch + transformers）
 #             ├── backbone/
 #             │   ├── config.json
 #             │   └── model.safetensors      （fp16 ~580MB）
-#             ├── heads/
-#             │   ├── seed42.pt … seed2024.pt （8 个 head ckpt，每个 ~33MB）
-#             ├── canonical_extended.parquet  （1535 类元数据）
-#             └── species_list_1301.parquet   （trained 1301 类的 model_output_id）
+#             ├── v4/
+#             │   └── seed42_adapter.pt       （LoRA + species/reject head ~32MB）
+#             ├── canonical_extended.parquet  （1591 类元数据）
+#             └── v4_calibration_policy.json  （recognized / uncertain / unrecognized 三态阈值）
 extraResources:
   - from: dist/plumelens-engine
     to: plumelens-engine
@@ -43,7 +43,7 @@ extraResources:
       - "*.onnx"
       - "*.parquet"
       - "*.json"
-  # species v3 的子目录（safetensors backbone + 8 head .pt + parquet）单独捞。
+  # species v4 的子目录（safetensors backbone + LoRA adapter + parquet/json）单独捞。
   # **/* 是全包，因此显式排除开发期临时产物，避免 .bak/缓存文件意外进 DMG。
   - from: engine/models/species
     to: models/species

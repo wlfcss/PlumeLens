@@ -218,11 +218,29 @@ def _species_candidate_confidence(candidate: Mapping[str, object]) -> float:
     return _clamp01(candidate.get("confidence"), default=0.0)
 
 
+def _species_candidate_state(candidate: Mapping[str, object]) -> str | None:
+    state = candidate.get("recognition_state")
+    return str(state) if state else None
+
+
+def _species_candidate_auto_eligible(candidate: Mapping[str, object]) -> bool:
+    """Whether a candidate may be used as an automatic species conclusion.
+
+    Legacy v3 results do not carry recognition_state, so `None` remains eligible.
+    v4 only allows explicit `recognized`; `uncertain` and `unrecognized` stay
+    review-only and must not be promoted by group consensus.
+    """
+    state = _species_candidate_state(candidate)
+    return state is None or state == "recognized"
+
+
 def _best_candidate(photo: PhotoRow) -> tuple[str | None, str | None, float]:
     candidates = photo.best_detection.species_candidates if photo.best_detection else []
     if not candidates:
         return None, None, 0.0
     first = candidates[0]
+    if not _species_candidate_auto_eligible(first):
+        return None, None, 0.0
     sci = _candidate_sci(first)
     if not sci:
         return None, None, 0.0
@@ -415,6 +433,8 @@ def _apply_group_species_consensus(photos: list[PhotoRow]) -> None:
             candidates = photo.best_detection.species_candidates
             if not candidates:
                 continue
+            if not _species_candidate_auto_eligible(candidates[0]):
+                continue
 
             weight = _consensus_photo_weight(photo)
             if weight <= 0:
@@ -481,6 +501,9 @@ def _apply_group_species_consensus(photos: list[PhotoRow]) -> None:
             photo.group_species_total = len(group_photos)
 
             if photo.bird_count != 1 or photo.best_detection is None or photo.manual_species:
+                continue
+            candidates = photo.best_detection.species_candidates
+            if not candidates or not _species_candidate_auto_eligible(candidates[0]):
                 continue
             original_sci, _original_name, original_conf = _best_candidate(photo)
             if original_sci == winner_sci:
@@ -1003,17 +1026,29 @@ async def library_detail(
             latin = direct_latin
             if candidates:
                 first = candidates[0] or {}
+                if first.get("recognition_state") == "unrecognized":
+                    return None, None, False
                 latin = latin or first.get("canonical_sci")
             return str(detection["species"]), (str(latin) if latin else None), False
 
         candidates = detection.get("species_candidates") or []
         if candidates:
             first = candidates[0] or {}
+            if first.get("recognition_state") == "unrecognized":
+                return None, None, False
             sci = first.get("canonical_sci")
             name = first.get("canonical_zh") or first.get("canonical_en") or sci
             return (str(name) if name else None), (str(sci) if sci else None), False
 
         return None, None, False
+
+    def _candidate_recognition_state(detection: dict) -> str | None:
+        candidates = detection.get("species_candidates") or []
+        if not candidates:
+            return None
+        first = candidates[0] or {}
+        state = first.get("recognition_state")
+        return str(state) if state else None
 
     def _detection_score(detection: dict) -> float:
         quality = detection.get("quality") or {}
@@ -1064,12 +1099,18 @@ async def library_detail(
         # 优先级：manual > model > model_unconfirmed > none。
         # group_consensus / conflict 由 _apply_group_species_consensus 在装配后改写。
         head_confirmed = pose is not None and pose["head_visible"]
+        candidate_state = _candidate_recognition_state(detection)
         if manual:
             detection_source: str = "manual"
-        elif species:
-            detection_source = "model" if head_confirmed else "model_unconfirmed"
-        else:
+        elif not species or candidate_state == "unrecognized":
             detection_source = "none"
+        elif candidate_state == "uncertain":
+            detection_source = "model_unconfirmed"
+        else:
+            detection_source = "model" if head_confirmed else "model_unconfirmed"
+        if detection_source == "none":
+            species = None
+            latin = None
         return BirdDetectionDetail.model_validate(
             {
                 "index": index,

@@ -1,11 +1,11 @@
-"""Tests for v3 species classifier helpers + taxonomy.
+"""Tests for DINOv3 species v4 helpers + taxonomy.
 
-注意：v3 切到 torch + transformers 后，完整的 SpeciesClassifier 加载需要真实
-backbone safetensors + 8 head .pt（>800MB），不在 unit test 跑。这里只测：
-- expand_bbox_to_square：纯几何，无依赖
-- preprocess_for_dinov3：torch tensor 输出
-- SpeciesTaxonomy：基于动态写入的 parquet 文件
-- HeadOnlyClassifier.from_ckpt：基于 in-memory 构造的 state_dict
+完整 SpeciesClassifier 需要真实 HF backbone + v4 adapter（>600MB），unit test 只覆盖：
+- expand_bbox_to_square：纯几何
+- preprocess_for_dinov3：384px tensor 输出
+- SpeciesPolicy：v4 reject/recognition 三态阈值
+- SpeciesTaxonomy：class_id 输出顺序与 legacy mask 兼容
+- LoRALinear：LoRA wrapper shape 与 frozen base
 """
 
 from __future__ import annotations
@@ -17,23 +17,27 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 import torch
+import torch.nn as nn
 from engine.pipeline.species import (
     DEFAULT_IMAGE_SIZE,
     DEFAULT_MIN_CONFIDENCE,
     IMAGENET_MEAN,
     IMAGENET_STD,
-    HeadOnlyClassifier,
+    LoRALinear,
+    SpeciesPolicy,
     SpeciesTaxonomy,
     expand_bbox_to_square,
     preprocess_for_dinov3,
 )
 
 
-# ============================================================
-# expand_bbox_to_square
-# ============================================================
 class TestExpandBboxToSquare:
-    def test_center_bbox_small_enforces_min_side(self) -> None:
+    def test_center_bbox_uses_v4_margin_without_legacy_min_side(self) -> None:
+        left, top, right, bottom = expand_bbox_to_square(0.5, 0.5, 0.05, 0.05, 1000, 1000)
+        assert right - left == bottom - top
+        assert right - left == 58
+
+    def test_legacy_min_side_can_still_be_enabled(self) -> None:
         left, top, right, bottom = expand_bbox_to_square(
             0.5,
             0.5,
@@ -41,35 +45,22 @@ class TestExpandBboxToSquare:
             0.05,
             1000,
             1000,
+            min_side_frac=0.30,
         )
-        side_w = right - left
-        side_h = bottom - top
-        assert side_w == side_h
-        assert side_w >= 300
+        assert right - left == bottom - top
+        assert right - left >= 300
 
     def test_bbox_near_edge_gets_clamped(self) -> None:
-        left, top, right, bottom = expand_bbox_to_square(
-            0.95,
-            0.95,
-            0.1,
-            0.1,
-            1000,
-            1000,
-        )
+        left, top, right, bottom = expand_bbox_to_square(0.95, 0.95, 0.1, 0.1, 1000, 1000)
         assert right <= 1000
         assert bottom <= 1000
         assert left >= 0
         assert top >= 0
 
     def test_returns_integer_coords(self) -> None:
-        coords = expand_bbox_to_square(0.5, 0.5, 0.3, 0.3, 800, 600)
-        for v in coords:
-            assert isinstance(v, int)
+        assert all(isinstance(v, int) for v in expand_bbox_to_square(0.5, 0.5, 0.3, 0.3, 800, 600))
 
 
-# ============================================================
-# preprocess_for_dinov3 — 输出 torch tensor
-# ============================================================
 class TestPreprocessForDinov3:
     def test_output_shape_and_dtype(self) -> None:
         img = np.random.rand(300, 400, 3).astype(np.float32)
@@ -80,101 +71,96 @@ class TestPreprocessForDinov3:
 
     def test_imagenet_normalization_applied(self) -> None:
         img = np.ones((300, 400, 3), dtype=np.float32)
-        x = preprocess_for_dinov3(img, 480)
+        x = preprocess_for_dinov3(img, DEFAULT_IMAGE_SIZE)
         r_channel_mean = float(x[0, 0].mean())
         expected = (1.0 - IMAGENET_MEAN[0]) / IMAGENET_STD[0]
         assert r_channel_mean == pytest.approx(expected, abs=0.02)
 
-    def test_default_size_is_480(self) -> None:
-        assert DEFAULT_IMAGE_SIZE == 480
+    def test_default_size_is_384(self) -> None:
+        assert DEFAULT_IMAGE_SIZE == 384
 
 
-# ============================================================
-# HeadOnlyClassifier — from_ckpt 推断结构 + load
-# ============================================================
-class TestHeadOnlyClassifier:
-    def _make_synthetic_ckpt(self, tmp_path: Path) -> Path:
-        """造一个 head ckpt，模拟 v3 LayerNorm + MLP-2048 + species/order/family/genus。"""
-        feature_dim = 2048
-        num_species = 1535
-        num_orders = 31
-        num_families = 124
-        num_genera = 521
-        mlp_hidden = 2048
-        h = HeadOnlyClassifier(
-            feature_dim=feature_dim,
-            num_species=num_species,
-            head_type="mlp",
-            mlp_hidden=mlp_hidden,
-            num_orders=num_orders,
-            num_families=num_families,
-            num_genera=num_genera,
-        )
-        ckpt = {"model_state": h.state_dict(), "epoch": 1, "args": {}, "metrics": {}}
-        ck_path = tmp_path / "fake_head.pt"
-        torch.save(ckpt, str(ck_path))
-        return ck_path
+class TestSpeciesPolicy:
+    def test_balanced_policy_recognizes_confident_known_species(self) -> None:
+        policy = SpeciesPolicy.balanced_default()
+        assert policy.decide(reject_score=0.1, top1_prob=0.7, margin=0.3) == "recognized"
 
-    def test_from_ckpt_loads_correct_shape(self, tmp_path: Path) -> None:
-        ck = self._make_synthetic_ckpt(tmp_path)
-        head = HeadOnlyClassifier.from_ckpt(ck)
-        assert head.species_head.weight.shape == (1535, 2048)
-        assert head.head_type == "mlp"
-        assert head.order_head is not None
+    def test_balanced_policy_sends_low_margin_to_review(self) -> None:
+        policy = SpeciesPolicy.balanced_default()
+        assert policy.decide(reject_score=0.1, top1_prob=0.7, margin=0.01) == "uncertain"
 
-    def test_forward_returns_species_logits(self, tmp_path: Path) -> None:
-        ck = self._make_synthetic_ckpt(tmp_path)
-        head = HeadOnlyClassifier.from_ckpt(ck)
-        feat = torch.randn(2, 2048)
-        out = head(feat)
-        assert tuple(out.shape) == (2, 1535)
+    def test_balanced_policy_hard_rejects_unknown(self) -> None:
+        policy = SpeciesPolicy.balanced_default()
+        assert policy.decide(reject_score=0.99, top1_prob=0.9, margin=0.8) == "unrecognized"
+
+    def test_non_finite_scores_are_unrecognized(self) -> None:
+        policy = SpeciesPolicy.balanced_default()
+        assert policy.decide(reject_score=float("nan"), top1_prob=0.9, margin=0.8) == "unrecognized"
 
 
-# ============================================================
-# SpeciesTaxonomy — 真实读 parquet（in tmp_path）
-# ============================================================
+class TestLoRALinear:
+    def test_forward_preserves_base_shape_and_freezes_base(self) -> None:
+        base = nn.Linear(16, 8)
+        layer = LoRALinear(base, r=4, alpha=8.0, dropout=0.0)
+        x = torch.randn(2, 16)
+        y = layer(x)
+        assert tuple(y.shape) == (2, 8)
+        assert all(not p.requires_grad for p in layer.base.parameters())
+        assert layer.lora_A.weight.requires_grad
+        assert layer.lora_B.weight.requires_grad
+
+
 class TestSpeciesTaxonomy:
-    def _write_taxonomy(self, deploy_dir: Path, num_classes: int = 5) -> None:
-        """写两个 parquet：canonical_extended + species_list_1301（trained mask）。"""
+    def _write_v4_taxonomy(self, deploy_dir: Path, num_classes: int = 5) -> None:
         canonical = pa.table(
             {
-                "canonical_sci": [f"Species_{i:03d}" for i in range(num_classes)],
-                "canonical_zh": [f"物种{i}" for i in range(num_classes)],
-                "canonical_en": [f"sp_{i}" for i in range(num_classes)],
+                "class_id": pa.array([3, 1, 4, 0, 2][:num_classes], type=pa.int32()),
+                "canonical_sci": [f"Species_{i:03d}" for i in [3, 1, 4, 0, 2][:num_classes]],
+                "canonical_zh": [f"物种{i}" for i in [3, 1, 4, 0, 2][:num_classes]],
+                "canonical_en": [f"sp_{i}" for i in [3, 1, 4, 0, 2][:num_classes]],
                 "order_sci": ["ORDER_X"] * num_classes,
                 "family_sci": ["FAMILY_X"] * num_classes,
                 "family_zh": ["科X"] * num_classes,
                 "iucn": ["LC"] * num_classes,
                 "protect_level": [None] * num_classes,
+                "scope": ["v12"] * num_classes,
                 "note": [None] * num_classes,
             }
         )
         pq.write_table(canonical, str(deploy_dir / "canonical_extended.parquet"))
 
-        # 只有 even-index 的类有训练（model_output_id = 0, 2, 4, ...）
-        # 注意：model_output_id 必须基于"按字典序排序后的 index"
-        # Species_000 < Species_001 < ... ASCII 排序后，index 即名称中的数字
-        trained_indices = [i for i in range(num_classes) if i % 2 == 0]
+    def _write_legacy_taxonomy(self, deploy_dir: Path, num_classes: int = 5) -> None:
+        canonical = pa.table(
+            {
+                "canonical_sci": [f"Species_{i:03d}" for i in range(num_classes)],
+                "canonical_zh": [f"物种{i}" for i in range(num_classes)],
+                "canonical_en": [f"sp_{i}" for i in range(num_classes)],
+            }
+        )
+        pq.write_table(canonical, str(deploy_dir / "canonical_extended.parquet"))
         trained = pa.table(
             {
-                "model_output_id": trained_indices,
-                "canonical_sci": [f"Species_{i:03d}" for i in trained_indices],
+                "model_output_id": [0, 2, 4],
+                "canonical_sci": ["Species_000", "Species_002", "Species_004"],
             }
         )
         pq.write_table(trained, str(deploy_dir / "species_list_1301.parquet"))
 
-    def test_loads_canonical_and_trained_mask(self, tmp_path: Path) -> None:
-        self._write_taxonomy(tmp_path, num_classes=5)
+    def test_v4_uses_class_id_order_and_all_classes_are_trained(self, tmp_path: Path) -> None:
+        self._write_v4_taxonomy(tmp_path)
         tax = SpeciesTaxonomy(tmp_path)
         assert len(tax) == 5
-        # 字典序：Species_000 → idx 0
         assert tax.sci_at(0) == "Species_000"
         assert tax.sci_at(4) == "Species_004"
-        # trained mask: 偶数 index 为 True
+        assert tax.trained_mask.tolist() == [True, True, True, True, True]
+
+    def test_legacy_taxonomy_still_supports_trained_mask(self, tmp_path: Path) -> None:
+        self._write_legacy_taxonomy(tmp_path)
+        tax = SpeciesTaxonomy(tmp_path)
         assert tax.trained_mask.tolist() == [True, False, True, False, True]
 
     def test_lookup_returns_metadata(self, tmp_path: Path) -> None:
-        self._write_taxonomy(tmp_path, num_classes=3)
+        self._write_v4_taxonomy(tmp_path)
         tax = SpeciesTaxonomy(tmp_path)
         meta = tax.lookup("Species_001")
         assert meta is not None
@@ -182,19 +168,15 @@ class TestSpeciesTaxonomy:
         assert meta["iucn"] == "LC"
 
     def test_lookup_missing_returns_none(self, tmp_path: Path) -> None:
-        self._write_taxonomy(tmp_path, num_classes=3)
+        self._write_v4_taxonomy(tmp_path)
         tax = SpeciesTaxonomy(tmp_path)
         assert tax.lookup("MissingSpecies") is None
 
 
-# ============================================================
-# 健全性：constants 没飘
-# ============================================================
 def test_imagenet_constants_unchanged() -> None:
     assert IMAGENET_MEAN == (0.485, 0.456, 0.406)
     assert IMAGENET_STD == (0.229, 0.224, 0.225)
 
 
-def test_default_min_confidence_low_enough_to_pass_train_predictions() -> None:
-    # 0.01 既能挡 ghost class 偶然命中，又不会过滤训练良好的预测
+def test_default_min_confidence_remains_review_friendly() -> None:
     assert DEFAULT_MIN_CONFIDENCE == 0.01

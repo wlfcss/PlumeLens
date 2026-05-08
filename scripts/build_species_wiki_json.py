@@ -41,10 +41,20 @@ def main() -> None:
     canonical_rows = [r for r in pq.read_table(CANONICAL).to_pylist() if r.get("canonical_sci")]
     canonical_rows.sort(key=lambda r: r["canonical_sci"])
 
-    # 全部 canonical_extended 物种都进 bundle；is_trained 用 v3 训练输出表标注。
-    trained_set: set[str] = set()
-    china_listed_by_sci: dict[str, bool] = {}
-    if TRAINED.exists():
+    # 全部 canonical_extended 物种都进 bundle。v4 taxonomy 带 class_id，1591 类都可自动识别；
+    # legacy v3 taxonomy 才回退到 species_list_1301.parquet 标注 trained mask。
+    has_v4_class_id = bool(canonical_rows and "class_id" in canonical_rows[0])
+    if has_v4_class_id:
+        trained_set = {str(r["canonical_sci"]) for r in canonical_rows}
+        china_listed_by_sci = {
+            str(r["canonical_sci"]): str(r.get("scope") or "v12") != "extra"
+            for r in canonical_rows
+        }
+        print(
+            f"Tagging v4 trained species ({len(trained_set)} auto-recognisable) "
+            f"out of {len(canonical_rows)} total"
+        )
+    elif TRAINED.exists():
         trained_rows = pq.read_table(TRAINED).to_pylist()
         trained_set = {r["canonical_sci"] for r in trained_rows if r.get("canonical_sci")}
         china_listed_by_sci = {
@@ -57,6 +67,8 @@ def main() -> None:
             f"out of {len(canonical_rows)} total (manual tagging covers all)"
         )
     else:
+        trained_set = set()
+        china_listed_by_sci = {}
         print(f"WARNING: {TRAINED} not found; is_trained will default to false")
 
     # 编译成索引结构：{ canonical_sci: {...} }，按 sci 直接 O(1) 查询
@@ -81,7 +93,7 @@ def main() -> None:
             "image_url": wiki.get("image_url"),
             # True = 可被自动识别；False = 名录收录但训练样本不足，仅支持手动标注
             "is_trained": sci in trained_set,
-            # False = 1301 识别清单里的模型增补物种，不属于中国观鸟年报 v12.0 主名录。
+            # False = 模型增补物种，不属于中国观鸟年报 v12.0 主名录。
             "in_china_v12": china_listed_by_sci.get(sci, True),
         }
 

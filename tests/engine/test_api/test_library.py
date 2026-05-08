@@ -601,6 +601,94 @@ class TestListAndDetail:
         assert paged["photos"][0]["species_source"] == "group_consensus"
         assert paged["photos"][0]["group_species_latin"] == "Zosterops simplex"
 
+    async def test_v4_uncertain_candidate_is_not_promoted_by_group_consensus(
+        self,
+        real_client,
+    ) -> None:
+        """v4 uncertain 只能作为复核候选，不能被同组共识自动升级进羽迹。"""
+        client, tmp = real_client
+        lib_root = tmp / "lib_uncertain_consensus"
+        for name in ("a.jpg", "b.jpg", "c.jpg", "d.jpg"):
+            _make_jpeg(lib_root / name)
+        await client.post("/library/import", json={"root_path": str(lib_root)})
+
+        libs = (await client.get("/library")).json()
+        lib_id = libs[0]["id"]
+        photos = sorted(
+            (await client.get(f"/library/{lib_id}")).json()["photos"],
+            key=lambda p: p["file_name"],
+        )
+
+        def make_result(photo_id: str, state: str) -> str:
+            detection = {
+                "bbox": {"x1": 1, "y1": 2, "x2": 30, "y2": 40, "confidence": 0.9},
+                "quality": {"clipiqa": 0.7, "hyperiqa": 0.8, "combined": 0.76},
+                "grade": "select",
+                "pose": _make_pose(head_visible=True),
+                "species": "暗绿绣眼鸟" if state == "recognized" else None,
+                "species_candidates": [
+                    {
+                        "canonical_sci": "Zosterops simplex",
+                        "canonical_zh": "暗绿绣眼鸟",
+                        "confidence": 0.92 if state == "recognized" else 0.38,
+                        "recognition_state": state,
+                        "reject_score": 0.12 if state == "recognized" else 0.71,
+                        "top1_top2_margin": 0.22 if state == "recognized" else 0.04,
+                    }
+                ],
+            }
+            return json.dumps(
+                {
+                    "photo_id": photo_id,
+                    "pipeline_version": "test-v1",
+                    "bird_count": 1,
+                    "duration_ms": 12,
+                    "best": detection,
+                    "detections": [detection],
+                }
+            )
+
+        cases = [
+            ("a.jpg", "recognized"),
+            ("b.jpg", "recognized"),
+            ("c.jpg", "recognized"),
+            ("d.jpg", "uncertain"),
+        ]
+        async with aiosqlite.connect(tmp / "test.db") as conn:
+            for index, (file_name, state) in enumerate(cases):
+                photo = next(p for p in photos if p["file_name"] == file_name)
+                row_species = "暗绿绣眼鸟" if state == "recognized" else None
+                await conn.execute(
+                    "UPDATE photos SET scene_id = ?, file_mtime = ? WHERE id = ?",
+                    (0, f"2026-04-23T07:00:0{index}+00:00", photo["id"]),
+                )
+                await conn.execute(
+                    "INSERT INTO analysis_results (id, photo_id, pipeline_version, "
+                    "quality_score, grade, bird_count, species, result_json, created_at, "
+                    "is_active) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)",
+                    (
+                        f"ar-{file_name}",
+                        photo["id"],
+                        "test-v1",
+                        0.76,
+                        "select",
+                        1,
+                        row_species,
+                        make_result(photo["id"], state),
+                        "2026-04-23T07:00:00+00:00",
+                    ),
+                )
+            await conn.commit()
+
+        detail = (await client.get(f"/library/{lib_id}")).json()
+        by_name = {p["file_name"]: p for p in detail["photos"]}
+
+        assert by_name["a.jpg"]["species_source"] == "model"
+        assert by_name["d.jpg"]["species_source"] == "model_unconfirmed"
+        assert by_name["d.jpg"]["best_detection"]["species_source"] == "model_unconfirmed"
+        assert by_name["d.jpg"]["group_species_latin"] == "Zosterops simplex"
+        assert by_name["d.jpg"]["group_species_evidence"] == 3
+
     async def test_species_source_marks_head_invisible_as_model_unconfirmed(
         self,
         real_client,

@@ -58,6 +58,9 @@ export interface SpeciesCandidate {
   latinName?: string | null
   englishName?: string | null
   confidence: number
+  recognitionState?: 'recognized' | 'uncertain' | 'unrecognized'
+  rejectScore?: number
+  top1Top2Margin?: number
 }
 
 export interface BirdDetectionRecord {

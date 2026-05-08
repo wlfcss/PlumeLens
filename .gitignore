@@ -63,9 +63,10 @@ engine/models/species_taxonomy.parquet
 engine/models/species_trained.json
 engine/models/clipiqa_plus.onnx
 engine/models/hyperiqa.onnx
-# DINOv3 species v3（torch + transformers）— 845MB 总，由 dino 训练 → copy
+# DINOv3 species v4（torch + transformers）— backbone + LoRA/reject adapter 由 dino 训练 → copy
 engine/models/species/backbone/model.safetensors
 engine/models/species/heads/*.pt
+engine/models/species/v4/*.pt
 # PyTorch weights cache (used only by the export script)
 engine/models/.cache/
 

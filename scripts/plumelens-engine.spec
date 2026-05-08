@@ -43,7 +43,7 @@ hidden_imports: list[str] = [
     "aiosqlite.cursor",
     # OpenCV (cv2) 用于场景分组（AKAZE + 颜色直方图）
     "cv2",
-    # ---- DINOv3 species v3：torch + transformers + safetensors ----
+    # ---- DINOv3 species v4：torch + transformers + safetensors + LoRA/reject adapter ----
     # transformers 通过 from_pretrained 动态 import 模型类
     *collect_submodules("transformers.models.dinov3_vit"),
     "transformers.models.auto",

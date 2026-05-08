@@ -144,7 +144,7 @@ class PipelineManager:
             "bird_visibility": False,
             "clipiqa": False,
             "hyperiqa": False,
-            "dinov3_species_v3": False,
+            "dinov3_species_v4": False,
         }
         self._model_providers: dict[str, str] = {}
 
@@ -302,21 +302,21 @@ class PipelineManager:
                 "(set PLUMELENS_REQUIRE_IQA=0 only for dev without models)."
             )
 
-        # ---- DINOv3 species classifier v3 (torch + transformers, 845 MB) ----
-        # 旧路径（dinov3_backbone.onnx + species_ensemble.onnx）已弃用；纯 ONNX
-        # species 路线已验证不可行（RoPE fp16 NaN + CoreML EP ViT 覆盖差，准确率显著下降）。
+        # ---- DINOv3 species classifier v4 (torch + transformers + LoRA/reject) ----
+        # 旧 v3 8-head ensemble 已替换为 seed42 LoRA adapter + calibrated reject head。
+        # 纯 ONNX species 路线仍不使用（RoPE fp16 NaN + CoreML EP ViT 覆盖差）。
         species_dir = models_dir / "species"
         species_backbone_safetensors = species_dir / "backbone" / "model.safetensors"
         species_canonical = species_dir / "canonical_extended.parquet"
-        species_trained = species_dir / "species_list_1301.parquet"
-        species_heads_dir = species_dir / "heads"
+        species_adapter = species_dir / "v4" / "seed42_adapter.pt"
+        species_policy = species_dir / "v4_calibration_policy.json"
         if (
             species_backbone_safetensors.exists()
             and species_canonical.exists()
-            and species_trained.exists()
-            and species_heads_dir.exists()
+            and species_adapter.exists()
+            and species_policy.exists()
         ):
-            await logger.ainfo("Loading DINOv3 species v3", deploy_dir=str(species_dir))
+            await logger.ainfo("Loading DINOv3 species v4", deploy_dir=str(species_dir))
             try:
                 self._species = SpeciesClassifier(
                     deploy_dir=species_dir,
@@ -324,41 +324,37 @@ class PipelineManager:
                     top_k=self._settings.species_top_k,
                     min_confidence=self._settings.species_min_confidence,
                 )
-                self._model_status["dinov3_species_v3"] = True
-                self._model_providers["dinov3_species_v3"] = (
+                self._model_status["dinov3_species_v4"] = True
+                self._model_providers["dinov3_species_v4"] = (
                     f"torch:{self._species.device}:{self._species._dtype}"
                 )
-                # Checksum：用 backbone safetensors + 任一 head ckpt 代表 deploy 包
-                checksums["dinov3_species_v3_backbone"] = _file_checksum(
+                checksums["dinov3_species_v4_backbone"] = _file_checksum(
                     species_backbone_safetensors
                 )
-                # 8 head ckpt 全部 hash 进去（同一个训练 deploy 也应同时 bump）
-                for ck in sorted(species_heads_dir.glob("*.pt")):
-                    checksums[f"head_{ck.stem}"] = _file_checksum(ck)
-                # taxonomy + trained list 也进 checksum（变了 → 版本变）
+                checksums["dinov3_species_v4_adapter"] = _file_checksum(species_adapter)
                 checksums["species_canonical"] = _file_checksum(species_canonical)
-                checksums["species_trained"] = _file_checksum(species_trained)
+                checksums["species_policy"] = _file_checksum(species_policy)
                 await logger.ainfo(
                     "Species classifier ready",
                     num_classes=self._species.num_classes,
-                    num_heads=self._species.num_heads,
+                    policy=self._species.policy_name,
                     device=self._species.device,
                 )
             except Exception:
-                await logger.aexception("Failed to load species classifier v3")
+                await logger.aexception("Failed to load species classifier v4")
         else:
             missing = [
                 str(p.relative_to(models_dir))
                 for p in (
                     species_backbone_safetensors,
                     species_canonical,
-                    species_trained,
-                    species_heads_dir,
+                    species_adapter,
+                    species_policy,
                 )
                 if not p.exists()
             ]
             await logger.awarning(
-                "Species classifier v3 disabled (files missing)",
+                "Species classifier v4 disabled (files missing)",
                 missing=missing,
             )
 
@@ -394,10 +390,10 @@ class PipelineManager:
         # IQA-specific expand crop (separate from pose crop)
         h.update(f"iqe:{self._settings.iqa_expand_ratio}".encode())
         h.update(f"iqar:{self._settings.iqa_max_aspect_ratio}".encode())
-        # 算法版本：bump 每当评分/降档逻辑变（pose penalty / grading 形式）
-        # v5：IQA 拆分输入 + 修正 PyIQA ONNX 输入契约。
+        # 算法版本：bump 每当评分/降档逻辑变（pose penalty / grading / species 口径）。
+        # v6：species v4 LoRA/reject 三态，uncertain 不再写入自动物种结论。
         # CLIPIQA/HyperIQA 图内已经做 ImageNet normalization，engine 只传 raw RGB 0-1。
-        h.update(b"alg:v5-iqa-raw-input-split-crops")
+        h.update(b"alg:v6-iqa-raw-input-species-v4-tristate")
         # Pose thresholds (5 项)
         h.update(f"pbt:{self._settings.pose_box_threshold}".encode())
         h.update(f"pet:{self._settings.pose_eye_threshold}".encode())
@@ -598,11 +594,10 @@ class PipelineManager:
                     logger.exception("Species classification failed", photo_id=photo_id)
             t_species_ms += (time.perf_counter() - _t) * 1000
 
-            species_name = (
-                species_candidates[0].canonical_zh or species_candidates[0].canonical_sci
-                if species_candidates
-                else None
-            )
+            top_candidate = species_candidates[0] if species_candidates else None
+            species_name = None
+            if top_candidate is not None and top_candidate.recognition_state == "recognized":
+                species_name = top_candidate.canonical_zh or top_candidate.canonical_sci
 
             detections.append(
                 BirdAnalysis(

@@ -27,7 +27,7 @@
 | 照片太多，翻看成本高     | 自动检测鸟类主体，按综合质量先分档               |
 | 同一场景连拍重复         | 按场景/时间组织照片，优先展示更值得复核的图      |
 | 远鸟、遮挡、焦点判断费眼 | 给出检测框、姿态点、IQA 裁切与对焦证据           |
-| 鸟种识别容易受角度影响   | DINOv3 species v3 给出候选，组内共识修正常见偏差 |
+| 鸟种识别容易受角度影响   | DINOv3 species v4 给出三态候选，组内共识修正常见偏差 |
 | 选完以后还要整理输出     | 支持按文件夹别名导出、JPG/RAW 同伴文件、中文报告 |
 | 拍过哪些鸟很难长期沉淀   | 羽迹模块按物种、保护等级和地理位置形成长期图鉴   |
 | 源文件夹改名或挪走       | 保留缓存与筛选结果，提示重新关联新的源路径       |
@@ -55,7 +55,7 @@
 - **深度复核**：原图舞台、IQA 裁切、检测框、姿态点、对焦点、倍率选择、全屏查看、filmstrip 快速切换。
 - **场景共识**：同一场景内的单鸟照片可互相校正物种结果，降低单张照片角度/遮挡导致的误识别。
 - **导出工作流**：多文件夹并行导出，支持合并导出与按评级分类导出，JPG/RAW companion 同步复制，附中文 manifest/CSV 报告。
-- **羽迹图鉴**：1535 种物种墙、保护等级分组、物种详情、本地百科、拍摄时间线和地理分布。
+- **羽迹图鉴**：1591 种物种墙、保护等级分组、物种详情、本地百科、拍摄时间线和地理分布。
 - **文件夹重关联**：源文件夹失联时可选择移动/改名后的新目录，保留既有照片身份、分析结果、人工决策和缩略图。
 - **桌面集成**：最近文件夹、Finder 打开、Topaz / Photoshop 外部编辑入口、macOS arm64 自动构建。
 
@@ -72,7 +72,7 @@ PlumeLens 的模型不是一个单点分类器，而是一条以摄影筛选为�
 | 3. 姿态可见性 | `bird_visibility v1.1`   | bbox crop → 5 个头部关键点        | 判断头部/眼睛是否可见，给复核和鸟种可信度提供证据 |
 | 4. 语义画质   | `CLIPIQA+`               | 2.5× 语义裁切 → 0-1 分            | 判断构图、主体语义质量和整体观感                  |
 | 5. 技术画质   | `HyperIQA`               | bbox +10% 技术裁切 → 0-1 分       | 判断清晰度、噪声、曝光和主体技术质量              |
-| 6. 鸟种识别   | `DINOv3 species v3`      | 480px crop → 1535 类 top-K        | 识别中文名/拉丁名/英文名，接入保护等级与百科      |
+| 6. 鸟种识别   | `DINOv3 species v4`      | 384px crop → 1591 类 top-K + reject | 输出识别 / 待确认 / 拒识三态，接入保护等级与百科 |
 | 7. 业务融合   | grader + consensus       | detections → photo result         | 计算分级、物种来源、场景共识、羽迹有效性          |
 
 ### 当前模型资产
@@ -83,11 +83,13 @@ PlumeLens 的模型不是一个单点分类器，而是一条以摄影筛选为�
 | bird_visibility v1.1       | `engine/models/bird_visibility.onnx`                  | 约 98 MB  | 入仓                       |
 | CLIPIQA+                   | `engine/models/clipiqa_plus.onnx`                     | 约 293 MB | 大文件，打包时由模型包恢复 |
 | HyperIQA                   | `engine/models/hyperiqa.onnx`                         | 约 104 MB | 大文件，打包时由模型包恢复 |
-| DINOv3 species v3 backbone | `engine/models/species/backbone/model.safetensors`    | 约 578 MB | 大文件，不入 git           |
-| DINOv3 species v3 heads    | `engine/models/species/heads/seed*.pt` × 8            | 约 267 MB | 大文件，不入 git           |
-| 分类与百科元数据           | `canonical_extended.parquet` / `species_wiki.parquet` | 1535 种   | 入仓                       |
+| DINOv3 species v4 backbone | `engine/models/species/backbone/model.safetensors`    | 约 578 MB | 大文件，不入 git           |
+| DINOv3 species v4 adapter  | `engine/models/species/v4/seed42_adapter.pt`          | 约 32 MB  | 大文件，不入 git           |
+| 分类与百科元数据           | `canonical_extended.parquet` / `species_wiki.parquet` | 1591 种   | 入仓                       |
 
 更多模型细节见 [engine/models/README.md](engine/models/README.md)、[YOLO model card](engine/models/yolo26l-bird-det.MODEL_CARD.md) 和 [bird visibility model card](engine/models/bird_visibility.MODEL_CARD.md)。
+
+species v4 使用 dino 项目校准出的 `balanced_v1` 策略：只有 `recognized` 会成为自动物种结论；`uncertain` 只作为复核候选并标记为待确认，不进入羽迹有效物种；`unrecognized` 不赋予物种。
 
 ### 分级口径
 
@@ -112,7 +114,7 @@ PlumeLens 的模型不是一个单点分类器，而是一条以摄影筛选为�
 | 前端     | React 19、TypeScript、Tailwind CSS v4、shadcn/ui、i18next | 开始/选片/羽迹三大工作区与本地化界面           |
 | 服务端态 | TanStack Query、SSE                                       | 后端数据同步、分析进度、导出进度和事件通知     |
 | 后端     | Python 3.11、FastAPI、Pydantic、structlog                 | API、扫描、队列、导出、地理回填、业务聚合      |
-| 推理     | onnxruntime、torch、transformers                          | YOLO / pose / IQA / DINOv3 species v3          |
+| 推理     | onnxruntime、torch、transformers                          | YOLO / pose / IQA / DINOv3 species v4          |
 | 存储     | SQLite WAL、aiosqlite                                     | 图库、照片、任务队列、分析结果、人工决策和缓存 |
 | 图片资产 | `plumelens://thumb` 协议                                  | 安全加载缩略图，不暴露 `file://`               |
 
@@ -209,7 +211,7 @@ GitHub Actions 当前只保留 macOS arm64 自动构建流程：
 
 模型与数据资产遵循各自来源许可：
 
-- `yolo26l-bird-det.onnx`、`bird_visibility.onnx`、DINOv3 species heads 由项目作者训练产出，使用时需注明来源。
+- `yolo26l-bird-det.onnx`、`bird_visibility.onnx`、DINOv3 species adapter 由项目作者训练产出，使用时需注明来源。
 - DINOv3 backbone 遵循 Meta DINOv3 许可，商业使用需自行确认许可边界。
 - CLIPIQA+ / HyperIQA 基于公开 IQA 研究模型导出，需遵循原始论文与代码仓库许可。
 - 分类表基于《中国鸟类名录 v12.0》整理。

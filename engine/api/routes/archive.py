@@ -170,6 +170,8 @@ def _display_species(
         english = None
         if candidates:
             first = candidates[0] or {}
+            if first.get("recognition_state") == "unrecognized":
+                return None, None, None, False
             latin = latin or first.get("canonical_sci")
             english = first.get("canonical_en")
         return (
@@ -182,6 +184,8 @@ def _display_species(
     candidates = detection.get("species_candidates") or []
     if candidates:
         first = candidates[0] or {}
+        if first.get("recognition_state") == "unrecognized":
+            return None, None, None, False
         sci = first.get("canonical_sci")
         name = first.get("canonical_zh") or first.get("canonical_en") or sci
         english = first.get("canonical_en")
@@ -192,6 +196,15 @@ def _display_species(
             False,
         )
     return None, None, None, False
+
+
+def _candidate_recognition_state(detection: dict[str, Any]) -> str | None:
+    candidates = detection.get("species_candidates") or []
+    if not candidates:
+        return None
+    first = candidates[0] or {}
+    state = first.get("recognition_state")
+    return str(state) if state else None
 
 
 def _build_detection_detail(
@@ -231,14 +244,20 @@ def _build_detection_detail(
             }
 
     species, latin, _english, manual = _display_species(detection, override)
+    candidate_state = _candidate_recognition_state(detection)
     if manual:
         species_source = "manual"
-    elif species:
+    elif not species or candidate_state == "unrecognized":
+        species_source = "none"
+    elif candidate_state == "uncertain":
+        species_source = "model_unconfirmed"
+    else:
         species_source = (
             "model" if pose is not None and pose["head_visible"] else "model_unconfirmed"
         )
-    else:
-        species_source = "none"
+    if species_source == "none":
+        species = None
+        latin = None
 
     return BirdDetectionDetail.model_validate(
         {

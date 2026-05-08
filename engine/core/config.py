@@ -33,11 +33,11 @@ class Settings(BaseSettings):
     #   18ms，vs ONNX CPU 108ms 还快 2.8×）。manager.py 同样自动注入。
     # - CLIPIQA/HyperIQA + CoreML(default)：CLIP/HyperNet 架构，无 advanced
     #   indexing，ANE 安全（diff < 0.2px），加速 7-27×。
-    # - DINOv3 species v3：转 torch + MPS bf16，不再走 ONNX 路线
+    # - DINOv3 species v4：torch + MPS bf16 + LoRA/reject adapter，不走 ONNX 路线
     yolo_provider: str = "coreml"
     iqa_provider: str = "coreml"
     pose_provider: str = "coreml"
-    # species v3 用 torch + transformers，"auto" 在 Mac 走 MPS bf16，
+    # species v4 用 torch + transformers，"auto" 在 Mac 走 MPS bf16，
     # NVIDIA 走 CUDA bf16，否则 CPU fp32（CPU ~500ms，MPS/CUDA ~60ms）
     species_provider: str = "auto"
 
@@ -78,11 +78,11 @@ class Settings(BaseSettings):
     pose_head_eye_threshold: float = 0.10
     pose_expanded_margin: float = 0.15
 
-    # Pipeline — species classification (DINOv3 ViT-L + 8-head ensemble)
+    # Pipeline — species classification (DINOv3 ViT-L + LoRA/reject adapter)
     species_top_k: int = 5
-    species_min_confidence: float = 0.01  # 过滤 1301 训练种之外的噪声命中
+    species_min_confidence: float = 0.01  # top-K 展示下限；自动结论由 v4 reject policy 决定
     species_crop_margin: float = 0.15  # 方形 bbox 扩展比例（见 MODEL_DELIVERY §6.3）
-    species_crop_min_side_frac: float = 0.30  # 方形最小边长占原图短边的比例
+    species_crop_min_side_frac: float = 0.0  # v4 训练口径不强制最小边长；仅保留 legacy fallback
     # head/eye visibility 不再是触发 gate（v5 放宽）— 所有 grade 通过 species_min_grade
     # 的鸟都跑识别；head 不可见时由 read-time 标记为 species_source='model_unconfirmed'，
     # UI 显示"不全 · 待审"标签，用户确认后才进羽迹（HANDOVER §11.2）。
@@ -101,7 +101,8 @@ class Settings(BaseSettings):
     #     都有自己的 species_source）— 多鸟图混合可见性不再被 photo-level 一刀切
     # v7: detector 输出加 IoU 0.85 dedup — YOLO26 NMS-free 在密集场景仍 over-detect
     #     同一只鸟，bbox 几乎完全重叠的视为 ghost duplicate，保留 conf 最高的
-    preprocess_version: int = 7
+    # v8: species 切换到 v4 384×384 LoRA/reject adapter，1591 类，uncertain 不写入自动物种结论
+    preprocess_version: int = 8
 
     # Pipeline — concurrency
     # 每个 task 内部 ONNX 推理会 to_thread 释放 GIL，多 worker 并发 = 多张图同时跑 ONNX。

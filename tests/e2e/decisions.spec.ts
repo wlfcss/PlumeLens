@@ -134,7 +134,7 @@ async function mockBackend(page: Page): Promise<void> {
             bird_visibility: { loaded: true, provider: 'CoreMLExecutionProvider' },
             clipiqa: { loaded: true, provider: 'CoreMLExecutionProvider' },
             hyperiqa: { loaded: true, provider: 'CoreMLExecutionProvider' },
-            dinov3_species_v3: { loaded: true, provider: 'torch:mps:torch.bfloat16' },
+            dinov3_species_v4: { loaded: true, provider: 'torch:mps:torch.bfloat16' },
           },
         },
       }),

@@ -4,10 +4,9 @@
  * 数据源：engine/models/species_wiki.parquet（由 scripts/fetch_species_wiki.py 爬取），
  * 由 scripts/build_species_wiki_json.py 导出为 `species-wiki.json`。
  *
- * 收录范围：species v3 canonical_extended 全部 1535 种。
+ * 收录范围：species v4 canonical_extended 全部 1591 种。
  *   - `is_trained = true`：DINOv3 分类模型可自动识别
- *   - `is_trained = false`：名录收录但训练样本不足，**仅支持用户手动标注**
- *     （manual 挑选物种时仍需展示介绍，因此也打包进来）
+ *   - `is_trained = false`：legacy taxonomy 下训练样本不足，**仅支持用户手动标注**
  *
  * Wikipedia 覆盖率 zh 99.3% / en 99.9%（个别稀有种可能都没有 extract）。
  */
@@ -36,7 +35,7 @@ export interface SpeciesWiki {
   is_trained: boolean
   /**
    * True  → 中国观鸟年报 v12.0 主名录物种
-   * False → 模型 1301 清单中的非 v12.0 增补物种
+ * False → v4 class map 中 `scope=extra` 的非 v12.0 增补物种
    */
   in_china_v12: boolean
 }
@@ -62,7 +61,7 @@ export function hasSpeciesWiki(canonicalSci: string): boolean {
   return canonicalSci in INDEX
 }
 
-/** Total number of species in the local cache (should be 1535 for species v3). */
+/** Total number of species in the local cache (1591 for species v4). */
 export function speciesWikiCount(): number {
   return Object.keys(INDEX).length
 }

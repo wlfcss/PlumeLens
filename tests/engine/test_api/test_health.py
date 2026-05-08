@@ -42,5 +42,5 @@ async def test_health_lists_current_model_slots(client: AsyncClient) -> None:
         "bird_visibility",
         "clipiqa",
         "hyperiqa",
-        "dinov3_species_v3",
+        "dinov3_species_v4",
     }

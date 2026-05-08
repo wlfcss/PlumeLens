@@ -3139,7 +3139,7 @@ function EnginePanel({
   const poseModel = getPipelineModel(models, 'bird_visibility')
   const clipiqaModel = getPipelineModel(models, 'clipiqa')
   const hyperiqaModel = getPipelineModel(models, 'hyperiqa')
-  const speciesModel = getPipelineModel(models, 'dinov3_species_v3')
+  const speciesModel = getPipelineModel(models, 'dinov3_species_v4')
 
   const modelValue = useCallback(
     (loaded: boolean) => {
