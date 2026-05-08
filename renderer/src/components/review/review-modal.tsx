@@ -428,109 +428,7 @@ export function ReviewModal({
             t={t}
           />
 
-          {/* 关键指标紧凑网格 */}
-          <div className="review-stats-grid">
-            <CompactStat
-              label={t('selection.metrics.semanticScore')}
-              value={formatScore(photo.semanticScore)}
-            />
-            <CompactStat
-              label={t('selection.metrics.technicalScore')}
-              value={formatScore(photo.technicalScore)}
-            />
-            <CompactStat
-              label={t('selection.metrics.head')}
-              value={pose ? (pose.head_visible ? '✓' : '✗') : '--'}
-              tone={pose ? (pose.head_visible ? 'ok' : 'warn') : 'muted'}
-            />
-            <CompactStat
-              label={t('selection.metrics.eye')}
-              value={pose ? (pose.eye_visible ? '✓' : '✗') : '--'}
-              tone={pose ? (pose.eye_visible ? 'ok' : 'warn') : 'muted'}
-            />
-            <CompactStat
-              label={t('selection.metrics.birdCount')}
-              value={String(photo.birdCount ?? 0)}
-            />
-            <CompactStat
-              label={t('selection.metrics.confidence')}
-              value={bbox ? `${Math.round((bbox.confidence ?? 0) * 100)}%` : '--'}
-            />
-          </div>
-
-          {/* 姿态信息 — v2 模型新增 5 项 visibility + 3 项 posture。
-              head/eye 已在 grid 上方(影响降档,核心地位);
-              body/wings/tail 用 chips 行紧凑展示;
-              姿态(飞版/栖版 · 视角)用 KV 行,飞版强调 — 这是 grader 升档触发条件。 */}
-          {pose ? (
-            <>
-              <PoseChipsRow pose={pose} t={t} />
-              {(() => {
-                const { text, isFlying } = formatPostureLabel(pose, t)
-                return (
-                  <CompactKV
-                    label={t('selection.metrics.posture')}
-                    value={isFlying ? `${text} · ${t('selection.review.posture.flyBoost')}` : text}
-                    emphasis={isFlying}
-                  />
-                )
-              })()}
-            </>
-          ) : null}
-
-          <CompactKV label={t('selection.metrics.scene')} value={group?.title ?? '--'} />
-
-          <CompactKV
-            label={t('selection.review.sequenceLabel')}
-            value={
-              isSequence
-                ? t('selection.review.sequenceValue', {
-                    count: reviewGroupPhotos.length,
-                    rank: sequenceRank ?? '--',
-                    score: formatScore(sequenceBestPhoto?.finalScore),
-                  })
-                : t('selection.review.sequenceSingleValue')
-            }
-          />
-
-          {photo.companionFormat && photo.companionPath ? (
-            <CompactKV
-              label={t('selection.review.companion')}
-              value={t('selection.review.companionValue', {
-                format: photo.companionFormat,
-                size: formatBytes(photo.companionSize ?? 0),
-              })}
-            />
-          ) : null}
-
-          <SpeciesOverrideEditor
-            activeBirdIndex={activeBirdIndex}
-            onSetActiveBirdIndex={setActiveBirdIndex}
-            onSetSpeciesOverride={onSetSpeciesOverride}
-            photo={photo}
-            t={t}
-          />
-
-          <ExifPanel exif={photo.exif} location={photo} t={t} />
-
-          <TagCluster photo={photo} t={t} />
-
-          <div className="review-shortcuts" aria-label={t('selection.review.shortcutsLabel')}>
-            <span>{t('selection.review.shortcuts.grade')}</span>
-            <kbd>1</kbd>
-            <b>{t('selection.actions.select')}</b>
-            <kbd>2</kbd>
-            <b>{t('selection.actions.usable')}</b>
-            <kbd>3</kbd>
-            <b>{t('selection.actions.record')}</b>
-            <kbd>4</kbd>
-            <b>{t('selection.actions.reject')}</b>
-            <span>{t('selection.review.shortcuts.nav')}</span>
-            <kbd>←</kbd>
-            <kbd>→</kbd>
-            <kbd>Esc</kbd>
-          </div>
-
+          {/* 评级按钮挪到顶部 — 鸟摄选片高频操作,放在底部要每张滚一遍。 */}
           <div className="inspector-actions inspector-actions--compact">
             <button
               className="button-primary"
@@ -564,6 +462,95 @@ export function ReviewModal({
               <X className="h-4 w-4" />
               {t('selection.actions.reject')}
             </button>
+          </div>
+
+          {/* 关键指标 3 列 — head/eye 移到 PoseChipsRow,birdCount 移除(单鸟图永远 1,
+              多鸟图由 SpeciesOverrideEditor bird tabs 表达,这里冗余)。 */}
+          <div className="review-stats-grid review-stats-grid--cols-3">
+            <CompactStat
+              label={t('selection.metrics.semanticScore')}
+              value={formatScore(photo.semanticScore)}
+            />
+            <CompactStat
+              label={t('selection.metrics.technicalScore')}
+              value={formatScore(photo.technicalScore)}
+            />
+            <CompactStat
+              label={t('selection.metrics.confidence')}
+              value={bbox ? `${Math.round((bbox.confidence ?? 0) * 100)}%` : '--'}
+            />
+          </div>
+
+          {/* 姿态/标签语义紧凑组:5 项 visibility chip + 飞版升档提示 + 主体条件 tags 紧跟。
+              老结构里 TagCluster 被 EXIF 拆到底部,语义脱节;主体条件本身就是 pose
+              派生(见 backend-adapter derivePoseTags),归位到 pose 组。 */}
+          {pose ? (
+            <>
+              <PoseChipsRow pose={pose} t={t} />
+              {(() => {
+                const { text, isFlying } = formatPostureLabel(pose, t)
+                return (
+                  <CompactKV
+                    label={t('selection.metrics.posture')}
+                    value={isFlying ? `${text} · ${t('selection.review.posture.flyBoost')}` : text}
+                    emphasis={isFlying}
+                  />
+                )
+              })()}
+            </>
+          ) : null}
+
+          <TagCluster photo={photo} t={t} />
+
+          <SpeciesOverrideEditor
+            activeBirdIndex={activeBirdIndex}
+            onSetActiveBirdIndex={setActiveBirdIndex}
+            onSetSpeciesOverride={onSetSpeciesOverride}
+            photo={photo}
+            t={t}
+          />
+
+          <CompactKV label={t('selection.metrics.scene')} value={group?.title ?? '--'} />
+
+          <CompactKV
+            label={t('selection.review.sequenceLabel')}
+            value={
+              isSequence
+                ? t('selection.review.sequenceValue', {
+                    count: reviewGroupPhotos.length,
+                    rank: sequenceRank ?? '--',
+                    score: formatScore(sequenceBestPhoto?.finalScore),
+                  })
+                : t('selection.review.sequenceSingleValue')
+            }
+          />
+
+          {photo.companionFormat && photo.companionPath ? (
+            <CompactKV
+              label={t('selection.review.companion')}
+              value={t('selection.review.companionValue', {
+                format: photo.companionFormat,
+                size: formatBytes(photo.companionSize ?? 0),
+              })}
+            />
+          ) : null}
+
+          <ExifPanel exif={photo.exif} location={photo} t={t} />
+
+          <div className="review-shortcuts" aria-label={t('selection.review.shortcutsLabel')}>
+            <span>{t('selection.review.shortcuts.grade')}</span>
+            <kbd>1</kbd>
+            <b>{t('selection.actions.select')}</b>
+            <kbd>2</kbd>
+            <b>{t('selection.actions.usable')}</b>
+            <kbd>3</kbd>
+            <b>{t('selection.actions.record')}</b>
+            <kbd>4</kbd>
+            <b>{t('selection.actions.reject')}</b>
+            <span>{t('selection.review.shortcuts.nav')}</span>
+            <kbd>←</kbd>
+            <kbd>→</kbd>
+            <kbd>Esc</kbd>
           </div>
         </aside>
 
@@ -1704,7 +1691,11 @@ function PoseChipsRow({
   // 三态:true=明确可见(ok),false=明确不可见(warn),undefined=旧 cache 未检测(muted)。
   // pipeline_version bump 后旧 cache 自动失效重分析,但用户首次升级窗口期会有混合状态。
   // 不能简单 ?? false,会让"未检测"显示成警告色误导用户。
+  // head/eye 也并入这里 — 之前在 review-stats-grid 占独立卡片,信息密度浪费;
+  // 与 body/wings/tail 同 visibility 维度,统一展示更紧凑。
   const items: Array<{ key: string; label: string; visible: boolean | undefined }> = [
+    { key: 'head', label: t('selection.metrics.head'), visible: pose.head_visible },
+    { key: 'eye', label: t('selection.metrics.eye'), visible: pose.eye_visible },
     { key: 'body', label: t('selection.metrics.body'), visible: pose.body_visible },
     { key: 'wings', label: t('selection.metrics.wings'), visible: pose.wings_visible },
     { key: 'tail', label: t('selection.metrics.tail'), visible: pose.tail_visible },

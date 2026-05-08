@@ -5561,7 +5561,44 @@ button.photo-stack-badge--button {
    ============================================================ */
 .review-detail--compact {
   padding: 14px 16px 12px;
-  gap: 8px;
+  gap: 10px;
+}
+
+/* Nothing UI 风格:section 之间用 1px 极细线分隔,无填充背景。CompactKV 已经
+   有自己的 border-bottom,这里只在 PoseChipsRow / TagCluster / inspector-actions
+   等独立 section 之间补隔断。 */
+.review-detail--compact .inspector-actions--compact {
+  margin-top: 4px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--pl-border-0);
+}
+
+.review-detail--compact .review-stats-grid {
+  padding-top: 6px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--pl-border-0);
+}
+
+.review-detail--compact .review-pose-chips {
+  padding-top: 8px;
+}
+
+.review-detail--compact .tag-cluster {
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--pl-border-0);
+}
+
+.review-detail--compact .species-editor {
+  padding: 8px 0;
+  border-bottom: 1px solid var(--pl-border-0);
+}
+
+/* 评级按钮挪到顶部后,要让"精选"白色按钮在黑底里更醒目;原 grade-pill 已自带
+   颜色但按钮组靠 button-primary / ghost / danger 类型区分,保持不动只调间距。 */
+.review-detail--compact .inspector-actions--compact button {
+  min-height: 32px;
+  padding-block: 4px;
+  font-size: 12px;
 }
 
 /* 顶部分数 + 分级胶囊 + 物种 */
