@@ -469,22 +469,37 @@ async def mark_failed_with_retry(
 
 
 async def recover_on_startup(db: Database) -> int:
-    """Recover tasks left as PROCESSING when the app crashed.
+    """Recover tasks left in transient states when the app crashed.
 
-    策略：processing → pending（重新排队），不计 attempts，避免把 crash 误判为 retry。
-    Returns: 恢复的任务数。
+    覆盖两类孤儿:
+    1. PROCESSING:worker 卡死/进程被杀,任务永远在 PROCESSING。
+    2. FAILED:mark_failed_with_retry 是两步 transition(FAILED → PENDING/DEAD),如果
+       第一步 commit 成功后第二步还没跑完进程就 crash,task 会永远停在 FAILED。
+       FAILED 不在 active states,worker 不会再 pick;sweeper 也只看 PROCESSING;
+       mark_failed_with_retry 内部的 fallback UPDATE 也是同一进程内的失败兜底,跨
+       重启不能修复。所以必须在启动时主动捞 FAILED 回 PENDING。
+
+    策略:两类孤儿都回 PENDING + 重置 attempts=0 + 清 error_message + 清时间戳。
+    重置 attempts 的理由:crash 是系统级中断,不应该把这一类中断算成任务自身的失败次
+    数。否则极端场景(attempts 已 2,本次 PROCESSING 时 crash)会让下次失败立刻
+    attempts=3 → DEAD,丢工作。bad-file 任务由 mark_failed_with_retry 中的
+    is_permanent_failure 短路 + sweeper 兜底,不会无限循环。
+
+    Returns: 恢复的任务数(两类合计)。
     """
     conn = db.conn
     async with conn.execute(
-        "UPDATE task_queue SET status = 'pending', started_at = NULL "
-        "WHERE status = 'processing' "
-        "RETURNING id",
+        "UPDATE task_queue "
+        "SET status = 'pending', started_at = NULL, completed_at = NULL, "
+        "    attempts = 0, error_message = NULL "
+        "WHERE status IN ('processing', 'failed') "
+        "RETURNING id, status",
     ) as cur:
         rows = list(await cur.fetchall())
     await conn.commit()
     recovered = len(rows)
     if recovered > 0:
-        await logger.ainfo("Recovered processing tasks", count=recovered)
+        await logger.ainfo("Recovered orphan tasks", count=recovered)
     return recovered
 
 

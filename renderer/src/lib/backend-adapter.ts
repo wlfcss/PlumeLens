@@ -16,6 +16,7 @@ import type {
   PhotoGrade,
   PhotoGroupRecord,
   PhotoRecord,
+  PoseTagId,
   ProblemTagId,
   SelectionDecision,
   SpeciesCandidate,
@@ -218,7 +219,7 @@ function withConsensusCandidate(row: PhotoRow, candidates: SpeciesCandidate[]): 
 }
 
 /**
- * 根据 grade + bird_count + species 推导问题标签。
+ * 根据 grade + bird_count + species + pose 推导问题标签。
  * 这是 UI 层启发式，不是后端权威信号；后端补齐后可替换。
  */
 function deriveProblemTags(row: PhotoRow): ProblemTagId[] {
@@ -228,6 +229,39 @@ function deriveProblemTags(row: PhotoRow): ProblemTagId[] {
   if (row.species === null && (row.bird_count ?? 0) > 0) {
     tags.push('low_species_confidence')
   }
+  // pose 派生:头/眼不可见 → 对应问题标签。要求有 pose(避免无 pose 时把所有照片都
+  // 标"头部遮挡"误导用户)。
+  const pose = row.best_detection?.pose
+  if (pose) {
+    if (!pose.head_visible) {
+      tags.push('head_occluded')
+    } else if (!pose.eye_visible) {
+      // 头可见但眼不可见 → 眼区清晰度不够(头部正面 ✓ 时 eye_soft 比 head_occluded 准确)
+      tags.push('eye_soft')
+    }
+  }
+  return tags
+}
+
+/**
+ * 根据 best_detection.pose + bird_count 推导姿态标签(tile chips 用)。
+ *
+ * 之前 backend-adapter 把 poseTags 写死 [],导致选片瓦片完全没有姿态徽标 —
+ * "见眼/头部完整/展翅/停栖/多鸟"五个 chip 永远不显示。修复后从 best_detection.pose
+ * 派生(后端 _build_detection_detail 现在透传完整 11 关键点 + 5 visibility + 3 posture)。
+ */
+function derivePoseTags(row: PhotoRow): PoseTagId[] {
+  const tags: PoseTagId[] = []
+  const pose = row.best_detection?.pose
+  if (pose) {
+    if (pose.eye_visible) tags.push('eye_visible')
+    if (pose.head_visible) tags.push('head_clean')
+    // wings_open 语义是"展翅"(飞行特征),不是简单的"翅膀关键点可见" — 后者
+    // 栖息鸟也常成立(折翅仍可检测),会让 chip 失去信号价值。
+    if (pose.posture === 'flying') tags.push('wings_open')
+    if (pose.posture === 'perched') tags.push('perched')
+  }
+  if ((row.bird_count ?? 0) > 1) tags.push('multi_bird')
   return tags
 }
 
@@ -336,7 +370,11 @@ export function buildPhotoRecordFromRow(
             ]
           : [],
     birdDetections: buildBirdDetections(row),
-    isNewSpecies: false, // TODO: 跨 library 比对决定（archive 视图侧统计）
+    // 单 library 维度的 backend-adapter 看不到全局物种历史,这里先给 false。
+    // App.tsx 的 applyNewSpeciesMarkers 在所有 library detail 注入 workspace 后跨库
+    // 按 shotAt 升序统一回标 photo.isNewSpecies + group.containsNewSpecies(每个物种第
+    // 一张照片为 true)。
+    isNewSpecies: false,
     birdCount: row.bird_count ?? 0,
     grade,
     decision,
@@ -349,7 +387,7 @@ export function buildPhotoRecordFromRow(
     analysisStatus: row.analysis_status ?? (isAnalyzed ? 'done' : 'pending'),
     analysisErrorCode: row.analysis_error_code ?? null,
     analysisError: row.analysis_error ?? null,
-    poseTags: [],
+    poseTags: derivePoseTags(row),
     problemTags: deriveProblemTags(row),
     sceneTag: 'record_shot',
     caption: isAnalyzed

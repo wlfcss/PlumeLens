@@ -93,7 +93,6 @@ import type {
   SpeciesRecord,
   WorkspaceSnapshot,
 } from '@/lib/mock-workspace'
-import { createImportedFolder } from '@/lib/mock-workspace'
 import { cn } from '@/lib/utils'
 import { useShallow, useUIStore, type QuickFilter, type ViewMode } from '@/stores/ui-store'
 import { subscribeEngineStatus, useEngineStore } from '@/stores/engine-store'
@@ -534,6 +533,65 @@ export function getArchiveSpeciesEntries(photo: PhotoRecord): ArchiveSpeciesEntr
     entries.push(entry)
   }
   return entries
+}
+
+/**
+ * 跨 library 标记 isNewSpecies — 按拍摄时间升序,每个物种第一次出现的照片打 true,
+ * 同步把"组内是否含新种"回写到 group.containsNewSpecies。
+ *
+ * 之前 backend-adapter 把 photo.isNewSpecies / group.containsNewSpecies 写死 false
+ * (TODO),导致选片"新增物种"角标永不亮、archive 视图统计永远 0、组卡片"含新种"徽
+ * 标常错。新逻辑跑在 workspace 层面(allDetails / activeDetail 两条 useEffect 注入完
+ * 毕后),保证跨 library 全局一致 — 用户即便分多个 library 拍同一种鸟,也只在最早那
+ * 张标"新种"。
+ *
+ * 物种身份用 getArchiveSpeciesEntries 返回的 entry.key(latin name 优先),与羽迹页
+ * 同维度,自动排除 model_unconfirmed / conflict / 无识别等不入档照片。
+ */
+function applyNewSpeciesMarkers(
+  photos: PhotoRecord[],
+  groups: PhotoGroupRecord[],
+): { photos: PhotoRecord[]; groups: PhotoGroupRecord[] } {
+  if (photos.length === 0) return { photos, groups }
+  // 按拍摄时间升序排;ties 用 photo.id 稳定排序避免不同渲染下 first-seen 漂移
+  const sorted = [...photos].sort((a, b) => {
+    const aTs = Date.parse(a.shotAt)
+    const bTs = Date.parse(b.shotAt)
+    const aSafe = Number.isFinite(aTs) ? aTs : 0
+    const bSafe = Number.isFinite(bTs) ? bTs : 0
+    if (aSafe !== bSafe) return aSafe - bSafe
+    return a.id.localeCompare(b.id)
+  })
+  const seenSpecies = new Set<string>()
+  const newSpeciesPhotoIds = new Set<string>()
+  const groupsWithNewSpecies = new Set<string>()
+  for (const photo of sorted) {
+    const entries = getArchiveSpeciesEntries(photo)
+    if (entries.length === 0) continue
+    let firstHere = false
+    for (const entry of entries) {
+      if (!seenSpecies.has(entry.key)) {
+        seenSpecies.add(entry.key)
+        firstHere = true
+      }
+    }
+    if (firstHere) {
+      newSpeciesPhotoIds.add(photo.id)
+      groupsWithNewSpecies.add(photo.groupId)
+    }
+  }
+  // 仅 mutate 标记需要变化的照片/组,大库下避免全量复制
+  const markedPhotos = photos.map((p) => {
+    const should = newSpeciesPhotoIds.has(p.id)
+    if (p.isNewSpecies === should) return p
+    return { ...p, isNewSpecies: should }
+  })
+  const markedGroups = groups.map((g) => {
+    const should = groupsWithNewSpecies.has(g.id)
+    if (g.containsNewSpecies === should) return g
+    return { ...g, containsNewSpecies: should }
+  })
+  return { photos: markedPhotos, groups: markedGroups }
 }
 
 function archivePhotoSearchParts(photo: PhotoRecord): Array<string | null | undefined> {
@@ -1282,15 +1340,6 @@ function sortLabelKey(sort: SortMode) {
 
 function quickFilterLabelKey(filter: QuickFilter) {
   return `selection.quickFilters.${filter}` as const
-}
-
-function mergeWorkspace(current: WorkspaceSnapshot, patch: WorkspaceSnapshot): WorkspaceSnapshot {
-  return {
-    folders: [...patch.folders, ...current.folders],
-    groups: [...patch.groups, ...current.groups],
-    photos: [...patch.photos, ...current.photos],
-    species: current.species,
-  }
 }
 
 export function photoReviewReason(photo: PhotoRecord): string {
@@ -2300,26 +2349,35 @@ export default function App() {
     // 否则全新安装时"最近文件夹"会显示崇明东滩/南汇嘴这种假数据。
     if (!realLibraries) return
     const realFolderIds = new Set(realLibraries.map((l) => l.id))
-    setWorkspace((current) => ({
-      folders: realLibraries.map((lib) => ({
-        id: lib.id,
-        displayName: lib.display_name,
-        parentPath: lib.parent_path,
-        rootPath: lib.root_path,
-        status: lib.status,
-        totalCount: lib.total_count,
-        analyzedCount: lib.analyzed_count,
-        recursive: lib.recursive,
-        lastOpenedAt: lib.last_opened_at,
-        lastScannedAt: lib.last_scanned_at ?? lib.last_opened_at,
-        lastAnalyzedAt: lib.last_analyzed_at,
-      })),
-      // 只保留真 folder 的 photos/groups（mock seeds 的 folderId 不在真集合里 → 被剔除）
-      photos: current.photos.filter((p) => realFolderIds.has(p.folderId)),
-      groups: current.groups.filter((g) => realFolderIds.has(g.folderId)),
-      // 物种列表清空 — deriveSpeciesRecords 会从真 photos 聚合
-      species: [],
-    }))
+    setWorkspace((current) => {
+      // 删除某 library 后,首张"新种"照片可能落在被删 library 里 → 剩余照片
+      // 中"新种"标记可能漂移(下一张同物种应升格为 first-seen)。重跑 markers 保
+      // 持一致。
+      const merged = applyNewSpeciesMarkers(
+        current.photos.filter((p) => realFolderIds.has(p.folderId)),
+        current.groups.filter((g) => realFolderIds.has(g.folderId)),
+      )
+      return {
+        folders: realLibraries.map((lib) => ({
+          id: lib.id,
+          displayName: lib.display_name,
+          parentPath: lib.parent_path,
+          rootPath: lib.root_path,
+          status: lib.status,
+          totalCount: lib.total_count,
+          analyzedCount: lib.analyzed_count,
+          recursive: lib.recursive,
+          lastOpenedAt: lib.last_opened_at,
+          lastScannedAt: lib.last_scanned_at ?? lib.last_opened_at,
+          lastAnalyzedAt: lib.last_analyzed_at,
+        })),
+        // 只保留真 folder 的 photos/groups（mock seeds 的 folderId 不在真集合里 → 被剔除）
+        photos: merged.photos,
+        groups: merged.groups,
+        // 物种列表清空 — deriveSpeciesRecords 会从真 photos 聚合
+        species: [],
+      }
+    })
   }, [realLibraries])
 
   // useAllLibraryDetails 每次 render 返回新数组引用，但内容大多数时候没变。
@@ -2341,39 +2399,56 @@ export default function App() {
     if (allDetails.length === 0) return
     const fragments = allDetails.map((detail) => buildFragmentFromDetail(detail, t))
     const realFolderIdsInDetails = new Set(fragments.map((f) => f.folder.id))
-    setWorkspace((current) => ({
-      folders: current.folders.map((f) => {
-        const updated = fragments.find((fr) => fr.folder.id === f.id)
-        return updated ? updated.folder : f
-      }),
-      photos: [
-        ...current.photos.filter((p) => !realFolderIdsInDetails.has(p.folderId)),
-        ...fragments.flatMap((f) => f.photos),
-      ],
-      groups: [
-        ...current.groups.filter((g) => !realFolderIdsInDetails.has(g.folderId)),
-        ...fragments.flatMap((f) => f.groups),
-      ],
-      species: [],
-    }))
+    setWorkspace((current) => {
+      // applyNewSpeciesMarkers 跨 library 重新标"新种"(photo + group 维度) —
+      // 否则 backend-adapter 一律给 false,UI 上"新增物种"角标永远不亮。
+      const merged = applyNewSpeciesMarkers(
+        [
+          ...current.photos.filter((p) => !realFolderIdsInDetails.has(p.folderId)),
+          ...fragments.flatMap((f) => f.photos),
+        ],
+        [
+          ...current.groups.filter((g) => !realFolderIdsInDetails.has(g.folderId)),
+          ...fragments.flatMap((f) => f.groups),
+        ],
+      )
+      return {
+        folders: current.folders.map((f) => {
+          const updated = fragments.find((fr) => fr.folder.id === f.id)
+          return updated ? updated.folder : f
+        }),
+        photos: merged.photos,
+        groups: merged.groups,
+        species: [],
+      }
+    })
   }, [allDetailsKey, t])
 
   // 单 library detail 就绪（active folder 切换时优先级更高，立即注入）
   useEffect(() => {
     if (!activeDetail) return
     const fragment = buildFragmentFromDetail(activeDetail, t)
-    setWorkspace((current) => ({
-      ...current,
-      folders: current.folders.map((f) => (f.id === fragment.folder.id ? fragment.folder : f)),
-      photos: [
-        ...current.photos.filter((p) => p.folderId !== fragment.folder.id),
-        ...fragment.photos,
-      ],
-      groups: [
-        ...current.groups.filter((g) => g.folderId !== fragment.folder.id),
-        ...fragment.groups,
-      ],
-    }))
+    setWorkspace((current) => {
+      // 同上 useEffect:applyNewSpeciesMarkers 跨 library 重算"新种"标记
+      const merged = applyNewSpeciesMarkers(
+        [
+          ...current.photos.filter((p) => p.folderId !== fragment.folder.id),
+          ...fragment.photos,
+        ],
+        [
+          ...current.groups.filter((g) => g.folderId !== fragment.folder.id),
+          ...fragment.groups,
+        ],
+      )
+      return {
+        ...current,
+        folders: current.folders.map((f) =>
+          f.id === fragment.folder.id ? fragment.folder : f,
+        ),
+        photos: merged.photos,
+        groups: merged.groups,
+      }
+    })
   }, [activeDetail, t])
 
   async function handleChooseFolder() {
@@ -2392,11 +2467,16 @@ export default function App() {
       const lib = await importLibrary.mutateAsync({ root_path: path })
       setActiveFolderId(lib.id)
     } catch (err) {
-      console.warn('Library import to backend failed:', err)
-      // 后端不可用时降级到 mock，避免空白屏
-      const imported = createImportedFolder(path)
-      setWorkspace((current) => mergeWorkspace(current, imported))
-      setActiveFolderId(imported.folders[0]?.id ?? null)
+      // 后端不可用 / 路径无效 / 库已存在等失败,**绝不**降级到 mock 数据
+      // (历史上的 createImportedFolder 会注入"池鹭/翠鸟/崇明东滩"等假种子,
+      // 用户当真照片处理 → 快捷键 1234 命中不存在的 photo_id → 错乱)。
+      // 切回 start 页,通过原生 alert 把 backend 错误透传给用户。
+      console.error('Library import to backend failed:', err)
+      startTransition(() => {
+        setRoute('start')
+      })
+      const detail = err instanceof Error ? err.message : String(err)
+      window.alert(t('selection.importFailed', { detail }))
     }
   }
 
@@ -2489,13 +2569,13 @@ export default function App() {
       }))
       setFocusedPhotoId(photoId)
     })
-    // 异步落库（后端不可用时保持 mock 体验）
+    // 异步落库。失败时 useSetDecision 内部会 invalidate library detail → refetch
+    // → 同步 useEffect 把后端真值重新注入 workspace,自动回滚乐观写入。
     setDecisionMutation.mutate(
       { photoId, decision: decision as DecisionValue },
       {
         onError: (err) => {
-          // 仅记录 — 乐观 UI 不回滚，下次 refetch 会纠正
-          console.warn('Failed to persist decision:', err)
+          console.warn('Failed to persist decision (will rollback via refetch):', err)
         },
       },
     )
@@ -2543,11 +2623,13 @@ export default function App() {
       setFocusedPhotoId(photoId)
     })
 
+    // 失败时 useSetSpeciesOverride 内部 invalidate → refetch → 同步 useEffect
+    // 把乐观写入回滚到后端真实状态。
     setSpeciesOverrideMutation.mutate(
       { photoId, birdIndex, species, bbox: bbox ?? null },
       {
         onError: (err) => {
-          console.warn('Failed to persist species override:', err)
+          console.warn('Failed to persist species override (will rollback via refetch):', err)
         },
       },
     )

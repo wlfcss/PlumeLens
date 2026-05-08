@@ -22,8 +22,12 @@ from engine.pipeline.models import (
 )
 from engine.pipeline.pose import PoseDetector
 from engine.pipeline.preprocess import crop_bbox, expand_for_iqa, load_image
-from engine.pipeline.quality import QualityAssessor
+from engine.pipeline.quality import IQA_NONFINITE_FALLBACK_SCORE, QualityAssessor
 from engine.pipeline.species import (
+    BBOX_MARGIN,
+    DEFAULT_IMAGE_SIZE,
+    IMAGENET_MEAN,
+    IMAGENET_STD,
     SpeciesClassifier,
     expand_bbox_to_square,
 )
@@ -434,6 +438,15 @@ class PipelineManager:
         h.update(f"smg:{self._settings.species_min_grade}".encode())
         # Preprocess code version
         h.update(f"pp:{self._settings.preprocess_version}".encode())
+        # Hard-coded code constants that affect output but live outside Settings.
+        # Without这些进 hash,改这些常量(例如 IMAGENET 归一化均值、IQA fallback 默认
+        # 分、species crop margin/size)会让旧 cache 命中错的结果而 pipeline_version
+        # 不变。preprocess_version 是 manual bump,容易漏。这里直接 hash 常量本身。
+        h.update(f"qfb:{IQA_NONFINITE_FALLBACK_SCORE}".encode())
+        h.update(f"imn:{IMAGENET_MEAN}".encode())
+        h.update(f"ims:{IMAGENET_STD}".encode())
+        h.update(f"sis:{DEFAULT_IMAGE_SIZE}".encode())
+        h.update(f"sbm:{BBOX_MARGIN}".encode())
         # Runtime environment
         h.update(f"ort:{ort.__version__}".encode())
         ep_str = ",".join(sorted(self._model_providers.values()))
@@ -576,13 +589,18 @@ class PipelineManager:
             )
 
             # Step 3a: pose detection (crop-mode)
+            # crop_origin 必须与 crop_bbox 内部 int(round(x))/int(round(y)) 取整一致 —
+            # 不然 PoseDetector 把 crop 内关键点 +offset 还原到原图时,offset 是浮点
+            # (pad_x1=10.7),实际 crop 起点是整数(11),关键点叠加在原图上会有最多
+            # 1px 漂移。
+            crop_origin = (round(pad_x1), round(pad_y1))
             pose_info = None
             _t = time.perf_counter()
             if self._pose is not None:
                 try:
                     pose_info = self._pose.detect(
                         technical_crop,
-                        crop_origin=(pad_x1, pad_y1),
+                        crop_origin=crop_origin,
                     )
                 except Exception:
                     logger.exception("Pose detection failed", photo_id=photo_id)
@@ -656,6 +674,9 @@ class PipelineManager:
             bird_count=len(detections),
             pipeline_version=self._pipeline_version,
             duration_ms=0.0,
+            image_width=img_w,
+            image_height=img_h,
+            companion_used=False,
         )
 
     def _should_run_species(

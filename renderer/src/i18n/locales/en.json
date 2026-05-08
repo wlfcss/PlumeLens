@@ -112,6 +112,7 @@
   },
   "selection": {
     "currentFolder": "Current folder",
+    "importFailed": "Failed to import folder: {{detail}}\n\nPlease confirm the backend engine is ready and the path is valid, then try again.",
     "folderStatus": {
       "idle": "Idle",
       "scanning": "Scanning",

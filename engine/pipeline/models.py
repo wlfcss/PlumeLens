@@ -123,3 +123,12 @@ class PipelineResult(BaseModel):
     bird_count: int
     pipeline_version: str
     duration_ms: float
+    # 实际分析时图像尺寸(像素)。bbox + pose 关键点坐标都在这个空间。
+    # 默认 0 兼容老 cache 反序列化;新结果由 manager 设置。
+    # companion fallback 路径下,这两个字段反映 RAW 文件尺寸而非 JPG 尺寸 —
+    # analyzer 负责检测差异并缩放到 photos.width/height 空间。
+    image_width: int = 0
+    image_height: int = 0
+    # True = 主文件读图失败,结果来自 companion(通常是 RAW)。诊断用,
+    # 也是 analyzer 决定是否做坐标空间缩放的触发条件。
+    companion_used: bool = False

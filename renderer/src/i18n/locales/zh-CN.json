@@ -112,6 +112,7 @@
   },
   "selection": {
     "currentFolder": "当前文件夹",
+    "importFailed": "导入文件夹失败:{{detail}}\n\n请确认后端引擎已就绪、路径有效后重试。",
     "folderStatus": {
       "idle": "未开始",
       "scanning": "正在扫描",
