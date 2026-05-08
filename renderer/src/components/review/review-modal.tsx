@@ -840,11 +840,12 @@ function SpeciesOverrideEditor({
 
 /**
  * 单独的图片舞台组件：
- * - cropRect 为 null → 显示完整原图（支持点击放大 + 拖动平移）
+ * - cropRect 为 null → 显示完整原图（支持按住放大 + 拖动平移）
  * - cropRect 给定 → 用 background-position/size 缩放出该区域（IQA 裁切预览，不做 loupe）
  *
- * Loupe 交互：
- *   第一次点击进入当前倍率放大；拖动时跟随鼠标平移；已放大且未拖动时再次点击退出。
+ * Loupe 交互(hold-to-zoom):
+ *   按下 → 立即放大 + 锁定鼠标位置;移动 → 跟随平移;松开 → 立即还原。
+ *   要锁定放大查看请用顶部 1.5×/2.5×/4× 倍率切换。
  */
 function ReviewImageStage({
   label,
@@ -945,6 +946,10 @@ function ReviewImageStage({
     [],
   )
 
+  // Hold-to-zoom 交互:pointerDown → 放大 + 锁定指针位置;pointerMove → 跟随平移;
+  // pointerUp / pointerCancel → 立即还原。比之前的 click-toggle 更符合用户预期
+  // ("按一下看清,松开就退") — 鸟摄复核高频检查眼睛/羽毛细节,toggle 模式要点两次,
+  // 累积下来明显更慢。如果用户想锁定放大查看,可以用顶部 1.5×/2.5×/4× 倍率切换。
   const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     if (!loupeEnabled || !previewSrc) return
     e.preventDefault()
@@ -956,7 +961,7 @@ function ReviewImageStage({
       wasActive: loupeActive,
     }
     updateLoupePosition(e.currentTarget, e.clientX, e.clientY)
-    if (!loupeActive) setLoupeActive(true)
+    setLoupeActive(true)
     e.currentTarget.setPointerCapture(e.pointerId)
   }
   const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -969,7 +974,8 @@ function ReviewImageStage({
   }
   const handlePointerEnd = (e: React.PointerEvent<HTMLDivElement>) => {
     const state = pointerStateRef.current
-    if (state && state.pointerId === e.pointerId && state.wasActive && !state.moved) {
+    if (state && state.pointerId === e.pointerId) {
+      // 总是退出放大 — hold-to-zoom 语义。
       setLoupeActive(false)
     }
     pointerStateRef.current = null
