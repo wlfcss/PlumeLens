@@ -10,6 +10,8 @@ import pytest
 from anyio import Path as AsyncPath
 from httpx import ASGITransport, AsyncClient
 
+MINIMAL_JPEG = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00\xff\xd9"
+
 
 def _write_file(path: Path, body: bytes = b"photo") -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -135,10 +137,16 @@ async def test_export_copies_selected_photos_companions_and_manifest(
     assert manifest["导出摘要"]["选择评级"] == ["精选", "可用"]
     rows = manifest["照片清单"]
     assert len(rows) == 3
+    assert manifest["导出摘要"]["源图库路径"] == "(已脱敏)"
+    assert str(root) not in json.dumps(manifest, ensure_ascii=False)
+    p1 = next(row for row in rows if row["照片ID"] == "p1")
+    assert p1["源文件路径"] == "a.jpg"
     p2 = next(row for row in rows if row["照片ID"] == "p2")
     assert p2["评级"] == "可用"
     assert p2["自动评级"] == "淘汰"
     assert p2["人工决策"] == "可用"
+    assert p2["源文件路径"] == "sub/b.jpg"
+    assert p2["源文件夹"] == "sub"
     p4 = next(row for row in rows if row["照片ID"] == "p4")
     assert p4["错误原因"] == "源文件不存在"
 
@@ -257,6 +265,46 @@ async def test_export_can_generate_xmp_sidecars_next_to_exported_files(
     p1 = next(row for row in manifest["照片清单"] if row["照片ID"] == "p1")
     assert p1["已导出XMP"] == "是"
     assert p1["XMP导出路径"].endswith("a.xmp")
+
+
+async def test_export_embeds_xmp_into_copied_jpeg_for_lightroom(
+    export_client: tuple[AsyncClient, Path],
+    tmp_path: Path,
+) -> None:
+    client, root = export_client
+    _write_file(root / "sub" / "b.jpg", MINIMAL_JPEG)
+
+    response = await client.post(
+        "/export/library/lib-export",
+        json={
+            "target_dir": str(tmp_path / "exports"),
+            "grades": ["usable"],
+            "include_companions": False,
+            "include_xmp_sidecars": True,
+            "include_manifest": True,
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    output_dir = AsyncPath(data["output_dir"])
+    assert data["selected_count"] == 1
+    assert data["exported_count"] == 1
+    assert data["xmp_count"] == 1
+
+    exported_jpeg = output_dir / "sub" / "b.jpg"
+    assert await exported_jpeg.exists()
+    assert not await (output_dir / "sub" / "b.xmp").exists()
+
+    jpeg_bytes = await exported_jpeg.read_bytes()
+    assert b"http://ns.adobe.com/xap/1.0/\x00" in jpeg_bytes
+    assert b'xmp:Rating="4"' in jpeg_bytes
+    assert "翠鸟".encode() in jpeg_bytes
+
+    manifest = json.loads(await AsyncPath(data["manifest"]["json"]).read_text(encoding="utf-8"))
+    p2 = next(row for row in manifest["照片清单"] if row["照片ID"] == "p2")
+    assert p2["已导出XMP"] == "是"
+    assert p2["XMP导出路径"].endswith("sub/b.jpg")
 
 
 async def test_export_can_generate_xmp_only_package_without_copying_photos(

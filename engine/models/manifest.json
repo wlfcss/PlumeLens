@@ -1,11 +1,11 @@
 {
   "manifest_version": 1,
-  "generated_at": "2026-05-08T11:20:19+00:00",
+  "generated_at": "2026-05-09T09:03:15+00:00",
   "comment": "Model asset SHA-256 pin. Engine startup refuses to load if hashes don't match. species/v4/seed42_adapter.pt 是 pickle (torch.load weights_only=False), SHA pin 是阻断供应链 RCE 的最后一道闸。Regenerate via `uv run python scripts/build_model_manifest.py` after training updates.",
   "assets": {
     "yolo26l-bird-det.onnx": {
-      "size": 99872889,
-      "sha256": "e98f38808858375c6a48a7a18d45bb95140f0dc1a3d3074cb096b39a0d074555"
+      "size": 99872905,
+      "sha256": "e71162a5c3a504112d790f1bd9da61aa239e7970d0d2b8a5d9579bd4658491c3"
     },
     "bird_visibility11.onnx": {
       "size": 102901634,
@@ -14,6 +14,14 @@
     "bird_visibility11_config.json": {
       "size": 2338,
       "sha256": "ccc39bf7ceceb53c10df7be588d56489f425e5f1c02f2fc16d049a7e58aa015c"
+    },
+    "bird_flight_classifier.onnx": {
+      "size": 41435340,
+      "sha256": "ebe73b8279180093852783d00b2cb5e2ee79b0a1372a752b99c54cc826de5c4d"
+    },
+    "bird_flight_classifier_config.json": {
+      "size": 4650,
+      "sha256": "07bfa36109af516811c18555aa03fa8a5d4a4733a4c5ee2a794baecdaba9dbf7"
     },
     "clipiqa_plus.onnx": {
       "size": 306969322,

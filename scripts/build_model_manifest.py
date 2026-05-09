@@ -34,9 +34,11 @@ MANIFEST = MODELS_DIR / "manifest.json"
 TRACKED_ASSETS = [
     # detector
     "yolo26l-bird-det.onnx",
-    # pose v2 (11 关键点)
+    # pose v2.1 (11 关键点 + fly/nofly 分类器)
     "bird_visibility11.onnx",
     "bird_visibility11_config.json",
+    "bird_flight_classifier.onnx",
+    "bird_flight_classifier_config.json",
     # IQA
     "clipiqa_plus.onnx",
     "hyperiqa.onnx",

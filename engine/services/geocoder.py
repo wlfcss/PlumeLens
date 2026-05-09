@@ -37,7 +37,7 @@ TIMEOUT_SEC = 2.5
 # 会触发:1.1s 等锁 + 2.5s HTTP = 3.6s > 3.0s 普通 budget)。10s 允许 ~7 个并发
 # caller 通过排队拿到结果,溢出 fall through 到 offline cities1000。
 NOMINATIM_QUEUE_TIMEOUT_SEC = 10.0
-USER_AGENT = "PlumeLens/0.6.0 (rev-geocoding)"
+USER_AGENT = "PlumeLens/0.7.0 (rev-geocoding)"
 CACHE_MAX = 1024
 # 离线兜底距离上限(经度差^2 + 纬度差^2 加权,单位约等于度^2)。
 # nearest city 超过这个距离就返回 None — 避免南极坐标落到非洲城市这种荒诞结果。

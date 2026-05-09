@@ -106,10 +106,10 @@ async def _sweep_stuck_tasks(app: FastAPI, db: Database) -> None:
     2. **孤儿 pending tasks**:worker pool 因为某个未捕获异常 / 重试逻辑漏洞退出,
        但 task_queue 里仍有 PENDING 行。原 _drain_queue 已经看不到任务退出,没人
        再 pick_next。结果就是进度条卡住到天荒地老(用户实测见过 1664/1668 卡 4 张)。
-       每个 sweep 周期顺手扫:有 PENDING 的 library 但 _workers 里没活跃 task →
+       每个 sweep 周期顺手扫:有 PENDING 的 library 但 worker registry 里没活跃 task →
        重启 worker 兜底。复用 _resume_pending_workers 同款 query。
     """
-    from engine.api.routes.analysis import _workers, start_library_worker
+    from engine.api.routes.analysis import get_library_worker, start_library_worker
 
     sweep_interval_sec = 15
 
@@ -143,7 +143,7 @@ async def _sweep_stuck_tasks(app: FastAPI, db: Database) -> None:
                 processing_rows = await cur.fetchall()
             for row in processing_rows:
                 library_id = str(row["library_id"])
-                worker = _workers.get(library_id)
+                worker = get_library_worker(library_id)
                 if worker is not None and not worker.done():
                     continue
                 count = int(row["n"])
@@ -170,7 +170,7 @@ async def _sweep_stuck_tasks(app: FastAPI, db: Database) -> None:
                 rows = await cur.fetchall()
             for row in rows:
                 library_id = str(row["library_id"])
-                worker = _workers.get(library_id)
+                worker = get_library_worker(library_id)
                 if worker is not None and not worker.done():
                     continue
                 await logger.awarning(
@@ -208,7 +208,7 @@ async def _refresh_all_thumbnails(db: Database) -> None:
                 error=str(e),
             )
             try:
-                await asyncio.sleep(2 ** attempt)  # 1s/2s/4s
+                await asyncio.sleep(2**attempt)  # 1s/2s/4s
             except asyncio.CancelledError:
                 raise
     if rows is None:
@@ -267,6 +267,7 @@ async def _refresh_all_thumbnails(db: Database) -> None:
                 # 轻量,只 stat 不读 EXIF。已有 companion 字段的行不动。
                 try:
                     from engine.services.scanner import backfill_companion_for_library
+
                     await backfill_companion_for_library(db, library_id)
                 except Exception:
                     logger.exception(

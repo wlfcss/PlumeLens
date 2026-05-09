@@ -265,6 +265,8 @@ def _build_detection_detail(
                 "view_angle": str(pose_d.get("view_angle", "unknown")),
                 "facing": str(pose_d.get("facing", "unknown")),
                 "posture": str(pose_d.get("posture", "unknown")),
+                "posture_confidence": float(pose_d.get("posture_confidence", 0.0)),
+                "posture_method": str(pose_d.get("posture_method", "heuristic")),
             }
 
     species, latin, _english, manual = _display_species(detection, override)

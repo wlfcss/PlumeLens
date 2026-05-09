@@ -18,7 +18,7 @@ OrtSession: TypeAlias = object  # onnxruntime.InferenceSession
 class BirdDetector:
     """Wraps YOLOv26l-bird-det.onnx for bird detection.
 
-    Model: yolo26l-bird v1.0 (single class, NMS-free end-to-end).
+    Model: yolo26l-bird v1.1 (single class, NMS-free end-to-end).
 
     Input:  float32 [1, 3, 1280, 1280] RGB 0-1, letterboxed with 114/255 fill
     Output: float32 [1, 300, 6] → (x1, y1, x2, y2, conf, class_id)
@@ -30,7 +30,7 @@ class BirdDetector:
         self,
         session: OrtSession,
         input_size: int = 1280,
-        iou_dedup_threshold: float = 0.85,
+        iou_dedup_threshold: float = 0.5,
     ) -> None:
         self._session = session
         self._input_size = input_size
@@ -130,8 +130,9 @@ def _dedup_iou(boxes: list[BoundingBox], iou_threshold: float) -> list[BoundingB
     box exceeds the threshold. Used as a defensive post-process for YOLO26 NMS-free
     output, which may still emit near-duplicate bboxes in dense bird scenes.
 
-    Threshold should be high (~0.85) — we only want to remove "ghost" duplicates,
-    not merge legitimate side-by-side birds (typical IoU ~0.3-0.5).
+    v1.1 inherits the v1.0.1 post-process threshold of 0.5: observed ghost
+    duplicates are IoU >0.95, while legitimate adjacent birds are typically
+    below 0.2 in the validation notes.
     """
     if iou_threshold >= 1.0 or len(boxes) <= 1:
         return boxes

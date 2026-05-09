@@ -62,6 +62,11 @@ _workers: dict[str, asyncio.Task[None]] = {}
 _progress_stream_counts: dict[str, int] = {}
 
 
+def get_library_worker(library_id: str) -> asyncio.Task[None] | None:
+    """Return the live in-memory worker task for a library, if any."""
+    return _workers.get(library_id)
+
+
 def _has_active_tasks(stats: dict[str, int]) -> bool:
     return (
         stats.get(TaskStatus.PENDING.value, 0)

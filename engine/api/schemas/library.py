@@ -110,9 +110,9 @@ class Keypoint(BaseModel):
 
 
 class PoseDetail(BaseModel):
-    """11 keypoints (5 head + 6 body) + 5 visibility + 3 posture fields.
+    """11 keypoints (5 head + 6 body) + 5 visibility + posture fields.
 
-    v2.0 schema(bird_visibility11)。所有新字段都有 default,旧 v1 cache JSON
+    v2.1 schema(bird_visibility11 + flight classifier)。所有新字段都有 default,旧 v1 cache JSON
     反序列化时使用默认值,前端拿到 None/false/'unknown',兼容显示。
     """
 
@@ -139,6 +139,8 @@ class PoseDetail(BaseModel):
     view_angle: str = "unknown"  # frontal / side / back / unknown
     facing: str = "unknown"  # left / right / unknown(仅 view=side 有效)
     posture: str = "unknown"  # perched / flying / unknown
+    posture_confidence: float = 0.0  # P(fly),classifier 模式有效
+    posture_method: str = "heuristic"  # classifier / heuristic
 
 
 class BestDetection(BaseModel):

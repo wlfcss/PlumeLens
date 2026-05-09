@@ -1,6 +1,6 @@
-# YOLO26l-bird v1.0 — 单类鸟类检测模型
+# YOLO26l-bird v1.1 — 单类鸟类检测模型
 
-> 用于摄影作品中鸟类目标的高精度检测与裁切。基于 Ultralytics YOLO26l(Large)在 49,236 张鸟类图像上端到端训练,包含 800 张人工 hard-negative。
+> 用于摄影作品中鸟类目标的高精度检测与裁切。基于 Ultralytics YOLO26l(Large)在 49,236 张鸟类图像上端到端训练,包含 800 张人工 hard-negative。**v1.1 在 v1.0 基础上做了一轮 fine-tune**(20 epoch,~22K 数据),针对绶带鸟密枝场景实测 holdout recall 从 **59% → 87%**(+28pp)。
 >
 > **本包内为生产推理产物 — 仅 ONNX 模型 + 原生推理代码,不依赖 Ultralytics 运行时。**
 
@@ -18,24 +18,43 @@
 | 输出布局 | `[x1, y1, x2, y2, conf, cls]`(letterbox 空间像素) |
 | ONNX opset | 17 |
 | 模型大小 | **95 MB** (best.onnx, simplified) |
-| 训练日期 | 2026-04-23 → 2026-04-25 (88 epoch, ~40h) |
+| 训练日期 | 2026-04-23 → 2026-04-25 (88 epoch base) + 2026-05-08 (fine-tune 20 epoch) |
 | 训练 GPU | NVIDIA RTX 5090 32 GB |
+| Fine-tune 数据 | +1.4K 用户实拍(绶带专题)+ 1.3K dino 林鸟科属 + 18K 防遗忘留样 |
 | 推荐 confidence | **0.5**(摄影场景,见 §6) |
 | 推荐 IoU | 0.7(NMS-free 模型其实不需要,仅用于二次去重) |
 
 ---
 
-## 2 · 性能指标(test set, 4,924 张)
+## 2 · 性能指标
 
-| 指标 | 值 |
-|---|---|
-| **mAP@0.5** | **0.927** |
-| **mAP@0.5:0.95** | **0.672** |
-| Precision (conf=0.5) | 0.961 |
-| Recall (conf=0.5) | 0.919 |
-| F1 (conf=0.5) | 0.940 |
+### 2.1 Test set (4,924 张,v1.0 与 v1.1 同 test 集)
 
-> 分数据桶:远景(small bird, area<32²)mAP50=0.84;中景(32²–96²)0.93;近景(>96²)0.97。远景仍是相对短板,符合检测模型一般规律。
+| 指标 | v1.0 | **v1.1** |
+|---|---|---|
+| mAP@0.5 | 0.927 | (fine-tune val 不在原 test 上重测,见下方 holdout)|
+| mAP@0.5:0.95 | 0.672 | |
+| Precision (conf=0.5) | 0.961 | |
+| Recall (conf=0.5) | 0.919 | |
+| F1 (conf=0.5) | 0.940 | |
+
+### 2.2 Real-world holdout (150 张未见用户实拍,fine-tune 关键评测)
+
+**v1.1 在用户摄影场景上大幅领先 v1.0** — 这才是部署关心的指标:
+
+| bucket(bbox 占图比) | n | v1.0 recall | **v1.1 recall** | 提升 |
+|---|---|---|---|---|
+| 0 (<0.1%, 极远景) | 2 | 0% | 0% | · |
+| 1 (0.1-0.5%, 远景小鸟) | 6 | 0% | 16.7% | +16.7 ↑ |
+| 2 (0.5-1%) | 12 | 83.3% | 75.0% | -8.3(1 张差,噪声) |
+| 3 (1-2.5%) | 26 | 84.6% | 92.3% | +7.7 ↑ |
+| 4 (2.5-5%) | 18 | 77.8% | 88.9% | +11.1 ↑ |
+| 5 (5-10%) | 21 | 61.9% | 95.2% | +33.3 ↑↑ |
+| **6 (10-20%, 林鸟肖像)** | 19 | 42.1% | **100%** | **+57.9 ↑↑↑** |
+| **7 (20-40%, 特写)** | 13 | 15.4% | **100%** | **+84.6 ↑↑↑** |
+| **OVERALL bbox recall** | **117** | **59.0%** | **87.2%** | **+28.2 pp** |
+
+> 远景小鸟(bucket 0/1)仍是短板 — 这是 small-object detection 难题,fine-tune 改善有限,需专门小目标检测技术。其他场景全部大幅提升或持平。
 
 ### 推理速度(单张 1280×1280)
 
@@ -57,7 +76,7 @@
 ## 3 · 文件清单
 
 ```
-yolo26l-bird-v1.0/
+yolo26l-bird-v1.1/
 ├── MODEL_CARD.md            # 本文档
 ├── inference_example.py     # 完整推理示例 (~210 行,可直接 CLI 运行)
 └── weights/
@@ -454,6 +473,50 @@ sess = build_session('weights/best.onnx', coreml_mode=None)
 - **Ultralytics:** Mac 部署官方推荐 PyTorch MPS(`device='mps'`),不为 ONNX EP bug 兜底。
 - **当前部署立场:** 强制 `CPUAndGPU` 是正确选择,**不要等**。
 
+#### 5.5.10 重复 bbox 去重(v1.0.1 新增,自动启用)
+
+**症状:** 一只鸟,YOLO 输出 2 个几乎完全重叠的 bbox(实测 IoU ≥ 0.96,坐标差 1-2 像素),用户看图会以为"识别成 2 只鸟"。
+
+**根因:** YOLO26 NMS-free head 用 1-to-K 匹配训练,每个 ground truth 应该只激活一个 query 输出。但少数情况下 2 个 query 都收敛到同一只鸟,各自输出高 conf bbox。这本来 NMS 一招就能解决,但 YOLO26 的设计哲学是"去掉 NMS",所以模型本身不带这一步。
+
+**实测发病率:**
+
+| 集 | 样本 | 重复框图片 | 比例 |
+|---|---|---|---|
+| 1950 张未见过的摄影实拍 | 1950 | 24 | 1.23% |
+
+**修复(v1.0.1 已默认开启):**
+
+`postprocess()` 在 conf 过滤 + 反 letterbox + clip 之后,新增第 4 步 `_dedup_nms()`:
+
+```python
+def _dedup_nms(boxes, iou_thresh=0.5):
+    """boxes 已按 conf 降序排,把 IoU>=阈值 的后框丢弃。"""
+    n = len(boxes)
+    keep = np.ones(n, dtype=bool)
+    for i in range(n):
+        if not keep[i]: continue
+        ai = (boxes[i,2]-boxes[i,0])*(boxes[i,3]-boxes[i,1])
+        for j in range(i+1, n):
+            if not keep[j]: continue
+            # 计算 IoU(代码省略,见 inference_example.py)
+            if iou_ij >= iou_thresh:
+                keep[j] = False
+    return boxes[keep]
+```
+
+**为什么阈值 0.5 安全?**
+
+- 真实重复框(同一只鸟):IoU > 0.95
+- 普通并排两只鸟:IoU < 0.2
+- 中间地带几乎不存在,所以 0.5 这个阈值非常宽容,不会误杀真的两只鸟
+
+**实测验证:** 24/24 真重复框被正确去重,3 个边缘案例(yolo_n=2 但 IoU 0.05-0.3)保留。
+
+**剩余边缘案例 — 长尾鸟拆框:**
+
+绶带鸟这类**超长尾**鸟,YOLO 偶尔把"鸟身 + 头" 和"长尾巴"分别框出来,两个 bbox 互不重叠(IoU ≈ 0)。dedup NMS 不会(也不应该)合并它们。如果你的下游需要"一只鸟一个 bbox",可以做后处理把同一图里 IoU=0 但中心距离 < bird_size×3 的 bbox 合并成一个。本包不做这个,因为是 case-by-case。
+
 ---
 
 ### 5.6 Confidence 阈值
@@ -649,7 +712,22 @@ print(f'mean={np.mean(times):.1f}ms  p50={np.median(times):.1f}ms  p99={np.perce
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| **v1.1** | **2026-05-09** | **Fine-tune 训练**:基于 v1.0 best.pt + 2.6K 新数据(1.4K 用户绶带实拍 + 1.3K dino 林鸟科属)+ 18K 防遗忘留样,共 ~22K 数据。20 epoch / freeze=10 / lr0=0.001 / AdamW。结果:**150 张 holdout 上 bbox-recall 59% → 87% (+28pp)**。绶带肖像 bucket 6/7 从 42%/15% 拉到 100%。详见下方"训练故事"和 §2.2。 |
+| v1.0.1 | 2026-05-08 | postprocess 增加 dedup NMS — 修复 NMS-free head 偶发的重复 bbox 问题(实测 1950 张未见数据中 1.23% 受影响,IoU ≥ 0.96)。详见 §5.5.10。**模型权重未变**,仅推理代码升级。 |
 | v1.0 | 2026-04-26 | 首次发布。88 epoch 训练 + 800 hard neg |
+
+### v1.1 训练故事(简版)
+
+**起因:** v1.0 部署后用 Qwen3.5-VL 交叉验证 1950 张未见用户实拍,发现 0504-1 文件夹(绶带鸟专题)recall 仅 61%。原训练 49K 数据里 Terpsiphone 仅 144 张,且每物种 40 张硬上限。
+
+**数据准备:** 从 dino 项目 71.7 万张图筛"林鸟科属白名单"(鹟科/莺科/鹎科/绣眼/山雀/鹛科 + 特殊体型 drongo/kingfisher/trogon/treepie),过 长边 ≥ 1280 阈值,得 1,257 张。加上 0504-1 用户实拍 yolo_missed 549 张 + 防遗忘 ~18K(原 ysn/dino/china)。**所有候选用 qwen3.5-4b@q4_k_m 重新跑 VLM 标注**(发现旧 recrop_results 标注 67% 错位,不能复用)。
+
+**对照实验:** 跑了 stage 2(全解冻 lr=0.0003)和 round 2(更激进 fine-tune 配置)做对照,结果都不如 stage 1(详细教训见 TRAINING_JOURNAL)。**v1.1 用的是 stage 1 模型**。
+
+### 已知问题(v1.1 未解)
+
+- **远景小鸟(bucket 0/1, bbox <0.5%)recall 仍低**(0% / 16.7%)— 这是 small-object detection 的固有难题,fine-tune 改善有限。要解决需要专门技术(SAHI 切图推理、HRNet 高分辨率特征等),不在当前模型能力范围。
+- **超长尾鸟偶尔被拆成 2 个 bbox**(身体 + 长尾)— IoU = 0,dedup NMS 不会合并(也不应该)。属于训练数据 bbox 标注规范问题,下一轮可专门调整。
 
 ---
 

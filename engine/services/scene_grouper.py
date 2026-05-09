@@ -17,17 +17,31 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import math
+import re
+from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import structlog
 
 from engine.core.database import Database
 from engine.pipeline.scene_grouping import (
+    SimilarityResult,
     compute_similarity,
     load_image_for_similarity,
 )
 
 logger = structlog.stdlib.get_logger()
+
+# 场景组(scene)表达一次连续拍摄事件 / 同一观察上下文；连拍堆叠(stack)
+# 则在场景内部由前端再按主体几何连续性拆分。这里不能把每个构图微动都切成
+# scene，否则同一次飞版会碎成多个 2 张小组。
+RAPID_CONTINUITY_MAX_GAP_SECONDS = 2.0
+RAPID_FEATURE_CONFIDENCE_MIN = 0.80
+RAPID_FEATURE_SIMILARITY_THRESHOLD = 0.03
+RAPID_COLOR_SIMILARITY_THRESHOLD = 0.78
 
 
 def _resolve_preview_path(thumb_preview: str | None, cache_root: Path) -> Path | None:
@@ -38,15 +52,131 @@ def _resolve_preview_path(thumb_preview: str | None, cache_root: Path) -> Path |
     return p if p.exists() else None
 
 
-def _compute_pair_sync(prev_path: Path, cur_path: Path) -> bool:
-    """同步计算两张图是否同场景（运行在 to_thread）。"""
+def _parse_sort_timestamp(value: object) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, int | float):
+        ts = float(value)
+        return ts if math.isfinite(ts) else None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        numeric_ts = float(text)
+    except ValueError:
+        numeric_ts = None
+    if numeric_ts is not None and math.isfinite(numeric_ts):
+        return numeric_ts
+    # EXIF DateTimeOriginal: "YYYY:MM:DD HH:MM:SS"; ISO strings from DB are already valid.
+    if len(text) >= 19 and text[4] == ":" and text[7] == ":":
+        text = text.replace(":", "-", 2).replace(" ", "T", 1)
+    if text.endswith("Z"):
+        text = f"{text[:-1]}+00:00"
+    try:
+        return datetime.fromisoformat(text).timestamp()
+    except ValueError:
+        return None
+
+
+def _shot_sort_timestamp(row: Any) -> float:
+    """排序优先级: EXIF DateTimeOriginal > file_mtime > created_at."""
+    try:
+        raw_exif = row["exif_json"]
+        if raw_exif:
+            exif = json.loads(str(raw_exif))
+            if isinstance(exif, dict):
+                dto_ts = _parse_sort_timestamp(exif.get("DateTimeOriginal"))
+                if dto_ts is not None:
+                    return dto_ts
+    except Exception:
+        pass
+
+    for key in ("file_mtime", "created_at"):
+        try:
+            ts = _parse_sort_timestamp(row[key])
+            if ts is not None:
+                return ts
+        except Exception:
+            continue
+    return 0.0
+
+
+def _natural_sort_key(value: object) -> tuple[tuple[int, int | str], ...]:
+    """文件名自然序：5Y3A9919.JPG < 5Y3A9920.JPG。
+
+    EXIF DateTimeOriginal 只有秒级精度；高速连拍同一秒内可有多张照片。
+    之前同秒照片用 UUID 打散顺序，会把连续飞版随机切碎。
+    """
+    parts = re.split(r"(\d+)", str(value or ""))
+    key: list[tuple[int, int | str]] = []
+    for part in parts:
+        if not part:
+            continue
+        if part.isdigit():
+            key.append((0, int(part)))
+        else:
+            key.append((1, part.lower()))
+    return tuple(key)
+
+
+def _shot_sort_key(row: Any) -> tuple[float, float, tuple[tuple[int, int | str], ...], str]:
+    """稳定拍摄顺序：EXIF 秒级时间 > 文件 mtime > 文件名自然序 > id。"""
+    primary_ts = _shot_sort_timestamp(row)
+    try:
+        file_mtime_ts = _parse_sort_timestamp(row["file_mtime"])
+    except Exception:
+        file_mtime_ts = None
+    try:
+        file_name = row["file_name"]
+    except Exception:
+        file_name = ""
+    try:
+        photo_id = str(row["id"])
+    except Exception:
+        photo_id = ""
+    return (
+        primary_ts,
+        file_mtime_ts if file_mtime_ts is not None else primary_ts,
+        _natural_sort_key(file_name),
+        photo_id,
+    )
+
+
+def _shot_gap_seconds(prev_row: Any, cur_row: Any) -> float | None:
+    prev_ts = _shot_sort_timestamp(prev_row)
+    cur_ts = _shot_sort_timestamp(cur_row)
+    if prev_ts <= 0 or cur_ts <= 0:
+        return None
+    return max(0.0, cur_ts - prev_ts)
+
+
+def _is_same_scene(sim: SimilarityResult, gap_seconds: float | None) -> bool:
+    if sim.similar:
+        return True
+    if gap_seconds is None or gap_seconds > RAPID_CONTINUITY_MAX_GAP_SECONDS:
+        return False
+
+    # 高速连拍里的飞鸟常因主体位置/翅形变化让 AKAZE 从 0.05 掉到 0.03-0.05。
+    # 这类边界仍应属于同一 scene；更细的候选拆分交给连拍堆叠处理。
+    if (
+        sim.feature_confidence >= RAPID_FEATURE_CONFIDENCE_MIN
+        and sim.feature_similarity >= RAPID_FEATURE_SIMILARITY_THRESHOLD
+    ):
+        return True
+    return bool(
+        sim.color_similarity >= 0
+        and sim.color_similarity >= RAPID_COLOR_SIMILARITY_THRESHOLD
+    )
+
+
+def _compute_pair_sync(prev_path: Path, cur_path: Path) -> SimilarityResult | None:
+    """同步计算两张图的相似度（运行在 to_thread）。"""
     img_prev = load_image_for_similarity(prev_path)
     img_cur = load_image_for_similarity(cur_path)
     if img_prev is None or img_cur is None:
         # 加载失败 → 保守起见标为不相似（开新场景）
-        return False
-    sim = compute_similarity(img_prev, img_cur)
-    return bool(sim.similar)
+        return None
+    return compute_similarity(img_prev, img_cur)
 
 
 async def regroup_library(
@@ -61,14 +191,16 @@ async def regroup_library(
         scenes: 生成的场景数（distinct scene_id 数）
         skipped: 缩略图缺失/加载失败被跳过的对数
     """
-    # 取所有 photo，按 file_mtime（拍摄时间近似）排序
+    # 取所有 photo，优先按 EXIF DateTimeOriginal 排序；缺失时回退 file_mtime。
     async with db.conn.execute(
-        "SELECT id, thumb_preview, file_mtime "
-        "FROM photos WHERE library_id = ? "
-        "ORDER BY file_mtime ASC",
+        "SELECT id, file_name, thumb_preview, file_mtime, created_at, exif_json "
+        "FROM photos WHERE library_id = ? ",
         (library_id,),
     ) as cur:
-        rows = await cur.fetchall()
+        rows = sorted(
+            await cur.fetchall(),
+            key=_shot_sort_key,
+        )
 
     if not rows:
         return {"scanned": 0, "scenes": 0, "skipped": 0}
@@ -76,6 +208,7 @@ async def regroup_library(
     scene_id = 0
     skipped = 0
     prev_path: Path | None = None
+    prev_row: Any | None = None
     updates: list[tuple[int, str]] = []  # (scene_id, photo_id)
 
     for row in rows:
@@ -85,21 +218,18 @@ async def regroup_library(
             cache_root,
         )
 
-        if prev_path is None or cur_path is None:
-            # 第一张 OR 当前缩略图缺失 → 新场景（保守）
-            if cur_path is None and prev_path is not None:
-                skipped += 1
-                # 没法判定相似度，沿用前一场景（连拍中间一张缩略图丢了也算同一场景）
-                # 这是经验权衡：宁可少切也别错切
-                pass
-            elif prev_path is not None and cur_path is not None:
-                # 不会进这个分支（被上面 if 包住了）
-                pass
+        if prev_path is None:
+            # 第一张，或前面都还没有可用缩略图：只能作为当前场景的起点。
+            updates.append((scene_id, photo_id))
+        elif cur_path is None:
+            skipped += 1
+            # 没法判定相似度时沿用前一场景（连拍中间一张缩略图丢了也算同一场景）。
+            # 这是经验权衡：宁可少切，也别因为缓存缺口把同一段连拍错切成多个场景。
             updates.append((scene_id, photo_id))
         else:
             # 跑相似度（cv2 在 thread pool）
             try:
-                similar = await asyncio.to_thread(_compute_pair_sync, prev_path, cur_path)
+                sim = await asyncio.to_thread(_compute_pair_sync, prev_path, cur_path)
             except Exception as e:
                 logger.warning(
                     "scene similarity exception",
@@ -107,13 +237,18 @@ async def regroup_library(
                     photo_id=photo_id,
                     error=str(e),
                 )
+                sim = None
+            if sim is None:
                 similar = False
+            else:
+                similar = _is_same_scene(sim, _shot_gap_seconds(prev_row, row))
             if not similar:
                 scene_id += 1
             updates.append((scene_id, photo_id))
 
         if cur_path is not None:
             prev_path = cur_path
+            prev_row = row
 
     # 批量写回 scene_id（一次事务）
     await db.conn.executemany(

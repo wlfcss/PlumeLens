@@ -44,7 +44,7 @@ class Keypoint(BaseModel):
 class PoseInfo(BaseModel):
     """Full-body keypoints + visibility + posture analysis.
 
-    来源:bird_visibility v2.0(YOLO26l-pose,11 关键点)。
+    来源:bird_visibility v2.1(YOLO26l-pose 11 关键点 + 可选飞行分类器)。
 
     关键点顺序固定:
         头部(5):bill, crown, nape, left_eye, right_eye
@@ -75,10 +75,12 @@ class PoseInfo(BaseModel):
     body_visible: bool = False  # v2 新增
     tail_visible: bool = False  # v2 新增
     wings_visible: bool = False  # v2 新增
-    # 3 项姿态(基于关键点几何派生)
+    # 3 项姿态(v2.1 优先由 bird_flight_classifier 给出,缺失时几何兜底)
     view_angle: str = "unknown"  # v2:frontal / side / back / unknown
     facing: str = "unknown"  # v2:left / right / unknown(仅 view=side 有效)
     posture: str = "unknown"  # v2:perched / flying / unknown
+    posture_confidence: float = 0.0  # v2.1:P(fly),几何兜底时为 0
+    posture_method: str = "heuristic"  # v2.1:classifier / heuristic
 
 
 class SpeciesCandidate(BaseModel):

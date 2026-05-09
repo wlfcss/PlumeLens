@@ -18,6 +18,7 @@ def _make_mock_pipeline() -> MagicMock:
     pipeline.model_status = {
         "yolo": False,
         "bird_visibility": False,
+        "bird_flight_classifier": False,
         "clipiqa": False,
         "hyperiqa": False,
         "dinov3_species_v4": False,

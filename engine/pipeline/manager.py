@@ -20,7 +20,12 @@ from engine.pipeline.models import (
     QualityGrade,
     SpeciesCandidate,
 )
-from engine.pipeline.pose import PoseDetector
+from engine.pipeline.pose import (
+    FLIGHT_CLASSIFIER_VERSION,
+    POSTURE_HEURISTIC_VERSION,
+    FlightClassifier,
+    PoseDetector,
+)
 from engine.pipeline.preprocess import crop_bbox, expand_for_iqa, load_image
 from engine.pipeline.quality import IQA_NONFINITE_FALLBACK_SCORE, QualityAssessor
 from engine.pipeline.species import (
@@ -142,11 +147,13 @@ class PipelineManager:
         self._detector_cpu_fallback: BirdDetector | None = None
         self._assessor: QualityAssessor | None = None
         self._pose: PoseDetector | None = None
+        self._flight_classifier: FlightClassifier | None = None
         self._species: SpeciesClassifier | None = None
         self._pipeline_version: str = "unknown"
         self._model_status: dict[str, bool] = {
             "yolo": False,
             "bird_visibility": False,
+            "bird_flight_classifier": False,
             "clipiqa": False,
             "hyperiqa": False,
             "dinov3_species_v4": False,
@@ -177,7 +184,7 @@ class PipelineManager:
         if yolo_path.exists():
             # YOLO 必须给 CoreML EP 传 MLComputeUnits=CPUAndGPU 关 ANE，
             # 否则 advanced indexing 在 ANE 上精度 bug 会出 letterbox 越界 bbox。
-            # 只对 yolo 一个模型这样设置；pose/IQA 用 ANE 没问题。
+            # YOLO 与 pose 同架构族都走 CPUAndGPU；IQA 图无 advanced indexing，保留默认 CoreML。
             providers = resolve_providers(
                 self._settings.yolo_provider,
                 coreml_compute_units=_COREML_NO_ANE,
@@ -215,7 +222,45 @@ class PipelineManager:
         else:
             await logger.awarning("YOLO detector not found", path=str(yolo_path))
 
-        # ---- bird_visibility v2 (pose, 11 关键点) ----
+        # ---- bird flight classifier v1 (fly / nofly; posture pipeline v2.1) ----
+        flight_classifier_path = models_dir / "bird_flight_classifier.onnx"
+        flight_classifier_config_path = models_dir / "bird_flight_classifier_config.json"
+        if flight_classifier_path.exists():
+            providers = resolve_providers(
+                self._settings.pose_provider,
+                coreml_compute_units=_COREML_NO_ANE,
+            )
+            await logger.ainfo(
+                "Loading bird flight classifier v1",
+                path=str(flight_classifier_path),
+                threshold=self._settings.flight_classifier_threshold,
+            )
+            try:
+                sess = ort.InferenceSession(str(flight_classifier_path), providers=providers)
+                self._flight_classifier = FlightClassifier(
+                    session=sess,
+                    input_size=self._settings.flight_classifier_input_size,
+                    threshold=self._settings.flight_classifier_threshold,
+                )
+                self._model_status["bird_flight_classifier"] = True
+                active = sess.get_providers()
+                self._model_providers["bird_flight_classifier"] = (
+                    active[0] if active else "unknown"
+                )
+                checksums["bird_flight_classifier"] = _file_checksum(flight_classifier_path)
+                if flight_classifier_config_path.exists():
+                    checksums["bird_flight_classifier_config"] = _file_checksum(
+                        flight_classifier_config_path
+                    )
+            except Exception:
+                await logger.aexception("Failed to load bird flight classifier")
+        else:
+            await logger.awarning(
+                "Bird flight classifier not found",
+                path=str(flight_classifier_path),
+            )
+
+        # ---- bird_visibility v2.0 (pose, 11 关键点; posture pipeline v2.1 uses classifier) ----
         # YOLO26l-pose 与 YOLO 同架构家族（NMS-free + advanced indexing head），
         # 同样在 ANE 上有精度风险（官方 INTEGRATION_GUIDE §14.2 实测 worst KP
         # drift 8.13 px）。强制 CPUAndGPU 关 ANE，与 YOLO 一致。
@@ -239,6 +284,7 @@ class PipelineManager:
                     tail_threshold=self._settings.pose_tail_threshold,
                     wing_threshold=self._settings.pose_wing_threshold,
                     expanded_box_margin=self._settings.pose_expanded_margin,
+                    flight_classifier=self._flight_classifier,
                 )
                 self._model_status["bird_visibility"] = True
                 active = sess.get_providers()
@@ -430,6 +476,10 @@ class PipelineManager:
         h.update(f"pwing:{self._settings.pose_wing_threshold}".encode())
         h.update(f"pem:{self._settings.pose_expanded_margin}".encode())
         h.update(f"pis:{self._settings.pose_input_size}".encode())
+        h.update(f"phv:{POSTURE_HEURISTIC_VERSION}".encode())
+        h.update(f"fcv:{FLIGHT_CLASSIFIER_VERSION}".encode())
+        h.update(f"fcis:{self._settings.flight_classifier_input_size}".encode())
+        h.update(f"fct:{self._settings.flight_classifier_threshold}".encode())
         # Species
         h.update(f"stk:{self._settings.species_top_k}".encode())
         h.update(f"smc:{self._settings.species_min_confidence}".encode())
@@ -461,6 +511,7 @@ class PipelineManager:
         self._detector = None
         self._assessor = None
         self._pose = None
+        self._flight_classifier = None
         self._species = None
 
     @property

@@ -6,8 +6,9 @@
 
 | 模型 | 文件 | 大小 | 用途 |
 |------|------|------|------|
-| YOLOv26l-bird-det v1.0 | `yolo26l-bird-det.onnx` | 99.9 MB | 鸟类目标检测 |
-| bird_visibility v2.0 | `bird_visibility11.onnx` | 98.1 MB | 11 关键点(头 5 + 身 6) + 5 visibility + 3 posture(view/facing/posture) |
+| YOLOv26l-bird-det v1.1 | `yolo26l-bird-det.onnx` | 99.9 MB (95 MiB) | 鸟类目标检测 |
+| bird_visibility v2.0 | `bird_visibility11.onnx` | 98.1 MB | 11 关键点(头 5 + 身 6) + 5 visibility + view/facing |
+| bird flight classifier v1 | `bird_flight_classifier.onnx` | 40 MB | 飞版 / 非飞版二分类，输出 P(fly) |
 | CLIPIQA+ | `clipiqa_plus.onnx` | 293 MB | 语义画质评估（含 CLIP ViT backbone） |
 | HyperIQA | `hyperiqa.onnx` | 104 MB | 技术画质评估（含 ResNet50 backbone + HyperNet forward_patch） |
 | DINOv3 species v4 backbone | `species/backbone/model.safetensors` | 578 MB | torch/transformers 鸟种特征提取（**不入 git**） |
@@ -18,6 +19,7 @@
 | 文件 | 大小 | 内容 |
 |------|------|------|
 | `bird_visibility11_config.json` | 2 KB | v2 校准阈值(eye/head/body/tail/wings 五项 best_*) |
+| `bird_flight_classifier_config.json` | 5 KB | 飞版分类器阈值曲线，产品默认 `P(fly) ≥ 0.35` |
 | `species/canonical_extended.parquet` | 约 100 KB | 1591 类鸟类分类表（class_id + 中/拉丁/英文名 + IUCN + 保护等级） |
 | `species/v4_calibration_policy.json` | 12 KB | `balanced_v1` 三态阈值：recognized / uncertain / unrecognized |
 | `species_wiki.parquet` | 925 KB | 旧 1535 种 Wikipedia 首段介绍（v4 extra 物种暂用分类表 fallback） |
@@ -33,7 +35,8 @@
 原图
   ↓ YOLO det (1280, conf=0.5, letterbox 114) → 鸟类 bbox 列表
   ↓ 对每个 bbox 裁切（均基于原片）
-  ├─ bbox +10% padding → bird_visibility11 (640) → 11 关键点 + 5 visibility(head/eye/body/tail/wings) + 3 posture(view_angle/facing/posture)
+  ├─ bbox +10% padding → bird_visibility11 (640) → 11 关键点 + 5 visibility(head/eye/body/tail/wings) + view_angle/facing
+  ├─ 同一主体裁切 → bird_flight_classifier (224) → P(fly), posture=flying/perched
   ├─ bbox 2.5× 语义裁切 → CLIPIQA+
   ├─ bbox +10% 技术裁切 → HyperIQA → 综合画质分 → 4 档分级
   └─ grade 满足 species_min_grade 时：
@@ -43,7 +46,7 @@
 
 ## 各模型详情
 
-### YOLOv26l-bird-det v1.0
+### YOLOv26l-bird-det v1.1
 
 完整规格见 [`yolo26l-bird-det.MODEL_CARD.md`](./yolo26l-bird-det.MODEL_CARD.md)。
 
@@ -51,8 +54,10 @@
 - **输入**：float32 [1, 3, 1280, 1280] RGB 0-1，letterbox 114/255 填充
 - **输出**：float32 [1, 300, 6] top-k 槽位 (x1,y1,x2,y2,conf,cls)
 - **推荐 conf**：0.5（摄影场景）
-- **Test mAP@0.5**：0.9364，**Recall**：0.9021（353 张独立测试集）
-- **训练**：49,236 张，覆盖 1,495 种鸟类（China-bird-YOLO + dino 40w + 用户自拍 + hard negatives）
+- **重复框去重**：沿用 v1.0.1 后处理默认 IoU 0.5
+- **实拍 holdout**：150 张未见用户实拍 bbox recall 从 v1.0 的 59.0% 提升到 v1.1 的 87.2%
+- **原 test baseline**：v1.0 在 4,924 张 test set 上 mAP@0.5=0.927 / Recall=0.919；v1.1 未在该 test set 重新完整评测
+- **训练**：v1.0 base 49,236 张 + v1.1 fine-tune 约 22K 数据（绶带鸟用户实拍、DINO 林鸟科属、防遗忘留样）
 
 ### bird_visibility v2.0
 
@@ -64,15 +69,24 @@
 - **关键点顺序**(11):头部 5 `bill, crown, nape, left_eye, right_eye` + 躯干 6 `belly, breast, back, tail, left_wing, right_wing`
 - **flip_idx**：`[0, 1, 2, 4, 3, 5, 6, 7, 8, 10, 9]`
 - **派生 visibility**(5 项):head / eye / body / tail / wings
-- **派生 posture**(3 项):view_angle (frontal/side/back) / facing (left/right) / posture (perched/flying)
+- **派生 posture**(3 项):view_angle (frontal/side/back) / facing (left/right) / posture (perched/flying)。当前产品优先使用 `bird_flight_classifier.onnx` 的 `P(fly)`；分类器不可用时才回退到严格的关键点几何启发式。
 - **校准阈值**([`bird_visibility11_config.json`](./bird_visibility11_config.json)):
-  - `box_threshold` = 0.05(crop 输入下取最高置信度)
+  - `box_threshold` = 0.05(校准值);产品运行默认 `pose_box_threshold` = 0.02,避免遮挡长尾实拍中 box_conf 偏低但关键点可用的结果被整条丢弃
   - `eye_threshold` = 0.45 / `head_threshold` = 0.45 / `head_eye_threshold` = 0.40
   - `body_threshold` = 0.30 / `tail_threshold` = 0.40 / `wing_threshold` = 0.40
   - `expanded_box_margin` = 0.15
 - **Val F1**:Eye 99.28%,Head 99.91%,Body 99.84%,Tail 96.90%,Wings 97.55%
 - **训练**:NABirds 48,562 张,555 种北美鸟类(60 epoch,起点权重 v1 best.pt 5kpt→11kpt 迁移)
 - **下游产品规则**:头眼齐全 + posture=flying → grader 上提一档(飞版自动升档,鸟摄精选惯例)
+
+### bird flight classifier v1
+
+- **架构**：YOLO26m-cls，二分类 `fly / nofly`
+- **输入**：主体 crop resize + center crop 到 224,RGB 0-1
+- **输出**：`[P(fly), P(nofly)]`
+- **产品阈值**：`P(fly) ≥ 0.35` 判定飞版
+- **验证集**：290 张，最佳阈值 F1 96.43%（precision 94.74%,recall 98.18%）
+- **业务定位**：替代旧的飞版几何启发式，降低长尾鸟、侧飞鸟、局部展翼照片的错判；几何规则仅作为分类器缺失时的保守 fallback。
 
 ### DINOv3 鸟种分类
 

@@ -13,6 +13,7 @@ from engine.pipeline.pose import (
     PART_NAMES,
     TAIL_PART,
     WING_PARTS,
+    FlightClassifier,
     PoseDetector,
 )
 
@@ -80,6 +81,14 @@ def _make_detector(**kwargs) -> tuple[PoseDetector, np.ndarray]:
     return detector, img
 
 
+def _make_mock_flight_classifier(
+    result: tuple[str, float, str] | None,
+) -> MagicMock:
+    classifier = MagicMock(spec=FlightClassifier)
+    classifier.classify.return_value = result
+    return classifier
+
+
 # ---------------------------------------------------------------------------
 # 输出维度 + 基础解析
 # ---------------------------------------------------------------------------
@@ -109,6 +118,13 @@ class TestPoseDetectorBasic:
         raw[0, 4] = 0.9
         detector, img = _make_detector(session=_make_mock_session(raw))
         assert detector.detect(img) is None
+
+    def test_flight_classifier_normalizes_logits_defensively(self) -> None:
+        probs = FlightClassifier._as_probability_vector(np.array([2.0, 0.0], dtype=np.float32))
+
+        assert probs is not None
+        assert probs[0] == pytest.approx(0.880797, rel=1e-5)
+        assert float(probs.sum()) == pytest.approx(1.0)
 
 
 class TestPoseDetectorParsing:
@@ -329,6 +345,148 @@ class TestPostureDerivation:
                 "crown": (275.0, 275.0, 0.9),
                 "nape": (280.0, 280.0, 0.9),
                 "left_eye": (272.0, 272.0, 0.9),
+            },
+        )
+        assert res is not None
+        assert res.posture == "perched"
+
+    def test_flight_classifier_overrides_geometry(self) -> None:
+        """v2.1:分类器可把几何上像栖版的主体判为飞版。"""
+        raw = np.zeros((300, _ROW_WIDTH), dtype=np.float32)
+        bbox = (250.0, 250.0, 300.0, 300.0)
+        kpts = _kpts_uniform(0.9, xy=(275.0, 275.0))
+        raw[0] = _make_raw_row(bbox, 0.9, kpts)
+        detector, img = _make_detector(
+            session=_make_mock_session(raw),
+            flight_classifier=_make_mock_flight_classifier(("flying", 0.92, "classifier")),
+        )
+
+        res = detector.detect(img)
+        assert res is not None
+        assert res.posture == "flying"
+        assert res.posture_confidence == pytest.approx(0.92)
+        assert res.posture_method == "classifier"
+
+    def test_flight_classifier_failure_falls_back_to_geometry(self) -> None:
+        """分类器输出不可用时仍用几何兜底,避免 pose 整体失败。"""
+        raw = np.zeros((300, _ROW_WIDTH), dtype=np.float32)
+        bbox = (100.0, 200.0, 700.0, 400.0)
+        kpts = []
+        for name in PART_NAMES:
+            if name == "left_wing":
+                kpts.append((200.0, 300.0, 0.9))
+            elif name == "right_wing":
+                kpts.append((600.0, 300.0, 0.9))
+            else:
+                kpts.append((0.0, 0.0, 0.0))
+        raw[0] = _make_raw_row(bbox, 0.9, kpts)
+        classifier = _make_mock_flight_classifier(None)
+        detector, img = _make_detector(
+            session=_make_mock_session(raw),
+            flight_classifier=classifier,
+        )
+
+        res = detector.detect(img)
+        assert res is not None
+        assert res.posture == "flying"
+        assert res.posture_confidence == pytest.approx(0.0)
+        assert res.posture_method == "heuristic"
+
+    def test_posture_flying_long_tail_open_wing_signal(self) -> None:
+        """长尾/侧飞会把 bbox 拉高；只要翅膀明显伸出头身核心区也应算 flying。"""
+        # bbox 宽 360,高 420 → aspect 0.86,旧规则会直接归 perched。
+        bbox = (100.0, 100.0, 460.0, 520.0)
+        res = self._detect_with_kpts(
+            bbox,
+            {
+                "bill": (210.0, 160.0, 0.9),
+                "nape": (250.0, 175.0, 0.9),
+                "left_eye": (220.0, 165.0, 0.9),
+                "breast": (245.0, 250.0, 0.9),
+                "belly": (260.0, 315.0, 0.9),
+                "back": (270.0, 220.0, 0.9),
+                "tail": (295.0, 480.0, 0.9),
+                "left_wing": (350.0, 230.0, 0.9),
+                "right_wing": (170.0, 245.0, 0.3),
+            },
+        )
+        assert res is not None
+        assert res.posture == "flying"
+
+    def test_posture_not_flying_when_folded_wing_has_no_span_signal(self) -> None:
+        """折叠翅可能横向伸出核心区,但翼距太小不能升成飞版。"""
+        bbox = (100.0, 100.0, 700.0, 600.0)
+        res = self._detect_with_kpts(
+            bbox,
+            {
+                "bill": (650.0, 170.0, 0.9),
+                "nape": (430.0, 150.0, 0.9),
+                "left_eye": (610.0, 180.0, 0.9),
+                "breast": (550.0, 310.0, 0.9),
+                "belly": (450.0, 420.0, 0.9),
+                "back": (410.0, 210.0, 0.9),
+                "tail": (150.0, 300.0, 0.9),
+                "left_wing": (0.0, 0.0, 0.0),
+                "right_wing": (380.0, 280.0, 0.98),
+            },
+        )
+        assert res is not None
+        assert res.posture != "flying"
+
+    def test_posture_not_flying_when_tail_laterally_pulls_perched_bbox(self) -> None:
+        """停栖鸟长尾横向拉框时,不能把折叠翅/尾形误当展翼。"""
+        bbox = (100.0, 100.0, 500.0, 520.0)
+        res = self._detect_with_kpts(
+            bbox,
+            {
+                "bill": (330.0, 150.0, 0.9),
+                "nape": (280.0, 180.0, 0.9),
+                "left_eye": (320.0, 165.0, 0.9),
+                "breast": (300.0, 270.0, 0.9),
+                "belly": (280.0, 340.0, 0.9),
+                "back": (260.0, 220.0, 0.9),
+                "tail": (120.0, 400.0, 0.9),
+                "left_wing": (360.0, 265.0, 0.85),
+                "right_wing": (250.0, 280.0, 0.35),
+            },
+        )
+        assert res is not None
+        assert res.posture != "flying"
+
+    def test_posture_not_flying_for_back_view_open_wing_fallback(self) -> None:
+        """长尾/单翼兜底只服务侧飞；背面巢边姿态不靠兜底升飞版。"""
+        bbox = (100.0, 100.0, 460.0, 520.0)
+        res = self._detect_with_kpts(
+            bbox,
+            {
+                "crown": (275.0, 145.0, 0.9),
+                "nape": (270.0, 190.0, 0.9),
+                "breast": (270.0, 300.0, 0.9),
+                "belly": (270.0, 365.0, 0.9),
+                "back": (270.0, 230.0, 0.9),
+                "tail": (280.0, 470.0, 0.1),
+                "left_wing": (190.0, 280.0, 0.85),
+                "right_wing": (310.0, 285.0, 0.85),
+            },
+        )
+        assert res is not None
+        assert res.view_angle == "back"
+        assert res.posture != "flying"
+
+    def test_posture_perched_when_visible_wing_stays_inside_body_core(self) -> None:
+        """可见翅膀如果仍贴在头身核心区,不能仅凭 wings_visible 误判为飞版。"""
+        bbox = (100.0, 100.0, 400.0, 520.0)
+        res = self._detect_with_kpts(
+            bbox,
+            {
+                "bill": (210.0, 160.0, 0.9),
+                "nape": (250.0, 175.0, 0.9),
+                "left_eye": (220.0, 165.0, 0.9),
+                "breast": (245.0, 250.0, 0.9),
+                "belly": (260.0, 315.0, 0.9),
+                "back": (270.0, 220.0, 0.9),
+                "tail": (295.0, 480.0, 0.9),
+                "left_wing": (255.0, 260.0, 0.9),
             },
         )
         assert res is not None

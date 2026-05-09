@@ -43,13 +43,13 @@ class Settings(BaseSettings):
     # NVIDIA 走 CUDA bf16，否则 CPU fp32（CPU ~500ms，MPS/CUDA ~60ms）
     species_provider: str = "auto"
 
-    # Pipeline — detection (yolo26l-bird v1.0: imgsz=1280, conf=0.5 for photography)
+    # Pipeline — detection (yolo26l-bird v1.1: imgsz=1280, conf=0.5 for photography)
     yolo_confidence: float = 0.5
     yolo_input_size: int = 1280
-    # 防御性 IoU dedup 阈值：YOLO26 NMS-free 模型在密集场景（鸟群 / 花丛）仍可能
-    # over-detect 同一只鸟（多个高度重叠 bbox）。> 此阈值视为重复，保留 conf 最高那个。
-    # 0.85 很严格，只杀"几乎完全重叠"的 ghost bbox，不误合真鸟群（IoU ~0.5 那种）。
-    yolo_iou_dedup_threshold: float = 0.85
+    # v1.1 继续沿用交付推理代码的后处理阈值：重复框 IoU 通常 >0.95，
+    # 正常并排鸟 IoU <0.2；
+    # 0.5 可去掉 ghost duplicate，同时保留真实相邻个体。
+    yolo_iou_dedup_threshold: float = 0.5
 
     # Pipeline — crop strategy
     crop_expand_ratio: float = 1.0  # YOLO det bbox expand for IQA/pose input
@@ -71,11 +71,12 @@ class Settings(BaseSettings):
     # 注意：实际最终档位还会经过 pose penalty（头不可见 -2 档，眼不可见 -1 档）。
     grade_thresholds: tuple[float, float, float] = (0.45, 0.60, 0.75)
 
-    # Pipeline — pose / visibility (bird_visibility v2.0, 11 关键点)
-    # box_threshold 作用于 crop 输入下取最高置信度检测，不作过滤
-    # 阈值默认值取自 bird_visibility11_config.json 的 best_* 校准结果
+    # Pipeline — pose / visibility (bird_visibility v2.1:11 关键点 + 飞行分类器)
+    # box_threshold 作用于 crop 输入下取最高置信度检测。bird_visibility11_config.json
+    # 的单鸟校准值是 0.05；实拍遮挡/长尾场景中会出现 box_conf≈0.027 但关键点
+    # 置信度很高的可用结果(5Y3A9994)，运行阈值下调到 0.02 避免整条 pose 被吞。
     pose_input_size: int = 640
-    pose_box_threshold: float = 0.05
+    pose_box_threshold: float = 0.02
     pose_eye_threshold: float = 0.45
     pose_head_threshold: float = 0.45  # v1 0.35 → v2 0.45(11 kpt 训练后头部判定可更严格)
     pose_head_eye_threshold: float = 0.40  # v1 0.10 → v2 0.40
@@ -83,6 +84,10 @@ class Settings(BaseSettings):
     pose_tail_threshold: float = 0.40  # 新增 v2:尾羽阈值
     pose_wing_threshold: float = 0.40  # 新增 v2:翅膀 left/right_wing 任一阈值
     pose_expanded_margin: float = 0.15
+    # v2.1 新增 YOLO26m-cls 飞版分类器。输出 P(fly),阈值 0.35 是随包校准的最佳
+    # F1 点(precision 94.74%,recall 98.18%,F1 96.43%)。
+    flight_classifier_input_size: int = 224
+    flight_classifier_threshold: float = 0.35
 
     # Pipeline — species classification (DINOv3 ViT-L + LoRA/reject adapter)
     species_top_k: int = 5
@@ -112,10 +117,7 @@ class Settings(BaseSettings):
         PLUMELENS_GRADE_THRESHOLDS 拼错(如 1.0,0.5,0.2)能在启动期被这个验证拦下。"""
         a, b, c = self.grade_thresholds
         if not (0.0 <= a < b < c <= 1.0):
-            msg = (
-                f"grade_thresholds must be strictly increasing in [0, 1]; "
-                f"got ({a}, {b}, {c})"
-            )
+            msg = f"grade_thresholds must be strictly increasing in [0, 1]; got ({a}, {b}, {c})"
             raise ValueError(msg)
         return self
 
@@ -129,12 +131,14 @@ class Settings(BaseSettings):
     #     read-time 把这类结果标记为 species_source='model_unconfirmed'
     # v6: species_source 升级为 detection-level（每个 BestDetection / BirdDetectionDetail
     #     都有自己的 species_source）— 多鸟图混合可见性不再被 photo-level 一刀切
-    # v7: detector 输出加 IoU 0.85 dedup — YOLO26 NMS-free 在密集场景仍 over-detect
+    # v7: detector 输出加 IoU dedup — YOLO26 NMS-free 在密集场景仍 over-detect
     #     同一只鸟，bbox 几乎完全重叠的视为 ghost duplicate，保留 conf 最高的
     # v8: species 切换到 v4 384×384 LoRA/reject adapter，1591 类，uncertain 不写入自动物种结论
     # v9: crop_bbox + expand_for_iqa 统一 int(round()) 取代 int() 截断，与 letterbox 对齐;
     #     边角 1-2 px 系统性偏移消除,pose 在边缘鸟头/眼判定 _in_box 时不再误判 not visible
-    preprocess_version: int = 9
+    # v10: YOLO detection dedup 阈值切到交付口径 0.5
+    # v11: YOLO detection 权重切到 yolo26l-bird v1.1 fine-tune 版本
+    preprocess_version: int = 11
 
     # Pipeline — concurrency
     # 每个 task 内部 ONNX 推理会 to_thread 释放 GIL，多 worker 并发 = 多张图同时跑 ONNX。

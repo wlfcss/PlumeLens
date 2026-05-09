@@ -8,7 +8,7 @@
 >   - grader 在头眼齐全(head_visible AND eye_visible)且 posture=='flying' 时,自动 +1 档
 >   - 实现:`engine/pipeline/grader.py::apply_pose_adjustment`
 >   - 鸟摄精选惯例:飞版需要技术 + 抓拍 + 运气,在画质相同时应给予更高认可
->   - flying 判定故意严格(aspect>1.3 + 双翼可见 + 翼跨度 ≥ bbox 宽 50%),宁愿误判 perched 也不污染精选墙
+>   - flying 判定以关键点几何为准:保留宽翼展强规则,同时支持长尾/侧飞时单侧展翼明显伸出头身核心区的飞版信号
 
 ---
 
@@ -139,11 +139,15 @@ unknown:  其他
 ### 3.4 姿态（启发式规则，无 GT 标签）
 
 ```
-flying:   bbox aspect (w/h) > 1.3
-          且双翼都可见
-          且翼跨度 / bbox 宽度 >= 0.5
+flying:   规则 1: bbox aspect (w/h) > 1.3
+                  且双翼都可见
+                  且翼跨度 / bbox 宽度 >= 0.5
+          规则 2: 仅 side 视角、bbox aspect 在 0.75-1.45、
+                  至少一侧强翼点(conf>=0.75)、另一侧翼点最低可信(conf>=0.20)、
+                  翼距>=bbox 宽 15%、头身核心不过宽、尾羽不横向强拉框,
+                  且翼点明显伸出 bill/nape/breast/belly/back 构成的头身核心区域
 perched:  aspect < 1.05
-          或翼不全可见
+          或没有任何可信翅膀关键点
 unknown:  其他
 ```
 
@@ -293,7 +297,7 @@ m = YOLO("bird_visibility11.onnx", task="pose")  # ← 必须加 task
 
 ### 7.3 posture 总是 unknown 或 perched
 
-`flying` 判定很严格（要求 aspect > 1.3 + 双翼可见 + 翼跨度大）。如果你的应用场景多飞鸟，可以读取原始关键点自行判断；或修改 `_derive_posture` 方法降低阈值。
+`flying` 是后处理启发式,不是模型直接分类头。若飞鸟被长尾或侧飞姿态拉成窄高 bbox,应检查 `left_wing/right_wing` 是否明显伸出头身核心区；当前集成已将该信号纳入 `_derive_posture`。若仍误判,优先查看原始关键点置信度和位置,再调整启发式阈值。
 
 ### 7.4 想用其他视觉特征做物种识别
 

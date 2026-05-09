@@ -74,7 +74,7 @@ class TestBirdDetector:
 
     def test_iou_dedup_drops_near_duplicate_keeping_highest_conf(self) -> None:
         """YOLO26 NMS-free 在密集场景仍可能 over-detect 同一只鸟（多个高度
-        重叠 bbox）。dedup 应保留 conf 最高那个，IoU > 0.85 视为重复。"""
+        重叠 bbox）。v1.1 沿用的 dedup 应保留 conf 最高那个，IoU > 0.5 视为重复。"""
         raw = np.zeros((300, 6), dtype=np.float32)
         # 3 个几乎完全重叠的框（同一只鸟），不同 conf；共享同一个区域
         raw[0] = [100, 100, 300, 300, 0.88, 0]  # 200×200 base
@@ -83,7 +83,7 @@ class TestBirdDetector:
         # 一个完全独立的框（远处另一只鸟，不应被合并）
         raw[3] = [400, 400, 500, 500, 0.78, 0]
         session = _make_mock_session(raw)
-        detector = BirdDetector(session, input_size=640, iou_dedup_threshold=0.85)
+        detector = BirdDetector(session, input_size=640, iou_dedup_threshold=0.5)
 
         image = np.random.rand(640, 640, 3).astype(np.float32)
         boxes = detector.detect(image, confidence_threshold=0.35)
@@ -95,13 +95,13 @@ class TestBirdDetector:
         assert confidences[1] == pytest.approx(0.78)
 
     def test_iou_dedup_does_not_merge_legit_adjacent_birds(self) -> None:
-        """两只挨着但 IoU 中等的鸟（典型鸟群）不该被误合 — 只杀 ghost duplicate。"""
+        """两只轻微相邻的鸟不该被误合 — 只杀 ghost duplicate。"""
         raw = np.zeros((300, 6), dtype=np.float32)
-        # 两个相邻 bbox，IoU ~0.33 (远低于 0.85 阈值) — 真鸟群场景
+        # 两个相邻 bbox，IoU ~0.2 以下 — 真鸟群场景
         raw[0] = [100, 100, 250, 250, 0.85, 0]
-        raw[1] = [200, 100, 350, 250, 0.80, 0]
+        raw[1] = [225, 100, 375, 250, 0.80, 0]
         session = _make_mock_session(raw)
-        detector = BirdDetector(session, input_size=640, iou_dedup_threshold=0.85)
+        detector = BirdDetector(session, input_size=640, iou_dedup_threshold=0.5)
 
         image = np.random.rand(640, 640, 3).astype(np.float32)
         boxes = detector.detect(image, confidence_threshold=0.35)

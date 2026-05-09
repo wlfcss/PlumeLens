@@ -19,7 +19,8 @@ MODELS_DIR = Path(__file__).resolve().parents[3] / "engine" / "models"
 
 CORE_MODELS = [
     "yolo26l-bird-det.onnx",
-    "bird_visibility11.onnx",  # v2 (11 关键点),v1 旧文件 bird_visibility.onnx 已弃用
+    "bird_visibility11.onnx",  # v2.1 pose 主模型(11 关键点)
+    "bird_flight_classifier.onnx",  # v2.1 fly/nofly 分类器
     "clipiqa_plus.onnx",
     "hyperiqa.onnx",
 ]
@@ -92,6 +93,24 @@ class TestRealONNXLoad:
         # Random noise → no strong bird detection, 随机数据可能返回 None
         assert result is None or result.head_visible in (True, False)
 
+    def test_flight_classifier_real_inference(self) -> None:
+        import onnxruntime as ort
+        from engine.pipeline.pose import FlightClassifier
+
+        sess = ort.InferenceSession(
+            str(MODELS_DIR / "bird_flight_classifier.onnx"),
+            providers=["CPUExecutionProvider"],
+        )
+        classifier = FlightClassifier(sess, input_size=224, threshold=0.35)
+
+        crop = np.random.rand(300, 200, 3).astype(np.float32)
+        result = classifier.classify(crop)
+        assert result is not None
+        posture, fly_prob, method = result
+        assert posture in ("flying", "perched")
+        assert 0.0 <= fly_prob <= 1.0
+        assert method == "classifier"
+
 
 class TestRealFullPipeline:
     """验证 PipelineManager 能从磁盘加载全部 6 模型 + 端到端跑通一张图。"""
@@ -121,14 +140,21 @@ class TestRealFullPipeline:
         pipeline = PipelineManager(settings)
         await pipeline.initialize()
 
-        # 所有 6 模型必须加载成功（这正是之前 CLIPIQA/HyperIQA 偷偷失败的场景）
+        # 所有核心模型必须加载成功（这正是之前 CLIPIQA/HyperIQA 偷偷失败的场景）
         assert pipeline.is_ready
         assert pipeline.quality_available
         assert pipeline.pose_available
         assert pipeline.species_available
         status = pipeline.model_status
         # v4：species 走 torch + transformers + LoRA/reject adapter。
-        for name in ("yolo", "bird_visibility", "clipiqa", "hyperiqa", "dinov3_species_v4"):
+        for name in (
+            "yolo",
+            "bird_visibility",
+            "bird_flight_classifier",
+            "clipiqa",
+            "hyperiqa",
+            "dinov3_species_v4",
+        ):
             assert status[name], f"{name} failed to load"
 
         # 端到端推理

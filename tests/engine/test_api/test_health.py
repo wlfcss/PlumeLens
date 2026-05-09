@@ -40,6 +40,7 @@ async def test_health_lists_current_model_slots(client: AsyncClient) -> None:
     assert set(models.keys()) == {
         "yolo",
         "bird_visibility",
+        "bird_flight_classifier",
         "clipiqa",
         "hyperiqa",
         "dinov3_species_v4",

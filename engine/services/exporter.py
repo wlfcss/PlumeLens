@@ -123,6 +123,11 @@ _GRADE_XMP_LABELS: dict[str, str] = {
     "reject": "Red",
 }
 _EXPORT_SPACE_MARGIN = 1.05
+_JPEG_EXTENSIONS = {".jpg", ".jpeg"}
+_JPEG_SOI = b"\xff\xd8"
+_JPEG_APP1 = b"\xff\xe1"
+_JPEG_XMP_HEADER = b"http://ns.adobe.com/xap/1.0/\x00"
+_JPEG_STANDALONE_MARKERS = {*range(0xD0, 0xD8), 0x01, 0xD8, 0xD9}
 
 
 def _now_stamp() -> str:
@@ -459,6 +464,92 @@ def _xmp_packet(photo: ExportPhoto, source: Path) -> str:
     )
 
 
+def _is_jpeg_path(path: Path) -> bool:
+    return path.suffix.lower() in _JPEG_EXTENSIONS
+
+
+def _jpeg_app1_segment(payload: bytes) -> bytes:
+    # JPEG APP1 length includes the two length bytes, so the payload itself is capped at 65533.
+    segment_len = len(payload) + 2
+    if segment_len > 0xFFFF:
+        msg = "XMP packet is too large for a single JPEG APP1 segment"
+        raise ValueError(msg)
+    return _JPEG_APP1 + segment_len.to_bytes(2, "big") + payload
+
+
+def _jpeg_with_embedded_xmp(data: bytes, packet: str) -> bytes:
+    """Return JPEG bytes with one standard XMP APP1 segment, preserving image data."""
+
+    if not data.startswith(_JPEG_SOI):
+        msg = "not a JPEG file"
+        raise ValueError(msg)
+
+    xmp_segment = _jpeg_app1_segment(_JPEG_XMP_HEADER + packet.encode("utf-8"))
+    segments: list[bytes] = []
+    offset = len(_JPEG_SOI)
+    tail_offset = offset
+
+    while offset < len(data):
+        marker_start = offset
+        if data[offset] != 0xFF:
+            tail_offset = offset
+            break
+
+        while offset < len(data) and data[offset] == 0xFF:
+            offset += 1
+        if offset >= len(data):
+            tail_offset = marker_start
+            break
+
+        marker = data[offset]
+        offset += 1
+        if marker == 0x00:
+            tail_offset = marker_start
+            break
+        if marker == 0xDA:  # Start of Scan: compressed image data follows.
+            tail_offset = marker_start
+            break
+        if marker in _JPEG_STANDALONE_MARKERS:
+            tail_offset = offset
+            if marker != 0xD9:
+                segments.append(data[marker_start:offset])
+                continue
+            tail_offset = marker_start
+            break
+
+        if offset + 2 > len(data):
+            msg = "truncated JPEG segment length"
+            raise ValueError(msg)
+        segment_len = int.from_bytes(data[offset : offset + 2], "big")
+        if segment_len < 2:
+            msg = "invalid JPEG segment length"
+            raise ValueError(msg)
+        segment_end = offset + segment_len
+        if segment_end > len(data):
+            msg = "truncated JPEG segment payload"
+            raise ValueError(msg)
+
+        payload = data[offset + 2 : segment_end]
+        segment = data[marker_start:segment_end]
+        if marker != 0xE1 or not payload.startswith(_JPEG_XMP_HEADER):
+            segments.append(segment)
+        offset = segment_end
+        tail_offset = offset
+
+    return _JPEG_SOI + b"".join(segments) + xmp_segment + data[tail_offset:]
+
+
+def _try_embed_xmp_in_jpeg(path: Path, packet: str) -> bool:
+    if not _is_jpeg_path(path):
+        return False
+    try:
+        embedded = _jpeg_with_embedded_xmp(path.read_bytes(), packet)
+    except (OSError, ValueError):
+        return False
+    path.write_bytes(embedded)
+    return True
+
+
 def _estimate_export_bytes(
     selected: list[ExportPhoto],
     body: ExportLibraryRequest,
@@ -523,15 +614,36 @@ def _rel_to_output(path: str | None, output_dir: Path) -> str | None:
         return path
 
 
-def _manifest_row_to_chinese(row: ExportManifestRow, output_dir: Path) -> dict[str, Any]:
+def _rel_to_source_root(path: str | None, root: Path) -> str | None:
+    if path is None:
+        return None
+    try:
+        return str(Path(path).resolve().relative_to(root))
+    except (OSError, ValueError):
+        return Path(path).name
+
+
+def _source_parent_label(relative_source: str | None) -> str | None:
+    if not relative_source:
+        return None
+    parent = Path(relative_source).parent
+    return "" if str(parent) == "." else str(parent)
+
+
+def _manifest_row_to_chinese(
+    row: ExportManifestRow,
+    output_dir: Path,
+    root: Path,
+) -> dict[str, Any]:
+    source_rel = _rel_to_source_root(row.source_path, root)
     return {
         "照片ID": row.photo_id,
         "文件名": row.file_name,
-        "源文件路径": row.source_path,
-        "源文件夹": str(Path(row.source_path).parent),
+        "源文件路径": source_rel,
+        "源文件夹": _source_parent_label(source_rel),
         "导出文件路径": row.dest_path,
         "导出相对路径": _rel_to_output(row.dest_path, output_dir),
-        "同伴源文件路径": row.companion_source_path,
+        "同伴源文件路径": _rel_to_source_root(row.companion_source_path, root),
         "同伴导出路径": row.companion_dest_path,
         "XMP导出路径": row.xmp_dest_path,
         "评级": _grade_label(row.grade),
@@ -550,6 +662,7 @@ def _manifest_row_to_chinese(row: ExportManifestRow, output_dir: Path) -> dict[s
 
 def _write_manifests(
     output_dir: Path,
+    root: Path,
     rows: list[ExportManifestRow],
     summary: dict[str, Any],
 ) -> tuple[Path, Path]:
@@ -562,7 +675,10 @@ def _write_manifests(
         for index, row in enumerate(rows):
             if index > 0:
                 f.write(",\n")
-            rendered = json.dumps(_manifest_row_to_chinese(row, output_dir), ensure_ascii=False)
+            rendered = json.dumps(
+                _manifest_row_to_chinese(row, output_dir, root),
+                ensure_ascii=False,
+            )
             f.write(f"    {rendered}")
         f.write("\n  ]\n")
         f.write("}\n")
@@ -570,7 +686,7 @@ def _write_manifests(
         writer = csv.DictWriter(f, fieldnames=_CHINESE_MANIFEST_FIELDNAMES)
         writer.writeheader()
         for row in rows:
-            writer.writerow(_manifest_row_to_chinese(row, output_dir))
+            writer.writerow(_manifest_row_to_chinese(row, output_dir, root))
     return json_path, csv_path
 
 
@@ -665,10 +781,18 @@ def _run_export(
                         if companion_source is not None and companion_source.exists()
                         else source
                     )
+                    xmp_body = _xmp_packet(photo, xmp_source)
                     if companion_dest is not None:
                         xmp_dest = _xmp_dest_for(output_dir, companion_dest, used)
+                        _write_text_file(xmp_dest, xmp_body)
+                        created_paths.append(xmp_dest)
                     elif dest_path is not None:
-                        xmp_dest = _xmp_dest_for(output_dir, dest_path, used)
+                        if _try_embed_xmp_in_jpeg(dest_path, xmp_body):
+                            xmp_dest = dest_path
+                        else:
+                            xmp_dest = _xmp_dest_for(output_dir, dest_path, used)
+                            _write_text_file(xmp_dest, xmp_body)
+                            created_paths.append(xmp_dest)
                     else:
                         xmp_rel = _dest_rel(
                             xmp_source,
@@ -678,8 +802,8 @@ def _run_export(
                             body.preserve_structure,
                         )
                         xmp_dest = _xmp_dest_for(output_dir, xmp_rel, used)
-                    _write_text_file(xmp_dest, _xmp_packet(photo, xmp_source))
-                    created_paths.append(xmp_dest)
+                        _write_text_file(xmp_dest, xmp_body)
+                        created_paths.append(xmp_dest)
                     exported_xmp = True
 
                 if error is None:
@@ -733,12 +857,13 @@ def _run_export(
     if body.include_manifest:
         json_path, csv_path = _write_manifests(
             output_dir,
+            root,
             rows,
             {
                 "导出时间": datetime.now(UTC).isoformat(),
                 "图库ID": library_id,
                 "图库名称": library_name,
-                "源图库路径": root_path,
+                "源图库路径": "(已脱敏)",
                 "目标目录": target_dir,
                 "输出目录": str(output_dir),
                 "导出布局": _LAYOUT_LABELS[body.layout],

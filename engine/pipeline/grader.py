@@ -63,8 +63,8 @@ def apply_pose_adjustment(g: QualityGrade, pose: PoseInfo | None) -> QualityGrad
     升档(v2 模型新增 — 飞版优于栖版):
       head + eye 都可见 + posture == flying → +1 档
       原因:飞版需要技术 + 抓拍 + 运气,在画质相同时应给予更高认可。
-      flying 判定故意严格(aspect>1.3 + 双翼可见 + 翼跨度 >= bbox 宽 50%),
-      错判为 perched 只是不升档,代价小;反向错判会污染精选墙。
+      flying 由 bird_flight_classifier.onnx 优先给出;分类器缺失/失败时才使用
+      pose.py 的关键点几何启发式兜底。perched / unknown 不参与升档。
 
     pose=None(模型缺失/推理失败)→ 不调整,保守等模型补齐后重跑。
     """
