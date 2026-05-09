@@ -81,7 +81,10 @@ export function useAnalysisProgress(
   const lastDetailRefreshRef = useRef<{ at: number; signature: string } | null>(null)
 
   useEffect(() => {
-    if (!libraryId || !enabled) return
+    setEvent(null)
+    lastDetailRefreshRef.current = null
+
+    if (!libraryId || !enabled) return undefined
     let source: EventSource | null = null
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null
     let cancelled = false

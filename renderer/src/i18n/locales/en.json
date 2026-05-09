@@ -42,7 +42,9 @@
       "baiduLabel": "Baidu Maps AK (server)",
       "baiduHint": "Baidu console → Apps → Create app, type \"server\"",
       "tencentLabel": "Tencent Maps Key",
-      "tencentHint": "Tencent location service console → Create key"
+      "tencentHint": "Tencent location service console → Create key",
+      "showKey": "Show API key",
+      "hideKey": "Hide API key"
     },
     "about": {
       "title": "About",
@@ -64,6 +66,8 @@
     "subtitle": "Choose a folder for local scanning, analysis, and culling",
     "primaryAction": "Choose photo folder",
     "secondaryAction": "Resume latest folder",
+    "importErrorTitle": "Import failed",
+    "importErrorBody": "Please confirm the backend engine is ready and the path is valid, then try again. {{detail}}",
     "recentFolders": "Recent folders",
     "resumeTitle": "Resume right where you left off.",
     "emptyRecentTitle": "Start with an import",
@@ -204,7 +208,7 @@
       "body": "Body",
       "tail": "Tail",
       "wings": "Wings",
-      "bodyParts": "Torso",
+      "bodyParts": "Visibility",
       "posture": "Posture",
       "viewAngle": "View",
       "confidence": "Confidence",
@@ -242,6 +246,10 @@
       "collapseStack": "Collapse stack",
       "stackAria": "{{count}} burst photos, cover {{file}}, click to view cover info",
       "expandAria": "Expand {{count}} burst photos",
+      "collapseAria": "Collapse {{count}} burst photos",
+      "expandTooltip": "Expand {{count}} burst photos",
+      "collapseTooltip": "Collapse back to a stack",
+      "stackLabel": "Burst",
       "stackCount": "×{{count}}",
       "stackHint": "Multiple photos · click ×N to expand",
       "pendingTitle": "{{time}} · Pending grouping",
@@ -276,10 +284,10 @@
       "conflict": "Group conflict",
       "conflictDetail": "Group conflict; keeping the high-confidence single-frame result",
       "unconfirmed": "Partial · Pending review",
-      "unconfirmedDetail": "Model confidence is limited; confirm in the deep review before this enters Plumetrail",
-      "unconfirmedUncertainDetail": "Model rejected the top candidate (reject head: uncertain); confirm in the deep review before this enters Plumetrail",
-      "unconfirmedHeadDetail": "Bird head not visible; model confidence is limited until you confirm in the deep review",
-      "unconfirmedGenericDetail": "Model confidence is limited; confirm in the deep review before this enters Plumetrail",
+      "unconfirmedDetail": "Low recognition confidence; confirm before adding to Plumetrail",
+      "unconfirmedUncertainDetail": "Low recognition confidence; confirm before adding to Plumetrail",
+      "unconfirmedHeadDetail": "Head not visible; confirm before adding to Plumetrail",
+      "unconfirmedGenericDetail": "Low recognition confidence; confirm before adding to Plumetrail",
       "partialUnconfirmed": "Partial pending review"
     },
     "poseTags": {
@@ -315,6 +323,7 @@
       "pendingCaption": "Waiting for analysis"
     },
     "actions": {
+      "label": "Photo rating actions",
       "select": "Select",
       "usable": "Usable",
       "record": "Record",
@@ -373,7 +382,11 @@
         "flying": "Flying",
         "perched": "Perched",
         "unknown": "—",
-        "flyBoost": "Flying · auto-upgraded"
+        "noResult": "No result",
+        "flyBoost": "flight bonus"
+      },
+      "visibility": {
+        "noResult": "No result"
       },
       "viewAngle": {
         "frontal": "Frontal",
@@ -596,7 +609,7 @@
       "openFolder": "Open in Finder",
       "openFailed": "Cannot open the output folder. Make sure it still exists.",
       "reset": "New export",
-      "stats": "{{exported}} exported, {{companions}} companion files, {{xmp}} XMP, {{failed}} failed"
+      "stats": "{{exported}} exported, {{companions}} companion files, {{xmp}} XMP metadata writes, {{failed}} failed"
     },
     "scope": {
       "label": "Scope",
@@ -620,14 +633,14 @@
         "hint": "Copy matching JPG/RAW files"
       },
       "files_xmp": {
-        "label": "Photos + XMP",
-        "short": "Photos + XMP",
-        "hint": "Copy photos and generate editor-readable rating sidecars"
+        "label": "Photos + metadata",
+        "short": "Photos + metadata",
+        "hint": "Copy photos; embed XMP in JPGs and write RAW sidecars"
       },
       "xmp_only": {
-        "label": "XMP only",
-        "short": "XMP manifest",
-        "hint": "Skip photo copying; generate a mirrored XMP sidecar bundle"
+        "label": "XMP sidecars only",
+        "short": "XMP sidecars",
+        "hint": "Skip photo copying; generate a mirrored XMP sidecar bundle, mainly for RAW workflows"
       }
     },
     "layout": {

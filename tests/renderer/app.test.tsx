@@ -4,6 +4,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { describe, it, expect, beforeAll, vi } from 'vitest'
 import '@/i18n'
 import App, {
+  applyNewSpeciesMarkers,
   buildArchiveMapPins,
   buildGroupStartMsMap,
   buildSpeciesCollectionGroups,
@@ -18,7 +19,12 @@ import App, {
 } from '@/App'
 import i18next from 'i18next'
 import { listAllSpecies, resolveSpeciesCanonicalSci } from '@/lib/species-wiki'
-import type { FolderRecord, PhotoRecord, WorkspaceSnapshot } from '@/lib/mock-workspace'
+import type {
+  FolderRecord,
+  PhotoGroupRecord,
+  PhotoRecord,
+  WorkspaceSnapshot,
+} from '@/lib/mock-workspace'
 
 // Mock the Electron preload API
 beforeAll(() => {
@@ -86,6 +92,7 @@ beforeAll(() => {
     selectExportDirectory: async () => null,
     openLogsDir: async () => '',
     openPathInFinder: async () => ({ ok: true }),
+    openExternalUrl: async () => ({ ok: true }),
     onBackendReady: () => {},
     onBackendError: () => {},
     onEngineStatus: () => () => {},
@@ -554,6 +561,63 @@ describe('App', () => {
     )
     expect(records.find((species) => species.latinName === 'Zosterops japonicus')?.collected).toBe(
       false,
+    )
+  })
+
+  it('marks all photos of a new species within its first encounter group only', () => {
+    const makePhoto = (
+      id: string,
+      groupId: string,
+      speciesName: string,
+      speciesLatinName: string,
+      shotAt: string,
+    ) =>
+      ({
+        id,
+        folderId: 'folder-1',
+        groupId,
+        fileName: `${id}.JPG`,
+        shotAt,
+        speciesName,
+        speciesLatinName,
+        speciesSource: 'model_recognized',
+        birdCount: 1,
+        analysisStatus: 'done',
+        grade: 'usable',
+        decision: null,
+        finalScore: 0.7,
+        isNewSpecies: false,
+      }) as PhotoRecord
+
+    const groups = [
+      { id: 'group-old', folderId: 'folder-1', containsNewSpecies: false },
+      { id: 'group-first', folderId: 'folder-1', containsNewSpecies: false },
+      { id: 'group-later', folderId: 'folder-1', containsNewSpecies: false },
+    ] as PhotoGroupRecord[]
+    const { photos, groups: markedGroups } = applyNewSpeciesMarkers(
+      [
+        makePhoto('old-1', 'group-old', '白鹭', 'Egretta garzetta', '2026-04-01T00:00:00Z'),
+        makePhoto('new-1', 'group-first', '池鹭', 'Ardeola bacchus', '2026-04-02T00:00:00Z'),
+        makePhoto('new-2', 'group-first', '池鹭', 'Ardeola bacchus', '2026-04-02T00:00:01Z'),
+        makePhoto('old-2', 'group-first', '白鹭', 'Egretta garzetta', '2026-04-02T00:00:02Z'),
+        makePhoto('later-1', 'group-later', '池鹭', 'Ardeola bacchus', '2026-04-03T00:00:00Z'),
+      ],
+      groups,
+    )
+
+    expect(Object.fromEntries(photos.map((photo) => [photo.id, photo.isNewSpecies]))).toEqual({
+      'old-1': true,
+      'new-1': true,
+      'new-2': true,
+      'old-2': false,
+      'later-1': false,
+    })
+    expect(Object.fromEntries(markedGroups.map((group) => [group.id, group.containsNewSpecies]))).toEqual(
+      {
+        'group-old': true,
+        'group-first': true,
+        'group-later': false,
+      },
     )
   })
 

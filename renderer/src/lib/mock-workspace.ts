@@ -89,6 +89,8 @@ export interface BirdDetectionRecord {
     view_angle?: 'frontal' | 'side' | 'back' | 'unknown'
     facing?: 'left' | 'right' | 'unknown'
     posture?: 'perched' | 'flying' | 'unknown'
+    posture_confidence?: number
+    posture_method?: 'classifier' | 'heuristic'
   } | null
   speciesName: string | null
   speciesLatinName: string | null
@@ -206,6 +208,8 @@ export interface PhotoRecord {
     view_angle?: 'frontal' | 'side' | 'back' | 'unknown'
     facing?: 'left' | 'right' | 'unknown'
     posture?: 'perched' | 'flying' | 'unknown'
+    posture_confidence?: number
+    posture_method?: 'classifier' | 'heuristic'
   } | null
   // 对焦点（原图坐标系，Canon AFInfo MakerNote 解析得到）
   bestAfPoint?: { x: number; y: number } | null

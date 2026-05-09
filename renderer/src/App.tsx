@@ -17,6 +17,7 @@ import {
   Settings2,
   Shield,
   Sparkles,
+  TriangleAlert,
   Trophy,
   Wand2,
   X,
@@ -28,6 +29,7 @@ import {
   useCallback,
   useDeferredValue,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -99,7 +101,6 @@ import { subscribeEngineStatus, useEngineStore } from '@/stores/engine-store'
 
 const PHOTO_GRID_MIN_COLUMN_WIDTH = 260
 const PHOTO_GRID_GAP = 18
-const PHOTO_GROUP_ESTIMATED_HEIGHT = 460
 const BURST_SEGMENT_RAPID_GAP_MS = 1_200
 const BURST_SEGMENT_SOFT_GAP_MS = 3_000
 const BURST_SEGMENT_HARD_GAP_MS = 12_000
@@ -122,6 +123,11 @@ type PhotoSegment = {
   id: string
   photos: PhotoRecord[]
   coverPhoto: PhotoRecord
+}
+
+type StackCollapseControl = {
+  count: number
+  onCollapse: () => void
 }
 
 type NormalizedBBox = {
@@ -401,6 +407,11 @@ export function shouldIgnoreSelectionReviewShortcutTarget(target: EventTarget | 
 }
 
 function buildFolderSummary(photos: PhotoRecord[]): FolderSummary {
+  const newSpeciesCount = new Set(
+    photos
+      .filter((photo) => photo.isNewSpecies)
+      .flatMap((photo) => getArchiveSpeciesEntries(photo).map((entry) => entry.key)),
+  ).size
   return photos.reduce<FolderSummary>(
     (acc, photo) => {
       // 失败照片单独计数,不进 grade buckets / 有鸟无鸟分类(它们的 birdCount/grade
@@ -411,13 +422,12 @@ function buildFolderSummary(photos: PhotoRecord[]): FolderSummary {
       }
       const category = photoCategory(photo)
       if (category !== 'no_bird') acc.gradeCounts[category] += 1
-      if (photo.isNewSpecies) acc.newSpeciesCount += 1
       if (photo.birdCount > 0) acc.birdPhotoCount += 1
       if (photo.birdCount === 0) acc.noBirdCount += 1
       return acc
     },
     {
-      newSpeciesCount: 0,
+      newSpeciesCount,
       birdPhotoCount: 0,
       noBirdCount: 0,
       failedCount: 0,
@@ -545,19 +555,19 @@ export function getArchiveSpeciesEntries(photo: PhotoRecord): ArchiveSpeciesEntr
 }
 
 /**
- * 跨 library 标记 isNewSpecies — 按拍摄时间升序,每个物种第一次出现的照片打 true,
- * 同步把"组内是否含新种"回写到 group.containsNewSpecies。
+ * 跨 library 标记 isNewSpecies — 按拍摄时间升序,先确定每个物种的首次出现场景,
+ * 再把该首次场景里属于这个物种的照片都打 true,同步回写 group.containsNewSpecies。
  *
  * 之前 backend-adapter 把 photo.isNewSpecies / group.containsNewSpecies 写死 false
  * (TODO),导致选片"新增物种"角标永不亮、archive 视图统计永远 0、组卡片"含新种"徽
  * 标常错。新逻辑跑在 workspace 层面(allDetails / activeDetail 两条 useEffect 注入完
- * 毕后),保证跨 library 全局一致 — 用户即便分多个 library 拍同一种鸟,也只在最早那
- * 张标"新种"。
+ * 毕后),保证跨 library 全局一致 — 用户即便分多个 library 拍同一种鸟,也只在最早遇
+ * 到该物种的场景里标"新种"。
  *
  * 物种身份用 getArchiveSpeciesEntries 返回的 entry.key(latin name 优先),与羽迹页
  * 同维度,自动排除 model_unconfirmed / conflict / 无识别等不入档照片。
  */
-function applyNewSpeciesMarkers(
+export function applyNewSpeciesMarkers(
   photos: PhotoRecord[],
   groups: PhotoGroupRecord[],
 ): { photos: PhotoRecord[]; groups: PhotoGroupRecord[] } {
@@ -572,31 +582,30 @@ function applyNewSpeciesMarkers(
     return a.id.localeCompare(b.id)
   })
   const seenSpecies = new Set<string>()
-  const newSpeciesPhotoIds = new Set<string>()
-  const groupsWithNewSpecies = new Set<string>()
+  const firstEncounterSpeciesKeysByGroupId = new Map<string, Set<string>>()
   for (const photo of sorted) {
     const entries = getArchiveSpeciesEntries(photo)
     if (entries.length === 0) continue
-    let firstHere = false
     for (const entry of entries) {
       if (!seenSpecies.has(entry.key)) {
         seenSpecies.add(entry.key)
-        firstHere = true
+        const groupKeys = firstEncounterSpeciesKeysByGroupId.get(photo.groupId) ?? new Set<string>()
+        groupKeys.add(entry.key)
+        firstEncounterSpeciesKeysByGroupId.set(photo.groupId, groupKeys)
       }
-    }
-    if (firstHere) {
-      newSpeciesPhotoIds.add(photo.id)
-      groupsWithNewSpecies.add(photo.groupId)
     }
   }
   // 仅 mutate 标记需要变化的照片/组,大库下避免全量复制
   const markedPhotos = photos.map((p) => {
-    const should = newSpeciesPhotoIds.has(p.id)
+    const firstEncounterKeys = firstEncounterSpeciesKeysByGroupId.get(p.groupId)
+    const should =
+      firstEncounterKeys !== undefined &&
+      getArchiveSpeciesEntries(p).some((entry) => firstEncounterKeys.has(entry.key))
     if (p.isNewSpecies === should) return p
     return { ...p, isNewSpecies: should }
   })
   const markedGroups = groups.map((g) => {
-    const should = groupsWithNewSpecies.has(g.id)
+    const should = firstEncounterSpeciesKeysByGroupId.has(g.id)
     if (g.containsNewSpecies === should) return g
     return { ...g, containsNewSpecies: should }
   })
@@ -640,15 +649,27 @@ const GRADE_RANK: Record<PhotoGrade, number> = {
 }
 
 function sortPhotos(photos: PhotoRecord[], sortBy: SortMode): PhotoRecord[] {
-  return photos.toSorted((left, right) => {
-    if (sortBy === 'name') return left.fileName.localeCompare(right.fileName)
-    if (sortBy === 'shot_at') return right.shotAt.localeCompare(left.shotAt)
-    // 综合评分（默认）：先按档位降序（精选 → 可用 → 记录 → 淘汰），
-    // 同档内按 quality_score 降序
-    const gradeDiff = GRADE_RANK[effectivePhotoGrade(right)] - GRADE_RANK[effectivePhotoGrade(left)]
-    if (gradeDiff !== 0) return gradeDiff
-    return (right.finalScore ?? -1) - (left.finalScore ?? -1)
-  })
+  return photos.toSorted((left, right) => comparePhotosBySort(left, right, sortBy))
+}
+
+function comparePhotosByScoreDesc(left: PhotoRecord, right: PhotoRecord): number {
+  // 综合评分（默认）：先按档位降序（精选 → 可用 → 记录 → 淘汰），
+  // 同档内按 quality_score 降序。
+  const gradeDiff = GRADE_RANK[effectivePhotoGrade(right)] - GRADE_RANK[effectivePhotoGrade(left)]
+  if (gradeDiff !== 0) return gradeDiff
+  const scoreDiff = (right.finalScore ?? -1) - (left.finalScore ?? -1)
+  if (scoreDiff !== 0) return scoreDiff
+  return comparePhotosByShotTimeDesc(left, right)
+}
+
+function comparePhotosBySort(left: PhotoRecord, right: PhotoRecord, sortBy: SortMode): number {
+  if (sortBy === 'name') {
+    const nameDiff = left.fileName.localeCompare(right.fileName)
+    if (nameDiff !== 0) return nameDiff
+    return comparePhotosByShotTimeAsc(left, right)
+  }
+  if (sortBy === 'shot_at') return comparePhotosByShotTimeDesc(left, right)
+  return comparePhotosByScoreDesc(left, right)
 }
 
 function bestPhotoForStack(photos: PhotoRecord[]): PhotoRecord | null {
@@ -658,12 +679,7 @@ function bestPhotoForStack(photos: PhotoRecord[]): PhotoRecord | null {
       best = photo
       continue
     }
-    const scoreDiff = (photo.finalScore ?? -1) - (best.finalScore ?? -1)
-    if (scoreDiff > 0) {
-      best = photo
-      continue
-    }
-    if (scoreDiff === 0 && photo.shotAt.localeCompare(best.shotAt) < 0) best = photo
+    if (comparePhotosByScoreDesc(photo, best) < 0) best = photo
   }
   return best
 }
@@ -677,6 +693,15 @@ function comparePhotosByShotTimeAsc(left: PhotoRecord, right: PhotoRecord): numb
   const leftTs = photoShotMs(left)
   const rightTs = photoShotMs(right)
   if (leftTs !== null && rightTs !== null && leftTs !== rightTs) return leftTs - rightTs
+  if (leftTs !== null && rightTs === null) return -1
+  if (leftTs === null && rightTs !== null) return 1
+  return left.fileName.localeCompare(right.fileName)
+}
+
+function comparePhotosByShotTimeDesc(left: PhotoRecord, right: PhotoRecord): number {
+  const leftTs = photoShotMs(left)
+  const rightTs = photoShotMs(right)
+  if (leftTs !== null && rightTs !== null && leftTs !== rightTs) return rightTs - leftTs
   if (leftTs !== null && rightTs === null) return -1
   if (leftTs === null && rightTs !== null) return 1
   return left.fileName.localeCompare(right.fileName)
@@ -763,6 +788,12 @@ function hasSemanticSegmentBreak(left: PhotoRecord, right: PhotoRecord): boolean
     rightSpecies !== 'no-bird' &&
     leftSpecies !== rightSpecies
   ) {
+    const continuity = bboxContinuity(left, right)
+    // 同一主体在相邻帧 bbox 高度重合时，物种差异通常是模型候选抖动
+    // （如“寿带/印度寿带/待审”），不应把同一连拍堆叠切碎。
+    if (continuity && (continuity.iou >= 0.35 || continuity.centerDistance <= 0.08)) {
+      return false
+    }
     return true
   }
   return false
@@ -787,23 +818,14 @@ function hasWeakSubjectContinuity(left: PhotoRecord, right: PhotoRecord): boolea
   return continuity.iou >= 0.08 || (continuity.centerDistance <= 0.22 && continuity.sizeRatio <= 2)
 }
 
-function hasAccumulatedGeometryBreak(anchor: PhotoRecord, current: PhotoRecord): boolean {
-  const continuity = bboxContinuity(anchor, current)
-  if (!continuity) return false
-  return (
-    (continuity.iou < 0.04 && continuity.centerDistance > 0.24) ||
-    (continuity.centerDistance > 0.22 && continuity.sizeRatio > 1.8)
-  )
-}
-
 function shouldSplitPhotoSegment(
-  anchor: PhotoRecord,
   previous: PhotoRecord,
   current: PhotoRecord,
 ): boolean {
   const previousTs = photoShotMs(previous)
   const currentTs = photoShotMs(current)
-  const gap = previousTs !== null && currentTs !== null ? Math.max(0, currentTs - previousTs) : null
+  const gap =
+    previousTs !== null && currentTs !== null ? Math.max(0, currentTs - previousTs) : null
 
   if (hasSemanticSegmentBreak(previous, current)) return true
   if (gap !== null && gap > BURST_SEGMENT_HARD_GAP_MS) return true
@@ -816,8 +838,6 @@ function shouldSplitPhotoSegment(
   ) {
     return true
   }
-
-  if (anchor.id !== previous.id && hasAccumulatedGeometryBreak(anchor, current)) return true
 
   if (
     gap !== null &&
@@ -848,30 +868,29 @@ function buildPhotoSegments(photos: PhotoRecord[]): PhotoSegment[] {
   const segments: PhotoSegment[] = []
   let current: PhotoRecord[] = []
   let previous: PhotoRecord | null = null
-  let anchor: PhotoRecord | null = null
 
   for (const photo of ordered) {
     const shouldSplit =
-      current.length > 0 &&
-      previous !== null &&
-      anchor !== null &&
-      shouldSplitPhotoSegment(anchor, previous, photo)
+      current.length > 0 && previous !== null && shouldSplitPhotoSegment(previous, photo)
 
     if (shouldSplit) {
       const segment = createPhotoSegment(current, segments.length)
       if (segment) segments.push(segment)
       current = []
-      anchor = null
     }
 
     current.push(photo)
-    if (anchor === null) anchor = photo
     previous = photo
   }
 
   const tail = createPhotoSegment(current, segments.length)
   if (tail) segments.push(tail)
   return segments
+}
+
+function defaultExpandedSegmentIdsForSegments(segments: PhotoSegment[]): Set<string> {
+  const stackSegments = segments.filter((segment) => segment.photos.length > 1)
+  return stackSegments.length === 1 ? new Set([stackSegments[0].id]) : new Set()
 }
 
 function formatGroupClock(value: string | null | undefined): string | null {
@@ -958,9 +977,9 @@ function buildReviewSegmentPhotosByPhotoId(photos: PhotoRecord[]): Map<string, P
   const segmentsByPhotoId = new Map<string, PhotoRecord[]>()
   for (const groupPhotos of groups.values()) {
     const segments = buildPhotoSegments(groupPhotos)
-    if (segments.length <= 1) continue
 
     for (const segment of segments) {
+      if (segment.photos.length <= 1) continue
       for (const photo of segment.photos) {
         segmentsByPhotoId.set(photo.id, segment.photos)
       }
@@ -984,6 +1003,17 @@ export function buildGroupStartMsMap(
   return starts
 }
 
+function compareGroupStartDesc(
+  left: { group: PhotoGroupRecord; photos: PhotoRecord[] },
+  right: { group: PhotoGroupRecord; photos: PhotoRecord[] },
+  groupStartMs: Map<string, number>,
+): number {
+  const leftStart = groupStartMs.get(left.group.id) ?? Number.NEGATIVE_INFINITY
+  const rightStart = groupStartMs.get(right.group.id) ?? Number.NEGATIVE_INFINITY
+  if (leftStart !== rightStart) return rightStart - leftStart
+  return left.group.id.localeCompare(right.group.id)
+}
+
 function statusTone(status: FolderStatus): Tone {
   if (status === 'ready') return 'success'
   if (status === 'path_missing' || status === 'error') return 'accent'
@@ -1002,6 +1032,13 @@ function gradeTone(grade: PhotoGrade): Tone {
 function categoryTone(category: PhotoCategory): Tone {
   if (category === 'no_bird') return 'muted'
   return gradeTone(category)
+}
+
+function openExternalLink(event: ReactMouseEvent<HTMLAnchorElement>, url: string): void {
+  const opener = window.plumelens?.openExternalUrl
+  if (!opener) return
+  event.preventDefault()
+  void opener(url)
 }
 
 // Source helpers 接收可选 detection — 多鸟图深度复核切鸟时，ScoreHeader 会
@@ -1947,6 +1984,7 @@ export default function App() {
   const [exportSessions, setExportSessions] = useState<ExportSession[]>([])
   const [folderContextMenu, setFolderContextMenu] = useState<FolderContextMenuState>(null)
   const [relinkingFolderId, setRelinkingFolderId] = useState<string | null>(null)
+  const [importError, setImportError] = useState<string | null>(null)
 
   const {
     route,
@@ -2133,14 +2171,7 @@ export default function App() {
         photos: photosByGroup.get(group.id) ?? EMPTY_PHOTOS,
       }))
       .filter((entry) => entry.photos.length > 0)
-      .toSorted((left, right) => {
-        // 组视图始终按组起始拍摄时间倒序；不复用 entry.photos[0]，
-        // 避免组内照片排序/筛选改变组与组之间的位置。
-        const leftStart = groupStartMs.get(left.group.id) ?? Number.NEGATIVE_INFINITY
-        const rightStart = groupStartMs.get(right.group.id) ?? Number.NEGATIVE_INFINITY
-        if (leftStart !== rightStart) return rightStart - leftStart
-        return left.group.id.localeCompare(right.group.id)
-      })
+      .toSorted((left, right) => compareGroupStartDesc(left, right, groupStartMs))
   }, [activeFolder?.id, filteredSelectionPhotos, groupStartMs, workspace.groups])
 
   const flatSelectionPhotos = useMemo(
@@ -2457,20 +2488,12 @@ export default function App() {
     setWorkspace((current) => {
       // 同上 useEffect:applyNewSpeciesMarkers 跨 library 重算"新种"标记
       const merged = applyNewSpeciesMarkers(
-        [
-          ...current.photos.filter((p) => p.folderId !== fragment.folder.id),
-          ...fragment.photos,
-        ],
-        [
-          ...current.groups.filter((g) => g.folderId !== fragment.folder.id),
-          ...fragment.groups,
-        ],
+        [...current.photos.filter((p) => p.folderId !== fragment.folder.id), ...fragment.photos],
+        [...current.groups.filter((g) => g.folderId !== fragment.folder.id), ...fragment.groups],
       )
       return {
         ...current,
-        folders: current.folders.map((f) =>
-          f.id === fragment.folder.id ? fragment.folder : f,
-        ),
+        folders: current.folders.map((f) => (f.id === fragment.folder.id ? fragment.folder : f)),
         photos: merged.photos,
         groups: merged.groups,
       }
@@ -2481,6 +2504,7 @@ export default function App() {
     const path = await window.plumelens?.openFolder?.()
     if (!path) return
 
+    setImportError(null)
     // 先切到 selection 路由，给用户即时视觉反馈
     startTransition(() => {
       setRoute('selection')
@@ -2491,18 +2515,19 @@ export default function App() {
     // → useLibraryDetail 自动拉详情 → useEffect 把真 photos 注入 workspace
     try {
       const lib = await importLibrary.mutateAsync({ root_path: path })
+      setImportError(null)
       setActiveFolderId(lib.id)
     } catch (err) {
       // 后端不可用 / 路径无效 / 库已存在等失败,**绝不**降级到 mock 数据
       // (历史上的 createImportedFolder 会注入"池鹭/翠鸟/崇明东滩"等假种子,
       // 用户当真照片处理 → 快捷键 1234 命中不存在的 photo_id → 错乱)。
-      // 切回 start 页,通过原生 alert 把 backend 错误透传给用户。
+      // 切回 start 页,用应用内错误条把 backend 错误透传给用户。
       console.error('Library import to backend failed:', err)
+      const detail = err instanceof Error ? err.message : String(err)
+      setImportError(detail)
       startTransition(() => {
         setRoute('start')
       })
-      const detail = err instanceof Error ? err.message : String(err)
-      window.alert(t('selection.importFailed', { detail }))
     }
   }
 
@@ -2743,10 +2768,12 @@ export default function App() {
         <StartScreen
           backendData={backendData}
           folders={visibleFolders}
+          importError={importError}
           isError={isError}
           isReady={isReady}
           onChooseFolder={handleChooseFolder}
           onContinueLatest={() => handleNavigate('selection')}
+          onDismissImportError={() => setImportError(null)}
           onOpenFolderContextMenu={openFolderContextMenu}
           onOpenFolder={handleSelectFolder}
           t={t}
@@ -2968,20 +2995,24 @@ function AppShell({
 function StartScreen({
   backendData,
   folders,
+  importError,
   isError,
   isReady,
   onChooseFolder,
   onContinueLatest,
+  onDismissImportError,
   onOpenFolderContextMenu,
   onOpenFolder,
   t,
 }: {
   backendData: ReturnType<typeof useBackendHealth>['data']
   folders: FolderRecord[]
+  importError: string | null
   isError: boolean
   isReady: boolean
   onChooseFolder: () => void
   onContinueLatest: () => void
+  onDismissImportError: () => void
   onOpenFolderContextMenu: (folder: FolderRecord, event: ReactMouseEvent<HTMLElement>) => void
   onOpenFolder: (folderId: string) => void
   t: ReturnType<typeof useTranslation>['t']
@@ -3027,6 +3058,23 @@ function StartScreen({
               {t('start.secondaryAction')}
             </button>
           </div>
+          {importError ? (
+            <div className="start-import-error" role="alert">
+              <TriangleAlert className="h-4 w-4" aria-hidden="true" />
+              <div>
+                <strong>{t('start.importErrorTitle')}</strong>
+                <p>{t('start.importErrorBody', { detail: importError })}</p>
+              </div>
+              <button
+                aria-label={t('common.close')}
+                className="start-import-error__close"
+                onClick={onDismissImportError}
+                type="button"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          ) : null}
         </div>
 
         <BirdGlyph />
@@ -3517,13 +3565,12 @@ function SelectionScreen({
 
         <div className="photo-flow">
           {viewMode === 'grouped' ? (
-            <VirtualizedPhotoGroups
+            <PhotoGroupsList
               focusedPhotoId={focusedPhotoId}
               groups={filteredGroups}
               onFocusPhoto={setFocusedPhotoId}
               onOpenReview={onOpenReview}
               onThumbnailLoadStatus={onThumbnailLoadStatus}
-              scrollElement={selectionScrollElement}
               t={t}
             />
           ) : (
@@ -3893,8 +3940,16 @@ function MetricStrip({
   summary: FolderSummary
   t: ReturnType<typeof useTranslation>['t']
 }) {
+  const hasFailures = summary.failedCount > 0
+
   return (
-    <section className="metric-strip">
+    <section
+      className={cn(
+        'metric-strip',
+        'metric-strip--selection',
+        hasFailures && 'metric-strip--with-failed',
+      )}
+    >
       <MetricCell label={t('selection.metrics.totalPhotos')} value={photos.length} />
       <MetricCell
         label={t('selection.metrics.birdPhotos')}
@@ -3919,7 +3974,7 @@ function MetricStrip({
       />
       {/* 失败 cell 仅在有失败照片时显示 — 0 不占视觉位,避免常态噪音。
           tone='accent' 与"淘汰"同色调红警告;失败的源文件没法分析,本质是"硬错"。 */}
-      {summary.failedCount > 0 ? (
+      {hasFailures ? (
         <MetricCell
           label={t('selection.metrics.failedPhotos')}
           tone="accent"
@@ -3991,13 +4046,12 @@ function SelectionControls({
   )
 }
 
-function VirtualizedPhotoGroups({
+function PhotoGroupsList({
   focusedPhotoId,
   groups,
   onFocusPhoto,
   onOpenReview,
   onThumbnailLoadStatus,
-  scrollElement,
   t,
 }: {
   focusedPhotoId: string | null
@@ -4005,43 +4059,27 @@ function VirtualizedPhotoGroups({
   onFocusPhoto: (photoId: string | null) => void
   onOpenReview: (photoId: string) => void
   onThumbnailLoadStatus: (photoId: string, status: ThumbnailLoadStatus) => void
-  scrollElement: HTMLElement | null
   t: ReturnType<typeof useTranslation>['t']
 }) {
-  const virtualizer = useVirtualizer({
-    count: groups.length,
-    getScrollElement: () => scrollElement,
-    estimateSize: () => PHOTO_GROUP_ESTIMATED_HEIGHT,
-    overscan: 3,
-  })
+  const handleLayoutChange = useCallback(() => {}, [])
 
   if (groups.length === 0) return null
 
   return (
-    <div className="photo-flow-virtual" style={{ height: virtualizer.getTotalSize() }}>
-      {virtualizer.getVirtualItems().map((virtualRow) => {
-        const entry = groups[virtualRow.index]
-        if (!entry) return null
-        return (
-          <div
-            className="photo-flow-virtual__item"
-            data-index={virtualRow.index}
-            key={entry.group.id}
-            ref={virtualizer.measureElement}
-            style={{ transform: `translateY(${virtualRow.start}px)` }}
-          >
-            <PhotoGroup
-              focusedPhotoId={focusedPhotoId}
-              group={entry.group}
-              onFocusPhoto={onFocusPhoto}
-              onOpenReview={onOpenReview}
-              onThumbnailLoadStatus={onThumbnailLoadStatus}
-              photos={entry.photos}
-              t={t}
-            />
-          </div>
-        )
-      })}
+    <div className="photo-flow-groups">
+      {groups.map((entry) => (
+        <PhotoGroup
+          focusedPhotoId={focusedPhotoId}
+          group={entry.group}
+          key={entry.group.id}
+          onLayoutChange={handleLayoutChange}
+          onFocusPhoto={onFocusPhoto}
+          onOpenReview={onOpenReview}
+          onThumbnailLoadStatus={onThumbnailLoadStatus}
+          photos={entry.photos}
+          t={t}
+        />
+      ))}
     </div>
   )
 }
@@ -4131,6 +4169,7 @@ function VirtualizedPhotoGrid({
 function PhotoGroup({
   focusedPhotoId,
   group,
+  onLayoutChange,
   onFocusPhoto,
   onOpenReview,
   onThumbnailLoadStatus,
@@ -4139,15 +4178,17 @@ function PhotoGroup({
 }: {
   focusedPhotoId: string | null
   group: PhotoGroupRecord
+  onLayoutChange: () => void
   onFocusPhoto: (photoId: string | null) => void
   onOpenReview: (photoId: string) => void
   onThumbnailLoadStatus: (photoId: string, status: ThumbnailLoadStatus) => void
   photos: PhotoRecord[]
   t: ReturnType<typeof useTranslation>['t']
 }) {
-  const groupRef = useRef<HTMLElement | null>(null)
-  const [expandedSegmentIds, setExpandedSegmentIds] = useState<Set<string>>(() => new Set())
   const segments = useMemo(() => buildPhotoSegments(photos), [photos])
+  const [expandedSegmentIds, setExpandedSegmentIds] = useState<Set<string>>(() =>
+    defaultExpandedSegmentIdsForSegments(segments),
+  )
   const segmentSignature = useMemo(
     () => segments.map((segment) => segment.id).join('|'),
     [segments],
@@ -4155,81 +4196,44 @@ function PhotoGroup({
   const bestPhoto = useMemo(() => bestPhotoForStack(photos), [photos])
   const bestScore = bestPhoto?.finalScore ?? null
   const title = useMemo(() => visibleGroupTitle(group, photos.length, t), [group, photos.length, t])
-  const hasExpandedStacks = segments.some(
-    (segment) => segment.photos.length > 1 && expandedSegmentIds.has(segment.id),
+  const onLayoutChangeRef = useRef(onLayoutChange)
+  const expandedSegmentKey = useMemo(
+    () => Array.from(expandedSegmentIds).toSorted().join('|'),
+    [expandedSegmentIds],
   )
 
+  useLayoutEffect(() => {
+    onLayoutChangeRef.current = onLayoutChange
+  }, [onLayoutChange])
+
   useEffect(() => {
-    setExpandedSegmentIds(new Set())
-  }, [group.id, segmentSignature])
+    setExpandedSegmentIds(defaultExpandedSegmentIdsForSegments(segments))
+  }, [group.id, segmentSignature, segments])
 
-  const expandStack = useCallback((segment: PhotoSegment, anchor: HTMLElement) => {
-    const scroller = anchor.closest('.selection-scroll')
-    const anchorTop = anchor.getBoundingClientRect().top
-    const coverPhotoId = segment.coverPhoto.id
-    const groupNode = groupRef.current
+  useLayoutEffect(() => {
+    onLayoutChangeRef.current()
+  }, [expandedSegmentKey, group.id, segmentSignature])
 
+  const expandStack = useCallback((segment: PhotoSegment) => {
     setExpandedSegmentIds((current) => {
       if (current.has(segment.id)) return current
       const next = new Set(current)
       next.add(segment.id)
       return next
     })
+  }, [])
 
-    if (!(scroller instanceof HTMLElement) || !coverPhotoId || !groupNode) return
-
-    // 滚动补偿:展开后让 cover photo 还在原 stack tile 那个屏幕高度,
-    // 视觉上不漂移。
-    //
-    // 老实现 rAF×2 后只测一次 cover.top,但 react-virtual 的 measureElement
-    // 走 ResizeObserver 异步触发 — grid 行高在 expanded N tile 里可能还没稳
-    // (尤其当 expanded segment 跨多行时,virtualizer 还没把后续行 measure
-    // 出来,cover tile 可能临时被定位到错误的 translateY,导致补偿后再 measure
-    // 又漂)。
-    //
-    // 修法:多帧采样,每帧测一次 cover top,如果连续 2 帧位置没变(layout 真稳了)
-    // 才做 scroll 修正。最长等 8 帧(~133ms),够 measureElement 跑完。
-    let prevTop: number | null = null
-    let stableCount = 0
-    let frameCount = 0
-    const maxFrames = 8
-    const stabilityRequired = 2
-
-    const tick = () => {
-      frameCount += 1
-      const coverTile =
-        Array.from(groupNode.querySelectorAll<HTMLElement>('[data-photo-id]')).find(
-          (node) => node.dataset.photoId === coverPhotoId,
-        )
-      if (!coverTile) {
-        if (frameCount < maxFrames) requestAnimationFrame(tick)
-        return
-      }
-      const top = coverTile.getBoundingClientRect().top
-      if (prevTop !== null && Math.abs(top - prevTop) < 0.5) {
-        stableCount += 1
-        if (stableCount >= stabilityRequired) {
-          const delta = top - anchorTop
-          if (Math.abs(delta) > 0.5) scroller.scrollTop += delta
-          return
-        }
-      } else {
-        stableCount = 0
-      }
-      prevTop = top
-      if (frameCount < maxFrames) {
-        requestAnimationFrame(tick)
-      } else {
-        // 最坏 fallback:直接按当前 top 修正,不再等。
-        const delta = top - anchorTop
-        if (Math.abs(delta) > 0.5) scroller.scrollTop += delta
-      }
-    }
-    requestAnimationFrame(tick)
+  const collapseStack = useCallback((segment: PhotoSegment) => {
+    setExpandedSegmentIds((current) => {
+      if (!current.has(segment.id)) return current
+      const next = new Set(current)
+      next.delete(segment.id)
+      return next
+    })
   }, [])
 
   return (
-    <section className="photo-group" ref={groupRef}>
+    <section className="photo-group">
       <div className="photo-group__header">
         <div>
           {/* "记录片" 这种 sceneTag SectionLabel 对每个 group 都是同一个固定值,
@@ -4238,7 +4242,7 @@ function PhotoGroup({
           <h2 className="photo-group__title">
             <span className="photo-group__title-text">{title}</span>
             {group.containsNewSpecies ? (
-              <span className="chip chip--accent photo-group__new-species">
+              <span className="chip chip--new-species photo-group__new-species">
                 {t('selection.quickFilters.new_species')}
               </span>
             ) : null}
@@ -4250,22 +4254,12 @@ function PhotoGroup({
               : ''}
           </p>
         </div>
-        <div className="photo-group__actions">
-          {hasExpandedStacks ? (
-            <button
-              className="text-button"
-              onClick={() => setExpandedSegmentIds(new Set())}
-              type="button"
-            >
-              {t('selection.group.collapseStack')}
-            </button>
-          ) : null}
-        </div>
       </div>
       <PhotoSegmentGrid
         expandedSegmentIds={expandedSegmentIds}
         focusedPhotoId={focusedPhotoId}
         group={group}
+        onCollapseSegment={collapseStack}
         onExpandSegment={expandStack}
         onFocusPhoto={onFocusPhoto}
         onOpenReview={onOpenReview}
@@ -4282,6 +4276,7 @@ function PhotoSegmentGrid({
   focusedPhotoId,
   group,
   onExpandSegment,
+  onCollapseSegment,
   onFocusPhoto,
   onOpenReview,
   onThumbnailLoadStatus,
@@ -4291,14 +4286,15 @@ function PhotoSegmentGrid({
   expandedSegmentIds: Set<string>
   focusedPhotoId: string | null
   group: PhotoGroupRecord
-  onExpandSegment: (segment: PhotoSegment, anchor: HTMLElement) => void
+  onExpandSegment: (segment: PhotoSegment) => void
+  onCollapseSegment: (segment: PhotoSegment) => void
   onFocusPhoto: (photoId: string | null) => void
   onOpenReview: (photoId: string) => void
   onThumbnailLoadStatus: (photoId: string, status: ThumbnailLoadStatus) => void
   segments: PhotoSegment[]
   t: ReturnType<typeof useTranslation>['t']
 }) {
-  const renderTile = (photo: PhotoRecord) => (
+  const renderTile = (photo: PhotoRecord, stackCollapse?: StackCollapseControl) => (
     <PhotoTile
       focused={focusedPhotoId === photo.id}
       key={photo.id}
@@ -4306,15 +4302,19 @@ function PhotoSegmentGrid({
       onOpenReview={onOpenReview}
       onThumbnailLoadStatus={onThumbnailLoadStatus}
       photo={photo}
+      stackCollapse={stackCollapse}
       t={t}
     />
   )
-  const shouldFlatten = segments.length <= 1
+  const hasStackSegments = segments.some((segment) => segment.photos.length > 1)
+  const visibleSegments = hasStackSegments
+    ? segments.filter((segment) => segment.photos.length > 1)
+    : segments
 
   return (
     <div className="photo-grid">
-      {segments.map((segment) => {
-        if (shouldFlatten) return segment.photos.map(renderTile)
+      {visibleSegments.map((segment) => {
+        if (!hasStackSegments) return segment.photos.map((photo) => renderTile(photo))
 
         const isStack = segment.photos.length > 1
         const expanded = expandedSegmentIds.has(segment.id)
@@ -4324,8 +4324,9 @@ function PhotoSegmentGrid({
               focused={segment.photos.some((photo) => photo.id === focusedPhotoId)}
               group={group}
               key={segment.id}
-              onExpand={(anchor) => onExpandSegment(segment, anchor)}
+              onExpand={() => onExpandSegment(segment)}
               onFocusPhoto={onFocusPhoto}
+              onOpenReview={onOpenReview}
               onThumbnailLoadStatus={onThumbnailLoadStatus}
               photo={segment.coverPhoto}
               photoCount={segment.photos.length}
@@ -4334,7 +4335,17 @@ function PhotoSegmentGrid({
           )
         }
 
-        return segment.photos.map(renderTile)
+        return segment.photos.map((photo, index) =>
+          renderTile(
+            photo,
+            isStack && expanded && index === 0
+              ? {
+                  count: segment.photos.length,
+                  onCollapse: () => onCollapseSegment(segment),
+                }
+              : undefined,
+          ),
+        )
       })}
     </div>
   )
@@ -4345,6 +4356,7 @@ function PhotoStackTile({
   group,
   onExpand,
   onFocusPhoto,
+  onOpenReview,
   onThumbnailLoadStatus,
   photoCount,
   photo,
@@ -4352,8 +4364,9 @@ function PhotoStackTile({
 }: {
   focused: boolean
   group: PhotoGroupRecord
-  onExpand: (anchor: HTMLElement) => void
+  onExpand: () => void
   onFocusPhoto: (photoId: string | null) => void
+  onOpenReview: (photoId: string) => void
   onThumbnailLoadStatus: (photoId: string, status: ThumbnailLoadStatus) => void
   photoCount: number
   photo: PhotoRecord
@@ -4363,8 +4376,8 @@ function PhotoStackTile({
   const displaySpecies = group.primarySpecies ?? formatPhotoSpeciesDisplay(photo, t)
 
   // 用 div+role="button" 而不是真 <button>,因为内部还要嵌一个真 button(数量
-   // badge 触发展开)。HTML 不允许 button 嵌 button(React DEV 模式会 warn,且
-   // 某些 a11y 工具栏会读错)。div+role+tabIndex+键盘事件 = 等价交互行为。
+  // badge 触发展开)。HTML 不允许 button 嵌 button(React DEV 模式会 warn,且
+  // 某些 a11y 工具栏会读错)。div+role+tabIndex+键盘事件 = 等价交互行为。
   const handleActivate = () => onFocusPhoto(photo.id)
   return (
     <article
@@ -4373,14 +4386,21 @@ function PhotoStackTile({
     >
       <div
         aria-label={t('selection.group.stackAria', { count: photoCount, file: photo.fileName })}
+        aria-keyshortcuts="Space"
         className="photo-preview photo-preview--stack"
         data-selection-review-shortcut="true"
         onClick={handleActivate}
+        onDoubleClick={() => onOpenReview(photo.id)}
         onKeyDown={(event) => {
-          // a11y:Enter / Space 等价 click(原生 button 行为)
-          if (event.key === 'Enter' || event.key === ' ') {
+          if (event.key === 'Enter') {
             event.preventDefault()
             handleActivate()
+            return
+          }
+          if (event.key === ' ' || event.key === 'Spacebar' || event.code === 'Space') {
+            event.preventDefault()
+            event.stopPropagation()
+            onOpenReview(photo.id)
           }
         }}
         role="button"
@@ -4388,8 +4408,8 @@ function PhotoStackTile({
         tabIndex={0}
       >
         <span className="photo-stack-pages" aria-hidden="true">
-          <span />
-          <span />
+          <span style={{ backgroundImage: photo.previewGradient }} />
+          <span style={{ backgroundImage: photo.previewGradient }} />
         </span>
         <ThumbnailImage
           alt={photo.fileName}
@@ -4405,31 +4425,31 @@ function PhotoStackTile({
             阻止冒泡到外层 div onClick,展开操作不会再触发 focus。 */}
         <button
           aria-label={t('selection.group.expandAria', { count: photoCount })}
-          className="photo-stack-badge photo-stack-badge--button"
+          className="photo-stack-action photo-stack-action--expand"
           onClick={(event) => {
             event.stopPropagation()
             event.preventDefault()
-            // anchor 必须传外层 stack tile,不能传 badge 本身 — badge 是 absolute
-            // 定位在 tile 右上(top:12px right:12px),getBoundingClientRect().top
-            // 比 tile 顶部低 12px。expandStack 用 anchorTop 做 scroll 补偿,如果
-            // 拿 badge 的 top 会让 cover tile 滚到 badge 原位 → 整个 grid 视觉上
-            // 往下漂 12px。closest 兜底到 .photo-preview--stack(button 元素)
-            // 也没问题,只要不是 badge 本身就对。
-            const anchor =
-              event.currentTarget.closest<HTMLElement>('.photo-tile--stack') ??
-              event.currentTarget.closest<HTMLElement>('.photo-preview--stack') ??
-              event.currentTarget
-            onExpand(anchor)
+            onExpand()
           }}
+          title={t('selection.group.expandTooltip', { count: photoCount })}
           type="button"
         >
           <Images className="h-3.5 w-3.5" />
-          <span>{t('selection.group.stackCount', { count: photoCount })}</span>
+          <span className="photo-stack-action__label">{t('selection.group.stackLabel')}</span>
+          <span className="photo-stack-action__count">
+            {t('selection.group.stackCount', { count: photoCount })}
+          </span>
+          <span className="photo-stack-action__hint">{t('common.expand')}</span>
         </button>
         <span className="photo-preview__bottom">
           <span>
             <strong className="photo-preview__species">
               <span>{displaySpecies}</span>
+              {photo.isNewSpecies ? (
+                <em className="species-source-inline species-source-inline--new">
+                  {t('selection.quickFilters.new_species')}
+                </em>
+              ) : null}
             </strong>
             <small>{t('selection.group.stackHint')}</small>
           </span>
@@ -4446,6 +4466,7 @@ function PhotoTile({
   onOpenReview,
   onThumbnailLoadStatus,
   photo,
+  stackCollapse,
   t,
 }: {
   focused: boolean
@@ -4453,6 +4474,7 @@ function PhotoTile({
   onOpenReview: (photoId: string) => void
   onThumbnailLoadStatus: (photoId: string, status: ThumbnailLoadStatus) => void
   photo: PhotoRecord
+  stackCollapse?: StackCollapseControl
   t: ReturnType<typeof useTranslation>['t']
 }) {
   const category = photoCategory(photo)
@@ -4502,9 +4524,6 @@ function PhotoTile({
           ) : (
             <StatusPill label={t(categoryLabelKey(category))} tone={categoryTone(category)} />
           )}
-          {photo.isNewSpecies ? (
-            <StatusPill label={t('selection.quickFilters.new_species')} tone="accent" />
-          ) : null}
           {photo.companionFormat ? (
             <StatusPill
               label={t('selection.companion.tile', { format: photo.companionFormat })}
@@ -4516,6 +4535,11 @@ function PhotoTile({
           <span>
             <strong className="photo-preview__species">
               <span>{displaySpecies}</span>
+              {photo.isNewSpecies ? (
+                <em className="species-source-inline species-source-inline--new">
+                  {t('selection.quickFilters.new_species')}
+                </em>
+              ) : null}
               {tileSourceBadge ? (
                 <em
                   className={cn(
@@ -4532,6 +4556,26 @@ function PhotoTile({
           <b>{formatScore(photo.finalScore)}</b>
         </span>
       </button>
+
+      {stackCollapse ? (
+        <button
+          aria-label={t('selection.group.collapseAria', { count: stackCollapse.count })}
+          className="photo-stack-action photo-stack-action--collapse"
+          onClick={(event) => {
+            event.stopPropagation()
+            stackCollapse.onCollapse()
+          }}
+          title={t('selection.group.collapseTooltip', { count: stackCollapse.count })}
+          type="button"
+        >
+          <Images className="h-3.5 w-3.5" />
+          <span className="photo-stack-action__label">{t('selection.group.stackLabel')}</span>
+          <span className="photo-stack-action__count">
+            {t('selection.group.stackCount', { count: stackCollapse.count })}
+          </span>
+          <span className="photo-stack-action__hint">{t('common.collapse')}</span>
+        </button>
+      ) : null}
 
       <div className="photo-tile__meta">
         <span>
@@ -4673,83 +4717,89 @@ function InspectorPanel({
       <SectionLabel label={t('selection.inspector.label')} />
       {photo ? (
         <div className="inspector__content">
-          <div className="inspector-preview" style={{ backgroundImage: photo.previewGradient }} />
-          <div className="score-block">
-            <span>{t('selection.inspector.score')}</span>
-            <strong>{formatScore(photo.finalScore)}</strong>
-            <small className="score-block__species">
-              <span>{formatPhotoSpeciesDisplay(photo, t)}</span>
-              {tileSourceBadge ? (
-                <em
-                  className={cn(
-                    'species-source-inline',
-                    `species-source-inline--${tileSourceBadge.kind}`,
-                  )}
-                >
-                  {t('selection.speciesSource.inline', { source: tileSourceBadge.label })}
-                </em>
+          <div className="inspector__body selection-scroll">
+            <div className="inspector-preview" style={{ backgroundImage: photo.previewGradient }} />
+            <div className="score-block">
+              <span>{t('selection.inspector.score')}</span>
+              <strong>{formatScore(photo.finalScore)}</strong>
+              <small className="score-block__species">
+                <span>{formatPhotoSpeciesDisplay(photo, t)}</span>
+                {tileSourceBadge ? (
+                  <em
+                    className={cn(
+                      'species-source-inline',
+                      `species-source-inline--${tileSourceBadge.kind}`,
+                    )}
+                  >
+                    {t('selection.speciesSource.inline', { source: tileSourceBadge.label })}
+                  </em>
+                ) : null}
+              </small>
+              {speciesSourceDetail(photo, t) ? (
+                <em className="score-block__source">{speciesSourceDetail(photo, t)}</em>
               ) : null}
-            </small>
-            {speciesSourceDetail(photo, t) ? (
-              <em className="score-block__source">{speciesSourceDetail(photo, t)}</em>
-            ) : null}
+            </div>
+            <div className="stat-stack">
+              <StatRow
+                label={t('selection.metrics.semanticScore')}
+                value={formatScore(photo.semanticScore)}
+              />
+              <StatRow
+                label={t('selection.metrics.technicalScore')}
+                value={formatScore(photo.technicalScore)}
+              />
+              <StatRow
+                label={t('selection.metrics.poseScore')}
+                value={formatScore(photo.poseScore)}
+              />
+              <StatRow label={t('selection.metrics.birdCount')} value={photo.birdCount} />
+            </div>
+            <TagCluster photo={photo} t={t} />
+            <ExternalEditorActions photo={photo} sourceMissing={sourceMissing} t={t} />
           </div>
-          <div className="stat-stack">
-            <StatRow
-              label={t('selection.metrics.semanticScore')}
-              value={formatScore(photo.semanticScore)}
-            />
-            <StatRow
-              label={t('selection.metrics.technicalScore')}
-              value={formatScore(photo.technicalScore)}
-            />
-            <StatRow
-              label={t('selection.metrics.poseScore')}
-              value={formatScore(photo.poseScore)}
-            />
-            <StatRow label={t('selection.metrics.birdCount')} value={photo.birdCount} />
-          </div>
-          <TagCluster photo={photo} t={t} />
-          <ExternalEditorActions photo={photo} sourceMissing={sourceMissing} t={t} />
-          <div className="inspector-actions">
-            <button
-              className="button-primary"
-              onClick={() => onSetDecision(photo.id, 'select')}
-              type="button"
-            >
-              <Sparkles className="h-4 w-4" />
-              {t('selection.actions.select')}
-            </button>
-            <button
-              className="button-ghost"
-              onClick={() => onSetDecision(photo.id, 'usable')}
-              type="button"
-            >
-              <Check className="h-4 w-4" />
-              {t('selection.actions.usable')}
-            </button>
-            <button
-              className="button-ghost"
-              onClick={() => onSetDecision(photo.id, 'record')}
-              type="button"
-            >
-              <Clock3 className="h-4 w-4" />
-              {t('selection.actions.record')}
-            </button>
-            <button
-              className="button-danger"
-              onClick={() => onSetDecision(photo.id, 'reject')}
-              type="button"
-            >
-              <X className="h-4 w-4" />
-              {t('selection.actions.reject')}
-            </button>
-            <button className="text-button" onClick={() => onOpenReview(photo.id)} type="button">
-              {t('selection.review.label')}
-            </button>
-            <button className="text-button" onClick={() => setFocusedPhotoId(null)} type="button">
-              {t('selection.inspector.clear')}
-            </button>
+          <div className="inspector-actions" aria-label={t('selection.actions.label')}>
+            <div className="inspector-actions__grades">
+              <button
+                className="button-primary"
+                onClick={() => onSetDecision(photo.id, 'select')}
+                type="button"
+              >
+                <Sparkles className="h-4 w-4" />
+                {t('selection.actions.select')}
+              </button>
+              <button
+                className="button-ghost"
+                onClick={() => onSetDecision(photo.id, 'usable')}
+                type="button"
+              >
+                <Check className="h-4 w-4" />
+                {t('selection.actions.usable')}
+              </button>
+              <button
+                className="button-ghost"
+                onClick={() => onSetDecision(photo.id, 'record')}
+                type="button"
+              >
+                <Clock3 className="h-4 w-4" />
+                {t('selection.actions.record')}
+              </button>
+              <button
+                className="button-danger"
+                onClick={() => onSetDecision(photo.id, 'reject')}
+                type="button"
+              >
+                <X className="h-4 w-4" />
+                {t('selection.actions.reject')}
+              </button>
+            </div>
+            <div className="inspector-actions__secondary">
+              <button className="text-button" onClick={() => onOpenReview(photo.id)} type="button">
+                {t('selection.review.label')}
+              </button>
+              <button className="text-button" onClick={() => setFocusedPhotoId(null)} type="button">
+                {t('selection.inspector.clear')}
+              </button>
+            </div>
           </div>
         </div>
       ) : (
@@ -5112,6 +5162,7 @@ function ArchiveScreen({
                       <a
                         className="archive-detail__source"
                         href={sourceUrl}
+                        onClick={(event) => openExternalLink(event, sourceUrl)}
                         target="_blank"
                         rel="noreferrer"
                       >
@@ -5904,16 +5955,18 @@ function StatRow({
 }
 
 function StatusPill({
+  className,
   label,
   tone = 'neutral',
   title,
 }: {
+  className?: string
   label: string
   tone?: Tone
   title?: string
 }) {
   return (
-    <span className={cn('status-pill', `status-pill--${tone}`)} title={title}>
+    <span className={cn('status-pill', `status-pill--${tone}`, className)} title={title}>
       {label}
     </span>
   )

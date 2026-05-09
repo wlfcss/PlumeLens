@@ -132,6 +132,7 @@ export function ReviewModal({
   // bbox / pose 优先用 activeBird 的，fallback 到 photo-level 兼容老数据 / 单鸟无 detections 数组场景
   const bbox = activeBird?.bbox ?? photo.bestBbox ?? null
   const pose = activeBird?.pose ?? photo.bestPose ?? null
+  const hasBirdSubject = Boolean(activeBird || bbox || photo.birdCount > 0)
   // AF 覆盖层是 photo-level（机身只写一份 EXIF AFInfo，不分鸟），切换 activeBird 不影响。
   // Canon 官方语义中，单点 / 扩展 / Zone / Whole area 的呈现不同。
   // 新数据使用结构化 af_area；旧数据退回 legacy af_point。
@@ -166,15 +167,20 @@ export function ReviewModal({
     if (!isSequence) return null
     return rankReviewGroupPhoto(reviewGroupPhotos, photo.id, sequenceIndex)
   }, [isSequence, photo.id, reviewGroupPhotos, sequenceIndex])
-  const navigationPhotos = isSequence ? reviewGroupPhotos : photos
-  const navigationIndex = isSequence ? sequenceIndex : activeIndex
+  // 深度复核是“当前筛选照片流”的审片器，连拍只提供上下文提示。
+  // 左右键 / 顶部切换 / 底部胶片条必须能跨出当前连拍堆叠继续审片。
+  const navigationPhotos = photos
+  const navigationIndex = activeIndex
   const canGoPrevious = navigationIndex > 0
   const canGoNext = navigationIndex >= 0 && navigationIndex < navigationPhotos.length - 1
 
   const selectRelativePhoto = useCallback(
     (offset: -1 | 1) => {
       if (navigationIndex < 0) return
-      const nextIndex = Math.max(0, Math.min(navigationPhotos.length - 1, navigationIndex + offset))
+      const nextIndex = Math.max(
+        0,
+        Math.min(navigationPhotos.length - 1, navigationIndex + offset),
+      )
       const nextPhoto = navigationPhotos[nextIndex]
       if (!nextPhoto || nextPhoto.id === photo.id) return
       onSelectPhoto(nextPhoto.id)
@@ -420,148 +426,154 @@ export function ReviewModal({
         </div>
 
         <aside className="review-detail review-detail--compact">
-          {/* 顶部：分数 + 物种 + 分级 */}
-          <ScoreHeader
-            photo={photo}
-            activeBird={activeBird}
-            totalBirds={photo.birdDetections?.length ?? 0}
-            t={t}
-          />
-
-          {/* 评级按钮挪到顶部 — 鸟摄选片高频操作,放在底部要每张滚一遍。 */}
-          <div className="inspector-actions inspector-actions--compact">
-            <button
-              className="button-primary"
-              onClick={() => onSetDecision(photo.id, 'select')}
-              type="button"
-            >
-              <Sparkles className="h-4 w-4" />
-              {t('selection.actions.select')}
-            </button>
-            <button
-              className="button-ghost"
-              onClick={() => onSetDecision(photo.id, 'usable')}
-              type="button"
-            >
-              <Check className="h-4 w-4" />
-              {t('selection.actions.usable')}
-            </button>
-            <button
-              className="button-ghost"
-              onClick={() => onSetDecision(photo.id, 'record')}
-              type="button"
-            >
-              <Clock3 className="h-4 w-4" />
-              {t('selection.actions.record')}
-            </button>
-            <button
-              className="button-danger"
-              onClick={() => onSetDecision(photo.id, 'reject')}
-              type="button"
-            >
-              <X className="h-4 w-4" />
-              {t('selection.actions.reject')}
-            </button>
-          </div>
-
-          {/* 关键指标 3 列 — head/eye 移到 PoseChipsRow,birdCount 移除(单鸟图永远 1,
-              多鸟图由 SpeciesOverrideEditor bird tabs 表达,这里冗余)。 */}
-          <div className="review-stats-grid review-stats-grid--cols-3">
-            <CompactStat
-              label={t('selection.metrics.semanticScore')}
-              value={formatScore(photo.semanticScore)}
+          <div className="review-detail__body">
+            {/* 顶部：分数 + 物种 + 分级 */}
+            <ScoreHeader
+              photo={photo}
+              activeBird={activeBird}
+              totalBirds={photo.birdDetections?.length ?? 0}
+              t={t}
             />
-            <CompactStat
-              label={t('selection.metrics.technicalScore')}
-              value={formatScore(photo.technicalScore)}
+
+            {/* 关键指标 3 列 — head/eye 移到 PoseChipsRow,birdCount 移除(单鸟图永远 1,
+                多鸟图由 SpeciesOverrideEditor bird tabs 表达,这里冗余)。 */}
+            <div className="review-stats-grid review-stats-grid--cols-3">
+              <CompactStat
+                label={t('selection.metrics.semanticScore')}
+                value={formatScore(photo.semanticScore)}
+              />
+              <CompactStat
+                label={t('selection.metrics.technicalScore')}
+                value={formatScore(photo.technicalScore)}
+              />
+              <CompactStat
+                label={t('selection.metrics.confidence')}
+                value={bbox ? `${Math.round((bbox.confidence ?? 0) * 100)}%` : '--'}
+              />
+            </div>
+
+            {/* 姿态/标签语义紧凑组:5 项 visibility chip + 姿态提示 + 主体条件 tags 紧跟。
+                老结构里 TagCluster 被 EXIF 拆到底部,语义脱节;主体条件本身就是 pose
+                派生(见 backend-adapter derivePoseTags),归位到 pose 组。
+                只要有鸟主体就展示此组;pose=null 时显示"暂无结果",避免右栏信息随机消失。 */}
+            {hasBirdSubject ? (
+              <>
+                <PoseChipsRow pose={pose} t={t} />
+                {(() => {
+                  const { text, isFlying } = formatPostureLabel(pose, t)
+                  return (
+                    <CompactKV
+                      label={t('selection.metrics.posture')}
+                      value={
+                        isFlying ? `${text} · ${t('selection.review.posture.flyBoost')}` : text
+                      }
+                      emphasis={isFlying}
+                    />
+                  )
+                })()}
+              </>
+            ) : null}
+
+            <TagCluster photo={photo} t={t} />
+
+            <SpeciesOverrideEditor
+              activeBirdIndex={activeBirdIndex}
+              onSetActiveBirdIndex={setActiveBirdIndex}
+              onSetSpeciesOverride={onSetSpeciesOverride}
+              photo={photo}
+              t={t}
             />
-            <CompactStat
-              label={t('selection.metrics.confidence')}
-              value={bbox ? `${Math.round((bbox.confidence ?? 0) * 100)}%` : '--'}
-            />
-          </div>
 
-          {/* 姿态/标签语义紧凑组:5 项 visibility chip + 飞版升档提示 + 主体条件 tags 紧跟。
-              老结构里 TagCluster 被 EXIF 拆到底部,语义脱节;主体条件本身就是 pose
-              派生(见 backend-adapter derivePoseTags),归位到 pose 组。 */}
-          {pose ? (
-            <>
-              <PoseChipsRow pose={pose} t={t} />
-              {(() => {
-                const { text, isFlying } = formatPostureLabel(pose, t)
-                return (
-                  <CompactKV
-                    label={t('selection.metrics.posture')}
-                    value={isFlying ? `${text} · ${t('selection.review.posture.flyBoost')}` : text}
-                    emphasis={isFlying}
-                  />
-                )
-              })()}
-            </>
-          ) : null}
+            <CompactKV label={t('selection.metrics.scene')} value={group?.title ?? '--'} />
 
-          <TagCluster photo={photo} t={t} />
-
-          <SpeciesOverrideEditor
-            activeBirdIndex={activeBirdIndex}
-            onSetActiveBirdIndex={setActiveBirdIndex}
-            onSetSpeciesOverride={onSetSpeciesOverride}
-            photo={photo}
-            t={t}
-          />
-
-          <CompactKV label={t('selection.metrics.scene')} value={group?.title ?? '--'} />
-
-          <CompactKV
-            label={t('selection.review.sequenceLabel')}
-            value={
-              isSequence
-                ? t('selection.review.sequenceValue', {
-                    count: reviewGroupPhotos.length,
-                    rank: sequenceRank ?? '--',
-                    score: formatScore(sequenceBestPhoto?.finalScore),
-                  })
-                : t('selection.review.sequenceSingleValue')
-            }
-          />
-
-          {photo.companionFormat && photo.companionPath ? (
             <CompactKV
-              label={t('selection.review.companion')}
-              value={t('selection.review.companionValue', {
-                format: photo.companionFormat,
-                size: formatBytes(photo.companionSize ?? 0),
-              })}
+              label={t('selection.review.sequenceLabel')}
+              value={
+                isSequence
+                  ? t('selection.review.sequenceValue', {
+                      count: reviewGroupPhotos.length,
+                      rank: sequenceRank ?? '--',
+                      score: formatScore(sequenceBestPhoto?.finalScore),
+                    })
+                  : t('selection.review.sequenceSingleValue')
+              }
             />
-          ) : null}
 
-          <ExifPanel exif={photo.exif} location={photo} t={t} />
+            {photo.companionFormat && photo.companionPath ? (
+              <CompactKV
+                label={t('selection.review.companion')}
+                value={t('selection.review.companionValue', {
+                  format: photo.companionFormat,
+                  size: formatBytes(photo.companionSize ?? 0),
+                })}
+              />
+            ) : null}
 
-          <div className="review-shortcuts" aria-label={t('selection.review.shortcutsLabel')}>
-            <span>{t('selection.review.shortcuts.grade')}</span>
-            <kbd>1</kbd>
-            <b>{t('selection.actions.select')}</b>
-            <kbd>2</kbd>
-            <b>{t('selection.actions.usable')}</b>
-            <kbd>3</kbd>
-            <b>{t('selection.actions.record')}</b>
-            <kbd>4</kbd>
-            <b>{t('selection.actions.reject')}</b>
-            <span>{t('selection.review.shortcuts.nav')}</span>
-            <kbd>←</kbd>
-            <kbd>→</kbd>
-            <kbd>Esc</kbd>
+            <ExifPanel exif={photo.exif} location={photo} t={t} />
+
+            <div className="review-shortcuts" aria-label={t('selection.review.shortcutsLabel')}>
+              <span>{t('selection.review.shortcuts.grade')}</span>
+              <kbd>1</kbd>
+              <b>{t('selection.actions.select')}</b>
+              <kbd>2</kbd>
+              <b>{t('selection.actions.usable')}</b>
+              <kbd>3</kbd>
+              <b>{t('selection.actions.record')}</b>
+              <kbd>4</kbd>
+              <b>{t('selection.actions.reject')}</b>
+              <span>{t('selection.review.shortcuts.nav')}</span>
+              <kbd>←</kbd>
+              <kbd>→</kbd>
+              <kbd>Esc</kbd>
+            </div>
+          </div>
+
+          <div className="review-detail__footer">
+            <div className="inspector-actions inspector-actions--compact">
+              <button
+                className="button-primary"
+                onClick={() => onSetDecision(photo.id, 'select')}
+                type="button"
+              >
+                <Sparkles className="h-4 w-4" />
+                {t('selection.actions.select')}
+              </button>
+              <button
+                className="button-ghost"
+                onClick={() => onSetDecision(photo.id, 'usable')}
+                type="button"
+              >
+                <Check className="h-4 w-4" />
+                {t('selection.actions.usable')}
+              </button>
+              <button
+                className="button-ghost"
+                onClick={() => onSetDecision(photo.id, 'record')}
+                type="button"
+              >
+                <Clock3 className="h-4 w-4" />
+                {t('selection.actions.record')}
+              </button>
+              <button
+                className="button-danger"
+                onClick={() => onSetDecision(photo.id, 'reject')}
+                type="button"
+              >
+                <X className="h-4 w-4" />
+                {t('selection.actions.reject')}
+              </button>
+            </div>
           </div>
         </aside>
 
         <ReviewFilmstrip
-          activePhotoIndex={isSequence ? sequenceIndex : activeIndex}
+          activePhotoIndex={activeIndex}
           activePhotoId={photo.id}
           bestGroupPhotoId={sequenceBestPhoto?.id ?? null}
           groupPhotoOrderById={reviewGroupOrderById}
           onThumbnailLoadStatus={onThumbnailLoadStatus}
           onSelectPhoto={onSelectPhoto}
-          photos={isSequence ? reviewGroupPhotos : photos}
+          photos={photos}
           sequenceCount={reviewGroupPhotos.length}
           t={t}
         />
@@ -725,10 +737,7 @@ function SpeciesOverrideEditor({
         </span>
         <ChevronDown
           aria-hidden="true"
-          className={cn(
-            'species-editor__chevron',
-            expanded && 'species-editor__chevron--open',
-          )}
+          className={cn('species-editor__chevron', expanded && 'species-editor__chevron--open')}
         />
       </button>
 
@@ -738,7 +747,8 @@ function SpeciesOverrideEditor({
       {expanded ? (
         <>
           {(activeBird.speciesSource === 'model_unconfirmed' ||
-            (activeBird.speciesSource === undefined && photo.speciesSource === 'model_unconfirmed')) &&
+            (activeBird.speciesSource === undefined &&
+              photo.speciesSource === 'model_unconfirmed')) &&
           !activeBird.manualSpecies &&
           activeBird.speciesLatinName ? (
             <button
@@ -847,7 +857,7 @@ function SpeciesOverrideEditor({
             }
             type="button"
           >
-        {t('selection.speciesEditor.clear')}
+            {t('selection.speciesEditor.clear')}
           </button>
         </>
       ) : null}
@@ -1687,25 +1697,34 @@ function PoseChipsRow({
   pose: PhotoRecord['bestPose']
   t: ReturnType<typeof useTranslation>['t']
 }) {
-  if (!pose) return null
-  // 三态:true=明确可见(ok),false=明确不可见(warn),undefined=旧 cache 未检测(muted)。
+  if (!pose) {
+    return (
+      <div className="review-pose-chips review-pose-chips--missing">
+        <span className="review-pose-chips__label">{t('selection.metrics.bodyParts')}</span>
+        <span className="review-pose-chips__chip review-pose-chips__chip--muted">
+          {t('selection.review.visibility.noResult')}
+        </span>
+      </div>
+    )
+  }
+
+  // 三态:true=明确可见(ok),false=明确不可见(warn),undefined=暂无字段结果(muted)。
   // pipeline_version bump 后旧 cache 自动失效重分析,但用户首次升级窗口期会有混合状态。
-  // 不能简单 ?? false,会让"未检测"显示成警告色误导用户。
+  // 不能简单 ?? false,会让"暂无结果"显示成警告色误导用户。
   // head/eye 也并入这里 — 之前在 review-stats-grid 占独立卡片,信息密度浪费;
   // 与 body/wings/tail 同 visibility 维度,统一展示更紧凑。
   const items: Array<{ key: string; label: string; visible: boolean | undefined }> = [
-    { key: 'head', label: t('selection.metrics.head'), visible: pose.head_visible },
-    { key: 'eye', label: t('selection.metrics.eye'), visible: pose.eye_visible },
-    { key: 'body', label: t('selection.metrics.body'), visible: pose.body_visible },
-    { key: 'wings', label: t('selection.metrics.wings'), visible: pose.wings_visible },
-    { key: 'tail', label: t('selection.metrics.tail'), visible: pose.tail_visible },
+    { key: 'head', label: t('selection.metrics.head'), visible: pose?.head_visible },
+    { key: 'eye', label: t('selection.metrics.eye'), visible: pose?.eye_visible },
+    { key: 'body', label: t('selection.metrics.body'), visible: pose?.body_visible },
+    { key: 'wings', label: t('selection.metrics.wings'), visible: pose?.wings_visible },
+    { key: 'tail', label: t('selection.metrics.tail'), visible: pose?.tail_visible },
   ]
   return (
     <div className="review-pose-chips">
       <span className="review-pose-chips__label">{t('selection.metrics.bodyParts')}</span>
       {items.map((it) => {
-        const tone =
-          it.visible === true ? 'ok' : it.visible === false ? 'warn' : 'muted'
+        const tone = it.visible === true ? 'ok' : it.visible === false ? 'warn' : 'muted'
         const symbol = it.visible === true ? '✓' : it.visible === false ? '✗' : '–'
         return (
           <span
@@ -1723,16 +1742,16 @@ function PoseChipsRow({
 /**
  * 把 pose 的 view_angle / facing / posture 三个字段拼成一行人话文案。
  * 例:
- *   - "飞版 · 侧面朝左"
- *   - "栖版 · 正面"
- *   - "栖版"(view_angle 未识别时省略)
+ *   - "飞行 · 侧面朝左"
+ *   - "停栖 · 正面"
+ *   - "停栖"(view_angle 未识别时省略)
  *   - "—"(三项都 unknown)
  */
 function formatPostureLabel(
   pose: PhotoRecord['bestPose'],
   t: ReturnType<typeof useTranslation>['t'],
 ): { text: string; isFlying: boolean } {
-  if (!pose) return { text: t('selection.review.posture.unknown'), isFlying: false }
+  if (!pose) return { text: t('selection.review.posture.noResult'), isFlying: false }
   const posture = pose.posture ?? 'unknown'
   const viewAngle = pose.view_angle ?? 'unknown'
   const facing = pose.facing ?? 'unknown'
@@ -1865,6 +1884,14 @@ function formatPersistedPlace(
   return unique.length > 0 ? unique.join(' · ') : null
 }
 
+function appleMapsUrl(gps: { lat: number; lon: number }): string {
+  const url = new URL('https://maps.apple.com/')
+  url.searchParams.set('ll', `${gps.lat},${gps.lon}`)
+  url.searchParams.set('q', `${gps.lat.toFixed(5)},${gps.lon.toFixed(5)}`)
+  url.searchParams.set('z', '16')
+  return url.toString()
+}
+
 /** GPS 行:坐标(可点 Apple Maps) + 后台 backfill 持久化地名 */
 function GpsRows({
   gps,
@@ -1876,13 +1903,20 @@ function GpsRows({
   t: ReturnType<typeof useTranslation>['t']
 }) {
   const place = formatPersistedPlace(location)
+  const mapsUrl = appleMapsUrl(gps)
   return (
     <>
       <div className="compact-kv">
         <span className="compact-kv__label">{t('selection.exif.location')}</span>
         <a
           className="compact-kv__value compact-kv__value--link"
-          href={`https://maps.apple.com/?ll=${gps.lat},${gps.lon}&z=15`}
+          href={mapsUrl}
+          onClick={(event) => {
+            const opener = window.plumelens?.openExternalUrl
+            if (!opener) return
+            event.preventDefault()
+            void opener(mapsUrl)
+          }}
           rel="noopener noreferrer"
           target="_blank"
           title={t('selection.exif.openInMaps')}
@@ -1910,26 +1944,71 @@ function extractGpsCoords(
   const gps = exif['GPSInfo']
   if (!gps || typeof gps !== 'object') return null
   const g = gps as Record<string, unknown>
-  const lat = dmsToDecimal(g['GPSLatitude'], g['GPSLatitudeRef'])
-  const lon = dmsToDecimal(g['GPSLongitude'], g['GPSLongitudeRef'])
+  const lat = gpsCoordinateToDecimal(
+    mappingValue(g, 'GPSLatitude', '2'),
+    mappingValue(g, 'GPSLatitudeRef', '1'),
+  )
+  const lon = gpsCoordinateToDecimal(
+    mappingValue(g, 'GPSLongitude', '4'),
+    mappingValue(g, 'GPSLongitudeRef', '3'),
+  )
   if (lat === null || lon === null) return null
   let alt: number | null = null
-  const a = g['GPSAltitude']
-  if (typeof a === 'number' && Number.isFinite(a)) {
+  const a = scalarToNumber(mappingValue(g, 'GPSAltitude', '6'))
+  if (a !== null) {
     // GPSAltitudeRef: 0 = 海平面以上,1 = 海平面以下(很罕见)
-    alt = g['GPSAltitudeRef'] === 1 ? -a : a
+    alt = scalarToNumber(mappingValue(g, 'GPSAltitudeRef', '5')) === 1 ? -a : a
   }
   return { lat, lon, alt }
 }
 
-function dmsToDecimal(dms: unknown, ref: unknown): number | null {
+function mappingValue(mapping: Record<string, unknown>, ...keys: string[]): unknown {
+  for (const key of keys) {
+    if (Object.hasOwn(mapping, key)) return mapping[key]
+  }
+  return null
+}
+
+function scalarToNumber(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (typeof value === 'string') {
+    const parsed = Number(value.trim())
+    return Number.isFinite(parsed) ? parsed : null
+  }
+  if (Array.isArray(value) && value.length === 2) {
+    const numerator = scalarToNumber(value[0])
+    const denominator = scalarToNumber(value[1])
+    if (numerator === null || denominator === null || denominator === 0) return null
+    return numerator / denominator
+  }
+  if (value && typeof value === 'object') {
+    const rational = value as Record<string, unknown>
+    const numerator = scalarToNumber(rational['numerator'])
+    const denominator = scalarToNumber(rational['denominator'])
+    if (numerator === null || denominator === null || denominator === 0) return null
+    return numerator / denominator
+  }
+  return null
+}
+
+function gpsCoordinateToDecimal(dms: unknown, ref: unknown): number | null {
   if (!Array.isArray(dms) || dms.length < 3) return null
   const [d, m, s] = dms
-  if (typeof d !== 'number' || typeof m !== 'number' || typeof s !== 'number') return null
-  let value = d + m / 60 + s / 3600
+  const degree = scalarToNumber(d)
+  const minute = scalarToNumber(m)
+  const second = scalarToNumber(s)
+  if (degree === null || minute === null || second === null) return null
+  let value = degree + minute / 60 + second / 3600
   if (!Number.isFinite(value)) return null
   // S(South) / W(West) → 负值
-  if (ref === 'S' || ref === 'W') value = -value
+  const refText =
+    typeof ref === 'string'
+      ? ref.trim().toUpperCase()
+      : String(ref ?? '')
+          .trim()
+          .toUpperCase()
+  if (refText === 'S' || refText === 'W') value = -value
+  if (!['N', 'E', 'S', 'W'].includes(refText)) return null
   return value
 }
 

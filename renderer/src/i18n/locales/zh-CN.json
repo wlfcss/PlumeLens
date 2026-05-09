@@ -42,7 +42,9 @@
       "baiduLabel": "百度地图 AK（服务端）",
       "baiduHint": "在百度开放平台 → 应用管理 → 创建应用「服务端」类型",
       "tencentLabel": "腾讯地图 Key",
-      "tencentHint": "在腾讯位置服务 → 控制台 → 创建 Key"
+      "tencentHint": "在腾讯位置服务 → 控制台 → 创建 Key",
+      "showKey": "显示 API Key",
+      "hideKey": "隐藏 API Key"
     },
     "about": {
       "title": "关于",
@@ -64,6 +66,8 @@
     "subtitle": "智能模型鉴定识别，助您聚焦每一次振翅",
     "primaryAction": "选择照片文件夹",
     "secondaryAction": "继续上次文件夹",
+    "importErrorTitle": "导入失败",
+    "importErrorBody": "请确认后端引擎已就绪、路径有效后重试。{{detail}}",
     "recentFolders": "最近文件夹",
     "resumeTitle": "从上次处理的位置继续",
     "emptyRecentTitle": "首次使用，从导入开始",
@@ -204,7 +208,7 @@
       "body": "身",
       "tail": "尾",
       "wings": "翼",
-      "bodyParts": "躯干",
+      "bodyParts": "可见性",
       "posture": "姿态",
       "viewAngle": "视角",
       "confidence": "置信",
@@ -242,6 +246,10 @@
       "collapseStack": "收起为多张",
       "stackAria": "{{count}} 张连拍，封面 {{file}}，点击查看封面信息",
       "expandAria": "展开 {{count}} 张连拍",
+      "collapseAria": "收起 {{count}} 张连拍",
+      "expandTooltip": "展开 {{count}} 张连拍",
+      "collapseTooltip": "收起为多张照片",
+      "stackLabel": "连拍",
       "stackCount": "×{{count}}",
       "stackHint": "多张照片 · 点右上角展开",
       "pendingTitle": "{{time}} · 待分组",
@@ -276,10 +284,10 @@
       "conflict": "组内分歧",
       "conflictDetail": "组内分歧，保留单张高置信结果",
       "unconfirmed": "不全 · 待审",
-      "unconfirmedDetail": "识别置信度受限，需在深度复核确认后才进羽迹",
-      "unconfirmedUncertainDetail": "模型识别置信度不足（reject head 判定为 uncertain），需在深度复核确认后才进羽迹",
-      "unconfirmedHeadDetail": "鸟头不可见，识别置信度受限，需在深度复核确认后才进羽迹",
-      "unconfirmedGenericDetail": "识别置信度受限，需在深度复核确认后才进羽迹",
+      "unconfirmedDetail": "识别把握不足，确认后再进羽迹",
+      "unconfirmedUncertainDetail": "识别把握不足，确认后再进羽迹",
+      "unconfirmedHeadDetail": "鸟头不可见，确认后再进羽迹",
+      "unconfirmedGenericDetail": "识别把握不足，确认后再进羽迹",
       "partialUnconfirmed": "部分待审"
     },
     "poseTags": {
@@ -315,6 +323,7 @@
       "pendingCaption": "等待分析"
     },
     "actions": {
+      "label": "照片分档操作",
       "select": "精选",
       "usable": "可用",
       "record": "记录",
@@ -370,10 +379,14 @@
       "sequenceSingleValue": "单张",
       "filmstripSequenceIndex": "{{index}}/{{count}}",
       "posture": {
-        "flying": "飞版",
-        "perched": "栖版",
+        "flying": "飞行",
+        "perched": "停栖",
         "unknown": "—",
-        "flyBoost": "飞版 · 自动升档"
+        "noResult": "暂无结果",
+        "flyBoost": "飞版加分"
+      },
+      "visibility": {
+        "noResult": "暂无结果"
       },
       "viewAngle": {
         "frontal": "正面",
@@ -596,7 +609,7 @@
       "openFolder": "在 Finder 中打开",
       "openFailed": "无法打开输出目录，请检查目录是否仍然存在",
       "reset": "新建导出",
-      "stats": "已导出 {{exported}} 张，附带 {{companions}} 个同伴文件，生成 {{xmp}} 个 XMP，失败 {{failed}} 张"
+      "stats": "已导出 {{exported}} 张，附带 {{companions}} 个同伴文件，写入 {{xmp}} 条 XMP 元数据，失败 {{failed}} 张"
     },
     "scope": {
       "label": "导出范围",
@@ -620,14 +633,14 @@
         "hint": "复制符合条件的 JPG/RAW 文件"
       },
       "files_xmp": {
-        "label": "照片 + XMP",
-        "short": "照片 + XMP",
-        "hint": "复制照片，并在旁边生成编辑器可读的评级文件"
+        "label": "照片 + 元数据",
+        "short": "照片 + 元数据",
+        "hint": "复制照片；JPG 内嵌 XMP，RAW 生成同名 sidecar"
       },
       "xmp_only": {
-        "label": "仅 XMP",
-        "short": "XMP 清单",
-        "hint": "不复制照片，只生成镜像结构的 XMP sidecar 包"
+        "label": "仅 XMP sidecar",
+        "short": "XMP sidecar",
+        "hint": "不复制照片，只生成镜像结构的 XMP sidecar 包，主要用于 RAW 工作流"
       }
     },
     "layout": {

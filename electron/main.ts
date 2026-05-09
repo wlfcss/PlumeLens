@@ -42,6 +42,49 @@ const REALPATH_CACHE_MAX = 2048
 
 const realpathCache = new Map<string, { value: string; expiresAt: number }>()
 
+function normalizeExternalUrl(target: unknown): string | null {
+  if (typeof target !== 'string' || target.trim() === '') return null
+  try {
+    const url = new URL(target)
+    if (url.protocol === 'maps:') return url.toString()
+    if (url.protocol !== 'https:') return null
+    const host = url.hostname.toLowerCase()
+    const allowed =
+      host === 'maps.apple.com' || host === 'wikipedia.org' || host.endsWith('.wikipedia.org')
+    return allowed ? url.toString() : null
+  } catch {
+    return null
+  }
+}
+
+function isTrustedAppNavigation(target: string, isDev: boolean): boolean {
+  try {
+    const url = new URL(target)
+    if (url.protocol === 'file:') return true
+    if (isDev && process.env['ELECTRON_RENDERER_URL']) {
+      const devUrl = new URL(process.env['ELECTRON_RENDERER_URL'])
+      return url.origin === devUrl.origin
+    }
+  } catch {
+    return false
+  }
+  return false
+}
+
+async function openExternalUrl(
+  target: unknown,
+): Promise<{ ok: true } | { ok: false; reason: 'invalid_url' | 'open_failed'; message?: string }> {
+  const url = normalizeExternalUrl(target)
+  if (!url) return { ok: false, reason: 'invalid_url' }
+  try {
+    await shell.openExternal(url)
+    return { ok: true }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    return { ok: false, reason: 'open_failed', message }
+  }
+}
+
 async function cachedRealpath(path: string): Promise<string> {
   const now = Date.now()
   const cached = realpathCache.get(path)
@@ -75,6 +118,16 @@ function createWindow(): void {
       nodeIntegration: false,
       sandbox: true,
     },
+  })
+
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    void openExternalUrl(url)
+    return { action: 'deny' }
+  })
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    if (isTrustedAppNavigation(url, isDev)) return
+    event.preventDefault()
+    if (normalizeExternalUrl(url)) void openExternalUrl(url)
   })
 
   // CSP
@@ -327,6 +380,8 @@ ipcMain.handle('open-path-in-finder', async (_event, targetPath: unknown) => {
   }
   return { ok: true as const }
 })
+
+ipcMain.handle('open-external-url', (_event, targetUrl: unknown) => openExternalUrl(targetUrl))
 
 // 用户设置(reverse geocoding API keys 等)— 持久化到 userData/settings.json,
 // 落盘前每个 key 都过 Electron safeStorage 加密(macOS Keychain / Win DPAPI /

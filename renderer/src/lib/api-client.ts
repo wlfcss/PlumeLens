@@ -217,6 +217,8 @@ export interface PoseDetail {
   view_angle?: 'frontal' | 'side' | 'back' | 'unknown'
   facing?: 'left' | 'right' | 'unknown'
   posture?: 'perched' | 'flying' | 'unknown'
+  posture_confidence?: number
+  posture_method?: 'classifier' | 'heuristic'
 }
 
 export interface SpeciesCandidate {

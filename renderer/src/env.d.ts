@@ -49,6 +49,9 @@ interface PlumeLensAPI {
     | { ok: true }
     | { ok: false; reason: 'invalid_path' | 'path_missing' | 'open_failed'; message?: string }
   >
+  openExternalUrl(
+    url: string,
+  ): Promise<{ ok: true } | { ok: false; reason: 'invalid_url' | 'open_failed'; message?: string }>
   /** 兼容老 channel；调用方必须在 unmount 时调用返回的 unsubscribe。 */
   onBackendReady(cb: (url: string) => void): () => void
   /** 兼容老 channel；调用方必须在 unmount 时调用返回的 unsubscribe。 */

@@ -169,6 +169,12 @@ contextBridge.exposeInMainWorld('plumelens', {
     | { ok: true }
     | { ok: false; reason: 'invalid_path' | 'path_missing' | 'open_failed'; message?: string }
   > => ipcRenderer.invoke('open-path-in-finder', path),
+  /** 用系统外部应用打开允许的 URL（地图 / Wikipedia），避免 Electron 内部空白窗口。 */
+  openExternalUrl: (
+    url: string,
+  ): Promise<
+    { ok: true } | { ok: false; reason: 'invalid_url' | 'open_failed'; message?: string }
+  > => ipcRenderer.invoke('open-external-url', url),
   /** 启动期探测的外部编辑器(Topaz/Photoshop)解析名;null = 未安装。 */
   listEditors: (): Promise<{ topaz: string | null; photoshop: string | null }> =>
     ipcRenderer.invoke('list-editors'),

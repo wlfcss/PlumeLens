@@ -48,7 +48,7 @@ export function buildFolderRecord(summary: LibrarySummary): FolderRecord {
   }
 }
 
-// ---------- Group: 用后端 scene_id（lingjian-v2 算法：AKAZE 特征 + 颜色直方图）----------
+// ---------- Group: 用后端 scene_id（连续拍摄事件 / 同一观察上下文）----------
 
 interface GroupPlan {
   id: string
@@ -64,9 +64,9 @@ interface GroupPlan {
 /**
  * 按后端写入的 photo.scene_id 聚类。
  *
- * 后端用 lingjian-v2 的算法：相邻 photo 用 AKAZE 特征匹配（≥0.05 相似 → 同场景），
- * 特征不足时回退 HSV 颜色直方图（≥0.82 → 同场景）。详见
- * engine/pipeline/scene_grouping.py。
+ * scene group 表示一次连续观察/拍摄事件；同一 scene 内仍可能包含多个 burst stack。
+ * burst stack 是前端在 scene 内按主体几何连续性拆出的更小候选组，用来表达
+ * “这几张可以作为同一连拍候选展开比较”。不要把 stack 和 scene 混用。
  *
  * scene_id 为 null 的 photo（场景分组还没跑完）回退到按时间近似分（每张单独一组）。
  * lifespan 启动 + import 完成会自动后台补 scene_id。

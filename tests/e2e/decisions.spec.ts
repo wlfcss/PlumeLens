@@ -10,6 +10,18 @@ interface DecisionRecord {
   decision: 'select' | 'usable' | 'record' | 'reject' | null
 }
 
+interface TestPhotoFixture {
+  id: string
+  file_name: string
+  species: string
+  latin: string
+  grade: 'select' | 'usable' | 'record' | 'reject'
+  score: number
+  analysisStatus?: 'done' | 'failed'
+  birdCount?: number
+  bbox?: { x1: number; y1: number; x2: number; y2: number; confidence: number }
+}
+
 const TEST_LIB = {
   id: 'lib-test',
   display_name: '测试库',
@@ -38,7 +50,7 @@ const TEST_LIB_2 = {
   last_analyzed_at: '2026-04-22T07:00:00+00:00',
 }
 
-const TEST_PHOTOS = [
+const TEST_PHOTOS: TestPhotoFixture[] = [
   {
     id: 'p1',
     file_name: 'IMG_0001.JPG',
@@ -73,7 +85,7 @@ const TEST_PHOTOS = [
   },
 ]
 
-const TEST_PHOTOS_OTHER = [
+const TEST_PHOTOS_OTHER: TestPhotoFixture[] = [
   {
     id: 'q1',
     file_name: 'OTHER_0001.JPG',
@@ -84,14 +96,113 @@ const TEST_PHOTOS_OTHER = [
   },
 ]
 
-async function mockBackend(page: Page): Promise<void> {
-  let libraryState = { ...TEST_LIB }
+const TEST_STACK_PHOTOS: TestPhotoFixture[] = [
+  {
+    id: 's1',
+    file_name: 'STACK_0001.JPG',
+    species: '印度寿带',
+    latin: 'Terpsiphone paradisi',
+    grade: 'record',
+    score: 0.567,
+    bbox: { x1: 1700, y1: 800, x2: 2200, y2: 2200, confidence: 0.93 },
+  },
+  {
+    id: 's2',
+    file_name: 'STACK_0002.JPG',
+    species: '印度寿带',
+    latin: 'Terpsiphone paradisi',
+    grade: 'record',
+    score: 0.577,
+    bbox: { x1: 1710, y1: 800, x2: 2210, y2: 2200, confidence: 0.93 },
+  },
+  {
+    id: 's3',
+    file_name: 'STACK_0003.JPG',
+    species: '白鹭',
+    latin: 'Egretta garzetta',
+    grade: 'usable',
+    score: 0.681,
+    bbox: { x1: 2700, y1: 780, x2: 3220, y2: 2180, confidence: 0.91 },
+  },
+  {
+    id: 's4',
+    file_name: 'STACK_0004.JPG',
+    species: '白鹭',
+    latin: 'Egretta garzetta',
+    grade: 'usable',
+    score: 0.693,
+    bbox: { x1: 2710, y1: 780, x2: 3230, y2: 2180, confidence: 0.91 },
+  },
+]
+
+const TEST_SINGLE_BURST_PHOTOS: TestPhotoFixture[] = Array.from({ length: 12 }, (_, idx) => ({
+  id: `burst-${idx + 1}`,
+  file_name: `5Y3A${String(8091 + idx)}.JPG`,
+  species: '东亚石䳭',
+  latin: 'Saxicola stejnegeri',
+  grade: idx % 4 === 0 ? 'select' : 'usable',
+  score: Math.max(0.61, 0.772 - idx * 0.014),
+}))
+
+const TEST_DRIFT_STACK_PHOTOS: TestPhotoFixture[] = Array.from({ length: 6 }, (_, idx) => ({
+  id: `drift-${idx + 1}`,
+  file_name: `DRIFT_${String(idx + 1).padStart(4, '0')}.JPG`,
+  species: idx === 3 ? '寿带' : '印度寿带',
+  latin: idx === 3 ? 'Terpsiphone incei' : 'Terpsiphone paradisi',
+  grade: idx === 0 ? 'select' : 'usable',
+  score: Math.max(0.65, 0.754 - idx * 0.008),
+  bbox: {
+    x1: 900 + idx * 290,
+    y1: 800,
+    x2: 1400 + idx * 290,
+    y2: 2200,
+    confidence: 0.93,
+  },
+}))
+
+async function mockBackend(
+  page: Page,
+  options: {
+    driftingStack?: boolean
+    includeFailed?: boolean
+    singleBurstScene?: boolean
+    stackedBursts?: boolean
+  } = {},
+): Promise<void> {
+  const primaryPhotosBase = options.driftingStack
+    ? TEST_DRIFT_STACK_PHOTOS
+    : options.singleBurstScene
+      ? TEST_SINGLE_BURST_PHOTOS
+      : options.stackedBursts
+        ? TEST_STACK_PHOTOS
+        : TEST_PHOTOS
+  const failedPhoto: TestPhotoFixture = {
+    id: 'failed-1',
+    file_name: 'BROKEN_0005.JPG',
+    species: '未识别',
+    latin: 'Unknown',
+    grade: 'reject',
+    score: 0,
+    analysisStatus: 'failed',
+    birdCount: 0,
+  }
+  const primaryPhotos: TestPhotoFixture[] = options.includeFailed
+    ? [...primaryPhotosBase, failedPhoto]
+    : primaryPhotosBase
+  let libraryState = {
+    ...TEST_LIB,
+    analyzed_count: primaryPhotos.length,
+    total_count: primaryPhotos.length,
+  }
   let libraryState2 = { ...TEST_LIB_2 }
 
   await page.addInitScript(() => {
     const openedFinderPaths: string[] = []
+    const openedExternalUrls: string[] = []
     ;(window as unknown as { __openedFinderPaths: string[] }).__openedFinderPaths =
       openedFinderPaths
+    ;(window as unknown as { __openedExternalUrls: string[] }).__openedExternalUrls =
+      openedExternalUrls
     ;(window as unknown as { plumelens: Record<string, unknown> }).plumelens = {
       getBackendUrl: async () => 'http://127.0.0.1:8000',
       // playwright e2e 走 vite-served renderer,无 preload engineRequest;
@@ -102,6 +213,10 @@ async function mockBackend(page: Page): Promise<void> {
       openLogsDir: async () => '',
       openPathInFinder: async (path: string) => {
         openedFinderPaths.push(path)
+        return { ok: true }
+      },
+      openExternalUrl: async (url: string) => {
+        openedExternalUrls.push(url)
         return { ok: true }
       },
       onBackendReady: () => {},
@@ -235,68 +350,69 @@ async function mockBackend(page: Page): Promise<void> {
       })
       return
     }
-    const photos = TEST_PHOTOS.map((p, idx) => ({
-      id: p.id,
-      file_path: `/tmp/lib-test/${p.file_name}`,
-      file_name: p.file_name,
-      format: 'jpg',
-      width: 4000,
-      height: 3000,
-      thumb_grid: null,
-      thumb_preview: `preview/${p.id}.jpg`,
-      created_at: `2026-04-23T07:0${idx}:00+00:00`,
-      shot_at: `2026-04-23T07:0${idx}:00+00:00`,
-      exif:
-        idx < 2
-          ? {
-              GPSInfo: {
-                '1': 'N',
-                '2': [
-                  [31, 1],
-                  [37, 1],
-                  [idx, 1],
-                ],
-                '3': 'E',
-                '4': [
-                  [121, 1],
-                  [30, 1],
-                  [idx, 1],
-                ],
-              },
-            }
-          : null,
-      scene_id: idx,
-      pipeline_version: 'v1-mock',
-      grade: p.grade,
-      quality_score: p.score,
-      bird_count: 1,
-      species: p.species,
-      species_latin: p.latin,
-      decision: null,
-      best_detection: {
-        index: 0,
-        bbox: { x1: 1700, y1: 800, x2: 2200, y2: 2200, confidence: 0.93 },
-        pose: null,
-        quality: { clipiqa: p.score, hyperiqa: p.score, combined: p.score },
+    const photos = primaryPhotos.map((p, idx) => {
+      const burstSecond =
+        options.driftingStack || options.singleBurstScene
+          ? idx
+          : options.stackedBursts
+            ? idx + (idx >= 2 ? 3 : 0)
+            : idx < 2
+              ? idx
+              : idx * 20
+      const shotAt =
+        options.driftingStack || options.singleBurstScene || options.stackedBursts
+          ? `2026-04-23T07:00:${String(burstSecond).padStart(2, '0')}+00:00`
+          : `2026-04-23T07:0${idx}:00+00:00`
+      const bbox = p.bbox ?? { x1: 1700, y1: 800, x2: 2200, y2: 2200, confidence: 0.93 }
+
+      return {
+        id: p.id,
+        file_path: `/tmp/lib-test/${p.file_name}`,
+        file_name: p.file_name,
+        format: 'jpg',
+        width: 4000,
+        height: 3000,
+        thumb_grid: null,
+        thumb_preview: `preview/${p.id}.jpg`,
+        created_at: shotAt,
+        shot_at: shotAt,
+        exif:
+          idx < 2
+            ? {
+                GPSInfo: {
+                  '1': 'N',
+                  '2': [
+                    [31, 1],
+                    [37, 1],
+                    [idx, 1],
+                  ],
+                  '3': 'E',
+                  '4': [
+                    [121, 1],
+                    [30, 1],
+                    [idx, 1],
+                  ],
+                },
+              }
+            : null,
+        scene_id:
+          options.driftingStack || options.singleBurstScene || options.stackedBursts ? 111 : idx,
+        pipeline_version: 'v1-mock',
+        grade: p.grade,
+        quality_score: p.score,
+        bird_count: p.birdCount ?? 1,
+        analysis_status: p.analysisStatus ?? 'done',
+        analysis_error_code: p.analysisStatus === 'failed' ? 'decode_error' : null,
+        analysis_error: p.analysisStatus === 'failed' ? 'mock decode error' : null,
         species: p.species,
         species_latin: p.latin,
-        manual_species: false,
-        species_candidates: [
-          {
-            canonical_sci: p.latin,
-            canonical_zh: p.species,
-            canonical_en: p.species === '须浮鸥' ? 'whiskered tern' : null,
-            confidence: p.score,
-          },
-        ],
-      },
-      detections:
-        p.id === 'p1'
-          ? [
-              {
+        decision: null,
+        best_detection:
+          p.analysisStatus === 'failed'
+            ? null
+            : {
                 index: 0,
-                is_best: true,
-                bbox: { x1: 1700, y1: 800, x2: 2200, y2: 2200, confidence: 0.93 },
+                bbox,
                 pose: null,
                 quality: { clipiqa: p.score, hyperiqa: p.score, combined: p.score },
                 species: p.species,
@@ -306,32 +422,56 @@ async function mockBackend(page: Page): Promise<void> {
                   {
                     canonical_sci: p.latin,
                     canonical_zh: p.species,
-                    canonical_en: 'whiskered tern',
+                    canonical_en: p.species === '须浮鸥' ? 'whiskered tern' : null,
                     confidence: p.score,
                   },
                 ],
               },
-              {
-                index: 1,
-                is_best: false,
-                bbox: { x1: 2300, y1: 900, x2: 2750, y2: 2100, confidence: 0.82 },
-                pose: null,
-                quality: { clipiqa: 0.76, hyperiqa: 0.71, combined: 0.73 },
-                species: '翠鸟',
-                species_latin: 'Alcedo atthis',
-                manual_species: false,
-                species_candidates: [
+        detections:
+          p.analysisStatus === 'failed'
+            ? null
+            : p.id === 'p1'
+              ? [
                   {
-                    canonical_sci: 'Alcedo atthis',
-                    canonical_zh: '翠鸟',
-                    canonical_en: 'common kingfisher',
-                    confidence: 0.82,
+                    index: 0,
+                    is_best: true,
+                    bbox: { x1: 1700, y1: 800, x2: 2200, y2: 2200, confidence: 0.93 },
+                    pose: null,
+                    quality: { clipiqa: p.score, hyperiqa: p.score, combined: p.score },
+                    species: p.species,
+                    species_latin: p.latin,
+                    manual_species: false,
+                    species_candidates: [
+                      {
+                        canonical_sci: p.latin,
+                        canonical_zh: p.species,
+                        canonical_en: 'whiskered tern',
+                        confidence: p.score,
+                      },
+                    ],
                   },
-                ],
-              },
-            ]
-          : null,
-    }))
+                  {
+                    index: 1,
+                    is_best: false,
+                    bbox: { x1: 2300, y1: 900, x2: 2750, y2: 2100, confidence: 0.82 },
+                    pose: null,
+                    quality: { clipiqa: 0.76, hyperiqa: 0.71, combined: 0.73 },
+                    species: '翠鸟',
+                    species_latin: 'Alcedo atthis',
+                    manual_species: false,
+                    species_candidates: [
+                      {
+                        canonical_sci: 'Alcedo atthis',
+                        canonical_zh: '翠鸟',
+                        canonical_en: 'common kingfisher',
+                        confidence: 0.82,
+                      },
+                    ],
+                  },
+                ]
+              : null,
+      }
+    })
     route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -464,6 +604,190 @@ async function mockBackend(page: Page): Promise<void> {
   })
 }
 
+async function waitForSelectionScrollSettled(page: Page): Promise<void> {
+  await page.locator('.selection-main.selection-scroll').evaluate((node) => {
+    const scroller = node as HTMLElement
+    return new Promise<void>((resolve) => {
+      let previousTop = scroller.scrollTop
+      let stableFrames = 0
+      let frameCount = 0
+
+      const tick = () => {
+        const currentTop = scroller.scrollTop
+        stableFrames = Math.abs(currentTop - previousTop) < 0.5 ? stableFrames + 1 : 0
+        previousTop = currentTop
+        frameCount += 1
+
+        if (stableFrames >= 2 || frameCount >= 12) {
+          resolve()
+          return
+        }
+
+        requestAnimationFrame(tick)
+      }
+
+      requestAnimationFrame(tick)
+    })
+  })
+}
+
+test.describe('Photo stack interactions (mock backend)', () => {
+  test('stack action hints only reveal on hover and expanded stacks can collapse', async ({
+    page,
+  }) => {
+    await mockBackend(page, { stackedBursts: true })
+    await page.goto('/')
+    await page.getByRole('button', { name: '选片', exact: true }).click()
+
+    const stackGroup = page.locator('.photo-group').first()
+    const expand = page.getByRole('button', { name: '展开 2 张连拍' }).first()
+    await expect(expand).toBeVisible()
+    await expect(stackGroup.locator('.photo-tile')).toHaveCount(2)
+    await expect(page.getByRole('button', { name: '展开 1 张连拍' })).toHaveCount(0)
+    await expect(page.getByRole('button', { name: '收起 1 张连拍' })).toHaveCount(0)
+    await expect(
+      page.locator('.photo-stack-action__count').filter({ hasText: /×\s*1/ }),
+    ).toHaveCount(0)
+    await expect(expand.locator('.photo-stack-action__hint')).toHaveCSS('opacity', '0')
+
+    await expand.hover()
+    await expect(expand.locator('.photo-stack-action__hint')).toHaveCSS('opacity', '1')
+    await expand.click()
+
+    const collapse = page.getByRole('button', { name: '收起 2 张连拍' }).first()
+    await expect(collapse).toBeVisible()
+    await expect(stackGroup.locator('.photo-tile')).toHaveCount(3)
+    await waitForSelectionScrollSettled(page)
+    await expect(collapse.locator('.photo-stack-action__hint')).toHaveCSS('opacity', '0')
+
+    await collapse.hover()
+    await expect(collapse.locator('.photo-stack-action__hint')).toHaveCSS('opacity', '1')
+    await collapse.click()
+
+    await expect(page.getByRole('button', { name: '展开 2 张连拍' }).first()).toBeVisible()
+    await expect(stackGroup.locator('.photo-tile')).toHaveCount(2)
+    await expect(page.getByRole('button', { name: '收起 2 张连拍' })).toHaveCount(0)
+    await expect(page.getByRole('button', { name: '展开 1 张连拍' })).toHaveCount(0)
+    await expect(page.getByRole('button', { name: '收起 1 张连拍' })).toHaveCount(0)
+
+    await stackGroup.locator('.photo-preview--stack').first().click()
+    await page.keyboard.press('Space')
+    await expect(page.locator('.review-panel')).toBeVisible()
+    await expect(page.locator('.review-heading h2')).toContainText('STACK_0002.JPG')
+  })
+
+  test('single-stack scenes start expanded while keeping the stack affordance', async ({
+    page,
+  }) => {
+    await mockBackend(page, { singleBurstScene: true })
+    await page.goto('/')
+    await page.getByRole('button', { name: '选片', exact: true }).click()
+
+    const collapse = page.getByRole('button', { name: '收起 12 张连拍' })
+    await expect(collapse).toBeVisible()
+    await expect(page.getByRole('button', { name: '展开 12 张连拍' })).toHaveCount(0)
+    await expect(
+      page.locator('.photo-stack-action__count').filter({ hasText: /×\s*12/ }),
+    ).toHaveCount(1)
+    await expect(page.locator('.photo-tile')).toHaveCount(12)
+
+    await collapse.click()
+    await expect(page.getByRole('button', { name: '展开 12 张连拍' })).toBeVisible()
+    await expect(page.locator('.photo-tile')).toHaveCount(1)
+  })
+
+  test('slowly drifting subjects stay in one burst stack despite species label jitter', async ({
+    page,
+  }) => {
+    await mockBackend(page, { driftingStack: true })
+    await page.goto('/')
+    await page.getByRole('button', { name: '选片', exact: true }).click()
+
+    const stackGroup = page.locator('.photo-group').first()
+    const collapse = page.getByRole('button', { name: '收起 6 张连拍' })
+
+    await expect(collapse).toBeVisible()
+    await expect(stackGroup.locator('.photo-tile')).toHaveCount(6)
+    await expect(
+      page.locator('.photo-stack-action__count').filter({ hasText: /×\s*[2345]/ }),
+    ).toHaveCount(0)
+    await expect(stackGroup).toContainText('DRIFT_0006.JPG')
+
+    await collapse.click()
+    await expect(page.getByRole('button', { name: '展开 6 张连拍' })).toBeVisible()
+    await expect(stackGroup.locator('.photo-tile')).toHaveCount(1)
+  })
+
+  test('deep review navigation leaves the active burst stack', async ({ page }) => {
+    await mockBackend(page, { stackedBursts: true })
+    await page.goto('/')
+    await page.getByRole('button', { name: '选片', exact: true }).click()
+
+    const stackGroup = page.locator('.photo-group').first()
+    await page.getByRole('button', { name: '展开 2 张连拍' }).first().click()
+    await stackGroup.locator('.photo-tile').nth(1).locator('.photo-preview').dblclick()
+
+    await expect(page.locator('.review-panel')).toBeVisible()
+    await expect(page.locator('.review-heading h2')).toContainText('STACK_0002.JPG')
+    await expect(page.locator('.review-sequence--stack')).toBeVisible()
+    await expect(page.locator('.review-filmstrip__item')).toHaveCount(4)
+
+    await page.keyboard.press('ArrowLeft')
+    await expect(page.locator('.review-heading h2')).toContainText('STACK_0003.JPG')
+  })
+
+  test('grouped scenes stay time-ordered and never overlap', async ({ page }) => {
+    await mockBackend(page)
+    await page.goto('/')
+    await page.getByRole('button', { name: '选片', exact: true }).click()
+
+    const groups = page.locator('.photo-group')
+    await expect(groups).toHaveCount(3)
+    await expect(groups.first()).toContainText('IMG_0003.JPG')
+
+    await page.getByRole('button', { name: '文件名' }).click()
+    await expect(groups.first()).toContainText('IMG_0003.JPG')
+
+    const groupRects = await groups.evaluateAll((nodes) =>
+      nodes.map((node) => {
+        const rect = node.getBoundingClientRect()
+        return { bottom: rect.bottom, top: rect.top }
+      }),
+    )
+    for (let index = 1; index < groupRects.length; index += 1) {
+      expect(groupRects[index].top).toBeGreaterThanOrEqual(groupRects[index - 1].bottom + 24)
+    }
+  })
+})
+
+test.describe('Selection metric layout (mock backend)', () => {
+  test.use({ viewport: { width: 1080, height: 720 } })
+
+  test('keeps the failed metric in the first row at default window width', async ({ page }) => {
+    await mockBackend(page, { includeFailed: true })
+    await page.goto('/')
+    await page.getByRole('button', { name: '选片', exact: true }).click()
+
+    const strip = page.locator('.metric-strip--selection')
+    const cells = strip.locator('.metric-cell')
+
+    await expect(strip).toBeVisible()
+    await expect(cells).toHaveCount(7)
+
+    const cellRects = await cells.evaluateAll((nodes) =>
+      nodes.map((node) => {
+        const rect = node.getBoundingClientRect()
+        return { height: rect.height, left: rect.left, top: Math.round(rect.top) }
+      }),
+    )
+    expect(new Set(cellRects.map((rect) => rect.top)).size).toBe(1)
+    expect(cellRects[6].left).toBeGreaterThan(cellRects[5].left)
+
+    const stripBox = await strip.boundingBox()
+    expect(stripBox?.height).toBeLessThan(90)
+  })
+})
+
 test.describe('Photo decision flow (mock backend)', () => {
   test.beforeEach(async ({ page }) => {
     await mockBackend(page)
@@ -555,7 +879,7 @@ test.describe('Photo decision flow (mock backend)', () => {
     await expect(page.getByText('导出完成')).toBeVisible()
     await page.getByRole('button', { name: '展开' }).click()
     await expect(
-      page.getByText('已导出 2 张，附带 0 个同伴文件，生成 2 个 XMP，失败 0 张'),
+      page.getByText('已导出 2 张，附带 0 个同伴文件，写入 2 条 XMP 元数据，失败 0 张'),
     ).toBeVisible()
   })
 
@@ -685,6 +1009,13 @@ test.describe('Photo decision flow (mock backend)', () => {
     await page.locator('.photo-preview').first().dblclick()
     await expect(page.locator('.review-panel')).toBeVisible()
 
+    const poseChips = page.locator('.review-pose-chips')
+    await expect(poseChips).toBeVisible()
+    await expect(poseChips).toContainText('可见性')
+    await expect(poseChips.locator('.review-pose-chips__chip--muted')).toHaveCount(1)
+    await expect(poseChips).toContainText('暂无结果')
+    await expect(page.locator('.compact-kv').filter({ hasText: '姿态' })).toContainText('暂无结果')
+
     const backdropRect = await page.locator('.overlay-backdrop').evaluate((element) => {
       const rect = element.getBoundingClientRect()
       return { width: rect.width, height: rect.height }
@@ -698,6 +1029,32 @@ test.describe('Photo decision flow (mock backend)', () => {
     })
     expect(panelRect.width / backdropRect.width).toBeCloseTo(0.9, 2)
     expect(panelRect.height / backdropRect.height).toBeCloseTo(0.9, 2)
+
+    const detailLayout = await page.locator('.review-detail').evaluate((element) => {
+      const detailRect = element.getBoundingClientRect()
+      const footerRect = element.querySelector('.review-detail__footer')?.getBoundingClientRect()
+      const actionsRect = element
+        .querySelector('.inspector-actions--compact')
+        ?.getBoundingClientRect()
+      const scoreChildren = Array.from(element.querySelector('.score-header')?.children ?? []).map(
+        (child) => {
+          const rect = child.getBoundingClientRect()
+          return { bottom: rect.bottom, top: rect.top }
+        },
+      )
+      const scoreHasOverlap = scoreChildren.some(
+        (rect, index) => index > 0 && rect.top < scoreChildren[index - 1].bottom - 0.5,
+      )
+      return {
+        actionsBottom: actionsRect?.bottom ?? 0,
+        detailBottom: detailRect.bottom,
+        footerBottom: footerRect?.bottom ?? 0,
+        scoreHasOverlap,
+      }
+    })
+    expect(detailLayout.scoreHasOverlap).toBe(false)
+    expect(Math.abs(detailLayout.detailBottom - detailLayout.footerBottom)).toBeLessThanOrEqual(1)
+    expect(detailLayout.actionsBottom).toBeLessThanOrEqual(detailLayout.detailBottom + 1)
 
     await expect
       .poll(async () =>
@@ -730,6 +1087,30 @@ test.describe('Photo decision flow (mock backend)', () => {
     }
   })
 
+  test('deep review opens GPS coordinates through the external URL bridge', async ({ page }) => {
+    await page.getByRole('button', { name: /IMG_0001\.JPG/ }).dblclick()
+    await expect(page.locator('.review-panel')).toBeVisible()
+
+    const gpsLink = page.locator('a.compact-kv__value--link[href*="maps.apple.com"]').first()
+    await expect(gpsLink).toBeVisible()
+    await gpsLink.click()
+
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () => (window as unknown as { __openedExternalUrls: string[] }).__openedExternalUrls,
+        ),
+      )
+      .toContainEqual(expect.stringContaining('https://maps.apple.com/'))
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () => (window as unknown as { __openedExternalUrls: string[] }).__openedExternalUrls,
+        ),
+      )
+      .toContainEqual(expect.stringContaining('q=31.61667%2C121.50000'))
+  })
+
   test('deep review exposes zoom scale controls and fullscreen viewer', async ({ page }) => {
     await page.locator('.photo-preview').first().dblclick()
     await expect(page.locator('.review-panel')).toBeVisible()
@@ -742,9 +1123,12 @@ test.describe('Photo decision flow (mock backend)', () => {
     )
 
     const primaryImage = primaryPane.locator('.review-image')
-    await primaryImage.click({ position: { x: 120, y: 120 } })
+    const primaryBox = await primaryImage.boundingBox()
+    expect(primaryBox).not.toBeNull()
+    await page.mouse.move(primaryBox!.x + 120, primaryBox!.y + 120)
+    await page.mouse.down()
     await expect(primaryImage).toHaveClass(/review-image--loupe-active/)
-    await primaryImage.click({ position: { x: 130, y: 130 } })
+    await page.mouse.up()
     await expect(primaryImage).not.toHaveClass(/review-image--loupe-active/)
 
     await primaryPane.getByRole('button', { name: '全屏查看' }).click()
@@ -754,8 +1138,12 @@ test.describe('Photo decision flow (mock backend)', () => {
 
     const fullscreenImage = fullscreen.locator('.review-image')
     await fullscreen.getByRole('button', { name: '2.5 倍放大' }).click()
-    await fullscreenImage.click({ position: { x: 240, y: 180 } })
+    const fullscreenBox = await fullscreenImage.boundingBox()
+    expect(fullscreenBox).not.toBeNull()
+    await page.mouse.move(fullscreenBox!.x + 240, fullscreenBox!.y + 180)
+    await page.mouse.down()
     await expect(fullscreenImage).toHaveClass(/review-image--loupe-active/)
+    await page.mouse.up()
 
     await page.keyboard.press('Escape')
     await expect(fullscreen).toHaveCount(0)
@@ -786,6 +1174,7 @@ test.describe('Photo decision flow (mock backend)', () => {
 
     await expect(page.locator('.species-editor__bird')).toHaveCount(2)
     await page.getByRole('button', { name: '鸟 2' }).click()
+    await page.locator('.species-editor__current--toggle').click()
     await page.getByPlaceholder('搜索中文名、英文名或拉丁名').fill('暗绿绣眼鸟')
     await page.getByRole('button', { name: /暗绿绣眼鸟/ }).click()
 
