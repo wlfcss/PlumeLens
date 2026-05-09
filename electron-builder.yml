@@ -17,6 +17,7 @@ files:
 #     └── models/                  ← 推理模型 + 配套 metadata
 #         ├── yolo26l-bird-det.onnx
 #         ├── bird_visibility11.onnx          （v2.0,11 关键点 pose）
+#         ├── bird_flight_classifier.onnx     （v1,飞版/非飞版分类）
 #         ├── clipiqa_plus.onnx
 #         ├── hyperiqa.onnx
 #         ├── bird_visibility11_config.json   （含 best_body/tail/wings 校准）

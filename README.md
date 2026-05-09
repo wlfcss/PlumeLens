@@ -10,7 +10,7 @@
 
 <p align="center">
   <a href="https://github.com/wlfcss/PlumeLens/actions/workflows/mac-build.yml"><img alt="macOS build" src="https://github.com/wlfcss/PlumeLens/actions/workflows/mac-build.yml/badge.svg"></a>
-  <img alt="version" src="https://img.shields.io/badge/version-0.6.0-white">
+  <img alt="version" src="https://img.shields.io/badge/version-0.7.0-white">
   <img alt="platform" src="https://img.shields.io/badge/platform-macOS%20arm64-111111">
   <img alt="local inference" src="https://img.shields.io/badge/inference-local-74F69C">
   <a href="LICENSE"><img alt="license" src="https://img.shields.io/badge/license-GPL--3.0-FFD45A"></a>
@@ -22,15 +22,15 @@
 
 一次鸟类外拍常常带回几百到几千张照片。真正耗时的不是拍摄，而是回家后反复判断：
 
-| 痛点                     | PlumeLens 的处理方式                             |
-| ------------------------ | ------------------------------------------------ |
-| 照片太多，翻看成本高     | 自动检测鸟类主体，按综合质量先分档               |
-| 同一场景连拍重复         | 按场景/时间组织照片，优先展示更值得复核的图      |
-| 远鸟、遮挡、焦点判断费眼 | 给出检测框、姿态点、IQA 裁切与对焦证据           |
+| 痛点                     | PlumeLens 的处理方式                                 |
+| ------------------------ | ---------------------------------------------------- |
+| 照片太多，翻看成本高     | 自动检测鸟类主体，按综合质量先分档                   |
+| 同一场景连拍重复         | 按场景/时间组织照片，优先展示更值得复核的图          |
+| 远鸟、遮挡、焦点判断费眼 | 给出检测框、姿态点、IQA 裁切与对焦证据               |
 | 鸟种识别容易受角度影响   | DINOv3 species v4 给出三态候选，组内共识修正常见偏差 |
-| 选完以后还要整理输出     | 支持按文件夹别名导出、JPG/RAW 同伴文件、中文报告 |
-| 拍过哪些鸟很难长期沉淀   | 羽迹模块按物种、保护等级和地理位置形成长期图鉴   |
-| 源文件夹改名或挪走       | 保留缓存与筛选结果，提示重新关联新的源路径       |
+| 选完以后还要整理输出     | 支持按文件夹别名导出、JPG/RAW 同伴文件、中文报告     |
+| 拍过哪些鸟很难长期沉淀   | 羽迹模块按物种、保护等级和地理位置形成长期图鉴       |
+| 源文件夹改名或挪走       | 保留缓存与筛选结果，提示重新关联新的源路径           |
 
 核心原则很朴素：**照片分析在本地完成，用户照片目录只读，人工判断永远优先于模型判断。**
 
@@ -40,10 +40,13 @@
 | ----------------------------------------------- | ------------------------------------------------------- | --------------------------------------------------- |
 | ![Start screen](assets/readme/start-screen.png) | ![Selection screen](assets/readme/selection-screen.png) | ![Archive screen](assets/readme/archive-screen.png) |
 
-## 0.6.0 更新重点
+## 0.7.0 更新重点
 
+- **深度复核信息栏优化**：右侧详情区重新梳理层级，评级按钮固定到底部，可见性/姿态缺失时明确显示暂无结果，避免信息栏随机消失或遮挡。
+- **姿态阈值校准**：基于真实照片复测，姿态框默认阈值从 0.05 调整为 0.02，保留弱框但关键点稳定的鸟体姿态结果。
 - **源文件夹失联保护**：图库根目录被改名或挪走时标记为失联，缓存缩略图、评分和人工筛选结果仍可查看；分析、导出和外部编辑会暂停，用户可在界面中重新关联新路径。
-- **导出链路稳定化**：导出会话锁定启动时的文件夹快照，切换工作集不会改变正在导出的内容；支持多文件夹并行导出、收起侧栏、JPG/RAW companion、XMP sidecar 与中文报告。
+- **连拍堆叠与大列表优化**：场景组内按时间、物种、主体连续性切分连拍堆叠；无堆叠单张不混入堆叠视图，单堆叠场景默认展开，展开/收起在自然流布局中稳定重排。
+- **导出链路稳定化**：导出会话锁定启动时的文件夹快照，切换工作集不会改变正在导出的内容；支持多文件夹并行导出、收起侧栏、JPG/RAW companion、JPEG 内嵌 XMP / RAW sidecar 与中文报告。
 - **羽迹地理分布重构**：只统计有效入羽迹照片，按物理地点合并拍摄点，地点详情支持鸟种筛选，地图 tooltip 做 HTML escape。
 - **深度复核与外部编辑**：复核图像支持倍率选择、拖动、全屏查看；Topaz / Photoshop 检测与启动路径更稳。
 - **性能与可靠性**：大列表虚拟化、地图按需加载、缩略图缺失自动修复、IQA 非有限分数防护、队列并发和暂停/取消状态机修复。
@@ -65,27 +68,28 @@
 
 PlumeLens 的模型不是一个单点分类器，而是一条以摄影筛选为目标的流水线：先判断画面里有没有鸟，再判断鸟的姿态与画质，最后识别物种，并把模型结果与人工复核、场景共识合并成稳定业务口径。
 
-| 阶段          | 模型 / 模块              | 输入与输出                        | 作用                                              |
-| ------------- | ------------------------ | --------------------------------- | ------------------------------------------------- |
-| 1. 原片解码   | Pillow / rawpy           | RAW/JPEG → EXIF 转正 RGB 图像     | 读取照片、补齐元数据、生成可分析图像              |
-| 2. 鸟类检测   | `YOLOv26l-bird-det v1.0` | `1280×1280` letterbox → bird bbox | 找到照片中的鸟类主体，支持多鸟图                  |
-| 3. 姿态可见性 | `bird_visibility v2.0`   | bbox crop → 11 关键点(5 头+6 身) | 输出 5 项 visibility(头/眼/身/尾/翼) + 3 项 posture(view_angle/facing/perched\|flying);头眼齐 + 飞版自动升档 |
-| 4. 语义画质   | `CLIPIQA+`               | 2.5× 语义裁切 → 0-1 分            | 判断构图、主体语义质量和整体观感                  |
-| 5. 技术画质   | `HyperIQA`               | bbox +10% 技术裁切 → 0-1 分       | 判断清晰度、噪声、曝光和主体技术质量              |
-| 6. 鸟种识别   | `DINOv3 species v4`      | 384px crop → 1591 类 top-K + reject | 输出识别 / 待确认 / 拒识三态，接入保护等级与百科 |
-| 7. 业务融合   | grader + consensus       | detections → photo result         | 计算分级、物种来源、场景共识、羽迹有效性          |
+| 阶段          | 模型 / 模块              | 输入与输出                          | 作用                                                                                                         |
+| ------------- | ------------------------ | ----------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| 1. 原片解码   | Pillow / rawpy           | RAW/JPEG → EXIF 转正 RGB 图像       | 读取照片、补齐元数据、生成可分析图像                                                                         |
+| 2. 鸟类检测   | `YOLOv26l-bird-det v1.1` | `1280×1280` letterbox → bird bbox   | 找到照片中的鸟类主体，支持多鸟图                                                                             |
+| 3. 姿态可见性 | `bird_visibility v2.0` + `flight classifier v1` | bbox crop → 11 关键点 + P(fly)      | 输出 5 项 visibility(头/眼/身/尾/翼) + 3 项 posture(view_angle/facing/perched\|flying);头眼齐 + 飞版自动升档 |
+| 4. 语义画质   | `CLIPIQA+`               | 2.5× 语义裁切 → 0-1 分              | 判断构图、主体语义质量和整体观感                                                                             |
+| 5. 技术画质   | `HyperIQA`               | bbox +10% 技术裁切 → 0-1 分         | 判断清晰度、噪声、曝光和主体技术质量                                                                         |
+| 6. 鸟种识别   | `DINOv3 species v4`      | 384px crop → 1591 类 top-K + reject | 输出识别 / 待确认 / 拒识三态，接入保护等级与百科                                                             |
+| 7. 业务融合   | grader + consensus       | detections → photo result           | 计算分级、物种来源、场景共识、羽迹有效性                                                                     |
 
 ### 当前模型资产
 
-| 模型资产                   | 文件                                                  | 规模      | 状态                       |
-| -------------------------- | ----------------------------------------------------- | --------- | -------------------------- |
-| YOLOv26l-bird-det v1.0     | `engine/models/yolo26l-bird-det.onnx`                 | 约 100 MB | 入仓                       |
-| bird_visibility v2.0       | `engine/models/bird_visibility11.onnx`                | 约 98 MB  | 入仓                       |
-| CLIPIQA+                   | `engine/models/clipiqa_plus.onnx`                     | 约 293 MB | 大文件，打包时由模型包恢复 |
-| HyperIQA                   | `engine/models/hyperiqa.onnx`                         | 约 104 MB | 大文件，打包时由模型包恢复 |
-| DINOv4 species backbone    | `engine/models/species/backbone/model.safetensors`    | 约 578 MB | 大文件，不入 git           |
-| DINOv4 species adapter     | `engine/models/species/v4/seed42_adapter.pt`          | 约 32 MB  | 大文件，不入 git           |
-| 分类与百科元数据           | `canonical_extended.parquet` / `species_wiki.parquet` | 1591 种   | 入仓                       |
+| 模型资产                | 文件                                                  | 规模      | 状态                       |
+| ----------------------- | ----------------------------------------------------- | --------- | -------------------------- |
+| YOLOv26l-bird-det v1.1  | `engine/models/yolo26l-bird-det.onnx`                 | 约 100 MB | 入仓                       |
+| bird_visibility v2.0    | `engine/models/bird_visibility11.onnx`                | 约 98 MB  | 入仓                       |
+| bird flight classifier v1 | `engine/models/bird_flight_classifier.onnx`          | 约 40 MB  | 入仓                       |
+| CLIPIQA+                | `engine/models/clipiqa_plus.onnx`                     | 约 293 MB | 大文件，打包时由模型包恢复 |
+| HyperIQA                | `engine/models/hyperiqa.onnx`                         | 约 104 MB | 大文件，打包时由模型包恢复 |
+| DINOv4 species backbone | `engine/models/species/backbone/model.safetensors`    | 约 578 MB | 大文件，不入 git           |
+| DINOv4 species adapter  | `engine/models/species/v4/seed42_adapter.pt`          | 约 32 MB  | 大文件，不入 git           |
+| 分类与百科元数据        | `canonical_extended.parquet` / `species_wiki.parquet` | 1591 种   | 入仓                       |
 
 更多模型细节见 [engine/models/README.md](engine/models/README.md)、[YOLO model card](engine/models/yolo26l-bird-det.MODEL_CARD.md) 和 [bird visibility model card](engine/models/bird_visibility.MODEL_CARD.md)。
 
@@ -93,7 +97,7 @@ species v4 使用 dino 项目校准出的 `balanced_v1` 策略：只有 `recogni
 
 ### 分级口径
 
-综合分由 `0.40 × CLIPIQA+ + 0.60 × HyperIQA` 得到（HyperIQA 技术质量主导,CLIPIQA+ 语义/构图作辅助;符合鸟摄"清晰主体 + 良好构图"的双门槛），再结合姿态可见性与人工决策进入业务层。pose v2 模型在头眼齐全且识别为飞版时,自动上提一档以认可飞版的抓拍价值。
+综合分由 `0.40 × CLIPIQA+ + 0.60 × HyperIQA` 得到（HyperIQA 技术质量主导,CLIPIQA+ 语义/构图作辅助;符合鸟摄"清晰主体 + 良好构图"的双门槛），再结合姿态可见性与人工决策进入业务层。姿态管线 v2.1 由 `bird_visibility v2.0` 负责关键点/可见性，由 `bird_flight_classifier v1` 负责飞版概率；头眼齐全且 `P(fly) ≥ 0.35` 时自动上提一档。
 
 | 档位 | 分数范围      | 含义                   |
 | ---- | ------------- | ---------------------- |
