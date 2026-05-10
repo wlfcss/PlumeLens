@@ -160,22 +160,45 @@ const TEST_DRIFT_STACK_PHOTOS: TestPhotoFixture[] = Array.from({ length: 6 }, (_
   },
 }))
 
+const TEST_MANY_GROUP_PHOTOS: TestPhotoFixture[] = Array.from({ length: 64 }, (_, idx) => {
+  const grade = (['select', 'usable', 'record', 'reject'] as const)[idx % 4]
+  const species = (['白鹭', '东亚石䳭', '印度寿带'] as const)[idx % 3]
+  const latin =
+    species === '白鹭'
+      ? 'Egretta garzetta'
+      : species === '东亚石䳭'
+        ? 'Saxicola stejnegeri'
+        : 'Terpsiphone paradisi'
+
+  return {
+    id: `many-${idx + 1}`,
+    file_name: `MANY_${String(idx + 1).padStart(4, '0')}.JPG`,
+    species,
+    latin,
+    grade,
+    score: Math.max(0.42, 0.88 - idx * 0.006),
+  }
+})
+
 async function mockBackend(
   page: Page,
   options: {
     driftingStack?: boolean
     includeFailed?: boolean
+    manyGroups?: boolean
     singleBurstScene?: boolean
     stackedBursts?: boolean
   } = {},
 ): Promise<void> {
-  const primaryPhotosBase = options.driftingStack
-    ? TEST_DRIFT_STACK_PHOTOS
-    : options.singleBurstScene
-      ? TEST_SINGLE_BURST_PHOTOS
-      : options.stackedBursts
-        ? TEST_STACK_PHOTOS
-        : TEST_PHOTOS
+  const primaryPhotosBase = options.manyGroups
+    ? TEST_MANY_GROUP_PHOTOS
+    : options.driftingStack
+      ? TEST_DRIFT_STACK_PHOTOS
+      : options.singleBurstScene
+        ? TEST_SINGLE_BURST_PHOTOS
+        : options.stackedBursts
+          ? TEST_STACK_PHOTOS
+          : TEST_PHOTOS
   const failedPhoto: TestPhotoFixture = {
     id: 'failed-1',
     file_name: 'BROKEN_0005.JPG',
@@ -359,8 +382,11 @@ async function mockBackend(
             : idx < 2
               ? idx
               : idx * 20
-      const shotAt =
-        options.driftingStack || options.singleBurstScene || options.stackedBursts
+      const manyGroupHour = 7 + Math.floor(idx / 60)
+      const manyGroupMinute = idx % 60
+      const shotAt = options.manyGroups
+        ? `2026-04-23T${String(manyGroupHour).padStart(2, '0')}:${String(manyGroupMinute).padStart(2, '0')}:00+00:00`
+        : options.driftingStack || options.singleBurstScene || options.stackedBursts
           ? `2026-04-23T07:00:${String(burstSecond).padStart(2, '0')}+00:00`
           : `2026-04-23T07:0${idx}:00+00:00`
       const bbox = p.bbox ?? { x1: 1700, y1: 800, x2: 2200, y2: 2200, confidence: 0.93 }
@@ -763,6 +789,34 @@ test.describe('Photo stack interactions (mock backend)', () => {
     for (let index = 1; index < groupRects.length; index += 1) {
       expect(groupRects[index].top).toBeGreaterThanOrEqual(groupRects[index - 1].bottom + 24)
     }
+  })
+
+  test('compact quick filters preserve the current scroll position', async ({ page }) => {
+    await page.setViewportSize({ width: 1680, height: 1040 })
+    await mockBackend(page, { manyGroups: true })
+    await page.goto('/')
+    await page.getByRole('button', { name: '选片', exact: true }).click()
+
+    const scroller = page.locator('.selection-main.selection-scroll')
+    await expect(page.locator('.photo-group').first()).toBeVisible()
+    await scroller.evaluate((node) => {
+      const scrollerElement = node as HTMLElement
+      scrollerElement.scrollTo({ top: 1200 })
+      scrollerElement.dispatchEvent(new Event('scroll', { bubbles: true }))
+    })
+    await waitForSelectionScrollSettled(page)
+
+    const before = await scroller.evaluate((node) => (node as HTMLElement).scrollTop)
+    expect(before).toBeGreaterThan(900)
+
+    const compactFilters = page.locator('.selection-compact-filter-row')
+    await expect(page.locator('.selection-compact-header--visible')).toBeVisible()
+    await expect(compactFilters).toBeVisible()
+    await compactFilters.getByRole('button', { name: '可用', exact: true }).click()
+    await waitForSelectionScrollSettled(page)
+
+    const after = await scroller.evaluate((node) => (node as HTMLElement).scrollTop)
+    expect(after).toBeGreaterThan(before - 120)
   })
 })
 

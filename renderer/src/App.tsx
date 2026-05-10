@@ -3620,14 +3620,14 @@ function SelectionScreen({
     selectionScrollRef.current = node
     setSelectionScrollElement((current) => (current === node ? current : node))
   }, [])
-  const selectionFilterKey = `${activeFolder?.id ?? ''}:${viewMode}:${activeSort}:${activeQuickFilters.join(',')}`
+  const selectionResetKey = `${activeFolder?.id ?? ''}:${viewMode}:${activeSort}`
 
   useEffect(() => {
     selectionScrollElement?.scrollTo({ top: 0 })
     const resetChrome = { compact: false, showScrollTop: false }
     selectionChromeStateRef.current = resetChrome
     setSelectionChromeState(resetChrome)
-  }, [selectionFilterKey, selectionScrollElement])
+  }, [selectionResetKey, selectionScrollElement])
 
   useEffect(() => {
     const node = selectionScrollElement
