@@ -40,6 +40,7 @@ import { ThumbnailImage, type ThumbnailLoadStatus } from '@/components/thumbnail
 import {
   IconButton,
   SectionLabel,
+  SpeciesNameAction,
   TagCluster,
   effectivePhotoGrade,
   effectiveSpeciesLatinName,
@@ -177,10 +178,7 @@ export function ReviewModal({
   const selectRelativePhoto = useCallback(
     (offset: -1 | 1) => {
       if (navigationIndex < 0) return
-      const nextIndex = Math.max(
-        0,
-        Math.min(navigationPhotos.length - 1, navigationIndex + offset),
-      )
+      const nextIndex = Math.max(0, Math.min(navigationPhotos.length - 1, navigationIndex + offset))
       const nextPhoto = navigationPhotos[nextIndex]
       if (!nextPhoto || nextPhoto.id === photo.id) return
       onSelectPhoto(nextPhoto.id)
@@ -1610,6 +1608,11 @@ function ScoreHeader({
   const speciesName =
     activeBird?.speciesName ?? effectiveSpeciesName(photo) ?? t('selection.photo.unidentified')
   const speciesLatinName = activeBird?.speciesLatinName ?? effectiveSpeciesLatinName(photo)
+  const speciesIdentity = {
+    englishName: activeBird?.speciesEnglishName ?? photo.speciesEnglishName ?? null,
+    latinName: speciesLatinName,
+    name: activeBird?.speciesName ?? effectiveSpeciesName(photo),
+  }
   // 多鸟图：当前鸟的提示（克制小字，section-label 同级语义）
   const showBirdHint = totalBirds >= 2 && activeBird != null
   return (
@@ -1627,7 +1630,9 @@ function ScoreHeader({
         <span className={cn('grade-pill', `grade-pill--${grade}`)}>{t(gradeLabelKey(grade))}</span>
       </div>
       <div className="score-header__species">
-        <span>{speciesName}</span>
+        <SpeciesNameAction identity={speciesIdentity} t={t}>
+          {speciesName}
+        </SpeciesNameAction>
         {sourceBadge && sourceKind ? (
           <em className={cn('species-source-inline', `species-source-inline--${sourceKind}`)}>
             {t('selection.speciesSource.inline', { source: sourceBadge })}

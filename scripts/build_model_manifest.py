@@ -51,6 +51,45 @@ TRACKED_ASSETS = [
     "species/v4/seed42_adapter.pt",
 ]
 
+MODEL_GROUPS = {
+    "yolo": {
+        "label": "YOLOv26l-bird-det",
+        "version": "v1.1",
+        "assets": ["yolo26l-bird-det.onnx"],
+    },
+    "bird_visibility": {
+        "label": "bird_visibility",
+        "version": "v2.0",
+        "assets": ["bird_visibility11.onnx", "bird_visibility11_config.json"],
+    },
+    "bird_flight_classifier": {
+        "label": "bird flight classifier",
+        "version": "v1",
+        "assets": ["bird_flight_classifier.onnx", "bird_flight_classifier_config.json"],
+    },
+    "clipiqa": {
+        "label": "CLIPIQA+",
+        "version": "ONNX",
+        "assets": ["clipiqa_plus.onnx"],
+    },
+    "hyperiqa": {
+        "label": "HyperIQA",
+        "version": "ONNX",
+        "assets": ["hyperiqa.onnx"],
+    },
+    "dinov3_species_v4": {
+        "label": "DINOv3 species",
+        "version": "v4",
+        "assets": [
+            "species/backbone/config.json",
+            "species/backbone/model.safetensors",
+            "species/canonical_extended.parquet",
+            "species/v4_calibration_policy.json",
+            "species/v4/seed42_adapter.pt",
+        ],
+    },
+}
+
 
 def sha256_of(path: Path) -> str:
     """Stream the file in 1 MiB chunks (avoid loading multi-GB models into RAM)."""
@@ -84,6 +123,19 @@ def main() -> int:
             print(f"  - {rel}", file=sys.stderr)
         return 1
 
+    models: dict[str, dict[str, object]] = {}
+    for model_id, meta in MODEL_GROUPS.items():
+        group_assets = list(meta["assets"])
+        digest = hashlib.sha256()
+        for rel in group_assets:
+            digest.update(str(assets[rel]["sha256"]).encode("ascii"))
+        models[model_id] = {
+            "label": meta["label"],
+            "version": meta["version"],
+            "revision": digest.hexdigest()[:12],
+            "assets": group_assets,
+        }
+
     payload = {
         "manifest_version": 1,
         "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
@@ -94,6 +146,7 @@ def main() -> int:
             "Regenerate via `uv run python scripts/build_model_manifest.py` "
             "after training updates."
         ),
+        "models": models,
         "assets": assets,
     }
 

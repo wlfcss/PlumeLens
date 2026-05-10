@@ -15,6 +15,7 @@ from engine.api.routes.export import router as export_router
 from engine.api.routes.geocoder import router as geocoder_router
 from engine.api.routes.health import router as health_router
 from engine.api.routes.library import router as library_router
+from engine.api.routes.settings import router as settings_router
 from engine.core.config import settings
 from engine.core.lifespan import lifespan
 
@@ -74,6 +75,7 @@ def create_app() -> FastAPI:
     application.include_router(geocoder_router)
     application.include_router(archive_router)
     application.include_router(export_router)
+    application.include_router(settings_router)
     return application
 
 

@@ -67,6 +67,33 @@ def get_library_worker(library_id: str) -> asyncio.Task[None] | None:
     return _workers.get(library_id)
 
 
+async def cancel_all_workers(wait_seconds: float = 5.0) -> bool:
+    """Cancel all in-memory analysis workers before destructive maintenance.
+
+    This is intentionally exported for the settings maintenance endpoint. It
+    prevents workers from continuing to write task/result rows while the user is
+    clearing local recognition history. Returns False if any worker is still
+    unwinding after the timeout, so destructive callers can ask the user to retry.
+    """
+    tasks = [task for task in _workers.values() if not task.done()]
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*tasks, return_exceptions=True),
+                timeout=wait_seconds,
+            )
+        except TimeoutError:
+            logger.warning("Timed out waiting for analysis workers to cancel")
+            for library_id, task in list(_workers.items()):
+                if task.done():
+                    _workers.pop(library_id, None)
+            return False
+    _workers.clear()
+    return True
+
+
 def _has_active_tasks(stats: dict[str, int]) -> bool:
     return (
         stats.get(TaskStatus.PENDING.value, 0)

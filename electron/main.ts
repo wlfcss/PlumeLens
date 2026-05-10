@@ -39,6 +39,9 @@ const windowBounds = {
 
 const REALPATH_CACHE_TTL_MS = 60_000
 const REALPATH_CACHE_MAX = 2048
+const GITHUB_REPO = 'wlfcss/PlumeLens'
+const GITHUB_REPO_PATH = `/${GITHUB_REPO.toLowerCase()}`
+const GITHUB_LATEST_RELEASE_API = `https://api.github.com/repos/${GITHUB_REPO}/releases/latest`
 
 const realpathCache = new Map<string, { value: string; expiresAt: number }>()
 
@@ -46,14 +49,110 @@ function normalizeExternalUrl(target: unknown): string | null {
   if (typeof target !== 'string' || target.trim() === '') return null
   try {
     const url = new URL(target)
+    if (url.protocol === 'mailto:') {
+      return url.pathname.toLowerCase() === 'wlfcss@gmail.com' ? url.toString() : null
+    }
     if (url.protocol === 'maps:') return url.toString()
     if (url.protocol !== 'https:') return null
     const host = url.hostname.toLowerCase()
+    const path = url.pathname.toLowerCase()
     const allowed =
-      host === 'maps.apple.com' || host === 'wikipedia.org' || host.endsWith('.wikipedia.org')
+      host === 'maps.apple.com' ||
+      (host === 'github.com' &&
+        (path === GITHUB_REPO_PATH || path.startsWith(`${GITHUB_REPO_PATH}/`))) ||
+      host === 'wikipedia.org' ||
+      host.endsWith('.wikipedia.org')
     return allowed ? url.toString() : null
   } catch {
     return null
+  }
+}
+
+function parseVersion(version: string): number[] {
+  return version
+    .trim()
+    .replace(/^v/i, '')
+    .split(/[.-]/)
+    .slice(0, 3)
+    .map((part) => {
+      const parsed = Number.parseInt(part, 10)
+      return Number.isFinite(parsed) ? parsed : 0
+    })
+}
+
+function compareVersions(a: string, b: string): number {
+  const av = parseVersion(a)
+  const bv = parseVersion(b)
+  for (let i = 0; i < Math.max(av.length, bv.length, 3); i += 1) {
+    const left = av[i] ?? 0
+    const right = bv[i] ?? 0
+    if (left > right) return 1
+    if (left < right) return -1
+  }
+  return 0
+}
+
+type UpdateCheckResult =
+  | {
+      ok: true
+      currentVersion: string
+      latestVersion: string
+      hasUpdate: boolean
+      releaseUrl: string
+      releaseName: string | null
+      publishedAt: string | null
+    }
+  | {
+      ok: false
+      currentVersion: string
+      reason: 'network' | 'invalid_response'
+      message: string
+    }
+
+async function checkForUpdates(): Promise<UpdateCheckResult> {
+  const currentVersion = app.getVersion()
+  try {
+    const response = await net.fetch(GITHUB_LATEST_RELEASE_API, {
+      headers: {
+        Accept: 'application/vnd.github+json',
+        'User-Agent': `PlumeLens/${currentVersion}`,
+      },
+    })
+    if (!response.ok) {
+      return {
+        ok: false,
+        currentVersion,
+        reason: 'network',
+        message: `${response.status} ${response.statusText}`,
+      }
+    }
+    const payload = (await response.json()) as Record<string, unknown>
+    const tagName = payload['tag_name']
+    const htmlUrl = payload['html_url']
+    if (typeof tagName !== 'string' || typeof htmlUrl !== 'string') {
+      return {
+        ok: false,
+        currentVersion,
+        reason: 'invalid_response',
+        message: 'GitHub release response missing tag_name/html_url',
+      }
+    }
+    return {
+      ok: true,
+      currentVersion,
+      latestVersion: tagName.replace(/^v/i, ''),
+      hasUpdate: compareVersions(tagName, currentVersion) > 0,
+      releaseUrl: htmlUrl,
+      releaseName: typeof payload['name'] === 'string' ? payload['name'] : null,
+      publishedAt: typeof payload['published_at'] === 'string' ? payload['published_at'] : null,
+    }
+  } catch (err) {
+    return {
+      ok: false,
+      currentVersion,
+      reason: 'network',
+      message: err instanceof Error ? err.message : String(err),
+    }
   }
 }
 
@@ -181,6 +280,8 @@ ipcMain.handle('get-backend-auth-token', () => {
 ipcMain.handle('get-app-version', () => {
   return app.getVersion()
 })
+
+ipcMain.handle('check-for-updates', () => checkForUpdates())
 
 ipcMain.handle('dialog:open-folder', async () => {
   if (!mainWindow) return null

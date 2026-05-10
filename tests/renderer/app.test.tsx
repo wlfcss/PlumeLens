@@ -89,6 +89,15 @@ beforeAll(() => {
     // app.test 测 React 集成,api-client 没有 preload engineRequest 时会自动
     // fallback 直 fetch(测试用 msw 拦截),保持 stub 极简。
     getAppVersion: async () => '0.1.0',
+    checkForUpdates: async () => ({
+      ok: true,
+      currentVersion: '0.1.0',
+      latestVersion: '0.1.0',
+      hasUpdate: false,
+      releaseUrl: 'https://github.com/wlfcss/PlumeLens/releases/tag/v0.1.0',
+      releaseName: 'v0.1.0',
+      publishedAt: '2026-04-01T00:00:00Z',
+    }),
     openFolder: async () => null,
     selectExportDirectory: async () => null,
     openLogsDir: async () => '',
@@ -100,7 +109,7 @@ beforeAll(() => {
     listEditors: async () => ({ topaz: null, photoshop: null }),
     openInEditor: async () => ({ ok: false, reason: 'not_installed' }),
     getUserSettings: async () => ({}),
-    saveUserSettings: async (partial) => partial,
+    saveUserSettings: async (partial) => ({ ok: true, settings: partial }),
     restartEngine: async () => true,
   }
   // jsdom 不实现 EventSource；useAnalysisProgress 订阅 SSE 时会 ReferenceError
@@ -683,13 +692,13 @@ describe('App', () => {
       'old-2': false,
       'later-1': false,
     })
-    expect(Object.fromEntries(markedGroups.map((group) => [group.id, group.containsNewSpecies]))).toEqual(
-      {
-        'group-old': true,
-        'group-first': true,
-        'group-later': false,
-      },
-    )
+    expect(
+      Object.fromEntries(markedGroups.map((group) => [group.id, group.containsNewSpecies])),
+    ).toEqual({
+      'group-old': true,
+      'group-first': true,
+      'group-later': false,
+    })
   })
 
   it('parses EXIF GPS and hides photos without GPS from the map', () => {

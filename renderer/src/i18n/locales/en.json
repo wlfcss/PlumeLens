@@ -19,6 +19,20 @@
     "settings": "Settings",
     "close": "Close"
   },
+  "speciesDetail": {
+    "label": "Species profile",
+    "dialogLabel": "{{species}} species profile",
+    "tooltip": "Open species profile",
+    "tooltipWithPinyin": "Pinyin: {{pinyin}} · Open species profile",
+    "wikimediaImage": "Wikimedia Commons",
+    "englishName": "English",
+    "family": "Family",
+    "protectLevel": "Protection",
+    "iucn": "IUCN",
+    "noExtract": "No local encyclopedia summary yet.",
+    "sourceZh": "Chinese Wikipedia",
+    "sourceEn": "English Wikipedia"
+  },
   "status": {
     "connecting": "Connecting",
     "connected": "Engine ready",
@@ -48,7 +62,47 @@
     },
     "about": {
       "title": "About",
-      "version": "Version"
+      "version": "Version",
+      "author": "Author",
+      "authorValue": "Wang Miao / wlfcss",
+      "contact": "Contact",
+      "contactValue": "wlfcss@gmail.com",
+      "github": "GitHub",
+      "githubValue": "github.com/wlfcss/PlumeLens",
+      "license": "License",
+      "licenseValue": "GPL-3.0",
+      "copyright": "© Wang Miao / wlfcss. PlumeLens is a local bird-photo culling tool. Feedback: wlfcss@gmail.com."
+    },
+    "update": {
+      "title": "Updates",
+      "idle": "Check GitHub Releases for a newer version.",
+      "checking": "Checking GitHub Releases…",
+      "upToDate": "You are on the latest version.",
+      "available": "New version {{version}} is available.",
+      "failed": "Update check failed: {{error}}",
+      "latestMeta": "Latest release: {{version}} · {{date}}",
+      "checkNow": "Check",
+      "openRelease": "Open Release"
+    },
+    "models": {
+      "title": "Model versions",
+      "hint": "Current pipeline: {{pipeline}}. The short revision comes from the model SHA manifest and changes automatically with model bundles.",
+      "loading": "Reading model versions…",
+      "failed": "Failed to read: {{error}}",
+      "loaded": "Loaded",
+      "notLoaded": "Not loaded",
+      "generatedAt": "Model manifest generated: {{date}}"
+    },
+    "history": {
+      "title": "Local recognition history",
+      "hint": "Clears app-owned folder history, recognition results, manual decisions, species overrides, analysis queue, and thumbnail cache. Original photos are not deleted.",
+      "clearAction": "Clear local records",
+      "confirmTitle": "Clear local recognition history?",
+      "confirmBody": "This cannot be undone. Original photos are unaffected; re-import a folder to analyze it again.",
+      "confirmAction": "Confirm clear",
+      "clearing": "Clearing…",
+      "cleared": "Cleared: folders / photos / results / manual records = {{summary}}.",
+      "failed": "Clear failed: {{error}}"
     }
   },
   "engineBanner": {
@@ -186,7 +240,18 @@
       "label": "Folder report",
       "title": "Current folder overview",
       "topFrames": "Top frames",
-      "userProgress": "Manual culling progress"
+      "userProgress": "Manual culling progress",
+      "subtitle": "Shooting and culling summary for {{folder}}",
+      "keepFrames": "Keep candidates",
+      "flyingFrames": "Flight frames",
+      "shootingWindow": "Shooting window",
+      "unknownTimeRange": "No capture time",
+      "sceneSummary": "{{scenes}} scenes · manually reviewed {{reviewed}}/{{total}}",
+      "topSpecies": "Frequent species",
+      "speciesFrames": "{{count}} frames",
+      "noSpecies": "No trusted species records yet",
+      "bestFrames": "Top scored frames",
+      "noBestFrames": "No analyzed frames yet"
     },
     "metrics": {
       "totalPhotos": "Total photos",

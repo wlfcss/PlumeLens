@@ -40,6 +40,23 @@ export interface EngineRequestInit {
   timeoutMs?: number
 }
 
+export type UpdateCheckResult =
+  | {
+      ok: true
+      currentVersion: string
+      latestVersion: string
+      hasUpdate: boolean
+      releaseUrl: string
+      releaseName: string | null
+      publishedAt: string | null
+    }
+  | {
+      ok: false
+      currentVersion: string
+      reason: 'network' | 'invalid_response'
+      message: string
+    }
+
 // 缓存 url + token,首次调用时通过 IPC 拉一次,engine 重启后清空让下次重取。
 // 关键点:这两个变量 *只存在于 preload 的 isolated context*,renderer JS
 // (window 上下文,即使 XSS)读不到 — 这是 H5 的核心:Bearer Token 不进渲染器。
@@ -157,6 +174,7 @@ contextBridge.exposeInMainWorld('plumelens', {
   /** 构造 SSE URL(包含 token 的 query string,详见 performEngineSseUrl 注释)。 */
   engineSseUrl: (path: string): Promise<string> => performEngineSseUrl(path),
   getAppVersion: (): Promise<string> => ipcRenderer.invoke('get-app-version'),
+  checkForUpdates: (): Promise<UpdateCheckResult> => ipcRenderer.invoke('check-for-updates'),
   openFolder: (): Promise<string | null> => ipcRenderer.invoke('dialog:open-folder'),
   selectExportDirectory: (): Promise<string | null> =>
     ipcRenderer.invoke('dialog:select-export-directory'),
@@ -169,7 +187,7 @@ contextBridge.exposeInMainWorld('plumelens', {
     | { ok: true }
     | { ok: false; reason: 'invalid_path' | 'path_missing' | 'open_failed'; message?: string }
   > => ipcRenderer.invoke('open-path-in-finder', path),
-  /** 用系统外部应用打开允许的 URL（地图 / Wikipedia），避免 Electron 内部空白窗口。 */
+  /** 用系统外部应用打开允许的 URL（地图 / Wikipedia / 项目 GitHub / 联系邮箱）。 */
   openExternalUrl: (
     url: string,
   ): Promise<
@@ -189,8 +207,13 @@ contextBridge.exposeInMainWorld('plumelens', {
     amapKey?: string
     baiduAk?: string
     tencentKey?: string
-  }): Promise<{ amapKey?: string; baiduAk?: string; tencentKey?: string }> =>
-    ipcRenderer.invoke('save-user-settings', partial),
+  }): Promise<
+    | {
+        ok: true
+        settings: { amapKey?: string; baiduAk?: string; tencentKey?: string }
+      }
+    | { ok: false; reason: 'safe_storage_unavailable' | 'unknown'; message: string }
+  > => ipcRenderer.invoke('save-user-settings', partial),
   /** 重启 engine 子进程 — settings 改后调使新 env 注入生效 */
   restartEngine: (): Promise<boolean> => ipcRenderer.invoke('restart-engine'),
   /** 用指定外部编辑器打开文件(Topaz 走 bundle executable,其他走系统 open)。 */

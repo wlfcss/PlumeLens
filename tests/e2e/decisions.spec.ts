@@ -311,6 +311,15 @@ async function mockBackend(
       // playwright e2e 走 vite-served renderer,无 preload engineRequest;
       // api-client 自动走 fallback fetch,本测试不验证 preload 内部。
       getAppVersion: async () => '0.1.0',
+      checkForUpdates: async () => ({
+        ok: true,
+        currentVersion: '0.1.0',
+        latestVersion: '0.1.0',
+        hasUpdate: false,
+        releaseUrl: 'https://github.com/wlfcss/PlumeLens/releases/tag/v0.1.0',
+        releaseName: 'v0.1.0',
+        publishedAt: '2026-04-01T00:00:00Z',
+      }),
       openFolder: async () => null,
       selectExportDirectory: async () => '/tmp/plumelens-export',
       openLogsDir: async () => '',
@@ -331,7 +340,10 @@ async function mockBackend(
       listEditors: async () => ({ topaz: null, photoshop: null }),
       openInEditor: async () => ({ ok: false, reason: 'not_installed' }),
       getUserSettings: async () => ({}),
-      saveUserSettings: async (partial: Record<string, unknown>) => partial,
+      saveUserSettings: async (partial: Record<string, unknown>) => ({
+        ok: true,
+        settings: partial,
+      }),
       restartEngine: async () => true,
     }
   })
@@ -426,6 +438,51 @@ async function mockBackend(
           ],
         },
       ]),
+    }),
+  )
+  await page.route('**/settings/models', (route: Route) =>
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        pipeline_version: 'v1-mock',
+        manifest_generated_at: '2026-05-10T00:00:00Z',
+        models: [
+          {
+            id: 'yolo',
+            label: 'YOLOv26l-bird-det',
+            version: 'v1.1',
+            revision: 'abcdef123456',
+            assets: ['yolo26l-bird-det.onnx'],
+            loaded: true,
+            provider: 'CoreMLExecutionProvider',
+          },
+          {
+            id: 'dinov3_species_v4',
+            label: 'DINOv3 species',
+            version: 'v4',
+            revision: '123456abcdef',
+            assets: ['species/v4/seed42_adapter.pt'],
+            loaded: true,
+            provider: 'torch:mps',
+          },
+        ],
+      }),
+    }),
+  )
+  await page.route('**/settings/history/clear', (route: Route) =>
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        libraries_deleted: 2,
+        photos_deleted: 8,
+        analysis_results_deleted: 8,
+        decisions_deleted: 1,
+        species_overrides_deleted: 1,
+        tasks_deleted: 0,
+        thumbnails_deleted: true,
+      }),
     }),
   )
   await page.route('**/library', (route: Route) => {
@@ -1214,6 +1271,68 @@ test.describe('Photo decision flow (mock backend)', () => {
     await expect(page.locator('.photo-actions .icon-button')).toHaveCount(0)
   })
 
+  test('settings panel shows ownership, updates, model versions, and confirms history clear', async ({
+    page,
+  }) => {
+    await page.getByLabel('设置').click()
+    const panel = page.locator('.settings-panel')
+    await expect(panel).toBeVisible()
+    await expect(panel).toContainText('汪淼 wlfcss')
+    await expect(panel).toContainText('wlfcss@gmail.com')
+    await expect(panel).toContainText('github.com/wlfcss/PlumeLens')
+    await expect(panel).toContainText('当前已是最新版本')
+    await expect(panel).toContainText('YOLOv26l-bird-det')
+    await expect(panel).toContainText('DINOv3 species')
+
+    const clearButton = page.getByRole('button', { name: '清理本地记录' })
+    await clearButton.scrollIntoViewIfNeeded()
+    await clearButton.click()
+    const confirm = page.locator('.settings-confirm')
+    await expect(confirm).toContainText('确认清理本地识别记录')
+    await confirm.getByRole('button', { name: '关闭' }).click()
+    await expect(confirm).toHaveCount(0)
+
+    await clearButton.click()
+    await page.getByRole('button', { name: '确认清理' }).click()
+    await expect(panel).toContainText('已清理')
+  })
+
+  test('inspector defaults to folder report and blank list click restores it', async ({ page }) => {
+    await expect(page.getByTestId('folder-report')).toBeVisible()
+    await expect(page.getByTestId('folder-report')).toContainText('当前文件夹整体概览')
+
+    await page.locator('.photo-preview').first().click()
+    await expect(page.locator('.inspector-species')).toContainText('池鹭')
+    await expect(page.getByTestId('folder-report')).toHaveCount(0)
+
+    await page.getByTestId('selection-photo-flow').click({ position: { x: 12, y: 12 } })
+    await expect(page.getByTestId('folder-report')).toBeVisible()
+  })
+
+  test('selection inspector species name opens wiki-backed species popover', async ({ page }) => {
+    await page.locator('.photo-preview').first().click()
+    const speciesButton = page.locator('.inspector-species').getByRole('button', { name: /池鹭/ })
+    await expect(speciesButton).toHaveAttribute('title', /chí lù/)
+    await speciesButton.click()
+
+    const popover = page.getByTestId('species-detail-popover')
+    await expect(popover).toBeVisible()
+    await expect(popover.getByTestId('species-pinyin')).toContainText('chí lù')
+    await expect(popover.locator('.species-detail-popover__art img')).toHaveAttribute(
+      'src',
+      /wikimedia|upload\.wikimedia\.org/,
+    )
+  })
+
+  test('deep review species name opens the same species profile', async ({ page }) => {
+    await page.locator('.photo-preview').first().dblclick()
+    await expect(page.locator('.review-panel')).toBeVisible()
+
+    await page.locator('.score-header__species').getByRole('button', { name: /池鹭/ }).click()
+    await expect(page.getByTestId('species-detail-popover')).toBeVisible()
+    await expect(page.getByTestId('species-pinyin')).toContainText('chí lù')
+  })
+
   test('folder alias can be edited and used by export drawer', async ({ page }) => {
     await expect(page.locator('.folder-topline h1')).toContainText('测试库')
 
@@ -1638,6 +1757,10 @@ test.describe('Archive species panel (local wiki data)', () => {
     const link = page.getByText('中文维基百科 →')
     const href = await link.getAttribute('href')
     expect(href).toMatch(/wikipedia\.org/)
+    await expect(page.getByTestId('archive-species-pinyin')).toBeVisible()
+    await expect(page.getByTestId('archive-species-pinyin')).toContainText(
+      /[a-zāáǎàēéěèīíǐìōóǒòūúǔùǖǘǚǜ]/,
+    )
   })
 
   test('archive map renders ECharts geo data', async ({ page }) => {

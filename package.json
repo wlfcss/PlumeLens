@@ -63,6 +63,7 @@
     "zustand": "^5.0.0"
   },
   "dependencies": {
-    "echarts": "^6.0.0"
+    "echarts": "^6.0.0",
+    "pinyin-pro": "^3.28.1"
   }
 }

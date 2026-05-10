@@ -410,6 +410,32 @@ export interface AnalysisProgressEvent {
   current_photo_id: string | null
 }
 
+export interface ModelVersionItem {
+  id: string
+  label: string
+  version: string
+  revision: string
+  assets: string[]
+  loaded: boolean
+  provider: string | null
+}
+
+export interface ModelVersionsResponse {
+  pipeline_version: string | null
+  manifest_generated_at: string | null
+  models: ModelVersionItem[]
+}
+
+export interface ClearHistoryResponse {
+  libraries_deleted: number
+  photos_deleted: number
+  analysis_results_deleted: number
+  decisions_deleted: number
+  species_overrides_deleted: number
+  tasks_deleted: number
+  thumbnails_deleted: boolean
+}
+
 // Decisions
 export type DecisionValue = 'select' | 'usable' | 'record' | 'reject' | null
 
@@ -478,6 +504,14 @@ export interface SpeciesOverrideRow {
 // ---------------- Endpoints ----------------
 
 export const api = {
+  // Settings / maintenance
+  modelVersions: () => request<ModelVersionsResponse>('/settings/models'),
+  clearLocalHistory: () =>
+    request<ClearHistoryResponse>('/settings/history/clear', {
+      method: 'POST',
+      body: JSON.stringify({ confirm: true }),
+    }),
+
   // Libraries
   listLibraries: () => request<LibrarySummary[]>('/library'),
   importLibrary: (body: ImportLibraryRequest) =>

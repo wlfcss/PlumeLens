@@ -1,7 +1,63 @@
 {
   "manifest_version": 1,
-  "generated_at": "2026-05-09T09:03:15+00:00",
+  "generated_at": "2026-05-10T14:06:34+00:00",
   "comment": "Model asset SHA-256 pin. Engine startup refuses to load if hashes don't match. species/v4/seed42_adapter.pt 是 pickle (torch.load weights_only=False), SHA pin 是阻断供应链 RCE 的最后一道闸。Regenerate via `uv run python scripts/build_model_manifest.py` after training updates.",
+  "models": {
+    "yolo": {
+      "label": "YOLOv26l-bird-det",
+      "version": "v1.1",
+      "revision": "0de7990004a1",
+      "assets": [
+        "yolo26l-bird-det.onnx"
+      ]
+    },
+    "bird_visibility": {
+      "label": "bird_visibility",
+      "version": "v2.0",
+      "revision": "89689b6ea171",
+      "assets": [
+        "bird_visibility11.onnx",
+        "bird_visibility11_config.json"
+      ]
+    },
+    "bird_flight_classifier": {
+      "label": "bird flight classifier",
+      "version": "v1",
+      "revision": "3a580f07b4cc",
+      "assets": [
+        "bird_flight_classifier.onnx",
+        "bird_flight_classifier_config.json"
+      ]
+    },
+    "clipiqa": {
+      "label": "CLIPIQA+",
+      "version": "ONNX",
+      "revision": "60998df152a9",
+      "assets": [
+        "clipiqa_plus.onnx"
+      ]
+    },
+    "hyperiqa": {
+      "label": "HyperIQA",
+      "version": "ONNX",
+      "revision": "fbe67fe024c7",
+      "assets": [
+        "hyperiqa.onnx"
+      ]
+    },
+    "dinov3_species_v4": {
+      "label": "DINOv3 species",
+      "version": "v4",
+      "revision": "6cd6e3954beb",
+      "assets": [
+        "species/backbone/config.json",
+        "species/backbone/model.safetensors",
+        "species/canonical_extended.parquet",
+        "species/v4_calibration_policy.json",
+        "species/v4/seed42_adapter.pt"
+      ]
+    }
+  },
   "assets": {
     "yolo26l-bird-det.onnx": {
       "size": 99872905,

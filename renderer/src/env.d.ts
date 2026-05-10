@@ -32,6 +32,23 @@ export interface EngineRequestInit {
   timeoutMs?: number
 }
 
+export type UpdateCheckResult =
+  | {
+      ok: true
+      currentVersion: string
+      latestVersion: string
+      hasUpdate: boolean
+      releaseUrl: string
+      releaseName: string | null
+      publishedAt: string | null
+    }
+  | {
+      ok: false
+      currentVersion: string
+      reason: 'network' | 'invalid_response'
+      message: string
+    }
+
 interface PlumeLensAPI {
   getBackendUrl(): Promise<string | null>
   /** Engine API 请求 — 在 preload 内完成 fetch,token 不进 renderer JS(H5)。
@@ -40,6 +57,7 @@ interface PlumeLensAPI {
   /** 构造 SSE URL(包含 query token,native EventSource 限制)。 */
   engineSseUrl?: (path: string) => Promise<string>
   getAppVersion(): Promise<string>
+  checkForUpdates(): Promise<UpdateCheckResult>
   openFolder(): Promise<string | null>
   selectExportDirectory(): Promise<string | null>
   openLogsDir(): Promise<string>

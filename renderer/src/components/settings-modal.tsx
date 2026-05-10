@@ -10,11 +10,19 @@
  * 持久化到 ~/Library/Application Support/plumelens/settings.json,
  * process-manager 启动 engine 时读这个文件注入 PLUMELENS_*_KEY env。
  */
-import { Eye, EyeOff, Save, X } from 'lucide-react'
+import { AlertTriangle, ExternalLink, Eye, EyeOff, RefreshCw, Save, Trash2, X } from 'lucide-react'
+import { useQueryClient } from '@tanstack/react-query'
 import { useCallback, useEffect, useRef, useState, type ReactElement } from 'react'
 import { useTranslation } from 'react-i18next'
 
+import {
+  api,
+  ApiError,
+  type ClearHistoryResponse,
+  type ModelVersionsResponse,
+} from '@/lib/api-client'
 import { useShallow, useUIStore } from '@/stores/ui-store'
+import type { UpdateCheckResult } from '@/env'
 
 interface KeyFieldProps {
   hideLabel: string
@@ -60,25 +68,78 @@ function KeyField({
   )
 }
 
+const CONTACT_EMAIL = 'wlfcss@gmail.com'
+const GITHUB_URL = 'https://github.com/wlfcss/PlumeLens'
+
+function formatDate(value: string | null): string {
+  if (!value) return '--'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+  return date.toLocaleString()
+}
+
+function clearHistorySummary(result: ClearHistoryResponse): string {
+  return [
+    result.libraries_deleted,
+    result.photos_deleted,
+    result.analysis_results_deleted,
+    result.decisions_deleted + result.species_overrides_deleted,
+  ].join(' / ')
+}
+
 export function SettingsModal(): ReactElement | null {
   const { t } = useTranslation()
-  const { open, setOpen } = useUIStore(
-    useShallow((s) => ({ open: s.settingsOpen, setOpen: s.setSettingsOpen })),
+  const queryClient = useQueryClient()
+  const { open, setOpen, setActiveFolderId } = useUIStore(
+    useShallow((s) => ({
+      open: s.settingsOpen,
+      setOpen: s.setSettingsOpen,
+      setActiveFolderId: s.setActiveFolderId,
+    })),
   )
 
   const [amapKey, setAmapKey] = useState('')
   const [baiduAk, setBaiduAk] = useState('')
   const [tencentKey, setTencentKey] = useState('')
   const [version, setVersion] = useState('')
+  const [modelVersions, setModelVersions] = useState<ModelVersionsResponse | null>(null)
+  const [modelError, setModelError] = useState<string | null>(null)
+  const [updateCheck, setUpdateCheck] = useState<UpdateCheckResult | null>(null)
+  const [checkingUpdate, setCheckingUpdate] = useState(false)
   const [saving, setSaving] = useState(false)
   const [savedHint, setSavedHint] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
+  const [clearConfirming, setClearConfirming] = useState(false)
+  const [clearingHistory, setClearingHistory] = useState(false)
+  const [clearResult, setClearResult] = useState<ClearHistoryResponse | null>(null)
+  const [clearError, setClearError] = useState<string | null>(null)
   const savedHintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const clearSavedHintTimer = useCallback(() => {
     if (savedHintTimerRef.current !== null) {
       clearTimeout(savedHintTimerRef.current)
       savedHintTimerRef.current = null
+    }
+  }, [])
+
+  const openExternal = useCallback((url: string) => {
+    void window.plumelens?.openExternalUrl?.(url)
+  }, [])
+
+  const handleCheckUpdates = useCallback(async () => {
+    setCheckingUpdate(true)
+    try {
+      const result = await window.plumelens?.checkForUpdates?.()
+      setUpdateCheck(result ?? null)
+    } catch (err) {
+      setUpdateCheck({
+        ok: false,
+        currentVersion: '0.0.0',
+        reason: 'network',
+        message: err instanceof Error ? err.message : String(err),
+      })
+    } finally {
+      setCheckingUpdate(false)
     }
   }, [])
 
@@ -89,6 +150,12 @@ export function SettingsModal(): ReactElement | null {
     clearSavedHintTimer()
     setSavedHint(false)
     setSaveError(null)
+    setClearConfirming(false)
+    setClearError(null)
+    setClearResult(null)
+    setModelError(null)
+    setModelVersions(null)
+    setUpdateCheck(null)
     void window.plumelens?.getUserSettings?.().then((s) => {
       if (cancelled) return
       setAmapKey(s.amapKey ?? '')
@@ -98,14 +165,25 @@ export function SettingsModal(): ReactElement | null {
     void window.plumelens?.getAppVersion?.().then((v) => {
       if (!cancelled) setVersion(v)
     })
+    void api
+      .modelVersions()
+      .then((payload) => {
+        if (!cancelled) setModelVersions(payload)
+      })
+      .catch((err) => {
+        if (cancelled) return
+        const message = err instanceof Error ? err.message : String(err)
+        setModelError(message)
+      })
+    void handleCheckUpdates()
     return () => {
       cancelled = true
     }
-  }, [clearSavedHintTimer, open])
+  }, [clearSavedHintTimer, handleCheckUpdates, open])
 
   const closeModal = useCallback(() => {
-    if (!saving) setOpen(false)
-  }, [saving, setOpen])
+    if (!saving && !clearingHistory) setOpen(false)
+  }, [clearingHistory, saving, setOpen])
 
   useEffect(() => clearSavedHintTimer, [clearSavedHintTimer])
 
@@ -158,7 +236,27 @@ export function SettingsModal(): ReactElement | null {
     }
   }, [amapKey, baiduAk, clearSavedHintTimer, t, tencentKey])
 
+  const handleClearHistory = useCallback(async () => {
+    setClearingHistory(true)
+    setClearError(null)
+    try {
+      const result = await api.clearLocalHistory()
+      setClearResult(result)
+      setClearConfirming(false)
+      setActiveFolderId(null)
+      await queryClient.invalidateQueries()
+    } catch (err) {
+      const message =
+        err instanceof ApiError ? err.message : err instanceof Error ? err.message : String(err)
+      setClearError(message)
+    } finally {
+      setClearingHistory(false)
+    }
+  }, [queryClient, setActiveFolderId])
+
   if (!open) return null
+
+  const busy = saving || clearingHistory
 
   return (
     <div
@@ -178,7 +276,7 @@ export function SettingsModal(): ReactElement | null {
           <button
             aria-label={t('common.close')}
             className="icon-button"
-            disabled={saving}
+            disabled={busy}
             onClick={closeModal}
             type="button"
           >
@@ -219,10 +317,197 @@ export function SettingsModal(): ReactElement | null {
 
           <section className="settings-section">
             <h3 className="settings-section__title">{t('settings.about.title')}</h3>
-            <div className="settings-about">
-              <span className="settings-about__label">{t('settings.about.version')}</span>
-              <span className="settings-about__value">{version || '--'}</span>
+            <div className="settings-about-list">
+              <div className="settings-about">
+                <span className="settings-about__label">{t('settings.about.version')}</span>
+                <span className="settings-about__value">{version || '--'}</span>
+              </div>
+              <div className="settings-about">
+                <span className="settings-about__label">{t('settings.about.author')}</span>
+                <span className="settings-about__value">{t('settings.about.authorValue')}</span>
+              </div>
+              <div className="settings-about">
+                <span className="settings-about__label">{t('settings.about.contact')}</span>
+                <button
+                  className="settings-link"
+                  onClick={() => openExternal(`mailto:${CONTACT_EMAIL}`)}
+                  type="button"
+                >
+                  {t('settings.about.contactValue')}
+                  <ExternalLink className="h-3 w-3" />
+                </button>
+              </div>
+              <div className="settings-about">
+                <span className="settings-about__label">{t('settings.about.github')}</span>
+                <button
+                  className="settings-link"
+                  onClick={() => openExternal(GITHUB_URL)}
+                  type="button"
+                >
+                  {t('settings.about.githubValue')}
+                  <ExternalLink className="h-3 w-3" />
+                </button>
+              </div>
+              <div className="settings-about">
+                <span className="settings-about__label">{t('settings.about.license')}</span>
+                <span className="settings-about__value">{t('settings.about.licenseValue')}</span>
+              </div>
+              <p className="settings-section__hint settings-section__hint--compact">
+                {t('settings.about.copyright')}
+              </p>
             </div>
+          </section>
+
+          <section className="settings-section">
+            <h3 className="settings-section__title">{t('settings.update.title')}</h3>
+            <div className="settings-update">
+              <div>
+                <p className="settings-update__status">
+                  {checkingUpdate
+                    ? t('settings.update.checking')
+                    : updateCheck?.ok
+                      ? updateCheck.hasUpdate
+                        ? t('settings.update.available', {
+                            version: updateCheck.latestVersion,
+                          })
+                        : t('settings.update.upToDate')
+                      : updateCheck
+                        ? t('settings.update.failed', { error: updateCheck.message })
+                        : t('settings.update.idle')}
+                </p>
+                {updateCheck?.ok ? (
+                  <p className="settings-section__hint settings-section__hint--compact">
+                    {t('settings.update.latestMeta', {
+                      version: updateCheck.latestVersion,
+                      date: formatDate(updateCheck.publishedAt),
+                    })}
+                  </p>
+                ) : null}
+              </div>
+              <div className="settings-update__actions">
+                {updateCheck?.ok && updateCheck.hasUpdate ? (
+                  <button
+                    className="button-ghost"
+                    onClick={() => openExternal(updateCheck.releaseUrl)}
+                    type="button"
+                  >
+                    <ExternalLink className="h-4 w-4" />
+                    {t('settings.update.openRelease')}
+                  </button>
+                ) : null}
+                <button
+                  className="button-ghost"
+                  disabled={checkingUpdate}
+                  onClick={handleCheckUpdates}
+                  type="button"
+                >
+                  <RefreshCw className="h-4 w-4" />
+                  {t('settings.update.checkNow')}
+                </button>
+              </div>
+            </div>
+          </section>
+
+          <section className="settings-section">
+            <h3 className="settings-section__title">{t('settings.models.title')}</h3>
+            <p className="settings-section__hint">
+              {t('settings.models.hint', {
+                pipeline: modelVersions?.pipeline_version ?? '--',
+              })}
+            </p>
+            {modelError ? (
+              <p className="settings-panel__error">
+                {t('settings.models.failed', { error: modelError })}
+              </p>
+            ) : modelVersions ? (
+              <div className="settings-model-list">
+                {modelVersions.models.map((model) => (
+                  <div className="settings-model-row" key={model.id}>
+                    <div className="settings-model-row__main">
+                      <span className="settings-model-row__name">{model.label}</span>
+                      <span className="settings-model-row__meta">
+                        {model.version} · {model.revision}
+                      </span>
+                    </div>
+                    <span
+                      className={
+                        model.loaded
+                          ? 'settings-model-row__status settings-model-row__status--loaded'
+                          : 'settings-model-row__status'
+                      }
+                    >
+                      {model.loaded ? t('settings.models.loaded') : t('settings.models.notLoaded')}
+                    </span>
+                  </div>
+                ))}
+                <p className="settings-section__hint settings-section__hint--compact">
+                  {t('settings.models.generatedAt', {
+                    date: formatDate(modelVersions.manifest_generated_at),
+                  })}
+                </p>
+              </div>
+            ) : (
+              <p className="settings-section__hint settings-section__hint--compact">
+                {t('settings.models.loading')}
+              </p>
+            )}
+          </section>
+
+          <section className="settings-section settings-section--danger">
+            <h3 className="settings-section__title">{t('settings.history.title')}</h3>
+            <p className="settings-section__hint">{t('settings.history.hint')}</p>
+            {clearResult ? (
+              <p className="settings-panel__saved">
+                {t('settings.history.cleared', { summary: clearHistorySummary(clearResult) })}
+              </p>
+            ) : null}
+            {clearError ? (
+              <p className="settings-panel__error">
+                {t('settings.history.failed', { error: clearError })}
+              </p>
+            ) : null}
+            {clearConfirming ? (
+              <div className="settings-confirm">
+                <AlertTriangle className="h-4 w-4" />
+                <div className="settings-confirm__body">
+                  <strong>{t('settings.history.confirmTitle')}</strong>
+                  <span>{t('settings.history.confirmBody')}</span>
+                </div>
+                <button
+                  className="button-ghost"
+                  disabled={clearingHistory}
+                  onClick={() => setClearConfirming(false)}
+                  type="button"
+                >
+                  {t('common.close')}
+                </button>
+                <button
+                  className="button-danger"
+                  disabled={clearingHistory}
+                  onClick={handleClearHistory}
+                  type="button"
+                >
+                  <Trash2 className="h-4 w-4" />
+                  {clearingHistory
+                    ? t('settings.history.clearing')
+                    : t('settings.history.confirmAction')}
+                </button>
+              </div>
+            ) : (
+              <button
+                className="button-danger"
+                disabled={clearingHistory}
+                onClick={() => {
+                  setClearResult(null)
+                  setClearError(null)
+                  setClearConfirming(true)
+                }}
+                type="button"
+              >
+                <Trash2 className="h-4 w-4" />
+                {t('settings.history.clearAction')}
+              </button>
+            )}
           </section>
         </div>
 
@@ -236,10 +521,10 @@ export function SettingsModal(): ReactElement | null {
           ) : (
             <span className="settings-panel__hint">{t('settings.saveHint')}</span>
           )}
-          <button className="button-ghost" disabled={saving} onClick={closeModal} type="button">
+          <button className="button-ghost" disabled={busy} onClick={closeModal} type="button">
             {t('common.close')}
           </button>
-          <button className="button-primary" disabled={saving} onClick={handleSave} type="button">
+          <button className="button-primary" disabled={busy} onClick={handleSave} type="button">
             <Save className="h-4 w-4" />
             {saving ? t('settings.saving') : t('settings.save')}
           </button>

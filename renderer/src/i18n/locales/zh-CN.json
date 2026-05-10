@@ -19,6 +19,20 @@
     "settings": "设置",
     "close": "关闭"
   },
+  "speciesDetail": {
+    "label": "鸟种资料",
+    "dialogLabel": "{{species}} 鸟种资料",
+    "tooltip": "点击查看鸟种资料",
+    "tooltipWithPinyin": "拼音：{{pinyin}} · 点击查看鸟种资料",
+    "wikimediaImage": "Wikimedia Commons",
+    "englishName": "英文",
+    "family": "科属",
+    "protectLevel": "保护",
+    "iucn": "IUCN",
+    "noExtract": "暂无本地百科摘要。",
+    "sourceZh": "中文维基百科",
+    "sourceEn": "英文维基百科"
+  },
   "status": {
     "connecting": "正在连接后端",
     "connected": "本地引擎就绪",
@@ -48,7 +62,47 @@
     },
     "about": {
       "title": "关于",
-      "version": "版本"
+      "version": "版本",
+      "author": "作者",
+      "authorValue": "汪淼 wlfcss",
+      "contact": "反馈",
+      "contactValue": "wlfcss@gmail.com",
+      "github": "GitHub",
+      "githubValue": "github.com/wlfcss/PlumeLens",
+      "license": "许可",
+      "licenseValue": "GPL-3.0",
+      "copyright": "© 汪淼 wlfcss。鉴翎用于本地鸟类照片筛选，反馈及联系邮箱：wlfcss@gmail.com。"
+    },
+    "update": {
+      "title": "更新提醒",
+      "idle": "可检查 GitHub Release 是否有新版本。",
+      "checking": "正在检查 GitHub Release…",
+      "upToDate": "当前已是最新版本。",
+      "available": "发现新版本 {{version}}。",
+      "failed": "检查失败：{{error}}",
+      "latestMeta": "最新 Release：{{version}} · {{date}}",
+      "checkNow": "检查更新",
+      "openRelease": "查看 Release"
+    },
+    "models": {
+      "title": "模型版本",
+      "hint": "当前管线：{{pipeline}}。版本后的短标识来自模型 SHA 清单，随模型包更新自动变化。",
+      "loading": "正在读取模型版本…",
+      "failed": "读取失败：{{error}}",
+      "loaded": "已加载",
+      "notLoaded": "未加载",
+      "generatedAt": "模型清单生成时间：{{date}}"
+    },
+    "history": {
+      "title": "本地识别记录",
+      "hint": "清理应用数据库中的文件夹历史、识别结果、人工筛选、物种修正、分析队列和缩略图缓存；不会删除原始照片。",
+      "clearAction": "清理本地记录",
+      "confirmTitle": "确认清理本地识别记录？",
+      "confirmBody": "该操作不可撤销。原始照片不受影响，重新导入文件夹后可重新分析。",
+      "confirmAction": "确认清理",
+      "clearing": "清理中…",
+      "cleared": "已清理：文件夹 / 照片 / 识别结果 / 人工记录 = {{summary}}。",
+      "failed": "清理失败：{{error}}"
     }
   },
   "engineBanner": {
@@ -186,7 +240,18 @@
       "label": "文件夹报告",
       "title": "当前文件夹整体概览",
       "topFrames": "代表作预览",
-      "userProgress": "人工筛选进度"
+      "userProgress": "人工筛选进度",
+      "subtitle": "{{folder}} 的拍摄与筛选摘要",
+      "keepFrames": "保留候选",
+      "flyingFrames": "飞版",
+      "shootingWindow": "拍摄时间",
+      "unknownTimeRange": "暂无拍摄时间",
+      "sceneSummary": "{{scenes}} 个场景 · 已人工筛选 {{reviewed}}/{{total}} 张",
+      "topSpecies": "高频鸟种",
+      "speciesFrames": "{{count}} 张",
+      "noSpecies": "暂无可信鸟种记录",
+      "bestFrames": "高分照片",
+      "noBestFrames": "暂无完成分析的照片"
     },
     "metrics": {
       "totalPhotos": "总照片数",
