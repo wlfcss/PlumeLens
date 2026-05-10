@@ -118,6 +118,8 @@ const SELECTION_SCROLL_TOP_SHOW_PROGRESS = 1 / 3
 const SELECTION_SCROLL_TOP_HIDE_PROGRESS = 0.25
 const SELECTION_SCROLL_TOP_SHOW_MIN_PX = 900
 const SELECTION_SCROLL_TOP_HIDE_MAX_PX = 220
+const SELECTION_SCROLL_TOP_SETTLE_MS = 720
+const SELECTION_SCROLL_TOP_EPSILON = 1
 
 const ArchiveGeoMap = lazy(() =>
   import('@/components/archive-geo-map').then((module) => ({ default: module.ArchiveGeoMap })),
@@ -3609,6 +3611,8 @@ function SelectionScreen({
 }) {
   const selectionScrollRef = useRef<HTMLElement | null>(null)
   const compactMoreRef = useRef<HTMLDivElement | null>(null)
+  const scrollTopSettleFrameRef = useRef<number | null>(null)
+  const scrollTopSettleTimeoutRef = useRef<number | null>(null)
   const [selectionScrollElement, setSelectionScrollElement] = useState<HTMLElement | null>(null)
   const [selectionChromeState, setSelectionChromeState] = useState({
     compact: false,
@@ -3622,12 +3626,41 @@ function SelectionScreen({
   }, [])
   const selectionResetKey = `${activeFolder?.id ?? ''}:${viewMode}:${activeSort}`
 
+  const cancelScrollTopSettle = useCallback(() => {
+    if (scrollTopSettleFrameRef.current !== null) {
+      window.cancelAnimationFrame(scrollTopSettleFrameRef.current)
+      scrollTopSettleFrameRef.current = null
+    }
+    if (scrollTopSettleTimeoutRef.current !== null) {
+      window.clearTimeout(scrollTopSettleTimeoutRef.current)
+      scrollTopSettleTimeoutRef.current = null
+    }
+  }, [])
+
+  const forceSelectionScrollTop = useCallback(
+    (node: HTMLElement) => {
+      cancelScrollTopSettle()
+      node.scrollTo({ behavior: 'auto', left: 0, top: 0 })
+      node.scrollTop = 0
+      node.scrollLeft = 0
+      const resetChrome = { compact: false, showScrollTop: false }
+      selectionChromeStateRef.current = resetChrome
+      setSelectionChromeState(resetChrome)
+    },
+    [cancelScrollTopSettle],
+  )
+
+  useEffect(() => cancelScrollTopSettle, [cancelScrollTopSettle])
+
   useEffect(() => {
-    selectionScrollElement?.scrollTo({ top: 0 })
+    if (selectionScrollElement) {
+      forceSelectionScrollTop(selectionScrollElement)
+      return
+    }
     const resetChrome = { compact: false, showScrollTop: false }
     selectionChromeStateRef.current = resetChrome
     setSelectionChromeState(resetChrome)
-  }, [selectionResetKey, selectionScrollElement])
+  }, [forceSelectionScrollTop, selectionResetKey, selectionScrollElement])
 
   useEffect(() => {
     const node = selectionScrollElement
@@ -3692,13 +3725,42 @@ function SelectionScreen({
   }, [compactMoreOpen])
 
   const scrollSelectionToTop = useCallback(() => {
+    const node = selectionScrollRef.current ?? selectionScrollElement
+    if (!node) return
+    cancelScrollTopSettle()
     const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
-    const resetChrome = { compact: false, showScrollTop: false }
-    selectionChromeStateRef.current = resetChrome
-    setSelectionChromeState(resetChrome)
     setCompactMoreOpen(false)
-    selectionScrollElement?.scrollTo({ behavior: reduceMotion ? 'auto' : 'smooth', top: 0 })
-  }, [selectionScrollElement])
+    if (reduceMotion || node.scrollTop <= SELECTION_SCROLL_TOP_EPSILON) {
+      forceSelectionScrollTop(node)
+      return
+    }
+
+    node.scrollTo({ behavior: 'smooth', left: 0, top: 0 })
+
+    const startedAt = window.performance.now()
+    const settle = () => {
+      if (selectionScrollRef.current !== node) {
+        cancelScrollTopSettle()
+        return
+      }
+      const elapsed = window.performance.now() - startedAt
+      if (
+        node.scrollTop <= SELECTION_SCROLL_TOP_EPSILON ||
+        elapsed >= SELECTION_SCROLL_TOP_SETTLE_MS
+      ) {
+        forceSelectionScrollTop(node)
+        return
+      }
+      scrollTopSettleFrameRef.current = window.requestAnimationFrame(settle)
+    }
+
+    scrollTopSettleFrameRef.current = window.requestAnimationFrame(settle)
+    scrollTopSettleTimeoutRef.current = window.setTimeout(() => {
+      if (selectionScrollRef.current === node && node.scrollTop > SELECTION_SCROLL_TOP_EPSILON) {
+        forceSelectionScrollTop(node)
+      }
+    }, SELECTION_SCROLL_TOP_SETTLE_MS + 80)
+  }, [cancelScrollTopSettle, forceSelectionScrollTop, selectionScrollElement])
 
   if (!activeFolder) {
     return (

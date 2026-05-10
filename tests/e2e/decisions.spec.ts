@@ -818,6 +818,39 @@ test.describe('Photo stack interactions (mock backend)', () => {
     const after = await scroller.evaluate((node) => (node as HTMLElement).scrollTop)
     expect(after).toBeGreaterThan(before - 120)
   })
+
+  test('back-to-top returns the virtualized selection list to the absolute top', async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 1680, height: 1040 })
+    await mockBackend(page, { manyGroups: true })
+    await page.goto('/')
+    await page.getByRole('button', { name: '选片', exact: true }).click()
+
+    const scroller = page.locator('.selection-main.selection-scroll')
+    await expect(page.locator('.photo-group').first()).toBeVisible()
+    await scroller.evaluate((node) => {
+      const scrollerElement = node as HTMLElement
+      const maxScroll = Math.max(0, scrollerElement.scrollHeight - scrollerElement.clientHeight)
+      scrollerElement.scrollTo({ top: Math.max(2400, maxScroll * 0.45) })
+      scrollerElement.dispatchEvent(new Event('scroll', { bubbles: true }))
+    })
+    await waitForSelectionScrollSettled(page)
+
+    const before = await scroller.evaluate((node) => (node as HTMLElement).scrollTop)
+    expect(before).toBeGreaterThan(1800)
+    await expect(page.locator('.selection-scroll-top--visible')).toBeVisible()
+
+    await page.getByRole('button', { name: '回到顶部' }).click()
+
+    await expect
+      .poll(async () => scroller.evaluate((node) => (node as HTMLElement).scrollTop), {
+        timeout: 2500,
+      })
+      .toBeLessThan(2)
+    await expect(page.locator('.folder-topline h1')).toBeVisible()
+    await expect(page.locator('.selection-compact-header--visible')).toHaveCount(0)
+  })
 })
 
 test.describe('Selection metric layout (mock backend)', () => {

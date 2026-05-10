@@ -1660,6 +1660,7 @@ button:disabled {
   position: relative;
   min-height: 0;
   overflow-y: auto;
+  overflow-anchor: none;
   padding: 22px 32px 72px;
   animation: pl-surface-in var(--pl-motion-slow) var(--pl-ease-soft) both;
 }
@@ -2291,6 +2292,7 @@ button:disabled {
 
 .photo-flow {
   margin-top: 22px;
+  overflow-anchor: none;
 }
 
 .selection-scroll-top {
