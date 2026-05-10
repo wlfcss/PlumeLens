@@ -7,6 +7,7 @@ import App, {
   applyNewSpeciesMarkers,
   buildArchiveMapPins,
   buildGroupStartMsMap,
+  buildReviewPhotoOrderForGroup,
   buildSpeciesCollectionGroups,
   deriveSpeciesRecords,
   effectiveSpeciesSummary,
@@ -218,6 +219,39 @@ describe('App', () => {
           (starts.get(left) ?? Number.NEGATIVE_INFINITY),
       ),
     ).toEqual(['newer', 'older'])
+  })
+
+  it('orders grouped review filmstrip by outer segment order instead of score order', () => {
+    const makePhoto = (id: string, shotAt: string, score: number) =>
+      ({
+        id,
+        folderId: 'folder-1',
+        groupId: 'group-1',
+        fileName: `${id}.JPG`,
+        shotAt,
+        speciesName: '印度寿带',
+        speciesLatinName: 'Terpsiphone paradisi',
+        birdCount: 1,
+        analysisStatus: 'done',
+        grade: score >= 0.75 ? 'select' : 'usable',
+        decision: null,
+        finalScore: score,
+        bestBbox: { x1: 100, y1: 100, x2: 300, y2: 400, confidence: 0.9 },
+        imageWidth: 1000,
+        imageHeight: 800,
+      }) as PhotoRecord
+
+    const photos = [
+      makePhoto('third-high-score', '2026-04-24T09:00:02Z', 0.92),
+      makePhoto('first-low-score', '2026-04-24T09:00:00Z', 0.61),
+      makePhoto('second-mid-score', '2026-04-24T09:00:01Z', 0.74),
+    ]
+
+    expect(buildReviewPhotoOrderForGroup(photos).map((photo) => photo.id)).toEqual([
+      'first-low-score',
+      'second-mid-score',
+      'third-high-score',
+    ])
   })
 
   it('only counts archive-eligible photos and lets manual species override model species', () => {

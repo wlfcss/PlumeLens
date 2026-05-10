@@ -731,8 +731,14 @@ test.describe('Photo stack interactions (mock backend)', () => {
     await expect(page.locator('.review-heading h2')).toContainText('STACK_0002.JPG')
     await expect(page.locator('.review-sequence--stack')).toBeVisible()
     await expect(page.locator('.review-filmstrip__item')).toHaveCount(4)
+    await expect(page.locator('.review-filmstrip__meta small')).toHaveText([
+      'STACK_0001.JPG',
+      'STACK_0002.JPG',
+      'STACK_0003.JPG',
+      'STACK_0004.JPG',
+    ])
 
-    await page.keyboard.press('ArrowLeft')
+    await page.keyboard.press('ArrowRight')
     await expect(page.locator('.review-heading h2')).toContainText('STACK_0003.JPG')
   })
 

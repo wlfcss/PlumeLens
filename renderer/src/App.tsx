@@ -988,6 +988,21 @@ function buildReviewSegmentPhotosByPhotoId(photos: PhotoRecord[]): Map<string, P
   return segmentsByPhotoId
 }
 
+export function buildReviewPhotoOrderForGroup(photos: PhotoRecord[]): PhotoRecord[] {
+  const segments = buildPhotoSegments(photos)
+  const hasStackSegments = segments.some((segment) => segment.photos.length > 1)
+  const visibleSegments = hasStackSegments
+    ? segments.filter((segment) => segment.photos.length > 1)
+    : segments
+  return visibleSegments.flatMap((segment) => segment.photos)
+}
+
+export function buildReviewPhotoOrderForGroupedEntries(
+  entries: Array<{ group: PhotoGroupRecord; photos: PhotoRecord[] }>,
+): PhotoRecord[] {
+  return entries.flatMap((entry) => buildReviewPhotoOrderForGroup(entry.photos))
+}
+
 export function buildGroupStartMsMap(
   photos: Array<Pick<PhotoRecord, 'groupId' | 'shotAt'>>,
 ): Map<string, number> {
@@ -2173,11 +2188,14 @@ export default function App() {
       .filter((entry) => entry.photos.length > 0)
       .toSorted((left, right) => compareGroupStartDesc(left, right, groupStartMs))
   }, [activeFolder?.id, filteredSelectionPhotos, groupStartMs, workspace.groups])
+  const groupedSelectionPhotos = useMemo(
+    () => buildReviewPhotoOrderForGroupedEntries(folderGroups),
+    [folderGroups],
+  )
 
   const flatSelectionPhotos = useMemo(
-    () =>
-      viewMode === 'flat' ? filteredSelectionPhotos : folderGroups.flatMap((entry) => entry.photos),
-    [filteredSelectionPhotos, folderGroups, viewMode],
+    () => (viewMode === 'flat' ? filteredSelectionPhotos : groupedSelectionPhotos),
+    [filteredSelectionPhotos, groupedSelectionPhotos, viewMode],
   )
 
   const photoById = useMemo(
