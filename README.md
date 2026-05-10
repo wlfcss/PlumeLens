@@ -42,14 +42,18 @@
 
 ## 0.7.0 更新重点
 
-- **深度复核信息栏优化**：右侧详情区重新梳理层级，评级按钮固定到底部，可见性/姿态缺失时明确显示暂无结果，避免信息栏随机消失或遮挡。
-- **姿态阈值校准**：基于真实照片复测，姿态框默认阈值从 0.05 调整为 0.02，保留弱框但关键点稳定的鸟体姿态结果。
-- **源文件夹失联保护**：图库根目录被改名或挪走时标记为失联，缓存缩略图、评分和人工筛选结果仍可查看；分析、导出和外部编辑会暂停，用户可在界面中重新关联新路径。
-- **连拍堆叠与大列表优化**：场景组内按时间、物种、主体连续性切分连拍堆叠；无堆叠单张不混入堆叠视图，单堆叠场景默认展开，展开/收起在自然流布局中稳定重排。
-- **导出链路稳定化**：导出会话锁定启动时的文件夹快照，切换工作集不会改变正在导出的内容；支持多文件夹并行导出、收起侧栏、JPG/RAW companion、JPEG 内嵌 XMP / RAW sidecar 与中文报告。
-- **羽迹地理分布重构**：只统计有效入羽迹照片，按物理地点合并拍摄点，地点详情支持鸟种筛选，地图 tooltip 做 HTML escape。
-- **深度复核与外部编辑**：复核图像支持倍率选择、拖动、全屏查看；Topaz / Photoshop 检测与启动路径更稳。
-- **性能与可靠性**：大列表虚拟化、地图按需加载、缩略图缺失自动修复、IQA 非有限分数防护、队列并发和暂停/取消状态机修复。
+> **升级提示**：本版本模型与阈值整体换代（YOLO v1.0→v1.1、姿态 v1→v2、新增飞版分类、IQA 权重重平衡、鸟种切到 DINOv3 species v4），`pipeline_version` 由模型 SHA 与阈值组合而成、与 0.6.x 全量不一致，升级后所有历史图库会按新管线自动后台重算。**人工评级、人工物种、入羽迹决策、导出快照与缩略图缓存全部保留不会丢**，只有自动评分和自动物种结果会被刷新。重算进度可在分析面板查看。
+
+- **模型管线升级**：鸟种识别切到 DINOv3 species v4（1591 类 + 三态 reject head），姿态升级到 `bird_visibility v2.0` 11 关键点，并新增 `bird_flight_classifier v1` 飞版分类。
+- **选片列表稳定化**：修复筛选切换自动回顶、回到顶部不归零、连拍收起后虚拟高度错乱、顶部精简栏挤压列表等真实测试回归。
+- **顶部筛选重排**：滚动后固定为精简信息栏，高频等级筛选保留在外侧，低频筛选/排序/视图/导出组合进“更多”，并新增“仅飞版”特征筛选。
+- **拍摄报告**：右侧复核摘要在未选中照片时默认展示“本次拍摄成就清单”，突出拍摄时间、照片数、平均分、新增鸟种和历史最高分刷新。
+- **鸟种资料与拼音**：鸟种中文名支持拼音；羽迹详情单独展示，其他位置 hover 显示；选片和深度复核右侧栏点击鸟种名可打开 Wiki/Commons 风格资料浮窗。
+- **深度复核信息栏重构**：右侧详情区精简层级，固定评级按钮，统一物种待审原因、姿态/可见性、EXIF、外部编辑和 filmstrip 顺序。
+- **设置与发布信息**：设置页补齐作者/邮箱/GitHub/个人博客/版权，支持 GitHub Release 更新检查、模型版本查看和二次确认清理本地识别记录。
+- **发布工程加固**：DMG 背景升级到 HiDPI TIFF，自定义 Finder 布局；模型 manifest 带 SHA pin；打包链路包含 build 与 packaged smoke。
+
+完整 0.6.0 之后更新及 58 个提交见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 核心能力
 
@@ -57,10 +61,12 @@
 - **四档选片**：精选、可用、记录、淘汰；无鸟是独立状态，不混入质量档位。
 - **深度复核**：原图舞台、IQA 裁切、检测框、姿态点、对焦点、倍率选择、全屏查看、filmstrip 快速切换。
 - **场景共识**：同一场景内的单鸟照片可互相校正物种结果，降低单张照片角度/遮挡导致的误识别。
+- **拍摄报告**：未选中照片时在右侧抽屉展示本次外拍的时间、照片数量、平均分、新增鸟种与历史最高分刷新。
 - **导出工作流**：多文件夹并行导出，支持合并导出与按评级分类导出，JPG/RAW companion 同步复制，附中文 manifest/CSV 报告。
 - **羽迹图鉴**：1591 种物种墙、保护等级分组、物种详情、本地百科、拍摄时间线和地理分布。
+- **鸟种资料**：鸟种中文名可展示拼音，点击鸟种名打开带 Wiki 摘要与 Commons 照片的资料浮窗。
 - **文件夹重关联**：源文件夹失联时可选择移动/改名后的新目录，保留既有照片身份、分析结果、人工决策和缩略图。
-- **桌面集成**：最近文件夹、Finder 打开、Topaz / Photoshop 外部编辑入口、macOS arm64 自动构建。
+- **桌面集成**：最近文件夹、Finder 打开、Topaz / Photoshop 外部编辑入口、关闭二次确认、GitHub Release 更新检查、macOS arm64 自动构建。
 
 ## 模型管线
 
@@ -87,8 +93,8 @@ PlumeLens 的模型不是一个单点分类器，而是一条以摄影筛选为�
 | bird flight classifier v1 | `engine/models/bird_flight_classifier.onnx`          | 约 40 MB  | 入仓                       |
 | CLIPIQA+                | `engine/models/clipiqa_plus.onnx`                     | 约 293 MB | 大文件，打包时由模型包恢复 |
 | HyperIQA                | `engine/models/hyperiqa.onnx`                         | 约 104 MB | 大文件，打包时由模型包恢复 |
-| DINOv4 species backbone | `engine/models/species/backbone/model.safetensors`    | 约 578 MB | 大文件，不入 git           |
-| DINOv4 species adapter  | `engine/models/species/v4/seed42_adapter.pt`          | 约 32 MB  | 大文件，不入 git           |
+| DINOv3 species v4 backbone | `engine/models/species/backbone/model.safetensors`    | 约 578 MB | 大文件，不入 git           |
+| DINOv3 species v4 adapter  | `engine/models/species/v4/seed42_adapter.pt`          | 约 32 MB  | 大文件，不入 git           |
 | 分类与百科元数据        | `canonical_extended.parquet` / `species_wiki.parquet` | 1591 种   | 入仓                       |
 
 更多模型细节见 [engine/models/README.md](engine/models/README.md)、[YOLO model card](engine/models/yolo26l-bird-det.MODEL_CARD.md) 和 [bird visibility model card](engine/models/bird_visibility.MODEL_CARD.md)。
@@ -204,9 +210,9 @@ GitHub Actions 当前只保留 macOS arm64 自动构建流程：
 
 ## 项目状态
 
-- 已完成：本地 hybrid 推理、选片工作台、深度复核、导出、羽迹物种墙、地理分布、macOS arm64 自动构建。
-- 已完成：源文件夹失联检测与重新关联、导出快照锁定、JPG/RAW/XMP 导出、中文报告、大列表虚拟化、缩略图自动修复。
-- 持续优化：App.tsx 拆分、连拍/场景业务讨论、更多真实相机样张覆盖。
+- 已完成：本地 hybrid 推理、选片工作台、深度复核、拍摄报告、导出、羽迹物种墙、地理分布、macOS arm64 自动构建。
+- 已完成：源文件夹失联检测与重新关联、导出快照锁定、JPG/RAW/XMP 导出、中文报告、大列表虚拟化、缩略图自动修复、设置页版权/更新/模型版本/清理历史。
+- 持续优化：App.tsx 拆分、更多真实相机样张覆盖、物种资料图片人工审核。
 - 待验证：Windows 打包、更多相机品牌的 AF 对焦点解析、更多 RAW 组合样本。
 
 ## 许可证与模型版权

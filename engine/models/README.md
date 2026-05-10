@@ -20,6 +20,7 @@
 |------|------|------|
 | `bird_visibility11_config.json` | 2 KB | v2 校准阈值(eye/head/body/tail/wings 五项 best_*) |
 | `bird_flight_classifier_config.json` | 5 KB | 飞版分类器阈值曲线，产品默认 `P(fly) ≥ 0.35` |
+| `manifest.json` | 约 8 KB | 模型语义版本、资产 SHA-256、12 位 revision 与生成时间；启动校验和设置页模型版本展示共用 |
 | `species/canonical_extended.parquet` | 约 100 KB | 1591 类鸟类分类表（class_id + 中/拉丁/英文名 + IUCN + 保护等级） |
 | `species/v4_calibration_policy.json` | 12 KB | `balanced_v1` 三态阈值：recognized / uncertain / unrecognized |
 | `species_wiki.parquet` | 925 KB | 旧 1535 种 Wikipedia 首段介绍（v4 extra 物种暂用分类表 fallback） |
@@ -72,7 +73,8 @@
 - **派生 posture**(3 项):view_angle (frontal/side/back) / facing (left/right) / posture (perched/flying)。当前产品优先使用 `bird_flight_classifier.onnx` 的 `P(fly)`；分类器不可用时才回退到严格的关键点几何启发式。
 - **校准阈值**([`bird_visibility11_config.json`](./bird_visibility11_config.json)):
   - `box_threshold` = 0.05(校准值);产品运行默认 `pose_box_threshold` = 0.02,避免遮挡长尾实拍中 box_conf 偏低但关键点可用的结果被整条丢弃
-  - `eye_threshold` = 0.45 / `head_threshold` = 0.45 / `head_eye_threshold` = 0.40
+  - `eye_threshold` = 0.40(校准值);产品运行默认 `pose_eye_threshold` = 0.42,UI 标签为"眼可见 / 眼不可见"
+  - `head_threshold` = 0.45 / `head_eye_threshold` = 0.40
   - `body_threshold` = 0.30 / `tail_threshold` = 0.40 / `wing_threshold` = 0.40
   - `expanded_box_margin` = 0.15
 - **Val F1**:Eye 99.28%,Head 99.91%,Body 99.84%,Tail 96.90%,Wings 97.55%

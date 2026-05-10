@@ -22,8 +22,8 @@ jobs:
     env:
       PLUMELENS_FORCE_ENGINE_BUILD: '1'
       MODEL_BUNDLE_URL: ${{ secrets.PLUMELENS_MODELS_URL }}
-      MODEL_RELEASE_TAG: ${{ vars.PLUMELENS_MODELS_RELEASE_TAG || 'models-v3' }}
-      MODEL_RELEASE_ASSET: ${{ vars.PLUMELENS_MODELS_RELEASE_ASSET || 'plumelens-models-v3.tar.gz' }}
+      MODEL_RELEASE_TAG: ${{ vars.PLUMELENS_MODELS_RELEASE_TAG || 'models-v4' }}
+      MODEL_RELEASE_ASSET: ${{ vars.PLUMELENS_MODELS_RELEASE_ASSET || 'plumelens-models-v4.tar.gz' }}
 
     steps:
       - name: Checkout
@@ -96,24 +96,28 @@ jobs:
         run: |
           set -euo pipefail
 
-          # v0.6.0+ 模型清单:
-          # - DINOv4 species:species_list_1301 已删,heads/seed*.pt 已替换为 v4 LoRA
-          #   单文件 adapter,新增 v4/seed42_adapter.pt + v4_calibration_policy.json
-          # - bird_visibility v2.0 (11 关键点):bird_visibility.onnx 已升级为
-          #   bird_visibility11.onnx + bird_visibility11_config.json (含 best_body /
-          #   best_tail / best_wings 校准段)。
+          # v0.7.0 模型清单(v0.6.0 → v0.7.0 变更):
+          # - DINOv3 species v4:heads/seed*.pt 已替换为 v4 LoRA 单文件 adapter
+          #   (v4/seed42_adapter.pt + v4_calibration_policy.json,1591 类三态)
+          # - bird_visibility v2.0 (11 关键点):bird_visibility.onnx → bird_visibility11.onnx +
+          #   bird_visibility11_config.json (含 best_body / best_tail / best_wings 校准段)
+          # - bird_flight_classifier v1:新增,飞版/非飞版二分类器
+          # - YOLOv26l-bird-det:v1.0 → v1.1 (实拍 holdout recall 提升到 87.2%)
           required=(
             "engine/models/yolo26l-bird-det.onnx"
             "engine/models/bird_visibility11.onnx"
+            "engine/models/bird_flight_classifier.onnx"
             "engine/models/clipiqa_plus.onnx"
             "engine/models/hyperiqa.onnx"
             "engine/models/bird_visibility11_config.json"
+            "engine/models/bird_flight_classifier_config.json"
             "engine/models/species/backbone/config.json"
             "engine/models/species/backbone/model.safetensors"
             "engine/models/species/canonical_extended.parquet"
             "engine/models/species/v4_calibration_policy.json"
             "engine/models/species/v4/seed42_adapter.pt"
             "engine/models/species_wiki.parquet"
+            "engine/models/manifest.json"
           )
 
           missing=0
@@ -174,46 +178,45 @@ jobs:
           sha256_path="${dmg}.sha256"
           printf '%s  %s\n' "$sha256_value" "$dmg_basename" > "$sha256_path"
 
-          cat > release-notes.md <<EOF
-          ## PlumeLens ${version}
+          # Release notes 从 CHANGELOG.md 抽取当前 tag 对应的章节,避免 workflow
+          # 模板与版本说明双源漂移。CHANGELOG 约定:版本以 `## <version>` 开头,
+          # 下一个 `## ` 行结束。
+          changelog_body=""
+          if [[ -f CHANGELOG.md ]]; then
+            changelog_body="$(awk -v v="$version" '
+              /^## / {
+                if (found) { exit }
+                if ($2 == v) { found = 1; next }
+              }
+              found { print }
+            ' CHANGELOG.md)"
+          fi
 
-          鉴翎 0.6.0 继续面向真实选片工作流打磨稳定性，重点补齐源文件夹失联重关联、导出链路、羽迹地理分布、深度复核和性能体验。
-
-          ### 主要更新
-
-          - 导出功能落地：支持多文件夹并行导出、右侧浮窗进度、收起后继续导出、合并导出与按评级分类导出。
-          - 源文件夹失联保护：源目录改名或移动后保留缓存与筛选结果，支持重新关联新路径。
-          - JPG/RAW 同步导出：优先复制主文件，并自动携带 RAW companion。
-          - 中文导出报告：manifest / CSV / 目录命名使用中文口径与文件夹别名。
-          - 羽迹地理分布重做：只统计有效入羽迹照片，按物理地点合并，地点详情支持鸟种筛选。
-          - 深度复核增强：固定分数区域、倍率选择、全屏查看、拖动与点击放大。
-          - 队列稳定性修复：暂停/取消不再破坏 processing 状态，多 worker 取任务改为原子语义。
-          - 缩略图可靠性修复：空缩略图自动重建并带本地缓存刷新。
-          - 外部编辑增强：Topaz / Photoshop 识别与启动路径更稳。
-          - 启动状态增强：展示 CPU / GPU / MPS / Mixed 推理设备状态。
-          - 性能优化：大列表虚拟化、地图按需加载、后端分页接口与缩略图修复队列。
-          - 版本更新：应用、Python 后端、FastAPI 均更新到 0.6.0。
-
-          ### 自动构建
-
-          - 本 Release 由 GitHub Actions 的 macOS arm64 自动构建流程生成。
-          - Windows 自动构建暂时停用。
-
-          ### 校验
-
-          - 本地已通过 ruff、pyright、pytest、typecheck、lint、vitest、Playwright 与 macOS DMG 打包校验。
-          - Actions Release 产物会在构建过程中完成模型资产校验、PyInstaller 后端冻结、Electron 打包、codesign 校验与 DMG 内容校验。
-
-          ### DMG 校验
-
-          下载 \`${dmg_basename}\` 后,本地比对 SHA-256:
-
-          \`\`\`bash
-          shasum -a 256 ${dmg_basename}
-          # 应与下方完全一致(也可直接下载 ${dmg_basename}.sha256 调 \`shasum -a 256 -c\` 自动校验)
-          # ${sha256_value}
-          \`\`\`
-          EOF
+          {
+            echo "## PlumeLens ${version}"
+            echo
+            if [[ -n "$changelog_body" ]]; then
+              echo "$changelog_body"
+            else
+              echo "_(未在 CHANGELOG.md 找到 ${version} 章节;详见仓库提交记录。)_"
+            fi
+            echo
+            echo "### 自动构建与校验"
+            echo
+            echo "- 本 Release 由 GitHub Actions 的 macOS arm64 自动构建流程生成。"
+            echo "- 模型资产 SHA-256、PyInstaller 后端冻结、Electron 打包、codesign 与 packaged cold-start smoke 都在 CI 中完成。"
+            echo "- Windows 自动构建暂时停用。"
+            echo
+            echo "### DMG 校验"
+            echo
+            echo "下载 \`${dmg_basename}\` 后本地比对 SHA-256:"
+            echo
+            echo '```bash'
+            echo "shasum -a 256 ${dmg_basename}"
+            echo "# 应输出: ${sha256_value}"
+            echo "# 也可下载 ${dmg_basename}.sha256 调 \`shasum -a 256 -c\` 自动校验"
+            echo '```'
+          } > release-notes.md
 
           if gh release view "$tag" >/dev/null 2>&1; then
             gh release edit "$tag" --title "PlumeLens ${version}" --notes-file release-notes.md
