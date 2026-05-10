@@ -222,10 +222,12 @@
       "primaryFilters": "常用筛选",
       "more": "更多",
       "moreFilters": "更多筛选",
+      "featureFilters": "画面特征",
       "sort": "排序",
       "view": "视图"
     },
     "quickFilters": {
+      "groupLabel": "等级筛选",
       "select": "精选",
       "usable": "可用",
       "record": "记录",
@@ -303,6 +305,10 @@
       "unconfirmedHeadDetail": "鸟头关键特征不完整，请在下方物种栏确认后再进羽迹",
       "unconfirmedGenericDetail": "物种识别需要复核，请在下方物种栏确认后再进羽迹",
       "partialUnconfirmed": "部分待审"
+    },
+    "featureFilters": {
+      "onlyFlying": "仅飞版",
+      "onlyFlyingHint": "在当前等级筛选内，仅显示飞版照片"
     },
     "poseTags": {
       "eye_visible": "眼可见",

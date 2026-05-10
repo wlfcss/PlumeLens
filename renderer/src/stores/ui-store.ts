@@ -17,6 +17,7 @@ interface UIState {
   activeFolderId: string | null
   activeSpeciesId: string | null
   activeQuickFilters: QuickFilter[]
+  onlyFlying: boolean
   activeSort: 'score' | 'shot_at' | 'name'
   viewMode: ViewMode
   searchQuery: string
@@ -31,6 +32,7 @@ interface UIState {
   setActiveSpeciesId: (speciesId: string | null) => void
   setActiveQuickFilter: (filter: QuickFilter) => void
   setActiveQuickFilters: (filters: QuickFilter[]) => void
+  setOnlyFlying: (enabled: boolean) => void
   setActiveSort: (sort: UIState['activeSort']) => void
   setViewMode: (mode: ViewMode) => void
   setSearchQuery: (value: string) => void
@@ -47,6 +49,7 @@ export const useUIStore = create<UIState>()((set) => ({
   activeFolderId: null,
   activeSpeciesId: null,
   activeQuickFilters: ['select', 'usable', 'record'],
+  onlyFlying: false,
   activeSort: 'score',
   viewMode: 'grouped',
   searchQuery: '',
@@ -72,6 +75,7 @@ export const useUIStore = create<UIState>()((set) => ({
       return { activeQuickFilters: active }
     }),
   setActiveQuickFilters: (activeQuickFilters) => set({ activeQuickFilters }),
+  setOnlyFlying: (onlyFlying) => set({ onlyFlying }),
   setActiveSort: (activeSort) => set({ activeSort }),
   setViewMode: (viewMode) => set({ viewMode }),
   setSearchQuery: (searchQuery) => set({ searchQuery }),

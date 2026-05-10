@@ -1970,6 +1970,19 @@ button:disabled {
   gap: 8px;
 }
 
+.filter-row__grades {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.filter-row__divider {
+  width: 1px;
+  height: 20px;
+  background: color-mix(in srgb, var(--pl-fg-0) 13%, transparent);
+}
+
 .control-row {
   flex: 0 1 auto;
   justify-content: space-between;
@@ -2007,6 +2020,20 @@ button:disabled {
   background: var(--pl-fg-0);
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.34);
   color: var(--pl-bg-0);
+}
+
+.chip--feature {
+  gap: 6px;
+  border-color: color-mix(in srgb, var(--pl-success) 30%, var(--pl-border-1));
+  background: color-mix(in srgb, var(--pl-success) 5%, transparent);
+  color: color-mix(in srgb, var(--pl-success) 78%, var(--pl-fg-1));
+}
+
+.chip--feature-active {
+  border-color: color-mix(in srgb, var(--pl-success) 72%, var(--pl-fg-0));
+  background: color-mix(in srgb, var(--pl-success) 20%, rgba(255, 255, 255, 0.04));
+  box-shadow: 0 8px 24px color-mix(in srgb, var(--pl-success) 16%, transparent);
+  color: var(--pl-fg-0);
 }
 
 .chip--accent,
@@ -2211,6 +2238,19 @@ button:disabled {
   background: var(--pl-fg-0);
   box-shadow: 0 8px 22px rgba(0, 0, 0, 0.32);
   color: var(--pl-bg-0);
+}
+
+.selection-compact-chip--feature {
+  gap: 6px;
+  border-color: color-mix(in srgb, var(--pl-success) 28%, var(--pl-border-1));
+  color: color-mix(in srgb, var(--pl-success) 78%, var(--pl-fg-1));
+}
+
+.selection-compact-chip--feature-active {
+  border-color: color-mix(in srgb, var(--pl-success) 68%, var(--pl-fg-0));
+  background: color-mix(in srgb, var(--pl-success) 18%, rgba(255, 255, 255, 0.04));
+  box-shadow: 0 8px 22px color-mix(in srgb, var(--pl-success) 14%, transparent);
+  color: var(--pl-fg-0);
 }
 
 .selection-compact-status {

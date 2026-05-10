@@ -222,10 +222,12 @@
       "primaryFilters": "Primary filters",
       "more": "More",
       "moreFilters": "More filters",
+      "featureFilters": "Frame features",
       "sort": "Sort",
       "view": "View"
     },
     "quickFilters": {
+      "groupLabel": "Grade filters",
       "select": "Top select",
       "usable": "Usable",
       "record": "Record",
@@ -303,6 +305,10 @@
       "unconfirmedHeadDetail": "Key head features are incomplete; confirm the species in the species panel before adding it to Plumetrail",
       "unconfirmedGenericDetail": "Species identification needs review; confirm it in the species panel before adding it to Plumetrail",
       "partialUnconfirmed": "Partial pending review"
+    },
+    "featureFilters": {
+      "onlyFlying": "Flying only",
+      "onlyFlyingHint": "Show flying frames within the current grade filters"
     },
     "poseTags": {
       "eye_visible": "Eye visible",

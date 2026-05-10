@@ -20,6 +20,7 @@ interface TestPhotoFixture {
   analysisStatus?: 'done' | 'failed'
   birdCount?: number
   bbox?: { x1: number; y1: number; x2: number; y2: number; confidence: number }
+  posture?: 'flying' | 'perched' | 'unknown'
 }
 
 const TEST_LIB = {
@@ -177,8 +178,36 @@ const TEST_MANY_GROUP_PHOTOS: TestPhotoFixture[] = Array.from({ length: 64 }, (_
     latin,
     grade,
     score: Math.max(0.42, 0.88 - idx * 0.006),
+    posture: idx % 5 === 0 ? 'flying' : 'perched',
   }
 })
+
+function makePose(posture: 'flying' | 'perched' | 'unknown') {
+  const flying = posture === 'flying'
+  return {
+    bill: { x: 1920, y: 1180, confidence: 0.9 },
+    crown: { x: 1900, y: 1100, confidence: 0.88 },
+    nape: { x: 1840, y: 1160, confidence: 0.86 },
+    left_eye: { x: 1910, y: 1140, confidence: 0.82 },
+    right_eye: { x: 1960, y: 1145, confidence: flying ? 0.78 : 0.36 },
+    belly: { x: 1990, y: 1540, confidence: 0.82 },
+    breast: { x: 1960, y: 1420, confidence: 0.84 },
+    back: { x: 1860, y: 1460, confidence: 0.8 },
+    tail: { x: 1760, y: 1800, confidence: flying ? 0.64 : 0.52 },
+    left_wing: { x: 1690, y: 1360, confidence: flying ? 0.8 : 0.22 },
+    right_wing: { x: 2240, y: 1370, confidence: flying ? 0.82 : 0.24 },
+    head_visible: true,
+    eye_visible: true,
+    body_visible: true,
+    tail_visible: true,
+    wings_visible: flying,
+    view_angle: flying ? 'side' : 'frontal',
+    facing: flying ? 'right' : 'unknown',
+    posture,
+    posture_confidence: flying ? 0.86 : 0.08,
+    posture_method: 'classifier',
+  }
+}
 
 async function mockBackend(
   page: Page,
@@ -390,6 +419,7 @@ async function mockBackend(
           ? `2026-04-23T07:00:${String(burstSecond).padStart(2, '0')}+00:00`
           : `2026-04-23T07:0${idx}:00+00:00`
       const bbox = p.bbox ?? { x1: 1700, y1: 800, x2: 2200, y2: 2200, confidence: 0.93 }
+      const pose = options.manyGroups && p.posture ? makePose(p.posture) : null
 
       return {
         id: p.id,
@@ -439,7 +469,7 @@ async function mockBackend(
             : {
                 index: 0,
                 bbox,
-                pose: null,
+                pose,
                 quality: { clipiqa: p.score, hyperiqa: p.score, combined: p.score },
                 species: p.species,
                 species_latin: p.latin,
@@ -817,6 +847,61 @@ test.describe('Photo stack interactions (mock backend)', () => {
 
     const after = await scroller.evaluate((node) => (node as HTMLElement).scrollTop)
     expect(after).toBeGreaterThan(before - 120)
+  })
+
+  test('flying-only filter narrows results without changing grade filter semantics', async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 1680, height: 1040 })
+    await mockBackend(page, { manyGroups: true })
+    await page.goto('/')
+    await page.getByRole('button', { name: '选片', exact: true }).click()
+    await page.getByRole('button', { name: '平铺', exact: true }).click()
+
+    const filters = page.locator('.filter-row')
+    const flyingOnly = filters.getByRole('button', { name: '仅飞版', exact: true })
+    await expect(flyingOnly).toBeVisible()
+    await expect(page.locator('.photo-tile').filter({ hasText: 'MANY_0002.JPG' })).toBeVisible()
+
+    await flyingOnly.click()
+    await expect(flyingOnly).toHaveAttribute('aria-pressed', 'true')
+    await expect(page.locator('.photo-tile').filter({ hasText: 'MANY_0001.JPG' })).toBeVisible()
+    await expect(page.locator('.photo-tile').filter({ hasText: 'MANY_0002.JPG' })).toHaveCount(0)
+    await expect(page.locator('.photo-tile').filter({ hasText: 'MANY_0006.JPG' })).toBeVisible()
+
+    await filters.getByRole('button', { name: '精选', exact: true }).click()
+    await expect(page.locator('.photo-tile').filter({ hasText: 'MANY_0001.JPG' })).toHaveCount(0)
+    await expect(page.locator('.photo-tile').filter({ hasText: 'MANY_0006.JPG' })).toBeVisible()
+  })
+
+  test('compact flying-only filter preserves the current scroll position', async ({ page }) => {
+    await page.setViewportSize({ width: 1680, height: 1040 })
+    await mockBackend(page, { manyGroups: true })
+    await page.goto('/')
+    await page.getByRole('button', { name: '选片', exact: true }).click()
+
+    const scroller = page.locator('.selection-main.selection-scroll')
+    await expect(page.locator('.photo-group').first()).toBeVisible()
+    await scroller.evaluate((node) => {
+      const scrollerElement = node as HTMLElement
+      scrollerElement.scrollTo({ top: 1400 })
+      scrollerElement.dispatchEvent(new Event('scroll', { bubbles: true }))
+    })
+    await waitForSelectionScrollSettled(page)
+
+    const before = await scroller.evaluate((node) => (node as HTMLElement).scrollTop)
+    expect(before).toBeGreaterThan(1000)
+
+    const compactFilters = page.locator('.selection-compact-filter-row')
+    const flyingOnly = compactFilters.getByRole('button', { name: '仅飞版', exact: true })
+    await expect(page.locator('.selection-compact-header--visible')).toBeVisible()
+    await expect(flyingOnly).toBeVisible()
+    await flyingOnly.click()
+    await waitForSelectionScrollSettled(page)
+
+    const after = await scroller.evaluate((node) => (node as HTMLElement).scrollTop)
+    expect(after).toBeGreaterThan(600)
+    await expect(flyingOnly).toHaveAttribute('aria-pressed', 'true')
   })
 
   test('back-to-top returns the virtualized selection list to the absolute top', async ({

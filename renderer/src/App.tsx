@@ -703,6 +703,18 @@ function filterPhotoByQuickFilters(photo: PhotoRecord, filters: QuickFilter[]): 
   return filters.includes(photoCategory(photo))
 }
 
+function photoHasFlyingPosture(photo: PhotoRecord): boolean {
+  const bestDetectionPose = photo.birdDetections?.find((detection) => detection.isBest)?.pose
+  const pose = photo.bestPose ?? bestDetectionPose ?? null
+  if (pose?.posture === 'flying') return true
+  return photo.poseTags.includes('wings_open')
+}
+
+function filterPhotoByFeatureConstraints(photo: PhotoRecord, onlyFlying: boolean): boolean {
+  if (!onlyFlying) return true
+  return photo.analysisStatus === 'done' && photoHasFlyingPosture(photo)
+}
+
 // 档位优先级：精选(3) > 可用(2) > 记录(1) > 淘汰(0)
 const GRADE_RANK: Record<PhotoGrade, number> = {
   select: 3,
@@ -2096,6 +2108,7 @@ export default function App() {
     activeFolderId,
     activeSpeciesId,
     activeQuickFilters,
+    onlyFlying,
     activeSort,
     viewMode,
     searchQuery,
@@ -2106,6 +2119,7 @@ export default function App() {
     setActiveFolderId,
     setActiveSpeciesId,
     setActiveQuickFilter,
+    setOnlyFlying,
     setActiveSort,
     setViewMode,
     setSearchQuery,
@@ -2119,6 +2133,7 @@ export default function App() {
       activeFolderId: state.activeFolderId,
       activeSpeciesId: state.activeSpeciesId,
       activeQuickFilters: state.activeQuickFilters,
+      onlyFlying: state.onlyFlying,
       activeSort: state.activeSort,
       viewMode: state.viewMode,
       searchQuery: state.searchQuery,
@@ -2129,6 +2144,7 @@ export default function App() {
       setActiveFolderId: state.setActiveFolderId,
       setActiveSpeciesId: state.setActiveSpeciesId,
       setActiveQuickFilter: state.setActiveQuickFilter,
+      setOnlyFlying: state.setOnlyFlying,
       setActiveSort: state.setActiveSort,
       setViewMode: state.setViewMode,
       setSearchQuery: state.setSearchQuery,
@@ -2253,11 +2269,12 @@ export default function App() {
         activeFolderPhotos.filter(
           (photo) =>
             filterPhotoByQuickFilters(photo, activeQuickFilters) &&
+            filterPhotoByFeatureConstraints(photo, onlyFlying) &&
             matchesQuery([photo.fileName, photo.speciesName, photo.caption], deferredSearch),
         ),
         activeSort,
       ),
-    [activeFolderPhotos, activeQuickFilters, activeSort, deferredSearch],
+    [activeFolderPhotos, activeQuickFilters, activeSort, deferredSearch, onlyFlying],
   )
   const groupStartMs = useMemo(() => buildGroupStartMsMap(activeFolderPhotos), [activeFolderPhotos])
 
@@ -2832,6 +2849,7 @@ export default function App() {
           activeFolder={activeFolder}
           activeFolderSummary={activeFolderSummary}
           activeQuickFilters={activeQuickFilters}
+          onlyFlying={onlyFlying}
           activeSort={activeSort}
           analysisStarting={startBatch.isPending}
           filteredGroups={folderGroups}
@@ -2852,6 +2870,7 @@ export default function App() {
           progressEvent={progressEvent}
           relinkingFolderId={relinkingFolderId}
           setActiveQuickFilter={setActiveQuickFilter}
+          setOnlyFlying={setOnlyFlying}
           setActiveSort={setActiveSort}
           setFocusedPhotoId={setFocusedPhotoId}
           setRoute={setRoute}
@@ -3550,6 +3569,7 @@ function SelectionScreen({
   activeFolder,
   activeFolderSummary,
   activeQuickFilters,
+  onlyFlying,
   activeSort,
   analysisStarting,
   filteredGroups,
@@ -3570,6 +3590,7 @@ function SelectionScreen({
   progressEvent,
   relinkingFolderId,
   setActiveQuickFilter,
+  setOnlyFlying,
   setActiveSort,
   setFocusedPhotoId,
   setRoute,
@@ -3581,6 +3602,7 @@ function SelectionScreen({
   activeFolder: FolderRecord | null
   activeFolderSummary: FolderSummary
   activeQuickFilters: QuickFilter[]
+  onlyFlying: boolean
   activeSort: SortMode
   analysisStarting: boolean
   filteredGroups: Array<{ group: PhotoGroupRecord; photos: PhotoRecord[] }>
@@ -3601,6 +3623,7 @@ function SelectionScreen({
   progressEvent: AnalysisProgressEventLite | null
   relinkingFolderId: string | null
   setActiveQuickFilter: (filter: QuickFilter) => void
+  setOnlyFlying: (enabled: boolean) => void
   setActiveSort: (sort: SortMode) => void
   setFocusedPhotoId: (photoId: string | null) => void
   setRoute: (route: AppRoute) => void
@@ -3805,7 +3828,9 @@ function SelectionScreen({
           <SelectionControls
             activeQuickFilters={activeQuickFilters}
             activeSort={activeSort}
+            onlyFlying={onlyFlying}
             setActiveQuickFilter={setActiveQuickFilter}
+            setOnlyFlying={setOnlyFlying}
             setActiveSort={setActiveSort}
             setViewMode={setViewMode}
             t={t}
@@ -3847,10 +3872,12 @@ function SelectionScreen({
         compactMoreRef={compactMoreRef}
         onOpenExport={onOpenExport}
         onStartAnalysis={onStartAnalysis}
+        onlyFlying={onlyFlying}
         progressEvent={progressEvent}
         setActiveQuickFilter={setActiveQuickFilter}
         setActiveSort={setActiveSort}
         setCompactMoreOpen={setCompactMoreOpen}
+        setOnlyFlying={setOnlyFlying}
         setViewMode={setViewMode}
         summary={activeFolderSummary}
         t={t}
@@ -3977,10 +4004,12 @@ function SelectionCompactHeader({
   compactMoreRef,
   onOpenExport,
   onStartAnalysis,
+  onlyFlying,
   progressEvent,
   setActiveQuickFilter,
   setActiveSort,
   setCompactMoreOpen,
+  setOnlyFlying,
   setViewMode,
   summary,
   t,
@@ -3995,10 +4024,12 @@ function SelectionCompactHeader({
   compactMoreRef: RefObject<HTMLDivElement | null>
   onOpenExport: () => void
   onStartAnalysis: () => void
+  onlyFlying: boolean
   progressEvent: AnalysisProgressEventLite | null
   setActiveQuickFilter: (filter: QuickFilter) => void
   setActiveSort: (sort: SortMode) => void
   setCompactMoreOpen: (open: boolean) => void
+  setOnlyFlying: (enabled: boolean) => void
   setViewMode: (mode: ViewMode) => void
   summary: FolderSummary
   t: ReturnType<typeof useTranslation>['t']
@@ -4063,6 +4094,19 @@ function SelectionCompactHeader({
             {t(quickFilterLabelKey(filter))}
           </button>
         ))}
+        <button
+          aria-pressed={onlyFlying}
+          className={cn(
+            'selection-compact-chip selection-compact-chip--feature',
+            onlyFlying && 'selection-compact-chip--feature-active',
+          )}
+          onClick={() => setOnlyFlying(!onlyFlying)}
+          title={t('selection.featureFilters.onlyFlyingHint')}
+          type="button"
+        >
+          <Feather className="h-3.5 w-3.5" />
+          {t('selection.featureFilters.onlyFlying')}
+        </button>
       </div>
 
       <div className="selection-compact-header__actions">
@@ -4131,6 +4175,24 @@ function SelectionCompactHeader({
                       {t(quickFilterLabelKey(filter))}
                     </button>
                   ))}
+                </div>
+              </div>
+              <div className="selection-compact-menu__section">
+                <span>{t('selection.compact.featureFilters')}</span>
+                <div className="selection-compact-menu__chips">
+                  <button
+                    aria-pressed={onlyFlying}
+                    className={cn(
+                      'selection-compact-chip selection-compact-chip--feature',
+                      onlyFlying && 'selection-compact-chip--feature-active',
+                    )}
+                    onClick={() => setOnlyFlying(!onlyFlying)}
+                    title={t('selection.featureFilters.onlyFlyingHint')}
+                    type="button"
+                  >
+                    <Feather className="h-3.5 w-3.5" />
+                    {t('selection.featureFilters.onlyFlying')}
+                  </button>
                 </div>
               </div>
               <div className="selection-compact-menu__section">
@@ -4488,7 +4550,9 @@ function MetricStrip({
 function SelectionControls({
   activeQuickFilters,
   activeSort,
+  onlyFlying,
   setActiveQuickFilter,
+  setOnlyFlying,
   setActiveSort,
   setViewMode,
   t,
@@ -4496,7 +4560,9 @@ function SelectionControls({
 }: {
   activeQuickFilters: QuickFilter[]
   activeSort: SortMode
+  onlyFlying: boolean
   setActiveQuickFilter: (filter: QuickFilter) => void
+  setOnlyFlying: (enabled: boolean) => void
   setActiveSort: (sort: SortMode) => void
   setViewMode: (mode: ViewMode) => void
   t: ReturnType<typeof useTranslation>['t']
@@ -4505,16 +4571,29 @@ function SelectionControls({
   return (
     <section className="selection-controls">
       <div className="filter-row">
-        {quickFilters.map((filter) => (
-          <button
-            className={cn('chip', activeQuickFilters.includes(filter) && 'chip--active')}
-            key={filter}
-            onClick={() => setActiveQuickFilter(filter)}
-            type="button"
-          >
-            {t(quickFilterLabelKey(filter))}
-          </button>
-        ))}
+        <div className="filter-row__grades" aria-label={t('selection.quickFilters.groupLabel')}>
+          {quickFilters.map((filter) => (
+            <button
+              className={cn('chip', activeQuickFilters.includes(filter) && 'chip--active')}
+              key={filter}
+              onClick={() => setActiveQuickFilter(filter)}
+              type="button"
+            >
+              {t(quickFilterLabelKey(filter))}
+            </button>
+          ))}
+        </div>
+        <span className="filter-row__divider" aria-hidden="true" />
+        <button
+          aria-pressed={onlyFlying}
+          className={cn('chip chip--feature', onlyFlying && 'chip--feature-active')}
+          onClick={() => setOnlyFlying(!onlyFlying)}
+          title={t('selection.featureFilters.onlyFlyingHint')}
+          type="button"
+        >
+          <Feather className="h-3.5 w-3.5" />
+          {t('selection.featureFilters.onlyFlying')}
+        </button>
       </div>
       <div className="control-row">
         <div className="mini-segment">
