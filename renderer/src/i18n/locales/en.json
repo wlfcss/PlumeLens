@@ -314,7 +314,7 @@
     "problemTags": {
       "no_bird": "No bird",
       "subject_small": "Small subject",
-      "eye_soft": "Soft eye",
+      "eye_soft": "Eye uncertain",
       "head_occluded": "Head occluded",
       "wing_cropped": "Wing cropped",
       "low_species_confidence": "Low species confidence"

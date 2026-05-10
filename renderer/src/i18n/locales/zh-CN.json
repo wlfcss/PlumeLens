@@ -314,7 +314,7 @@
     "problemTags": {
       "no_bird": "无鸟",
       "subject_small": "主体太小",
-      "eye_soft": "眼不清",
+      "eye_soft": "见眼不足",
       "head_occluded": "头部遮挡",
       "wing_cropped": "翅膀截断",
       "low_species_confidence": "物种置信低"

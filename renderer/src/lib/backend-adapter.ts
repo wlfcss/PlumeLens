@@ -236,7 +236,8 @@ function deriveProblemTags(row: PhotoRow): ProblemTagId[] {
     if (!pose.head_visible) {
       tags.push('head_occluded')
     } else if (!pose.eye_visible) {
-      // 头可见但眼不可见 → 眼区清晰度不够(头部正面 ✓ 时 eye_soft 比 head_occluded 准确)
+      // 头可见但眼部关键点置信不足。这里表达的是 pose 可见性证据不足,
+      // 不是独立的眼部清晰度模型判断。
       tags.push('eye_soft')
     }
   }
