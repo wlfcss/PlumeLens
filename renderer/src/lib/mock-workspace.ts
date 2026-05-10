@@ -99,8 +99,8 @@ export interface BirdDetectionRecord {
   manualSpecies: boolean
   isBest: boolean
   // 每个 detection 独立的 species_source（多鸟图混合可见性的关键 — 后端 v6 schema）。
-  // 羽迹聚合按 detection 维度，head 不可见的 detection（speciesSource ===
-  // 'model_unconfirmed'）不进羽迹，直到用户在深度复核确认。
+  // 羽迹聚合按 detection 维度，model_unconfirmed 的 detection 不进羽迹，
+  // 直到用户在深度复核确认。
   speciesSource?: 'none' | 'model' | 'model_unconfirmed' | 'manual' | 'group_consensus' | 'conflict'
 }
 
@@ -145,8 +145,8 @@ export interface PhotoRecord {
   speciesLatinName: string | null
   speciesEnglishName?: string | null
   manualSpecies?: boolean
-  // model_unconfirmed: head 不可见但模型给了识别 → "不全 · 待审"，不进羽迹，
-  // 用户在深度复核确认后升级为 manual。group consensus 可覆盖为 group_consensus。
+  // model_unconfirmed: 物种 reject head 不确定，或鸟头/关键特征不完整但模型给了识别。
+  // 不进羽迹，用户在深度复核确认后升级为 manual。group consensus 可覆盖为 group_consensus。
   speciesSource?: 'none' | 'model' | 'model_unconfirmed' | 'manual' | 'group_consensus' | 'conflict'
   modelSpeciesName?: string | null
   modelSpeciesLatinName?: string | null

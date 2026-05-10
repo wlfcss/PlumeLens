@@ -690,6 +690,9 @@ function SpeciesOverrideEditor({
   const currentName =
     activeBird.speciesName ??
     (activeBird.speciesCandidates[0]?.name || t('selection.photo.unidentified'))
+  const activeSpeciesSource = activeBird.speciesSource ?? photo.speciesSource
+  const needsSpeciesReview =
+    activeSpeciesSource === 'model_unconfirmed' && !activeBird.manualSpecies
 
   return (
     <div className={cn('species-editor', expanded && 'species-editor--expanded')}>
@@ -740,17 +743,22 @@ function SpeciesOverrideEditor({
           className={cn('species-editor__chevron', expanded && 'species-editor__chevron--open')}
         />
       </button>
+      {needsSpeciesReview ? (
+        <div className="species-editor__review-note" role="note">
+          {t(
+            expanded
+              ? 'selection.speciesEditor.reviewHintExpanded'
+              : 'selection.speciesEditor.reviewHintCollapsed',
+          )}
+        </div>
+      ) : null}
 
       {/* 折叠状态:以上头部 + 当前物种行就够;展开才显示候选/搜索/清除。
           按 activeBird.speciesSource 判断（v6 detection-level）— 多鸟图混合可见性
           下，每个 detection 独立判断按钮显隐，不被 photo-level 一刀切。 */}
       {expanded ? (
         <>
-          {(activeBird.speciesSource === 'model_unconfirmed' ||
-            (activeBird.speciesSource === undefined &&
-              photo.speciesSource === 'model_unconfirmed')) &&
-          !activeBird.manualSpecies &&
-          activeBird.speciesLatinName ? (
+          {needsSpeciesReview && activeBird.speciesLatinName ? (
             <button
               className="species-editor__confirm"
               onClick={() =>

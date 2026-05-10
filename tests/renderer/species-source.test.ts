@@ -5,11 +5,11 @@
  *   (a) v4 reject head: candidate.recognitionState === 'uncertain'
  *   (b) head 不可见: pose.head_visible === false
  * 之前一律展示 (b) 文案,在 (a) 场景跟 head ✓ UI 直接矛盾(用户实测截图)。
- * 现在 speciesSourceDetail 按实际成因分流,本测试锁定行为。
+ * 现在 speciesSourceDetail / speciesSourceBadge 按实际成因分流,本测试锁定行为。
  */
 import { describe, expect, it } from 'vitest'
 
-import { speciesSourceDetail } from '@/App'
+import { speciesSourceBadge, speciesSourceDetail } from '@/App'
 import type { PhotoRecord } from '@/lib/mock-workspace'
 
 type Detection = NonNullable<PhotoRecord['birdDetections']>[number]
@@ -118,6 +118,8 @@ describe('speciesSourceDetail — model_unconfirmed cause differentiation', () =
     })
     const detail = speciesSourceDetail(photo, tFake, detection)
     expect(detail).toBe('selection.speciesSource.unconfirmedUncertainDetail')
+    const badge = speciesSourceBadge(photo, tFake, detection)
+    expect(badge).toBe('selection.speciesSource.unconfirmedSpecies')
   })
 
   it('head invisible → head 文案', () => {
@@ -143,6 +145,8 @@ describe('speciesSourceDetail — model_unconfirmed cause differentiation', () =
     })
     const detail = speciesSourceDetail(photo, tFake, detection)
     expect(detail).toBe('selection.speciesSource.unconfirmedHeadDetail')
+    const badge = speciesSourceBadge(photo, tFake, detection)
+    expect(badge).toBe('selection.speciesSource.unconfirmedIncomplete')
   })
 
   it('uncertain + head invisible → uncertain 文案优先(reject head 是更直接的成因)', () => {
@@ -168,6 +172,32 @@ describe('speciesSourceDetail — model_unconfirmed cause differentiation', () =
     })
     const detail = speciesSourceDetail(photo, tFake, detection)
     expect(detail).toBe('selection.speciesSource.unconfirmedUncertainDetail')
+  })
+
+  it('photo-level fallback 使用 photo candidates / bestPose 判定，不误报不全', () => {
+    const photo = makePhoto({
+      bestPose: {
+        bill: { x: 0, y: 0, confidence: 0.9 },
+        crown: { x: 0, y: 0, confidence: 0.9 },
+        nape: { x: 0, y: 0, confidence: 0.9 },
+        left_eye: { x: 0, y: 0, confidence: 0.8 },
+        right_eye: { x: 0, y: 0, confidence: 0.8 },
+        head_visible: true,
+        eye_visible: true,
+      },
+      speciesCandidates: [
+        {
+          name: '印度寿带',
+          latinName: 'Terpsiphone paradisi',
+          confidence: 0.96,
+          recognitionState: 'uncertain',
+        },
+      ],
+    })
+    const detail = speciesSourceDetail(photo, tFake)
+    const badge = speciesSourceBadge(photo, tFake)
+    expect(detail).toBe('selection.speciesSource.unconfirmedUncertainDetail')
+    expect(badge).toBe('selection.speciesSource.unconfirmedSpecies')
   })
 
   it('pose missing → 当 head 不可见处理(老数据兼容)', () => {

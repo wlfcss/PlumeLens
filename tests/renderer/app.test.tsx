@@ -458,6 +458,43 @@ describe('App', () => {
       i18next.t.bind(i18next) as never,
     )
     expect(partialBadge?.kind).toBe('unconfirmed')
+
+    // 全部 detection 都是待审时，tile 也必须按 best detection 的真实成因显示；
+    // 不能退回 photo-level 后因为缺 pose/candidates 误报成"不全 · 待审"。
+    const allUnconfirmedUncertain = {
+      ...singleBird,
+      id: 'p-all-unconfirmed-uncertain',
+      speciesSource: 'model_unconfirmed',
+      speciesCandidates: [],
+      birdDetections: [
+        {
+          ...singleBird.birdDetections![0],
+          speciesSource: 'model_unconfirmed',
+          pose: {
+            bill: { x: 0, y: 0, confidence: 0.9 },
+            crown: { x: 0, y: 0, confidence: 0.9 },
+            nape: { x: 0, y: 0, confidence: 0.9 },
+            left_eye: { x: 0, y: 0, confidence: 0.8 },
+            right_eye: { x: 0, y: 0, confidence: 0.8 },
+            head_visible: true,
+            eye_visible: true,
+          },
+          speciesCandidates: [
+            {
+              name: '白鹭',
+              latinName: 'Egretta garzetta',
+              confidence: 0.61,
+              recognitionState: 'uncertain',
+            },
+          ],
+        },
+      ],
+    } as PhotoRecord
+    const uncertainBadge = tileSpeciesSourceBadge(
+      allUnconfirmedUncertain,
+      i18next.t.bind(i18next) as never,
+    )
+    expect(uncertainBadge).toEqual({ label: '物种待审', kind: 'unconfirmed' })
   })
 
   it('aggregates multi-bird mixed visibility per detection (v6 detection-level)', () => {

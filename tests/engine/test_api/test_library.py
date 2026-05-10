@@ -601,11 +601,11 @@ class TestListAndDetail:
         assert paged["photos"][0]["species_source"] == "group_consensus"
         assert paged["photos"][0]["group_species_latin"] == "Zosterops simplex"
 
-    async def test_v4_uncertain_candidate_is_not_promoted_by_group_consensus(
+    async def test_v4_uncertain_candidate_is_promoted_by_group_consensus(
         self,
         real_client,
     ) -> None:
-        """v4 uncertain 只能作为复核候选，不能被同组共识自动升级进羽迹。"""
+        """v4 uncertain 单张待审，但可信组内共识可以覆盖并计入羽迹。"""
         client, tmp = real_client
         lib_root = tmp / "lib_uncertain_consensus"
         for name in ("a.jpg", "b.jpg", "c.jpg", "d.jpg"):
@@ -684,8 +684,9 @@ class TestListAndDetail:
         by_name = {p["file_name"]: p for p in detail["photos"]}
 
         assert by_name["a.jpg"]["species_source"] == "model"
-        assert by_name["d.jpg"]["species_source"] == "model_unconfirmed"
-        assert by_name["d.jpg"]["best_detection"]["species_source"] == "model_unconfirmed"
+        assert by_name["d.jpg"]["species_source"] == "group_consensus"
+        assert by_name["d.jpg"]["best_detection"]["species_source"] == "group_consensus"
+        assert by_name["d.jpg"]["species_latin"] == "Zosterops simplex"
         assert by_name["d.jpg"]["group_species_latin"] == "Zosterops simplex"
         assert by_name["d.jpg"]["group_species_evidence"] == 3
 

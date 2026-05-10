@@ -116,6 +116,8 @@
   },
   "selection": {
     "currentFolder": "Current folder",
+    "dateLocale": "en-US",
+    "scrollTop": "Back to top",
     "importFailed": "Failed to import folder: {{detail}}\n\nPlease confirm the backend engine is ready and the path is valid, then try again.",
     "folderStatus": {
       "idle": "Idle",
@@ -276,18 +278,21 @@
     },
     "speciesSource": {
       "inline": "({{source}})",
-      "groupConsensus": "Recognition correction",
-      "groupConsensusDetail": "Recognition correction {{support}}",
-      "groupConsensusWithRaw": "Recognition correction {{support}} · Raw: {{species}}",
+      "groupConsensus": "Group consensus",
+      "groupConsensusDetail": "Group consensus {{support}}",
+      "groupConsensusWithRaw": "Group consensus {{support}} · Raw: {{species}}",
       "manual": "Manual species",
       "manualDetail": "Manual species override",
       "conflict": "Group conflict",
       "conflictDetail": "Group conflict; keeping the high-confidence single-frame result",
       "unconfirmed": "Partial · Pending review",
-      "unconfirmedDetail": "Low recognition confidence; confirm before adding to Plumetrail",
-      "unconfirmedUncertainDetail": "Low recognition confidence; confirm before adding to Plumetrail",
-      "unconfirmedHeadDetail": "Head not visible; confirm before adding to Plumetrail",
-      "unconfirmedGenericDetail": "Low recognition confidence; confirm before adding to Plumetrail",
+      "unconfirmedSpecies": "Species pending review",
+      "unconfirmedIncomplete": "Partial · Pending review",
+      "unconfirmedGeneric": "Recognition pending review",
+      "unconfirmedDetail": "Species identification confidence is low; confirm it in the species panel before adding it to Plumetrail",
+      "unconfirmedUncertainDetail": "Species identification confidence is low; confirm it in the species panel before adding it to Plumetrail",
+      "unconfirmedHeadDetail": "Key head features are incomplete; confirm the species in the species panel before adding it to Plumetrail",
+      "unconfirmedGenericDetail": "Species identification needs review; confirm it in the species panel before adding it to Plumetrail",
       "partialUnconfirmed": "Partial pending review"
     },
     "poseTags": {
@@ -330,15 +335,28 @@
       "reject": "Reject"
     },
     "inspector": {
-      "label": "Inspector",
+      "label": "Review summary",
       "active": "Active photo",
       "idle": "Quick context",
       "score": "Final score",
+      "gradeSource": "{{source}} grade",
+      "scoreSection": "Scoring evidence",
+      "speciesSection": "Species call",
+      "subjectSection": "Subject state",
+      "fileSection": "File and capture",
+      "candidates": "Species candidates",
+      "noCandidates": "No candidates",
+      "detectionConfidence": "Detection confidence",
       "problemFocus": "Focus issues",
       "cleanFrame": "Clean frame",
       "clear": "Clear selection",
+      "visibility": {
+        "visible": "visible",
+        "missing": "missing",
+        "unknown": "unknown"
+      },
       "idleTitle": "Pick a frame first",
-      "idleBody": "The inspector keeps score, pose, species, and problem tags one glance away so you can avoid opening the full review panel every time."
+      "idleBody": "The inspector summarizes grade, species source, subject visibility, and capture context so you can decide quickly whether a deep review is needed."
     },
     "editor": {
       "label": "Open in editor",
@@ -429,15 +447,18 @@
       "bird": "Bird",
       "clear": "Clear manual species",
       "confirmModel": "Confirm current identification",
-      "confirmModelHint": "Once confirmed, this photo counts toward archive collection under this species",
+      "confirmModelHint": "Once confirmed, this photo counts toward Plumetrail under this species",
       "manual": "Manual",
       "manualOnly": "Manual",
       "noLatin": "No scientific name",
+      "reviewHintCollapsed": "Species identification is pending review: expand to confirm the current ID or search for the correct species.",
+      "reviewHintExpanded": "Confirm the current ID or search for the correct species; it will not count toward Plumetrail until confirmed.",
       "search": "Search Chinese, English, or scientific name"
     },
     "exif": {
       "shutter": "Shutter",
       "aperture": "Aperture",
+      "iso": "ISO",
       "focalLength": "Focal length",
       "camera": "Camera",
       "lens": "Lens",

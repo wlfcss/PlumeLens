@@ -242,11 +242,21 @@ def _species_candidate_auto_eligible(candidate: Mapping[str, object]) -> bool:
     """Whether a candidate may be used as an automatic species conclusion.
 
     Legacy v3 results do not carry recognition_state, so `None` remains eligible.
-    v4 only allows explicit `recognized`; `uncertain` and `unrecognized` stay
-    review-only and must not be promoted by group consensus.
+    v4 only allows explicit `recognized`; `uncertain` and `unrecognized` do not
+    help form group consensus.
     """
     state = _species_candidate_state(candidate)
     return state is None or state == "recognized"
+
+
+def _species_candidate_can_follow_consensus(candidate: Mapping[str, object]) -> bool:
+    """Whether a top candidate may be overwritten by an already-formed consensus.
+
+    `uncertain` is a review-only single-frame result, but a trusted scene-level
+    consensus is stronger evidence. `unrecognized` means the reject head found no
+    usable species candidate and should remain out of archive species.
+    """
+    return _species_candidate_state(candidate) != "unrecognized"
 
 
 def _best_candidate(photo: PhotoRow) -> tuple[str | None, str | None, float]:
@@ -261,6 +271,23 @@ def _best_candidate(photo: PhotoRow) -> tuple[str | None, str | None, float]:
         return None, None, 0.0
     name, _ = _candidate_display(first, sci)
     return sci, name, _species_candidate_confidence(first)
+
+
+def _top_candidate_for_consensus_follow(
+    photo: PhotoRow,
+) -> tuple[str | None, str | None, float, str | None]:
+    candidates = photo.best_detection.species_candidates if photo.best_detection else []
+    if not candidates:
+        return None, None, 0.0, None
+    first = candidates[0]
+    state = _species_candidate_state(first)
+    if not _species_candidate_can_follow_consensus(first):
+        return None, None, 0.0, state
+    sci = _candidate_sci(first)
+    if not sci:
+        return None, None, 0.0, state
+    name, _ = _candidate_display(first, sci)
+    return sci, name, _species_candidate_confidence(first), state
 
 
 def _consensus_photo_weight(photo: PhotoRow) -> float:
@@ -518,17 +545,23 @@ def _apply_group_species_consensus(photos: list[PhotoRow]) -> None:
             if photo.bird_count != 1 or photo.best_detection is None or photo.manual_species:
                 continue
             candidates = photo.best_detection.species_candidates
-            if not candidates or not _species_candidate_auto_eligible(candidates[0]):
+            if not candidates or not _species_candidate_can_follow_consensus(candidates[0]):
                 continue
-            original_sci, _original_name, original_conf = _best_candidate(photo)
+            original_sci, _original_name, original_conf, original_state = (
+                _top_candidate_for_consensus_follow(photo)
+            )
             if original_sci == winner_sci:
                 # 模型 top-1 与共识一致 → 通常不需要改 species_source。但若该照片
-                # 当前是 'model_unconfirmed'（head 不可见但模型给了识别），共识就
+                # 当前是 'model_unconfirmed'（head 不可见或 v4 uncertain），共识就
                 # 是"代审"信号 → 升级为 'group_consensus' 让它能进羽迹（规则 #3）。
                 if photo.species_source == "model_unconfirmed":
                     _apply_effective_species(photo, winner_name, winner_sci, "group_consensus")
                 continue
-            if original_sci and original_conf > GROUP_SPECIES_MAX_CONFLICT_TOP1_CONF:
+            if (
+                original_state != "uncertain"
+                and original_sci
+                and original_conf > GROUP_SPECIES_MAX_CONFLICT_TOP1_CONF
+            ):
                 photo.species_conflict = True
                 photo.species_source = "conflict"
                 if photo.best_detection is not None:

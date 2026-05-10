@@ -2,6 +2,7 @@ import {
   Aperture,
   ArrowLeft,
   ArrowRight,
+  ArrowUp,
   Brush,
   Check,
   Clock3,
@@ -108,6 +109,8 @@ const COLLECTION_GRID_MIN_COLUMN_WIDTH = 150
 const COLLECTION_GRID_GAP = 8
 const COLLECTION_HEADING_ESTIMATED_HEIGHT = 52
 const COLLECTION_CARD_ROW_ESTIMATED_HEIGHT = 204
+const SELECTION_HEADER_COMPACT_SCROLL_PX = 88
+const SELECTION_SCROLL_TOP_VISIBLE_PROGRESS = 1 / 3
 
 const ArchiveGeoMap = lazy(() =>
   import('@/components/archive-geo-map').then((module) => ({ default: module.ArchiveGeoMap })),
@@ -1059,14 +1062,19 @@ function openExternalLink(event: ReactMouseEvent<HTMLAnchorElement>, url: string
 // Source helpers 接收可选 detection — 多鸟图深度复核切鸟时，ScoreHeader 会
 // 把 activeBird 传进来；其他场景（PhotoTile、CompareModal）按 photo-level。
 type DetectionLike = NonNullable<PhotoRecord['birdDetections']>[number]
+type UnconfirmedSpeciesCause = 'uncertain' | 'head' | 'generic'
 
 function resolveSourceFor(
   photo: PhotoRecord,
   detection?: DetectionLike | null,
 ): { source: PhotoRecord['speciesSource']; manualSpecies: boolean } {
   if (detection) {
+    const source =
+      photo.speciesSource === 'group_consensus' && detection.isBest && !detection.manualSpecies
+        ? photo.speciesSource
+        : detection.speciesSource
     return {
-      source: detection.speciesSource,
+      source,
       manualSpecies: detection.manualSpecies,
     }
   }
@@ -1074,6 +1082,22 @@ function resolveSourceFor(
     source: photo.speciesSource,
     manualSpecies: photo.manualSpecies ?? false,
   }
+}
+
+export function speciesUnconfirmedCause(
+  photo: PhotoRecord,
+  detection?: DetectionLike | null,
+): UnconfirmedSpeciesCause | null {
+  const { source } = resolveSourceFor(photo, detection)
+  if (source !== 'model_unconfirmed') return null
+
+  const top = detection?.speciesCandidates?.[0] ?? photo.speciesCandidates?.[0]
+  if (top?.recognitionState === 'uncertain') return 'uncertain'
+
+  const pose = detection?.pose ?? photo.bestPose ?? null
+  if (!pose || !pose.head_visible) return 'head'
+
+  return 'generic'
 }
 
 export function speciesSourceTone(photo: PhotoRecord, detection?: DetectionLike | null): Tone {
@@ -1110,7 +1134,10 @@ export function speciesSourceBadge(
     return t('selection.speciesSource.conflict')
   }
   if (source === 'model_unconfirmed') {
-    return t('selection.speciesSource.unconfirmed')
+    const cause = speciesUnconfirmedCause(photo, detection)
+    if (cause === 'uncertain') return t('selection.speciesSource.unconfirmedSpecies')
+    if (cause === 'head') return t('selection.speciesSource.unconfirmedIncomplete')
+    return t('selection.speciesSource.unconfirmedGeneric')
   }
   if (source === 'manual' || manualSpecies) {
     return t('selection.speciesSource.manual')
@@ -1164,25 +1191,13 @@ export function speciesSourceDetail(
     return t('selection.speciesSource.conflictDetail')
   }
   if (source === 'model_unconfirmed') {
-    // model_unconfirmed 在 engine 端有两条独立成因(api/routes/library.py
-    // _build_detection_detail 1131/1134):
-    //   (1) v4 reject head 给出 candidate.recognitionState === 'uncertain'
-    //       — 模型识别本身置信不足,即便 head 完全可见
-    //   (2) head_confirmed === false — pose 模型判定鸟头不可见,识别凭线索
-    //       不足
-    // 之前只用一条"鸟头不可见..."文案,导致情形 (1) 下展示与 head ✓ 直接矛盾
-    // (用户截图实测),分开渲染对应文案才不会误导用户。
-    const top = detection?.speciesCandidates?.[0]
-    const recognitionState = top?.recognitionState
-    const headInvisible = detection?.pose ? !detection.pose.head_visible : true
-    if (recognitionState === 'uncertain') {
+    const cause = speciesUnconfirmedCause(photo, detection)
+    if (cause === 'uncertain') {
       return t('selection.speciesSource.unconfirmedUncertainDetail')
     }
-    if (headInvisible) {
+    if (cause === 'head') {
       return t('selection.speciesSource.unconfirmedHeadDetail')
     }
-    // 兜底:两者皆否(理论上不会进 model_unconfirmed,但留一份安全网避免出
-    // 错误归因)。
     return t('selection.speciesSource.unconfirmedGenericDetail')
   }
   if (source === 'manual' || manualSpecies) {
@@ -1305,11 +1320,20 @@ export function formatPhotoSpeciesDisplay(
   })
 }
 
+function bestDetectionWithSource(photo: PhotoRecord): DetectionLike | null {
+  const detections = photo.birdDetections ?? []
+  return (
+    detections.find((d) => d.isBest && d.speciesSource !== undefined) ??
+    detections.find((d) => d.speciesSource !== undefined) ??
+    null
+  )
+}
+
 // 多鸟图 tile 来源徽标策略：
-// - 全部 detection source 一致 → 走 photo-level（不变）
+// - 有 detection-level source 时，优先用 best detection 判定待审成因
 // - 多源混合且包含 unconfirmed → "部分待审"（warning 色，复用 unconfirmed CSS）
 // - 多源混合不含 unconfirmed → 取最高优先级 source 的 badge（manual > group_consensus > model）
-// 单鸟图直接走 photo-level。
+// - 老数据无 detection source → 走 photo-level fallback。
 export function tileSpeciesSourceBadge(
   photo: PhotoRecord,
   t: ReturnType<typeof useTranslation>['t'],
@@ -1327,9 +1351,9 @@ export function tileSpeciesSourceBadge(
       kind: 'unconfirmed',
     }
   }
-  // 否则走 photo-level（best detection 决定的）
-  const label = speciesSourceBadge(photo, t)
-  const kind = speciesSourceKind(photo)
+  const bestDetection = bestDetectionWithSource(photo)
+  const label = speciesSourceBadge(photo, t, bestDetection)
+  const kind = speciesSourceKind(photo, bestDetection)
   return label && kind ? { label, kind } : null
 }
 
@@ -3522,6 +3546,10 @@ function SelectionScreen({
 }) {
   const selectionScrollRef = useRef<HTMLElement | null>(null)
   const [selectionScrollElement, setSelectionScrollElement] = useState<HTMLElement | null>(null)
+  const [selectionChromeState, setSelectionChromeState] = useState({
+    compact: false,
+    showScrollTop: false,
+  })
   const setSelectionScrollNode = useCallback((node: HTMLElement | null) => {
     selectionScrollRef.current = node
     setSelectionScrollElement((current) => (current === node ? current : node))
@@ -3530,7 +3558,45 @@ function SelectionScreen({
 
   useEffect(() => {
     selectionScrollElement?.scrollTo({ top: 0 })
+    setSelectionChromeState({ compact: false, showScrollTop: false })
   }, [selectionFilterKey, selectionScrollElement])
+
+  useEffect(() => {
+    const node = selectionScrollElement
+    if (!node) return undefined
+
+    let frame = 0
+    const update = () => {
+      frame = 0
+      const maxScroll = Math.max(0, node.scrollHeight - node.clientHeight)
+      const progress = maxScroll > 0 ? node.scrollTop / maxScroll : 0
+      const next = {
+        compact: node.scrollTop > SELECTION_HEADER_COMPACT_SCROLL_PX,
+        showScrollTop: progress > SELECTION_SCROLL_TOP_VISIBLE_PROGRESS,
+      }
+      setSelectionChromeState((current) =>
+        current.compact === next.compact && current.showScrollTop === next.showScrollTop
+          ? current
+          : next,
+      )
+    }
+
+    const requestUpdate = () => {
+      if (frame !== 0) return
+      frame = window.requestAnimationFrame(update)
+    }
+
+    update()
+    node.addEventListener('scroll', requestUpdate, { passive: true })
+    return () => {
+      if (frame !== 0) window.cancelAnimationFrame(frame)
+      node.removeEventListener('scroll', requestUpdate)
+    }
+  }, [selectionScrollElement])
+
+  const scrollSelectionToTop = useCallback(() => {
+    selectionScrollElement?.scrollTo({ top: 0 })
+  }, [selectionScrollElement])
 
   if (!activeFolder) {
     return (
@@ -3559,27 +3625,34 @@ function SelectionScreen({
       />
 
       <section className="selection-main selection-scroll" ref={setSelectionScrollNode}>
-        <FolderTopline
-          activeFolder={activeFolder}
-          analysisStarting={analysisStarting}
-          onOpenExport={onOpenExport}
-          onRelinkFolder={onRelinkFolder}
-          onRenameFolder={onRenameFolder}
-          onStartAnalysis={onStartAnalysis}
-          progressEvent={progressEvent}
-          relinking={relinkingFolderId === activeFolder.id}
-          t={t}
-        />
-        <MetricStrip photos={folderPhotos} summary={activeFolderSummary} t={t} />
-        <SelectionControls
-          activeQuickFilters={activeQuickFilters}
-          activeSort={activeSort}
-          setActiveQuickFilter={setActiveQuickFilter}
-          setActiveSort={setActiveSort}
-          setViewMode={setViewMode}
-          t={t}
-          viewMode={viewMode}
-        />
+        <div
+          className={cn(
+            'selection-sticky-header',
+            selectionChromeState.compact && 'selection-sticky-header--compact',
+          )}
+        >
+          <FolderTopline
+            activeFolder={activeFolder}
+            analysisStarting={analysisStarting}
+            onOpenExport={onOpenExport}
+            onRelinkFolder={onRelinkFolder}
+            onRenameFolder={onRenameFolder}
+            onStartAnalysis={onStartAnalysis}
+            progressEvent={progressEvent}
+            relinking={relinkingFolderId === activeFolder.id}
+            t={t}
+          />
+          <MetricStrip photos={folderPhotos} summary={activeFolderSummary} t={t} />
+          <SelectionControls
+            activeQuickFilters={activeQuickFilters}
+            activeSort={activeSort}
+            setActiveQuickFilter={setActiveQuickFilter}
+            setActiveSort={setActiveSort}
+            setViewMode={setViewMode}
+            t={t}
+            viewMode={viewMode}
+          />
+        </div>
 
         <div className="photo-flow">
           {viewMode === 'grouped' ? (
@@ -3604,6 +3677,19 @@ function SelectionScreen({
           )}
         </div>
       </section>
+
+      <button
+        aria-label={t('selection.scrollTop')}
+        className={cn(
+          'selection-scroll-top',
+          selectionChromeState.showScrollTop && 'selection-scroll-top--visible',
+        )}
+        onClick={scrollSelectionToTop}
+        title={t('selection.scrollTop')}
+        type="button"
+      >
+        <ArrowUp className="h-4 w-4" />
+      </button>
 
       <InspectorPanel
         onOpenReview={onOpenReview}
@@ -4392,6 +4478,7 @@ function PhotoStackTile({
 }) {
   const category = photoCategory(photo)
   const displaySpecies = group.primarySpecies ?? formatPhotoSpeciesDisplay(photo, t)
+  const tileSourceBadge = tileSpeciesSourceBadge(photo, t)
 
   // 用 div+role="button" 而不是真 <button>,因为内部还要嵌一个真 button(数量
   // badge 触发展开)。HTML 不允许 button 嵌 button(React DEV 模式会 warn,且
@@ -4466,6 +4553,16 @@ function PhotoStackTile({
               {photo.isNewSpecies ? (
                 <em className="species-source-inline species-source-inline--new">
                   {t('selection.quickFilters.new_species')}
+                </em>
+              ) : null}
+              {tileSourceBadge ? (
+                <em
+                  className={cn(
+                    'species-source-inline',
+                    `species-source-inline--${tileSourceBadge.kind}`,
+                  )}
+                >
+                  {t('selection.speciesSource.inline', { source: tileSourceBadge.label })}
                 </em>
               ) : null}
             </strong>
@@ -4714,6 +4811,411 @@ function ExternalEditorActions({
   )
 }
 
+type InspectorMetric = {
+  label: string
+  tone?: Tone
+  value: number | string
+}
+
+function bestDetectionForInspector(photo: PhotoRecord): DetectionLike | null {
+  const detections = photo.birdDetections ?? []
+  return detections.find((d) => d.isBest) ?? detections[0] ?? null
+}
+
+function confidenceLabel(value: number | null | undefined): string {
+  if (value === null || value === undefined || !Number.isFinite(value)) return '--'
+  const percent = value > 1 ? value : value * 100
+  return `${percent >= 10 ? percent.toFixed(0) : percent.toFixed(1)}%`
+}
+
+function cleanExifString(value: unknown): string | null {
+  if (typeof value === 'string') {
+    const trimmed = value.trim()
+    return trimmed.length > 0 ? trimmed : null
+  }
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value)
+  return null
+}
+
+function exifNumber(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (typeof value === 'string') {
+    const parsed = Number(value.trim())
+    return Number.isFinite(parsed) ? parsed : null
+  }
+  return null
+}
+
+function formatShutterFromExif(exif: Record<string, unknown> | null | undefined): string {
+  const raw = cleanExifString(exif?.ExposureTime)
+  const value = exifNumber(exif?.ExposureTime)
+  if (value === null || value <= 0) return raw ?? '--'
+  if (value >= 1) return `${Number.isInteger(value) ? value.toFixed(0) : value.toFixed(1)} s`
+  return `1/${Math.round(1 / value)} s`
+}
+
+function formatApertureFromExif(exif: Record<string, unknown> | null | undefined): string {
+  const raw = cleanExifString(exif?.FNumber)
+  const value = exifNumber(exif?.FNumber)
+  if (value === null || value <= 0) return raw ?? '--'
+  return `f/${value.toFixed(1)}`
+}
+
+function formatFocalFromExif(exif: Record<string, unknown> | null | undefined): string {
+  const raw = cleanExifString(exif?.FocalLength)
+  const value = exifNumber(exif?.FocalLength)
+  if (value === null || value <= 0) return raw ?? '--'
+  return `${Math.round(value)} mm`
+}
+
+function formatIsoFromExif(exif: Record<string, unknown> | null | undefined): string {
+  const value = exif?.ISOSpeedRatings ?? exif?.PhotographicSensitivity ?? exif?.ISO
+  if (value === null || value === undefined || value === '') return '--'
+  if (Array.isArray(value)) {
+    const first = value.find((item) => item !== null && item !== undefined && item !== '')
+    return first === undefined ? '--' : `ISO ${String(first)}`
+  }
+  return `ISO ${String(value)}`
+}
+
+function formatCameraForInspector(photo: PhotoRecord): string {
+  const make = cleanExifString(photo.exif?.Make)
+  const model = cleanExifString(photo.exif?.Model)
+  if (make && model) {
+    return model.toLowerCase().startsWith(make.toLowerCase()) ? model : `${make} ${model}`
+  }
+  return model ?? make ?? photo.camera ?? '--'
+}
+
+function formatLensForInspector(photo: PhotoRecord): string {
+  return cleanExifString(photo.exif?.LensModel) ?? photo.lens ?? '--'
+}
+
+function formatByteSize(bytes: number | null | undefined): string | null {
+  if (bytes === null || bytes === undefined || !Number.isFinite(bytes) || bytes <= 0) return null
+  const units = ['B', 'KB', 'MB', 'GB'] as const
+  let value = bytes
+  let unitIndex = 0
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024
+    unitIndex += 1
+  }
+  const precision = value >= 10 || unitIndex === 0 ? 0 : 1
+  return `${value.toFixed(precision)} ${units[unitIndex]}`
+}
+
+function formatDateTimeForInspector(value: unknown, locale: string): string {
+  const raw = cleanExifString(value)
+  if (!raw) return '--'
+  const normalized = raw.replace(/^(\d{4}):(\d{2}):(\d{2})/, '$1-$2-$3')
+  const date = new Date(normalized)
+  if (!Number.isNaN(date.getTime())) {
+    const normalizedLocale = locale || 'zh-CN'
+    return new Intl.DateTimeFormat(normalizedLocale, {
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: normalizedLocale.toLowerCase().startsWith('zh') ? false : undefined,
+    }).format(date)
+  }
+  return raw
+}
+
+function formatPlaceForInspector(photo: PhotoRecord): string {
+  const parts = [photo.place, photo.district, photo.city]
+    .map((value) => value?.trim())
+    .filter((value): value is string => Boolean(value))
+  const unique = parts.filter((value, index) => parts.indexOf(value) === index)
+  if (unique.length > 0) return unique.join(' · ')
+  const gps = extractPhotoGps(photo.exif)
+  if (gps) return `${gps.lat.toFixed(5)}, ${gps.lon.toFixed(5)}`
+  return '--'
+}
+
+function formatInspectorPostureLabel(
+  pose: PhotoRecord['bestPose'],
+  t: ReturnType<typeof useTranslation>['t'],
+): string {
+  if (!pose) return t('selection.review.posture.noResult')
+  const posture = pose.posture ?? 'unknown'
+  const viewAngle = pose.view_angle ?? 'unknown'
+  const facing = pose.facing ?? 'unknown'
+  const postureText =
+    posture === 'flying'
+      ? t('selection.review.posture.flying')
+      : posture === 'perched'
+        ? t('selection.review.posture.perched')
+        : null
+
+  let viewText: string | null = null
+  if (viewAngle === 'side' && (facing === 'left' || facing === 'right')) {
+    viewText = `${t('selection.review.viewAngle.side')}${t(`selection.review.facing.${facing}`)}`
+  } else if (viewAngle === 'frontal' || viewAngle === 'back' || viewAngle === 'side') {
+    viewText = t(`selection.review.viewAngle.${viewAngle}`)
+  }
+
+  const parts = [postureText, viewText].filter((part): part is string => Boolean(part))
+  return parts.length > 0 ? parts.join(' · ') : t('selection.review.posture.unknown')
+}
+
+function InspectorSection({
+  children,
+  title,
+}: {
+  children: ReactNode
+  title: string
+}) {
+  return (
+    <section className="inspector-section">
+      <h3 className="inspector-section__title">{title}</h3>
+      {children}
+    </section>
+  )
+}
+
+function InspectorMetricGrid({ items }: { items: InspectorMetric[] }) {
+  return (
+    <div className="inspector-metric-grid">
+      {items.map((item) => (
+        <div className="inspector-metric" key={item.label}>
+          <span>{item.label}</span>
+          <strong className={item.tone ? `tone-text-${item.tone}` : undefined}>{item.value}</strong>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function InspectorHero({
+  photo,
+  t,
+}: {
+  photo: PhotoRecord
+  t: ReturnType<typeof useTranslation>['t']
+}) {
+  const grade = effectivePhotoGrade(photo)
+  const sourceLabel = photo.decision
+    ? t('selection.gradeSource.manual')
+    : t('selection.gradeSource.system')
+  return (
+    <div className="inspector-hero">
+      <div className="inspector-hero__top">
+        <div className="inspector-hero__score">
+          <span>{t('selection.inspector.score')}</span>
+          <strong>{formatScore(photo.finalScore)}</strong>
+        </div>
+        <span className={cn('inspector-grade-pill', `inspector-grade-pill--${gradeTone(grade)}`)}>
+          {t(gradeLabelKey(grade))}
+        </span>
+      </div>
+      <div className="inspector-hero__meta">
+        <span title={photo.fileName}>{photo.fileName}</span>
+        <em>{t('selection.inspector.gradeSource', { source: sourceLabel })}</em>
+      </div>
+      <p className="inspector-hero__reason">{t(photoReviewReason(photo))}</p>
+    </div>
+  )
+}
+
+function InspectorSpeciesSection({
+  bestDetection,
+  photo,
+  t,
+}: {
+  bestDetection: DetectionLike | null
+  photo: PhotoRecord
+  t: ReturnType<typeof useTranslation>['t']
+}) {
+  const tileSourceBadge = tileSpeciesSourceBadge(photo, t)
+  const detectionBadgeLabel = speciesSourceBadge(photo, t, bestDetection)
+  const detectionBadgeKind = speciesSourceKind(photo, bestDetection)
+  const sourceBadge =
+    tileSourceBadge ??
+    (detectionBadgeLabel && detectionBadgeKind
+      ? { kind: detectionBadgeKind, label: detectionBadgeLabel }
+      : null)
+  const candidates =
+    bestDetection?.speciesCandidates && bestDetection.speciesCandidates.length > 0
+      ? bestDetection.speciesCandidates
+      : photo.speciesCandidates
+  const sourceDetail = speciesSourceDetail(photo, t, bestDetection) ?? speciesSourceDetail(photo, t)
+  const latinName = effectiveSpeciesLatinName(photo)
+
+  return (
+    <InspectorSection title={t('selection.inspector.speciesSection')}>
+      <div className="inspector-species">
+        <div className="inspector-species__identity">
+          <strong>{formatPhotoSpeciesDisplay(photo, t)}</strong>
+          {sourceBadge ? (
+            <em
+              className={cn(
+                'species-source-inline',
+                `species-source-inline--${sourceBadge.kind}`,
+              )}
+            >
+              {sourceBadge.label}
+            </em>
+          ) : null}
+        </div>
+        {latinName ? <span className="inspector-species__latin">{latinName}</span> : null}
+        {sourceDetail ? <p className="inspector-species__detail">{sourceDetail}</p> : null}
+      </div>
+      <div className="inspector-candidates">
+        <span className="inspector-candidates__label">{t('selection.inspector.candidates')}</span>
+        {candidates.length > 0 ? (
+          candidates.slice(0, 2).map((candidate) => (
+            <div className="inspector-candidate" key={`${candidate.name}-${candidate.latinName}`}>
+              <span>
+                <strong>{candidate.name}</strong>
+                <small>{candidate.latinName ?? t('selection.speciesEditor.noLatin')}</small>
+              </span>
+              <em>{confidenceLabel(candidate.confidence)}</em>
+            </div>
+          ))
+        ) : (
+          <p className="inspector-muted">{t('selection.inspector.noCandidates')}</p>
+        )}
+      </div>
+    </InspectorSection>
+  )
+}
+
+function InspectorScoreSection({
+  bestDetection,
+  photo,
+  t,
+}: {
+  bestDetection: DetectionLike | null
+  photo: PhotoRecord
+  t: ReturnType<typeof useTranslation>['t']
+}) {
+  const detectionConfidence = bestDetection?.bbox.confidence ?? photo.bestBbox?.confidence
+  const items: InspectorMetric[] = [
+    {
+      label: t('selection.metrics.semanticScore'),
+      value: formatScore(photo.semanticScore),
+    },
+    {
+      label: t('selection.metrics.technicalScore'),
+      value: formatScore(photo.technicalScore),
+    },
+    {
+      label: t('selection.inspector.detectionConfidence'),
+      value: confidenceLabel(detectionConfidence),
+    },
+    {
+      label: t('selection.metrics.birdCount'),
+      value: photo.birdCount,
+    },
+  ]
+  return (
+    <InspectorSection title={t('selection.inspector.scoreSection')}>
+      <InspectorMetricGrid items={items} />
+    </InspectorSection>
+  )
+}
+
+function InspectorSubjectSection({
+  bestDetection,
+  photo,
+  t,
+}: {
+  bestDetection: DetectionLike | null
+  photo: PhotoRecord
+  t: ReturnType<typeof useTranslation>['t']
+}) {
+  const pose = bestDetection?.pose ?? photo.bestPose ?? null
+  const visibilityItems = pose
+    ? [
+        { key: 'head', label: t('selection.metrics.head'), visible: pose.head_visible },
+        { key: 'eye', label: t('selection.metrics.eye'), visible: pose.eye_visible },
+        { key: 'body', label: t('selection.metrics.body'), visible: pose.body_visible },
+        { key: 'wings', label: t('selection.metrics.wings'), visible: pose.wings_visible },
+        { key: 'tail', label: t('selection.metrics.tail'), visible: pose.tail_visible },
+      ]
+    : []
+
+  return (
+    <InspectorSection title={t('selection.inspector.subjectSection')}>
+      <div className="inspector-subject">
+        <div className="inspector-subject__posture">
+          <span>{t('selection.metrics.posture')}</span>
+          <strong>{formatInspectorPostureLabel(pose, t)}</strong>
+          {pose?.posture_confidence ? <em>{confidenceLabel(pose.posture_confidence)}</em> : null}
+        </div>
+        {pose ? (
+          <div className="inspector-visibility">
+            {visibilityItems.map((item) => {
+              const state =
+                item.visible === true ? 'visible' : item.visible === false ? 'missing' : 'unknown'
+              return (
+                <span
+                  className={cn('inspector-visibility__chip', `inspector-visibility__chip--${state}`)}
+                  key={item.key}
+                >
+                  {item.label}
+                  <em>{t(`selection.inspector.visibility.${state}`)}</em>
+                </span>
+              )
+            })}
+          </div>
+        ) : (
+          <p className="inspector-muted">{t('selection.review.visibility.noResult')}</p>
+        )}
+        <TagCluster photo={photo} t={t} />
+      </div>
+    </InspectorSection>
+  )
+}
+
+function InspectorFileSection({
+  photo,
+  t,
+}: {
+  photo: PhotoRecord
+  t: ReturnType<typeof useTranslation>['t']
+}) {
+  const dateLocale = t('selection.dateLocale')
+  const exposureItems: InspectorMetric[] = [
+    { label: t('selection.exif.shutter'), value: formatShutterFromExif(photo.exif) },
+    { label: t('selection.exif.aperture'), value: formatApertureFromExif(photo.exif) },
+    { label: t('selection.exif.iso'), value: formatIsoFromExif(photo.exif) },
+    { label: t('selection.exif.focalLength'), value: formatFocalFromExif(photo.exif) },
+  ]
+  const companionSize = formatByteSize(photo.companionSize)
+  const companion = photo.companionFormat
+    ? t('selection.review.companionValue', {
+        format: photo.companionFormat,
+        size: companionSize ?? '--',
+      })
+    : '--'
+  const fileRows = [
+    { label: t('selection.exif.camera'), value: formatCameraForInspector(photo) },
+    { label: t('selection.exif.lens'), value: formatLensForInspector(photo) },
+    {
+      label: t('selection.exif.time'),
+      value: formatDateTimeForInspector(photo.exif?.DateTimeOriginal ?? photo.shotAt, dateLocale),
+    },
+    { label: t('selection.exif.location'), value: formatPlaceForInspector(photo) },
+    { label: t('selection.review.companion'), value: companion },
+  ]
+
+  return (
+    <InspectorSection title={t('selection.inspector.fileSection')}>
+      <InspectorMetricGrid items={exposureItems} />
+      <div className="inspector-kv-list">
+        {fileRows.map((row) => (
+          <div className="inspector-kv" key={row.label}>
+            <span>{row.label}</span>
+            <strong title={row.value}>{row.value}</strong>
+          </div>
+        ))}
+      </div>
+    </InspectorSection>
+  )
+}
+
 function InspectorPanel({
   onOpenReview,
   onSetDecision,
@@ -4729,7 +5231,7 @@ function InspectorPanel({
   sourceMissing: boolean
   t: ReturnType<typeof useTranslation>['t']
 }) {
-  const tileSourceBadge = photo ? tileSpeciesSourceBadge(photo, t) : null
+  const bestDetection = photo ? bestDetectionForInspector(photo) : null
   return (
     <aside className="inspector selection-scroll">
       <SectionLabel label={t('selection.inspector.label')} />
@@ -4737,42 +5239,11 @@ function InspectorPanel({
         <div className="inspector__content">
           <div className="inspector__body selection-scroll">
             <div className="inspector-preview" style={{ backgroundImage: photo.previewGradient }} />
-            <div className="score-block">
-              <span>{t('selection.inspector.score')}</span>
-              <strong>{formatScore(photo.finalScore)}</strong>
-              <small className="score-block__species">
-                <span>{formatPhotoSpeciesDisplay(photo, t)}</span>
-                {tileSourceBadge ? (
-                  <em
-                    className={cn(
-                      'species-source-inline',
-                      `species-source-inline--${tileSourceBadge.kind}`,
-                    )}
-                  >
-                    {t('selection.speciesSource.inline', { source: tileSourceBadge.label })}
-                  </em>
-                ) : null}
-              </small>
-              {speciesSourceDetail(photo, t) ? (
-                <em className="score-block__source">{speciesSourceDetail(photo, t)}</em>
-              ) : null}
-            </div>
-            <div className="stat-stack">
-              <StatRow
-                label={t('selection.metrics.semanticScore')}
-                value={formatScore(photo.semanticScore)}
-              />
-              <StatRow
-                label={t('selection.metrics.technicalScore')}
-                value={formatScore(photo.technicalScore)}
-              />
-              <StatRow
-                label={t('selection.metrics.poseScore')}
-                value={formatScore(photo.poseScore)}
-              />
-              <StatRow label={t('selection.metrics.birdCount')} value={photo.birdCount} />
-            </div>
-            <TagCluster photo={photo} t={t} />
+            <InspectorHero photo={photo} t={t} />
+            <InspectorSpeciesSection bestDetection={bestDetection} photo={photo} t={t} />
+            <InspectorSubjectSection bestDetection={bestDetection} photo={photo} t={t} />
+            <InspectorScoreSection bestDetection={bestDetection} photo={photo} t={t} />
+            <InspectorFileSection photo={photo} t={t} />
             <ExternalEditorActions photo={photo} sourceMissing={sourceMissing} t={t} />
           </div>
           <div className="inspector-actions" aria-label={t('selection.actions.label')}>

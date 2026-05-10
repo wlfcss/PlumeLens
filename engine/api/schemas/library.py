@@ -204,7 +204,7 @@ class PhotoRow(BaseModel):
     # Effective species display source. Raw model output is preserved below so
     # group consensus can stabilize the UI without destroying auditability.
     # photo-level species_source = best detection 的 species_source（见 BestDetection）。
-    # model_unconfirmed: head 不可见但模型给了识别 → UI 显示"不全 · 待审"，
+    # model_unconfirmed: 物种 reject head 不确定，或鸟头/关键特征不完整但模型给了识别。
     # 用户在深度复核确认后升级为 manual；group consensus 可覆盖为 group_consensus。
     species_source: SpeciesSource = "none"
     model_species: str | None = None

@@ -116,6 +116,8 @@
   },
   "selection": {
     "currentFolder": "当前文件夹",
+    "dateLocale": "zh-CN",
+    "scrollTop": "回到顶部",
     "importFailed": "导入文件夹失败:{{detail}}\n\n请确认后端引擎已就绪、路径有效后重试。",
     "folderStatus": {
       "idle": "未开始",
@@ -276,18 +278,21 @@
     },
     "speciesSource": {
       "inline": "（{{source}}）",
-      "groupConsensus": "识别修正",
-      "groupConsensusDetail": "识别修正 {{support}}",
-      "groupConsensusWithRaw": "识别修正 {{support}} · 原识别：{{species}}",
+      "groupConsensus": "组内共识",
+      "groupConsensusDetail": "组内共识 {{support}}",
+      "groupConsensusWithRaw": "组内共识 {{support}} · 原识别：{{species}}",
       "manual": "人工鸟种",
       "manualDetail": "人工鸟种覆盖",
       "conflict": "组内分歧",
       "conflictDetail": "组内分歧，保留单张高置信结果",
       "unconfirmed": "不全 · 待审",
-      "unconfirmedDetail": "识别把握不足，确认后再进羽迹",
-      "unconfirmedUncertainDetail": "识别把握不足，确认后再进羽迹",
-      "unconfirmedHeadDetail": "鸟头不可见，确认后再进羽迹",
-      "unconfirmedGenericDetail": "识别把握不足，确认后再进羽迹",
+      "unconfirmedSpecies": "物种待审",
+      "unconfirmedIncomplete": "不全 · 待审",
+      "unconfirmedGeneric": "识别待审",
+      "unconfirmedDetail": "物种识别把握不足，请在下方物种栏确认后再进羽迹",
+      "unconfirmedUncertainDetail": "物种识别把握不足，请在下方物种栏确认后再进羽迹",
+      "unconfirmedHeadDetail": "鸟头关键特征不完整，请在下方物种栏确认后再进羽迹",
+      "unconfirmedGenericDetail": "物种识别需要复核，请在下方物种栏确认后再进羽迹",
       "partialUnconfirmed": "部分待审"
     },
     "poseTags": {
@@ -330,15 +335,28 @@
       "reject": "淘汰"
     },
     "inspector": {
-      "label": "信息抽屉",
+      "label": "复核摘要",
       "active": "当前选中照片",
       "idle": "快速上下文",
       "score": "综合分",
+      "gradeSource": "{{source}}评级",
+      "scoreSection": "评分证据",
+      "speciesSection": "鸟种判断",
+      "subjectSection": "主体状态",
+      "fileSection": "文件与拍摄",
+      "candidates": "候选物种",
+      "noCandidates": "暂无候选",
+      "detectionConfidence": "检测置信",
       "problemFocus": "问题焦点",
       "cleanFrame": "主体条件良好",
       "clear": "取消选中",
+      "visibility": {
+        "visible": "可见",
+        "missing": "缺失",
+        "unknown": "暂无"
+      },
       "idleTitle": "先选中一张照片",
-      "idleBody": "这里会显示当前照片的分数、姿态、物种和问题标签，帮助你少开一次完整复核"
+      "idleBody": "这里会汇总当前照片的评级、鸟种来源、主体可见性和拍摄信息，帮助你快速判断是否需要深度复核"
     },
     "editor": {
       "label": "外部编辑",
@@ -429,15 +447,18 @@
       "bird": "鸟",
       "clear": "清除人工鸟种",
       "confirmModel": "确认当前识别",
-      "confirmModelHint": "确认后该照片即按此鸟种计入羽迹",
+      "confirmModelHint": "确认该物种后，这张照片会按此鸟种计入羽迹",
       "manual": "人工",
       "manualOnly": "手动",
       "noLatin": "无拉丁名",
+      "reviewHintCollapsed": "物种识别待审：展开后可确认当前识别，或搜索选择正确物种。",
+      "reviewHintExpanded": "确认当前识别，或搜索选择正确物种；确认前不会计入羽迹。",
       "search": "搜索中文名、英文名或拉丁名"
     },
     "exif": {
       "shutter": "快门",
       "aperture": "光圈",
+      "iso": "ISO",
       "focalLength": "焦距",
       "camera": "机身",
       "lens": "镜头",

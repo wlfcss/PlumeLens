@@ -95,8 +95,8 @@ class Settings(BaseSettings):
     species_crop_margin: float = 0.15  # 方形 bbox 扩展比例（见 MODEL_DELIVERY §6.3）
     species_crop_min_side_frac: float = 0.0  # v4 训练口径不强制最小边长；仅保留 legacy fallback
     # head/eye visibility 不再是触发 gate（v5 放宽）— 所有 grade 通过 species_min_grade
-    # 的鸟都跑识别；head 不可见时由 read-time 标记为 species_source='model_unconfirmed'，
-    # UI 显示"不全 · 待审"标签，用户确认后才进羽迹（HANDOVER §11.2）。
+    # 的鸟都跑识别；read-time 会把 reject head 不确定或头部关键特征不完整的识别
+    # 标记为 species_source='model_unconfirmed'，用户确认后才进羽迹（HANDOVER §11.2）。
     # 代价：每张多 30-80% 物种推理时间；DINOv3 ~150ms/张。
     species_min_grade: str = "reject"  # "reject" / "record" / "usable" / "select"
 
