@@ -216,6 +216,15 @@
       "confidence": "置信",
       "scene": "场景"
     },
+    "compact": {
+      "summary": "{{total}} 张 · {{bird}} 有鸟",
+      "keyMetrics": "关键分档统计",
+      "primaryFilters": "常用筛选",
+      "more": "更多",
+      "moreFilters": "更多筛选",
+      "sort": "排序",
+      "view": "视图"
+    },
     "quickFilters": {
       "select": "精选",
       "usable": "可用",
@@ -345,6 +354,7 @@
       "subjectSection": "主体状态",
       "fileSection": "文件与拍摄",
       "candidates": "候选物种",
+      "topCandidate": "候选 {{confidence}}",
       "noCandidates": "暂无候选",
       "detectionConfidence": "检测置信",
       "problemFocus": "问题焦点",
@@ -354,6 +364,11 @@
         "visible": "可见",
         "missing": "缺失",
         "unknown": "暂无"
+      },
+      "visibilitySummary": {
+        "clean": "头眼与主体清晰",
+        "missing": "{{items}} 待看",
+        "pending": "姿态结果不足"
       },
       "idleTitle": "先选中一张照片",
       "idleBody": "这里会汇总当前照片的评级、鸟种来源、主体可见性和拍摄信息，帮助你快速判断是否需要深度复核"

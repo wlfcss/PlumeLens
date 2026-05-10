@@ -12,6 +12,7 @@ import {
   FolderSearch2,
   Images,
   LibraryBig,
+  MoreHorizontal,
   PencilLine,
   RefreshCw,
   Search,
@@ -109,8 +110,12 @@ const COLLECTION_GRID_MIN_COLUMN_WIDTH = 150
 const COLLECTION_GRID_GAP = 8
 const COLLECTION_HEADING_ESTIMATED_HEIGHT = 52
 const COLLECTION_CARD_ROW_ESTIMATED_HEIGHT = 204
-const SELECTION_HEADER_COMPACT_SCROLL_PX = 88
-const SELECTION_SCROLL_TOP_VISIBLE_PROGRESS = 1 / 3
+const PHOTO_GROUP_HEADER_ESTIMATED_HEIGHT = 58
+const PHOTO_GROUP_ITEM_GAP = 30
+const SELECTION_COMPACT_ENTER_SCROLL_PX = 148
+const SELECTION_COMPACT_EXIT_SCROLL_PX = 72
+const SELECTION_SCROLL_TOP_SHOW_PROGRESS = 1 / 3
+const SELECTION_SCROLL_TOP_HIDE_PROGRESS = 0.25
 
 const ArchiveGeoMap = lazy(() =>
   import('@/components/archive-geo-map').then((module) => ({ default: module.ArchiveGeoMap })),
@@ -232,6 +237,8 @@ const THUMBNAIL_REPAIR_MAX_CONCURRENT = 4
 const THUMBNAIL_MISSING_REPAIR_DELAY_MS = 600
 
 const quickFilters: QuickFilter[] = ['select', 'usable', 'record', 'reject', 'no_bird', 'failed']
+const compactPrimaryFilters: QuickFilter[] = ['select', 'usable', 'record', 'reject']
+const compactMoreFilters: QuickFilter[] = ['no_bird', 'failed']
 
 const archiveTabs: ArchiveTab[] = ['species', 'map']
 type SpeciesCollectionFilter = 'all' | 'collected' | SpeciesCollectionGroupId
@@ -821,14 +828,10 @@ function hasWeakSubjectContinuity(left: PhotoRecord, right: PhotoRecord): boolea
   return continuity.iou >= 0.08 || (continuity.centerDistance <= 0.22 && continuity.sizeRatio <= 2)
 }
 
-function shouldSplitPhotoSegment(
-  previous: PhotoRecord,
-  current: PhotoRecord,
-): boolean {
+function shouldSplitPhotoSegment(previous: PhotoRecord, current: PhotoRecord): boolean {
   const previousTs = photoShotMs(previous)
   const currentTs = photoShotMs(current)
-  const gap =
-    previousTs !== null && currentTs !== null ? Math.max(0, currentTs - previousTs) : null
+  const gap = previousTs !== null && currentTs !== null ? Math.max(0, currentTs - previousTs) : null
 
   if (hasSemanticSegmentBreak(previous, current)) return true
   if (gap !== null && gap > BURST_SEGMENT_HARD_GAP_MS) return true
@@ -3545,11 +3548,14 @@ function SelectionScreen({
   workspace: WorkspaceSnapshot
 }) {
   const selectionScrollRef = useRef<HTMLElement | null>(null)
+  const compactMoreRef = useRef<HTMLDivElement | null>(null)
   const [selectionScrollElement, setSelectionScrollElement] = useState<HTMLElement | null>(null)
   const [selectionChromeState, setSelectionChromeState] = useState({
     compact: false,
     showScrollTop: false,
   })
+  const selectionChromeStateRef = useRef(selectionChromeState)
+  const [compactMoreOpen, setCompactMoreOpen] = useState(false)
   const setSelectionScrollNode = useCallback((node: HTMLElement | null) => {
     selectionScrollRef.current = node
     setSelectionScrollElement((current) => (current === node ? current : node))
@@ -3558,7 +3564,9 @@ function SelectionScreen({
 
   useEffect(() => {
     selectionScrollElement?.scrollTo({ top: 0 })
-    setSelectionChromeState({ compact: false, showScrollTop: false })
+    const resetChrome = { compact: false, showScrollTop: false }
+    selectionChromeStateRef.current = resetChrome
+    setSelectionChromeState(resetChrome)
   }, [selectionFilterKey, selectionScrollElement])
 
   useEffect(() => {
@@ -3570,15 +3578,17 @@ function SelectionScreen({
       frame = 0
       const maxScroll = Math.max(0, node.scrollHeight - node.clientHeight)
       const progress = maxScroll > 0 ? node.scrollTop / maxScroll : 0
-      const next = {
-        compact: node.scrollTop > SELECTION_HEADER_COMPACT_SCROLL_PX,
-        showScrollTop: progress > SELECTION_SCROLL_TOP_VISIBLE_PROGRESS,
-      }
-      setSelectionChromeState((current) =>
-        current.compact === next.compact && current.showScrollTop === next.showScrollTop
-          ? current
-          : next,
-      )
+      const current = selectionChromeStateRef.current
+      const compact = current.compact
+        ? node.scrollTop > SELECTION_COMPACT_EXIT_SCROLL_PX
+        : node.scrollTop > SELECTION_COMPACT_ENTER_SCROLL_PX
+      const showScrollTop = current.showScrollTop
+        ? progress > SELECTION_SCROLL_TOP_HIDE_PROGRESS
+        : progress > SELECTION_SCROLL_TOP_SHOW_PROGRESS
+      if (current.compact === compact && current.showScrollTop === showScrollTop) return
+      const next = { compact, showScrollTop }
+      selectionChromeStateRef.current = next
+      setSelectionChromeState(next)
     }
 
     const requestUpdate = () => {
@@ -3594,8 +3604,33 @@ function SelectionScreen({
     }
   }, [selectionScrollElement])
 
+  useEffect(() => {
+    if (!selectionChromeState.compact) setCompactMoreOpen(false)
+  }, [selectionChromeState.compact])
+
+  useEffect(() => {
+    if (!compactMoreOpen) return undefined
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target
+      if (!(target instanceof Node)) return
+      if (!compactMoreRef.current?.contains(target)) {
+        setCompactMoreOpen(false)
+      }
+    }
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setCompactMoreOpen(false)
+    }
+    document.addEventListener('pointerdown', handlePointerDown)
+    document.addEventListener('keydown', handleKeyDown)
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown)
+      document.removeEventListener('keydown', handleKeyDown)
+    }
+  }, [compactMoreOpen])
+
   const scrollSelectionToTop = useCallback(() => {
-    selectionScrollElement?.scrollTo({ top: 0 })
+    const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    selectionScrollElement?.scrollTo({ behavior: reduceMotion ? 'auto' : 'smooth', top: 0 })
   }, [selectionScrollElement])
 
   if (!activeFolder) {
@@ -3625,12 +3660,7 @@ function SelectionScreen({
       />
 
       <section className="selection-main selection-scroll" ref={setSelectionScrollNode}>
-        <div
-          className={cn(
-            'selection-sticky-header',
-            selectionChromeState.compact && 'selection-sticky-header--compact',
-          )}
-        >
+        <div className="selection-full-header">
           <FolderTopline
             activeFolder={activeFolder}
             analysisStarting={analysisStarting}
@@ -3662,6 +3692,7 @@ function SelectionScreen({
               onFocusPhoto={setFocusedPhotoId}
               onOpenReview={onOpenReview}
               onThumbnailLoadStatus={onThumbnailLoadStatus}
+              scrollElement={selectionScrollElement}
               t={t}
             />
           ) : (
@@ -3677,6 +3708,26 @@ function SelectionScreen({
           )}
         </div>
       </section>
+
+      <SelectionCompactHeader
+        activeFolder={activeFolder}
+        activeQuickFilters={activeQuickFilters}
+        activeSort={activeSort}
+        analysisStarting={analysisStarting}
+        compactMoreOpen={compactMoreOpen}
+        compactMoreRef={compactMoreRef}
+        onOpenExport={onOpenExport}
+        onStartAnalysis={onStartAnalysis}
+        progressEvent={progressEvent}
+        setActiveQuickFilter={setActiveQuickFilter}
+        setActiveSort={setActiveSort}
+        setCompactMoreOpen={setCompactMoreOpen}
+        setViewMode={setViewMode}
+        summary={activeFolderSummary}
+        t={t}
+        visible={selectionChromeState.compact}
+        viewMode={viewMode}
+      />
 
       <button
         aria-label={t('selection.scrollTop')}
@@ -3785,6 +3836,222 @@ function FolderRail({
         )
       })}
     </aside>
+  )
+}
+
+function SelectionCompactHeader({
+  activeFolder,
+  activeQuickFilters,
+  activeSort,
+  analysisStarting,
+  compactMoreOpen,
+  compactMoreRef,
+  onOpenExport,
+  onStartAnalysis,
+  progressEvent,
+  setActiveQuickFilter,
+  setActiveSort,
+  setCompactMoreOpen,
+  setViewMode,
+  summary,
+  t,
+  visible,
+  viewMode,
+}: {
+  activeFolder: FolderRecord
+  activeQuickFilters: QuickFilter[]
+  activeSort: SortMode
+  analysisStarting: boolean
+  compactMoreOpen: boolean
+  compactMoreRef: RefObject<HTMLDivElement | null>
+  onOpenExport: () => void
+  onStartAnalysis: () => void
+  progressEvent: AnalysisProgressEventLite | null
+  setActiveQuickFilter: (filter: QuickFilter) => void
+  setActiveSort: (sort: SortMode) => void
+  setCompactMoreOpen: (open: boolean) => void
+  setViewMode: (mode: ViewMode) => void
+  summary: FolderSummary
+  t: ReturnType<typeof useTranslation>['t']
+  visible: boolean
+  viewMode: ViewMode
+}) {
+  const sourceMissing = activeFolder.status === 'path_missing'
+  const hasProgress = progressEvent !== null && progressEvent.total > 0
+  const running = progressEvent ? progressEvent.pending + progressEvent.processing > 0 : false
+  const ratio = hasProgress
+    ? Math.min(1, progressEvent.completed / Math.max(progressEvent.total, 1))
+    : 0
+  const sourceDisabledTitle = sourceMissing
+    ? t('selection.sourceMissing.disabledTooltip')
+    : undefined
+
+  return (
+    <div
+      aria-hidden={!visible}
+      className={cn('selection-compact-header', visible && 'selection-compact-header--visible')}
+      data-selection-compact-header
+    >
+      <div className="selection-compact-header__identity">
+        <strong>{activeFolder.displayName}</strong>
+        <span>
+          {t('selection.compact.summary', {
+            total: activeFolder.totalCount,
+            bird: summary.birdPhotoCount,
+          })}
+        </span>
+      </div>
+
+      <div
+        aria-label={t('selection.compact.keyMetrics')}
+        className="selection-compact-header__metrics"
+      >
+        <span className="selection-compact-metric selection-compact-metric--select">
+          {t('selection.metrics.selectPhotos')} <b>{summary.gradeCounts.select}</b>
+        </span>
+        <span className="selection-compact-metric selection-compact-metric--usable">
+          {t('selection.metrics.usablePhotos')} <b>{summary.gradeCounts.usable}</b>
+        </span>
+        <span className="selection-compact-metric selection-compact-metric--record">
+          {t('selection.metrics.recordPhotos')} <b>{summary.gradeCounts.record}</b>
+        </span>
+      </div>
+
+      <div
+        className="selection-compact-filter-row"
+        aria-label={t('selection.compact.primaryFilters')}
+      >
+        {compactPrimaryFilters.map((filter) => (
+          <button
+            className={cn(
+              'selection-compact-chip',
+              activeQuickFilters.includes(filter) && 'selection-compact-chip--active',
+            )}
+            key={filter}
+            onClick={() => setActiveQuickFilter(filter)}
+            type="button"
+          >
+            {t(quickFilterLabelKey(filter))}
+          </button>
+        ))}
+      </div>
+
+      <div className="selection-compact-header__actions">
+        <span className="selection-compact-status">
+          <StatusDot tone={statusTone(activeFolder.status)} />
+          {t(statusLabelKey(activeFolder.status))}
+        </span>
+        <button
+          className="button-primary button-compact selection-compact-start"
+          disabled={analysisStarting || running || sourceMissing}
+          onClick={onStartAnalysis}
+          title={sourceDisabledTitle}
+          type="button"
+        >
+          <Sparkles className="h-4 w-4" />
+          {running
+            ? t('selection.folderHeader.analyzingPercent', { percent: Math.round(ratio * 100) })
+            : analysisStarting
+              ? t('selection.folderHeader.starting')
+              : t('selection.folderHeader.startAnalysis')}
+        </button>
+        <div className="selection-compact-more" ref={compactMoreRef}>
+          <button
+            aria-expanded={compactMoreOpen}
+            aria-haspopup="menu"
+            className="button-ghost button-compact selection-compact-more__trigger"
+            onClick={() => setCompactMoreOpen(!compactMoreOpen)}
+            type="button"
+          >
+            <MoreHorizontal className="h-4 w-4" />
+            {t('selection.compact.more')}
+          </button>
+          {compactMoreOpen ? (
+            <div className="selection-compact-menu" role="menu">
+              <div className="selection-compact-menu__section selection-compact-menu__primary">
+                <span>{t('selection.compact.primaryFilters')}</span>
+                <div className="selection-compact-menu__chips">
+                  {compactPrimaryFilters.map((filter) => (
+                    <button
+                      className={cn(
+                        'selection-compact-chip',
+                        activeQuickFilters.includes(filter) && 'selection-compact-chip--active',
+                      )}
+                      key={filter}
+                      onClick={() => setActiveQuickFilter(filter)}
+                      type="button"
+                    >
+                      {t(quickFilterLabelKey(filter))}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div className="selection-compact-menu__section">
+                <span>{t('selection.compact.moreFilters')}</span>
+                <div className="selection-compact-menu__chips">
+                  {compactMoreFilters.map((filter) => (
+                    <button
+                      className={cn(
+                        'selection-compact-chip',
+                        activeQuickFilters.includes(filter) && 'selection-compact-chip--active',
+                      )}
+                      key={filter}
+                      onClick={() => setActiveQuickFilter(filter)}
+                      type="button"
+                    >
+                      {t(quickFilterLabelKey(filter))}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div className="selection-compact-menu__section">
+                <span>{t('selection.compact.sort')}</span>
+                <div className="mini-segment selection-compact-menu__segment">
+                  {sortModes.map((sort) => (
+                    <button
+                      className={cn(activeSort === sort && 'is-active')}
+                      key={sort}
+                      onClick={() => setActiveSort(sort)}
+                      type="button"
+                    >
+                      {t(sortLabelKey(sort))}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div className="selection-compact-menu__section">
+                <span>{t('selection.compact.view')}</span>
+                <div className="mini-segment selection-compact-menu__segment">
+                  {viewModes.map((mode) => (
+                    <button
+                      className={cn(viewMode === mode && 'is-active')}
+                      key={mode}
+                      onClick={() => setViewMode(mode)}
+                      type="button"
+                    >
+                      {t(viewModeKey(mode))}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <button
+                className="button-ghost button-compact selection-compact-menu__action"
+                disabled={sourceMissing}
+                onClick={() => {
+                  setCompactMoreOpen(false)
+                  onOpenExport()
+                }}
+                title={sourceMissing ? t('selection.sourceMissing.exportDisabled') : undefined}
+                type="button"
+              >
+                <Download className="h-4 w-4" />
+                {t('common.export')}
+              </button>
+            </div>
+          ) : null}
+        </div>
+      </div>
+    </div>
   )
 }
 
@@ -4156,6 +4423,7 @@ function PhotoGroupsList({
   onFocusPhoto,
   onOpenReview,
   onThumbnailLoadStatus,
+  scrollElement,
   t,
 }: {
   focusedPhotoId: string | null
@@ -4163,27 +4431,76 @@ function PhotoGroupsList({
   onFocusPhoto: (photoId: string | null) => void
   onOpenReview: (photoId: string) => void
   onThumbnailLoadStatus: (photoId: string, status: ThumbnailLoadStatus) => void
+  scrollElement: HTMLElement | null
   t: ReturnType<typeof useTranslation>['t']
 }) {
-  const handleLayoutChange = useCallback(() => {}, [])
+  const containerRef = useRef<HTMLDivElement | null>(null)
+  const gridLayout = useResponsiveGridLayout(
+    containerRef,
+    PHOTO_GRID_MIN_COLUMN_WIDTH,
+    PHOTO_GRID_GAP,
+  )
+  const columns = gridLayout.columns
+  const estimatedTileHeight = useMemo(() => {
+    const tileWidth = Math.max(
+      PHOTO_GRID_MIN_COLUMN_WIDTH,
+      (gridLayout.width - PHOTO_GRID_GAP * (columns - 1)) / columns,
+    )
+    return Math.round(tileWidth * 0.75)
+  }, [columns, gridLayout.width])
+  const estimateGroupSize = useCallback(
+    (index: number) => {
+      const photoCount = Math.max(1, groups[index]?.photos.length ?? 1)
+      const rows = Math.max(1, Math.ceil(photoCount / columns))
+      return (
+        PHOTO_GROUP_HEADER_ESTIMATED_HEIGHT +
+        rows * estimatedTileHeight +
+        Math.max(0, rows - 1) * PHOTO_GRID_GAP +
+        PHOTO_GROUP_ITEM_GAP
+      )
+    },
+    [columns, estimatedTileHeight, groups],
+  )
+  const virtualizer = useVirtualizer({
+    count: groups.length,
+    getScrollElement: () => scrollElement,
+    estimateSize: estimateGroupSize,
+    overscan: 4,
+  })
+  const handleLayoutChange = useCallback(() => {
+    virtualizer.measure()
+  }, [virtualizer])
 
   if (groups.length === 0) return null
 
   return (
-    <div className="photo-flow-groups">
-      {groups.map((entry) => (
-        <PhotoGroup
-          focusedPhotoId={focusedPhotoId}
-          group={entry.group}
-          key={entry.group.id}
-          onLayoutChange={handleLayoutChange}
-          onFocusPhoto={onFocusPhoto}
-          onOpenReview={onOpenReview}
-          onThumbnailLoadStatus={onThumbnailLoadStatus}
-          photos={entry.photos}
-          t={t}
-        />
-      ))}
+    <div className="photo-flow-virtual" ref={containerRef}>
+      <div className="photo-flow-virtual__spacer" style={{ height: virtualizer.getTotalSize() }}>
+        {virtualizer.getVirtualItems().map((virtualRow) => {
+          const entry = groups[virtualRow.index]
+          if (!entry) return null
+          return (
+            <div
+              className="photo-flow-virtual__item"
+              data-index={virtualRow.index}
+              key={virtualRow.key}
+              ref={virtualizer.measureElement}
+              style={{ transform: `translateY(${virtualRow.start}px)` }}
+            >
+              <PhotoGroup
+                focusedPhotoId={focusedPhotoId}
+                group={entry.group}
+                onLayoutChange={handleLayoutChange}
+                onFocusPhoto={onFocusPhoto}
+                onOpenReview={onOpenReview}
+                onThumbnailLoadStatus={onThumbnailLoadStatus}
+                photos={entry.photos}
+                t={t}
+              />
+            </div>
+          )
+        })}
+      </div>
     </div>
   )
 }
@@ -4811,12 +5128,6 @@ function ExternalEditorActions({
   )
 }
 
-type InspectorMetric = {
-  label: string
-  tone?: Tone
-  value: number | string
-}
-
 function bestDetectionForInspector(photo: PhotoRecord): DetectionLike | null {
   const detections = photo.birdDetections ?? []
   return detections.find((d) => d.isBest) ?? detections[0] ?? null
@@ -4878,61 +5189,6 @@ function formatIsoFromExif(exif: Record<string, unknown> | null | undefined): st
   return `ISO ${String(value)}`
 }
 
-function formatCameraForInspector(photo: PhotoRecord): string {
-  const make = cleanExifString(photo.exif?.Make)
-  const model = cleanExifString(photo.exif?.Model)
-  if (make && model) {
-    return model.toLowerCase().startsWith(make.toLowerCase()) ? model : `${make} ${model}`
-  }
-  return model ?? make ?? photo.camera ?? '--'
-}
-
-function formatLensForInspector(photo: PhotoRecord): string {
-  return cleanExifString(photo.exif?.LensModel) ?? photo.lens ?? '--'
-}
-
-function formatByteSize(bytes: number | null | undefined): string | null {
-  if (bytes === null || bytes === undefined || !Number.isFinite(bytes) || bytes <= 0) return null
-  const units = ['B', 'KB', 'MB', 'GB'] as const
-  let value = bytes
-  let unitIndex = 0
-  while (value >= 1024 && unitIndex < units.length - 1) {
-    value /= 1024
-    unitIndex += 1
-  }
-  const precision = value >= 10 || unitIndex === 0 ? 0 : 1
-  return `${value.toFixed(precision)} ${units[unitIndex]}`
-}
-
-function formatDateTimeForInspector(value: unknown, locale: string): string {
-  const raw = cleanExifString(value)
-  if (!raw) return '--'
-  const normalized = raw.replace(/^(\d{4}):(\d{2}):(\d{2})/, '$1-$2-$3')
-  const date = new Date(normalized)
-  if (!Number.isNaN(date.getTime())) {
-    const normalizedLocale = locale || 'zh-CN'
-    return new Intl.DateTimeFormat(normalizedLocale, {
-      month: '2-digit',
-      day: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit',
-      hour12: normalizedLocale.toLowerCase().startsWith('zh') ? false : undefined,
-    }).format(date)
-  }
-  return raw
-}
-
-function formatPlaceForInspector(photo: PhotoRecord): string {
-  const parts = [photo.place, photo.district, photo.city]
-    .map((value) => value?.trim())
-    .filter((value): value is string => Boolean(value))
-  const unique = parts.filter((value, index) => parts.indexOf(value) === index)
-  if (unique.length > 0) return unique.join(' · ')
-  const gps = extractPhotoGps(photo.exif)
-  if (gps) return `${gps.lat.toFixed(5)}, ${gps.lon.toFixed(5)}`
-  return '--'
-}
-
 function formatInspectorPostureLabel(
   pose: PhotoRecord['bestPose'],
   t: ReturnType<typeof useTranslation>['t'],
@@ -4959,32 +5215,23 @@ function formatInspectorPostureLabel(
   return parts.length > 0 ? parts.join(' · ') : t('selection.review.posture.unknown')
 }
 
-function InspectorSection({
-  children,
-  title,
-}: {
-  children: ReactNode
-  title: string
-}) {
+function InspectorSummaryCard({ children, title }: { children: ReactNode; title: string }) {
   return (
-    <section className="inspector-section">
-      <h3 className="inspector-section__title">{title}</h3>
+    <section className="inspector-summary-card">
+      <h3>{title}</h3>
       {children}
     </section>
   )
 }
 
-function InspectorMetricGrid({ items }: { items: InspectorMetric[] }) {
-  return (
-    <div className="inspector-metric-grid">
-      {items.map((item) => (
-        <div className="inspector-metric" key={item.label}>
-          <span>{item.label}</span>
-          <strong className={item.tone ? `tone-text-${item.tone}` : undefined}>{item.value}</strong>
-        </div>
-      ))}
-    </div>
-  )
+function formatInspectorExposureLine(photo: PhotoRecord): string | null {
+  const values = [
+    formatShutterFromExif(photo.exif),
+    formatApertureFromExif(photo.exif),
+    formatIsoFromExif(photo.exif),
+    formatFocalFromExif(photo.exif),
+  ].filter((value) => value !== '--')
+  return values.length > 0 ? values.join(' · ') : null
 }
 
 function InspectorHero({
@@ -4998,6 +5245,7 @@ function InspectorHero({
   const sourceLabel = photo.decision
     ? t('selection.gradeSource.manual')
     : t('selection.gradeSource.system')
+  const exposureLine = formatInspectorExposureLine(photo)
   return (
     <div className="inspector-hero">
       <div className="inspector-hero__top">
@@ -5013,7 +5261,7 @@ function InspectorHero({
         <span title={photo.fileName}>{photo.fileName}</span>
         <em>{t('selection.inspector.gradeSource', { source: sourceLabel })}</em>
       </div>
-      <p className="inspector-hero__reason">{t(photoReviewReason(photo))}</p>
+      {exposureLine ? <p className="inspector-hero__capture">{exposureLine}</p> : null}
     </div>
   )
 }
@@ -5039,81 +5287,55 @@ function InspectorSpeciesSection({
     bestDetection?.speciesCandidates && bestDetection.speciesCandidates.length > 0
       ? bestDetection.speciesCandidates
       : photo.speciesCandidates
-  const sourceDetail = speciesSourceDetail(photo, t, bestDetection) ?? speciesSourceDetail(photo, t)
   const latinName = effectiveSpeciesLatinName(photo)
+  const primaryCandidate = candidates[0] ?? null
 
   return (
-    <InspectorSection title={t('selection.inspector.speciesSection')}>
+    <InspectorSummaryCard title={t('selection.inspector.speciesSection')}>
       <div className="inspector-species">
         <div className="inspector-species__identity">
           <strong>{formatPhotoSpeciesDisplay(photo, t)}</strong>
           {sourceBadge ? (
             <em
-              className={cn(
-                'species-source-inline',
-                `species-source-inline--${sourceBadge.kind}`,
-              )}
+              className={cn('species-source-inline', `species-source-inline--${sourceBadge.kind}`)}
             >
               {sourceBadge.label}
             </em>
           ) : null}
         </div>
         {latinName ? <span className="inspector-species__latin">{latinName}</span> : null}
-        {sourceDetail ? <p className="inspector-species__detail">{sourceDetail}</p> : null}
+        {primaryCandidate ? (
+          <div className="inspector-species__signals">
+            <span>
+              {t('selection.inspector.topCandidate', {
+                confidence: confidenceLabel(primaryCandidate.confidence),
+              })}
+            </span>
+          </div>
+        ) : null}
       </div>
-      <div className="inspector-candidates">
-        <span className="inspector-candidates__label">{t('selection.inspector.candidates')}</span>
-        {candidates.length > 0 ? (
-          candidates.slice(0, 2).map((candidate) => (
-            <div className="inspector-candidate" key={`${candidate.name}-${candidate.latinName}`}>
-              <span>
-                <strong>{candidate.name}</strong>
-                <small>{candidate.latinName ?? t('selection.speciesEditor.noLatin')}</small>
-              </span>
-              <em>{confidenceLabel(candidate.confidence)}</em>
-            </div>
-          ))
-        ) : (
-          <p className="inspector-muted">{t('selection.inspector.noCandidates')}</p>
-        )}
-      </div>
-    </InspectorSection>
+    </InspectorSummaryCard>
   )
 }
 
-function InspectorScoreSection({
-  bestDetection,
-  photo,
-  t,
-}: {
-  bestDetection: DetectionLike | null
-  photo: PhotoRecord
-  t: ReturnType<typeof useTranslation>['t']
-}) {
-  const detectionConfidence = bestDetection?.bbox.confidence ?? photo.bestBbox?.confidence
-  const items: InspectorMetric[] = [
-    {
-      label: t('selection.metrics.semanticScore'),
-      value: formatScore(photo.semanticScore),
-    },
-    {
-      label: t('selection.metrics.technicalScore'),
-      value: formatScore(photo.technicalScore),
-    },
-    {
-      label: t('selection.inspector.detectionConfidence'),
-      value: confidenceLabel(detectionConfidence),
-    },
-    {
-      label: t('selection.metrics.birdCount'),
-      value: photo.birdCount,
-    },
+function formatInspectorVisibilitySummary(
+  pose: PhotoRecord['bestPose'],
+  t: ReturnType<typeof useTranslation>['t'],
+): string {
+  if (!pose) return t('selection.inspector.visibilitySummary.pending')
+  const criticalParts = [
+    { label: t('selection.metrics.head'), visible: pose.head_visible },
+    { label: t('selection.metrics.eye'), visible: pose.eye_visible },
+    { label: t('selection.metrics.body'), visible: pose.body_visible },
   ]
-  return (
-    <InspectorSection title={t('selection.inspector.scoreSection')}>
-      <InspectorMetricGrid items={items} />
-    </InspectorSection>
-  )
+  const missing = criticalParts.filter((item) => item.visible === false).map((item) => item.label)
+  if (missing.length > 0) {
+    return t('selection.inspector.visibilitySummary.missing', { items: missing.join(' / ') })
+  }
+  if (criticalParts.every((item) => item.visible === true)) {
+    return t('selection.inspector.visibilitySummary.clean')
+  }
+  return t('selection.inspector.visibilitySummary.pending')
 }
 
 function InspectorSubjectSection({
@@ -5126,93 +5348,25 @@ function InspectorSubjectSection({
   t: ReturnType<typeof useTranslation>['t']
 }) {
   const pose = bestDetection?.pose ?? photo.bestPose ?? null
-  const visibilityItems = pose
-    ? [
-        { key: 'head', label: t('selection.metrics.head'), visible: pose.head_visible },
-        { key: 'eye', label: t('selection.metrics.eye'), visible: pose.eye_visible },
-        { key: 'body', label: t('selection.metrics.body'), visible: pose.body_visible },
-        { key: 'wings', label: t('selection.metrics.wings'), visible: pose.wings_visible },
-        { key: 'tail', label: t('selection.metrics.tail'), visible: pose.tail_visible },
-      ]
-    : []
+  const focusTags = photo.problemTags.slice(0, 2)
 
   return (
-    <InspectorSection title={t('selection.inspector.subjectSection')}>
+    <InspectorSummaryCard title={t('selection.inspector.subjectSection')}>
       <div className="inspector-subject">
         <div className="inspector-subject__posture">
-          <span>{t('selection.metrics.posture')}</span>
           <strong>{formatInspectorPostureLabel(pose, t)}</strong>
+          <span>{formatInspectorVisibilitySummary(pose, t)}</span>
           {pose?.posture_confidence ? <em>{confidenceLabel(pose.posture_confidence)}</em> : null}
         </div>
-        {pose ? (
-          <div className="inspector-visibility">
-            {visibilityItems.map((item) => {
-              const state =
-                item.visible === true ? 'visible' : item.visible === false ? 'missing' : 'unknown'
-              return (
-                <span
-                  className={cn('inspector-visibility__chip', `inspector-visibility__chip--${state}`)}
-                  key={item.key}
-                >
-                  {item.label}
-                  <em>{t(`selection.inspector.visibility.${state}`)}</em>
-                </span>
-              )
-            })}
+        {focusTags.length > 0 ? (
+          <div className="inspector-focus-tags">
+            {focusTags.map((tag) => (
+              <span key={tag}>{t(problemTagKey(tag))}</span>
+            ))}
           </div>
-        ) : (
-          <p className="inspector-muted">{t('selection.review.visibility.noResult')}</p>
-        )}
-        <TagCluster photo={photo} t={t} />
+        ) : null}
       </div>
-    </InspectorSection>
-  )
-}
-
-function InspectorFileSection({
-  photo,
-  t,
-}: {
-  photo: PhotoRecord
-  t: ReturnType<typeof useTranslation>['t']
-}) {
-  const dateLocale = t('selection.dateLocale')
-  const exposureItems: InspectorMetric[] = [
-    { label: t('selection.exif.shutter'), value: formatShutterFromExif(photo.exif) },
-    { label: t('selection.exif.aperture'), value: formatApertureFromExif(photo.exif) },
-    { label: t('selection.exif.iso'), value: formatIsoFromExif(photo.exif) },
-    { label: t('selection.exif.focalLength'), value: formatFocalFromExif(photo.exif) },
-  ]
-  const companionSize = formatByteSize(photo.companionSize)
-  const companion = photo.companionFormat
-    ? t('selection.review.companionValue', {
-        format: photo.companionFormat,
-        size: companionSize ?? '--',
-      })
-    : '--'
-  const fileRows = [
-    { label: t('selection.exif.camera'), value: formatCameraForInspector(photo) },
-    { label: t('selection.exif.lens'), value: formatLensForInspector(photo) },
-    {
-      label: t('selection.exif.time'),
-      value: formatDateTimeForInspector(photo.exif?.DateTimeOriginal ?? photo.shotAt, dateLocale),
-    },
-    { label: t('selection.exif.location'), value: formatPlaceForInspector(photo) },
-    { label: t('selection.review.companion'), value: companion },
-  ]
-
-  return (
-    <InspectorSection title={t('selection.inspector.fileSection')}>
-      <InspectorMetricGrid items={exposureItems} />
-      <div className="inspector-kv-list">
-        {fileRows.map((row) => (
-          <div className="inspector-kv" key={row.label}>
-            <span>{row.label}</span>
-            <strong title={row.value}>{row.value}</strong>
-          </div>
-        ))}
-      </div>
-    </InspectorSection>
+    </InspectorSummaryCard>
   )
 }
 
@@ -5242,8 +5396,6 @@ function InspectorPanel({
             <InspectorHero photo={photo} t={t} />
             <InspectorSpeciesSection bestDetection={bestDetection} photo={photo} t={t} />
             <InspectorSubjectSection bestDetection={bestDetection} photo={photo} t={t} />
-            <InspectorScoreSection bestDetection={bestDetection} photo={photo} t={t} />
-            <InspectorFileSection photo={photo} t={t} />
             <ExternalEditorActions photo={photo} sourceMissing={sourceMissing} t={t} />
           </div>
           <div className="inspector-actions" aria-label={t('selection.actions.label')}>

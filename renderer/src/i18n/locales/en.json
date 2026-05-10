@@ -216,6 +216,15 @@
       "confidence": "Confidence",
       "scene": "Scene"
     },
+    "compact": {
+      "summary": "{{total}} photos · {{bird}} bird frames",
+      "keyMetrics": "Key grade metrics",
+      "primaryFilters": "Primary filters",
+      "more": "More",
+      "moreFilters": "More filters",
+      "sort": "Sort",
+      "view": "View"
+    },
     "quickFilters": {
       "select": "Top select",
       "usable": "Usable",
@@ -345,6 +354,7 @@
       "subjectSection": "Subject state",
       "fileSection": "File and capture",
       "candidates": "Species candidates",
+      "topCandidate": "Candidate {{confidence}}",
       "noCandidates": "No candidates",
       "detectionConfidence": "Detection confidence",
       "problemFocus": "Focus issues",
@@ -354,6 +364,11 @@
         "visible": "visible",
         "missing": "missing",
         "unknown": "unknown"
+      },
+      "visibilitySummary": {
+        "clean": "Head, eye, and body clear",
+        "missing": "Check {{items}}",
+        "pending": "Pose evidence limited"
       },
       "idleTitle": "Pick a frame first",
       "idleBody": "The inspector summarizes grade, species source, subject visibility, and capture context so you can decide quickly whether a deep review is needed."
