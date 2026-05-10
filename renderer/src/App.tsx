@@ -110,12 +110,14 @@ const COLLECTION_GRID_MIN_COLUMN_WIDTH = 150
 const COLLECTION_GRID_GAP = 8
 const COLLECTION_HEADING_ESTIMATED_HEIGHT = 52
 const COLLECTION_CARD_ROW_ESTIMATED_HEIGHT = 204
-const PHOTO_GROUP_HEADER_ESTIMATED_HEIGHT = 58
+const PHOTO_GROUP_HEADER_ESTIMATED_HEIGHT = 72
 const PHOTO_GROUP_ITEM_GAP = 30
 const SELECTION_COMPACT_ENTER_SCROLL_PX = 148
 const SELECTION_COMPACT_EXIT_SCROLL_PX = 72
 const SELECTION_SCROLL_TOP_SHOW_PROGRESS = 1 / 3
 const SELECTION_SCROLL_TOP_HIDE_PROGRESS = 0.25
+const SELECTION_SCROLL_TOP_SHOW_MIN_PX = 900
+const SELECTION_SCROLL_TOP_HIDE_MAX_PX = 220
 
 const ArchiveGeoMap = lazy(() =>
   import('@/components/archive-geo-map').then((module) => ({ default: module.ArchiveGeoMap })),
@@ -389,6 +391,55 @@ function useResponsiveGridLayout(
   }, [containerRef, gap, minColumnWidth])
 
   return layout
+}
+
+function useVirtualScrollMargin(
+  containerRef: RefObject<HTMLElement | null>,
+  scrollElement: HTMLElement | null,
+): number {
+  const [scrollMargin, setScrollMargin] = useState(0)
+  const scrollMarginRef = useRef(0)
+
+  const updateScrollMargin = useCallback(() => {
+    const container = containerRef.current
+    if (!container || !scrollElement) {
+      if (scrollMarginRef.current !== 0) {
+        scrollMarginRef.current = 0
+        setScrollMargin(0)
+      }
+      return
+    }
+
+    const scrollRect = scrollElement.getBoundingClientRect()
+    const containerRect = container.getBoundingClientRect()
+    const next = Math.max(0, containerRect.top - scrollRect.top + scrollElement.scrollTop)
+    if (Math.abs(next - scrollMarginRef.current) < 0.5) return
+    scrollMarginRef.current = next
+    setScrollMargin(next)
+  }, [containerRef, scrollElement])
+
+  useLayoutEffect(() => {
+    updateScrollMargin()
+  })
+
+  useEffect(() => {
+    updateScrollMargin()
+    if (typeof ResizeObserver === 'undefined') {
+      window.addEventListener('resize', updateScrollMargin)
+      return () => window.removeEventListener('resize', updateScrollMargin)
+    }
+
+    const observer = new ResizeObserver(updateScrollMargin)
+    if (containerRef.current) observer.observe(containerRef.current)
+    if (scrollElement) observer.observe(scrollElement)
+    window.addEventListener('resize', updateScrollMargin)
+    return () => {
+      observer.disconnect()
+      window.removeEventListener('resize', updateScrollMargin)
+    }
+  }, [containerRef, scrollElement, updateScrollMargin])
+
+  return scrollMargin
 }
 
 function virtualGridStyle(columns: number): CSSProperties {
@@ -897,6 +948,15 @@ function buildPhotoSegments(photos: PhotoRecord[]): PhotoSegment[] {
 function defaultExpandedSegmentIdsForSegments(segments: PhotoSegment[]): Set<string> {
   const stackSegments = segments.filter((segment) => segment.photos.length > 1)
   return stackSegments.length === 1 ? new Set([stackSegments[0].id]) : new Set()
+}
+
+function defaultVisibleTileCountForSegments(segments: PhotoSegment[]): number {
+  const stackSegments = segments.filter((segment) => segment.photos.length > 1)
+  if (stackSegments.length === 0) {
+    return segments.reduce((count, segment) => count + segment.photos.length, 0)
+  }
+  if (stackSegments.length === 1) return stackSegments[0].photos.length
+  return stackSegments.length
 }
 
 function formatGroupClock(value: string | null | undefined): string | null {
@@ -3577,14 +3637,17 @@ function SelectionScreen({
     const update = () => {
       frame = 0
       const maxScroll = Math.max(0, node.scrollHeight - node.clientHeight)
-      const progress = maxScroll > 0 ? node.scrollTop / maxScroll : 0
+      const scrollTop = node.scrollTop
+      const progress = maxScroll > 0 ? scrollTop / maxScroll : 0
       const current = selectionChromeStateRef.current
       const compact = current.compact
-        ? node.scrollTop > SELECTION_COMPACT_EXIT_SCROLL_PX
-        : node.scrollTop > SELECTION_COMPACT_ENTER_SCROLL_PX
+        ? scrollTop > SELECTION_COMPACT_EXIT_SCROLL_PX
+        : scrollTop > SELECTION_COMPACT_ENTER_SCROLL_PX
       const showScrollTop = current.showScrollTop
-        ? progress > SELECTION_SCROLL_TOP_HIDE_PROGRESS
-        : progress > SELECTION_SCROLL_TOP_SHOW_PROGRESS
+        ? progress > SELECTION_SCROLL_TOP_HIDE_PROGRESS &&
+          scrollTop > SELECTION_SCROLL_TOP_HIDE_MAX_PX
+        : progress > SELECTION_SCROLL_TOP_SHOW_PROGRESS &&
+          scrollTop > SELECTION_SCROLL_TOP_SHOW_MIN_PX
       if (current.compact === compact && current.showScrollTop === showScrollTop) return
       const next = { compact, showScrollTop }
       selectionChromeStateRef.current = next
@@ -3630,6 +3693,10 @@ function SelectionScreen({
 
   const scrollSelectionToTop = useCallback(() => {
     const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    const resetChrome = { compact: false, showScrollTop: false }
+    selectionChromeStateRef.current = resetChrome
+    setSelectionChromeState(resetChrome)
+    setCompactMoreOpen(false)
     selectionScrollElement?.scrollTo({ behavior: reduceMotion ? 'auto' : 'smooth', top: 0 })
   }, [selectionScrollElement])
 
@@ -4441,6 +4508,12 @@ function PhotoGroupsList({
     PHOTO_GRID_GAP,
   )
   const columns = gridLayout.columns
+  const scrollMargin = useVirtualScrollMargin(containerRef, scrollElement)
+  const estimatedTileCountByGroup = useMemo(
+    () =>
+      groups.map((entry) => defaultVisibleTileCountForSegments(buildPhotoSegments(entry.photos))),
+    [groups],
+  )
   const estimatedTileHeight = useMemo(() => {
     const tileWidth = Math.max(
       PHOTO_GRID_MIN_COLUMN_WIDTH,
@@ -4450,8 +4523,8 @@ function PhotoGroupsList({
   }, [columns, gridLayout.width])
   const estimateGroupSize = useCallback(
     (index: number) => {
-      const photoCount = Math.max(1, groups[index]?.photos.length ?? 1)
-      const rows = Math.max(1, Math.ceil(photoCount / columns))
+      const visibleTileCount = Math.max(1, estimatedTileCountByGroup[index] ?? 1)
+      const rows = Math.max(1, Math.ceil(visibleTileCount / columns))
       return (
         PHOTO_GROUP_HEADER_ESTIMATED_HEIGHT +
         rows * estimatedTileHeight +
@@ -4459,17 +4532,23 @@ function PhotoGroupsList({
         PHOTO_GROUP_ITEM_GAP
       )
     },
-    [columns, estimatedTileHeight, groups],
+    [columns, estimatedTileCountByGroup, estimatedTileHeight],
   )
   const virtualizer = useVirtualizer({
     count: groups.length,
+    getItemKey: (index) => groups[index]?.group.id ?? index,
     getScrollElement: () => scrollElement,
     estimateSize: estimateGroupSize,
     overscan: 4,
+    scrollMargin,
   })
   const handleLayoutChange = useCallback(() => {
     virtualizer.measure()
   }, [virtualizer])
+
+  useLayoutEffect(() => {
+    virtualizer.measure()
+  }, [columns, estimatedTileCountByGroup, virtualizer])
 
   if (groups.length === 0) return null
 
@@ -4485,7 +4564,7 @@ function PhotoGroupsList({
               data-index={virtualRow.index}
               key={virtualRow.key}
               ref={virtualizer.measureElement}
-              style={{ transform: `translateY(${virtualRow.start}px)` }}
+              style={{ transform: `translateY(${virtualRow.start - scrollMargin}px)` }}
             >
               <PhotoGroup
                 focusedPhotoId={focusedPhotoId}
@@ -4529,6 +4608,7 @@ function VirtualizedPhotoGrid({
     PHOTO_GRID_GAP,
   )
   const columns = gridLayout.columns
+  const scrollMargin = useVirtualScrollMargin(containerRef, scrollElement)
   const rows = useMemo(() => {
     const nextRows: PhotoRecord[][] = []
     for (let start = 0; start < photos.length; start += columns) {
@@ -4541,14 +4621,20 @@ function VirtualizedPhotoGrid({
       PHOTO_GRID_MIN_COLUMN_WIDTH,
       (gridLayout.width - PHOTO_GRID_GAP * (columns - 1)) / columns,
     )
-    return Math.round(tileWidth * 0.75 + 54 + PHOTO_GRID_GAP)
+    return Math.round(tileWidth * 0.75 + PHOTO_GRID_GAP)
   }, [columns, gridLayout.width])
   const virtualizer = useVirtualizer({
     count: rows.length,
+    getItemKey: (index) => rows[index]?.[0]?.id ?? index,
     getScrollElement: () => scrollElement,
     estimateSize: () => estimatedRowHeight,
     overscan: 5,
+    scrollMargin,
   })
+
+  useLayoutEffect(() => {
+    virtualizer.measure()
+  }, [columns, estimatedRowHeight, rows, virtualizer])
 
   if (photos.length === 0) return null
 
@@ -4565,7 +4651,7 @@ function VirtualizedPhotoGrid({
               ref={virtualizer.measureElement}
               style={{
                 ...virtualGridStyle(columns),
-                transform: `translateY(${virtualRow.start}px)`,
+                transform: `translateY(${virtualRow.start - scrollMargin}px)`,
               }}
             >
               {rowPhotos.map((photo) => (

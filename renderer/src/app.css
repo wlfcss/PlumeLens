@@ -2372,6 +2372,7 @@ button:disabled {
 .photo-grid-virtual__spacer {
   position: relative;
   width: 100%;
+  overflow-anchor: none;
 }
 
 .photo-flow-virtual__item {
@@ -2380,6 +2381,7 @@ button:disabled {
   left: 0;
   width: 100%;
   padding-bottom: 30px;
+  contain: layout style;
   will-change: transform;
 }
 
@@ -2477,6 +2479,7 @@ button:disabled {
   width: 100%;
   grid-template-columns: repeat(var(--virtual-grid-columns), minmax(0, 1fr));
   padding-bottom: 18px;
+  contain: layout style;
   will-change: transform;
 }
 
