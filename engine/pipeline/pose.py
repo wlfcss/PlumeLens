@@ -186,7 +186,8 @@ class PoseDetector:
             crop_origin=(x0, y0),    # crop 在原图中左上角坐标(用于关键点还原)
         )
 
-    决策规则与阈值默认值见 bird_visibility11_config.json 的 best_* 校准段。
+    决策规则基于 bird_visibility11_config.json 的 best_* 校准段;产品运行默认对
+    eye_visible 略放宽到 0.42,以减少边界侧脸/遮挡样本误判为眼不可见。
     """
 
     def __init__(
@@ -196,7 +197,7 @@ class PoseDetector:
         # crop 输入下 box_threshold 只用于"取最高置信度检测"后的低置信保护;
         # 产品默认 0.02。单鸟校准值 0.05 在遮挡长尾实拍里会吞掉可用关键点。
         box_threshold: float = 0.02,
-        eye_threshold: float = 0.45,
+        eye_threshold: float = 0.42,
         head_threshold: float = 0.45,
         head_eye_threshold: float = 0.40,
         body_threshold: float = 0.30,

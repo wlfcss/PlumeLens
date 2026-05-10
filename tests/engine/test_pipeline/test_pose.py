@@ -69,7 +69,7 @@ def _make_detector(**kwargs) -> tuple[PoseDetector, np.ndarray]:
         sess,
         input_size=640,
         box_threshold=0.05,
-        eye_threshold=0.45,
+        eye_threshold=0.42,
         head_threshold=0.45,
         head_eye_threshold=0.40,
         body_threshold=0.30,
@@ -177,8 +177,17 @@ class TestHeadEyeRules:
         confs.update({n: 0.9 for n in (*BODY_PARTS, TAIL_PART, *WING_PARTS)})
         res = self._detect(confs)
         assert res is not None
-        assert res.eye_visible is False  # 双眼都 < 0.45
+        assert res.eye_visible is False  # 双眼都 < 0.42
         assert res.head_visible is True  # 3 个 head_parts 满足
+
+    def test_eye_visible_accepts_borderline_eye_conf(self) -> None:
+        confs = {n: (0.9 if n in HEAD_PARTS else 0.3) for n in PART_NAMES}
+        confs.update({"left_eye": 0.423, "right_eye": 0.2})
+        confs.update({n: 0.9 for n in (*BODY_PARTS, TAIL_PART, *WING_PARTS)})
+        res = self._detect(confs)
+        assert res is not None
+        assert res.eye_visible is True
+        assert res.head_visible is True
 
     def test_head_visible_with_two_head_parts(self) -> None:
         confs = {n: 0.0 for n in PART_NAMES}

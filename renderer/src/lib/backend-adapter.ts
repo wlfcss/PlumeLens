@@ -236,8 +236,8 @@ function deriveProblemTags(row: PhotoRow): ProblemTagId[] {
     if (!pose.head_visible) {
       tags.push('head_occluded')
     } else if (!pose.eye_visible) {
-      // 头可见但眼部关键点置信不足。这里表达的是 pose 可见性证据不足,
-      // 不是独立的眼部清晰度模型判断。
+      // 头可见但眼部关键点未过可见阈值。这里表达的是 pose 可见性证据不足,
+      // 不是独立的眼部清晰度或锐度模型判断。
       tags.push('eye_soft')
     }
   }
@@ -248,7 +248,7 @@ function deriveProblemTags(row: PhotoRow): ProblemTagId[] {
  * 根据 best_detection.pose + bird_count 推导姿态标签(tile chips 用)。
  *
  * 之前 backend-adapter 把 poseTags 写死 [],导致选片瓦片完全没有姿态徽标 —
- * "见眼/头部完整/展翅/停栖/多鸟"五个 chip 永远不显示。修复后从 best_detection.pose
+ * "眼可见/头部完整/展翅/停栖/多鸟"五个 chip 永远不显示。修复后从 best_detection.pose
  * 派生(后端 _build_detection_detail 现在透传完整 11 关键点 + 5 visibility + 3 posture)。
  */
 function derivePoseTags(row: PhotoRow): PoseTagId[] {

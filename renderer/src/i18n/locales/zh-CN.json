@@ -305,7 +305,7 @@
       "partialUnconfirmed": "部分待审"
     },
     "poseTags": {
-      "eye_visible": "见眼",
+      "eye_visible": "眼可见",
       "head_clean": "头部完整",
       "wings_open": "展翅",
       "perched": "停栖",
@@ -314,7 +314,7 @@
     "problemTags": {
       "no_bird": "无鸟",
       "subject_small": "主体太小",
-      "eye_soft": "见眼不足",
+      "eye_soft": "眼不可见",
       "head_occluded": "头部遮挡",
       "wing_cropped": "翅膀截断",
       "low_species_confidence": "物种置信低"

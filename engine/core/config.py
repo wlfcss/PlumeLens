@@ -77,7 +77,7 @@ class Settings(BaseSettings):
     # 置信度很高的可用结果(5Y3A9994)，运行阈值下调到 0.02 避免整条 pose 被吞。
     pose_input_size: int = 640
     pose_box_threshold: float = 0.02
-    pose_eye_threshold: float = 0.45
+    pose_eye_threshold: float = 0.42
     pose_head_threshold: float = 0.45  # v1 0.35 → v2 0.45(11 kpt 训练后头部判定可更严格)
     pose_head_eye_threshold: float = 0.40  # v1 0.10 → v2 0.40
     pose_body_threshold: float = 0.30  # 新增 v2:躯干 belly/breast/back 任一阈值
