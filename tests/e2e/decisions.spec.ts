@@ -21,6 +21,8 @@ interface TestPhotoFixture {
   birdCount?: number
   bbox?: { x1: number; y1: number; x2: number; y2: number; confidence: number }
   posture?: 'flying' | 'perched' | 'unknown'
+  sceneId?: number
+  shotAt?: string
 }
 
 const TEST_LIB = {
@@ -182,6 +184,52 @@ const TEST_MANY_GROUP_PHOTOS: TestPhotoFixture[] = Array.from({ length: 64 }, (_
   }
 })
 
+function makeRealisticScene(
+  sceneId: number,
+  count: number,
+  hhmm: string,
+  startFileNo: number,
+): TestPhotoFixture[] {
+  const [hour, minute] = hhmm.split(':').map(Number)
+  return Array.from({ length: count }, (_, idx) => {
+    const drift = Math.min(idx, 8) * 6
+    const grade = idx % 11 === 4 ? 'usable' : idx % 13 === 6 ? 'record' : 'select'
+    return {
+      id: `real-${sceneId}-${idx + 1}`,
+      file_name: `5Y3A${String(startFileNo + idx).padStart(4, '0')}.JPG`,
+      species: '纯色山鹪莺',
+      latin: 'Prinia inornata',
+      grade,
+      score: Math.max(0.55, 0.792 - idx * 0.004),
+      sceneId,
+      shotAt: `2026-05-10T${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}:${String(idx).padStart(2, '0')}+08:00`,
+      bbox: {
+        x1: 1800 + drift,
+        y1: 760,
+        x2: 2320 + drift,
+        y2: 2160,
+        confidence: 0.93,
+      },
+      posture: idx % 17 === 0 ? 'flying' : 'perched',
+    }
+  })
+}
+
+const TEST_REALISTIC_STACK_PHOTOS: TestPhotoFixture[] = [
+  ...makeRealisticScene(22, 31, '10:21', 1508),
+  ...makeRealisticScene(21, 5, '10:21', 1503),
+  ...makeRealisticScene(20, 12, '10:20', 1491),
+  ...makeRealisticScene(19, 9, '10:19', 1482),
+  ...makeRealisticScene(18, 18, '10:18', 1464),
+  ...makeRealisticScene(17, 7, '10:17', 1457),
+  ...makeRealisticScene(16, 14, '10:16', 1443),
+  ...makeRealisticScene(15, 21, '10:15', 1422),
+  ...makeRealisticScene(14, 6, '10:14', 1416),
+  ...makeRealisticScene(13, 16, '10:13', 1400),
+  ...makeRealisticScene(12, 11, '10:12', 1389),
+  ...makeRealisticScene(11, 20, '10:11', 1369),
+]
+
 function makePose(posture: 'flying' | 'perched' | 'unknown') {
   const flying = posture === 'flying'
   return {
@@ -215,19 +263,22 @@ async function mockBackend(
     driftingStack?: boolean
     includeFailed?: boolean
     manyGroups?: boolean
+    realisticStacks?: boolean
     singleBurstScene?: boolean
     stackedBursts?: boolean
   } = {},
 ): Promise<void> {
-  const primaryPhotosBase = options.manyGroups
-    ? TEST_MANY_GROUP_PHOTOS
-    : options.driftingStack
-      ? TEST_DRIFT_STACK_PHOTOS
-      : options.singleBurstScene
-        ? TEST_SINGLE_BURST_PHOTOS
-        : options.stackedBursts
-          ? TEST_STACK_PHOTOS
-          : TEST_PHOTOS
+  const primaryPhotosBase = options.realisticStacks
+    ? TEST_REALISTIC_STACK_PHOTOS
+    : options.manyGroups
+      ? TEST_MANY_GROUP_PHOTOS
+      : options.driftingStack
+        ? TEST_DRIFT_STACK_PHOTOS
+        : options.singleBurstScene
+          ? TEST_SINGLE_BURST_PHOTOS
+          : options.stackedBursts
+            ? TEST_STACK_PHOTOS
+            : TEST_PHOTOS
   const failedPhoto: TestPhotoFixture = {
     id: 'failed-1',
     file_name: 'BROKEN_0005.JPG',
@@ -413,13 +464,16 @@ async function mockBackend(
               : idx * 20
       const manyGroupHour = 7 + Math.floor(idx / 60)
       const manyGroupMinute = idx % 60
-      const shotAt = options.manyGroups
-        ? `2026-04-23T${String(manyGroupHour).padStart(2, '0')}:${String(manyGroupMinute).padStart(2, '0')}:00+00:00`
-        : options.driftingStack || options.singleBurstScene || options.stackedBursts
-          ? `2026-04-23T07:00:${String(burstSecond).padStart(2, '0')}+00:00`
-          : `2026-04-23T07:0${idx}:00+00:00`
+      const shotAt = p.shotAt
+        ? p.shotAt
+        : options.manyGroups
+          ? `2026-04-23T${String(manyGroupHour).padStart(2, '0')}:${String(manyGroupMinute).padStart(2, '0')}:00+00:00`
+          : options.driftingStack || options.singleBurstScene || options.stackedBursts
+            ? `2026-04-23T07:00:${String(burstSecond).padStart(2, '0')}+00:00`
+            : `2026-04-23T07:0${idx}:00+00:00`
       const bbox = p.bbox ?? { x1: 1700, y1: 800, x2: 2200, y2: 2200, confidence: 0.93 }
-      const pose = options.manyGroups && p.posture ? makePose(p.posture) : null
+      const pose =
+        (options.manyGroups || options.realisticStacks) && p.posture ? makePose(p.posture) : null
 
       return {
         id: p.id,
@@ -452,7 +506,8 @@ async function mockBackend(
               }
             : null,
         scene_id:
-          options.driftingStack || options.singleBurstScene || options.stackedBursts ? 111 : idx,
+          p.sceneId ??
+          (options.driftingStack || options.singleBurstScene || options.stackedBursts ? 111 : idx),
         pipeline_version: 'v1-mock',
         grade: p.grade,
         quality_score: p.score,
@@ -687,6 +742,54 @@ async function waitForSelectionScrollSettled(page: Page): Promise<void> {
   })
 }
 
+async function expectVirtualListHasNoLargeVisibleGap(page: Page, maxTopGap = 340): Promise<void> {
+  const metrics = await page.locator('.selection-main.selection-scroll').evaluate((node) => {
+    const scroller = node as HTMLElement
+    const scrollerRect = scroller.getBoundingClientRect()
+    const groups = Array.from(scroller.querySelectorAll<HTMLElement>('.photo-group'))
+      .map((group) => {
+        const rect = group.getBoundingClientRect()
+        return { bottom: rect.bottom, height: rect.height, top: rect.top }
+      })
+      .filter((rect) => rect.bottom > scrollerRect.top && rect.top < scrollerRect.bottom)
+      .sort((left, right) => left.top - right.top)
+
+    let maxInterGroupGap = 0
+    for (let index = 1; index < groups.length; index += 1) {
+      maxInterGroupGap = Math.max(
+        maxInterGroupGap,
+        Math.max(0, groups[index].top - groups[index - 1].bottom),
+      )
+    }
+
+    return {
+      maxInterGroupGap,
+      topGap:
+        groups.length > 0 ? Math.max(0, groups[0].top - scrollerRect.top) : scrollerRect.height,
+      visibleCount: groups.length,
+    }
+  })
+
+  expect(metrics.visibleCount).toBeGreaterThan(0)
+  expect(metrics.topGap).toBeLessThan(maxTopGap)
+  expect(metrics.maxInterGroupGap).toBeLessThan(140)
+}
+
+async function scrollSelectionToRatio(page: Page, ratio: number): Promise<number> {
+  const top = await page
+    .locator('.selection-main.selection-scroll')
+    .evaluate((node, targetRatio) => {
+      const scroller = node as HTMLElement
+      const maxScroll = Math.max(0, scroller.scrollHeight - scroller.clientHeight)
+      const nextTop = maxScroll * targetRatio
+      scroller.scrollTo({ top: nextTop })
+      scroller.dispatchEvent(new Event('scroll', { bubbles: true }))
+      return nextTop
+    }, ratio)
+  await waitForSelectionScrollSettled(page)
+  return top
+}
+
 test.describe('Photo stack interactions (mock backend)', () => {
   test('stack action hints only reveal on hover and expanded stacks can collapse', async ({
     page,
@@ -750,6 +853,133 @@ test.describe('Photo stack interactions (mock backend)', () => {
     await collapse.click()
     await expect(page.getByRole('button', { name: '展开 12 张连拍' })).toBeVisible()
     await expect(page.locator('.photo-tile')).toHaveCount(1)
+  })
+
+  test('large default-expanded burst stacks collapse without stale virtual height gaps', async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 2048, height: 1152 })
+    await mockBackend(page, { realisticStacks: true })
+    await page.goto('/')
+    await page.getByRole('button', { name: '选片', exact: true }).click()
+
+    const groups = page.locator('.photo-group')
+    const largeStackGroup = groups.filter({
+      has: page.getByRole('button', { name: '收起 31 张连拍' }),
+    })
+    await expect(page.getByRole('button', { name: '收起 31 张连拍' })).toBeVisible()
+    await expect(largeStackGroup).toContainText('31 张照片')
+    await expect(largeStackGroup.locator('.photo-tile')).toHaveCount(31)
+
+    await page.getByRole('button', { name: '收起 31 张连拍' }).click()
+    await waitForSelectionScrollSettled(page)
+
+    const collapsedLargeStackGroup = groups.filter({
+      has: page.getByRole('button', { name: '展开 31 张连拍' }),
+    })
+    await expect(page.getByRole('button', { name: '展开 31 张连拍' })).toBeVisible()
+    await expect(collapsedLargeStackGroup.locator('.photo-tile')).toHaveCount(1)
+
+    const layout = await groups.evaluateAll((nodes) =>
+      nodes.map((node) => {
+        const rect = node.getBoundingClientRect()
+        return {
+          bottom: rect.bottom,
+          height: rect.height,
+          text: node.textContent ?? '',
+          top: rect.top,
+        }
+      }),
+    )
+    const collapsedIndex = layout.findIndex((item) => item.text.includes('31 张照片'))
+    expect(collapsedIndex).toBeGreaterThanOrEqual(0)
+    expect(layout[collapsedIndex].height).toBeLessThan(360)
+    if (layout[collapsedIndex + 1]) {
+      const nextGap = layout[collapsedIndex + 1].top - layout[collapsedIndex].bottom
+      expect(nextGap).toBeGreaterThanOrEqual(24)
+      expect(nextGap).toBeLessThan(90)
+    }
+    await expectVirtualListHasNoLargeVisibleGap(page)
+  })
+
+  test('collapsed burst stacks survive virtual remounts and scroll sweeps', async ({ page }) => {
+    await page.setViewportSize({ width: 2048, height: 1152 })
+    await mockBackend(page, { realisticStacks: true })
+    await page.goto('/')
+    await page.getByRole('button', { name: '选片', exact: true }).click()
+
+    const scroller = page.locator('.selection-main.selection-scroll')
+    await page.getByRole('button', { name: '收起 31 张连拍' }).click()
+    await waitForSelectionScrollSettled(page)
+
+    const maxScroll = await scroller.evaluate((node) => {
+      const scrollerElement = node as HTMLElement
+      return Math.max(0, scrollerElement.scrollHeight - scrollerElement.clientHeight)
+    })
+    expect(maxScroll).toBeGreaterThan(2200)
+
+    for (const ratio of [0.22, 0.5, 0.78]) {
+      await scrollSelectionToRatio(page, ratio)
+      await expectVirtualListHasNoLargeVisibleGap(page, 260)
+    }
+
+    await scroller.evaluate((node) => {
+      const scrollerElement = node as HTMLElement
+      scrollerElement.scrollTo({ top: 0 })
+      scrollerElement.dispatchEvent(new Event('scroll', { bubbles: true }))
+    })
+    await waitForSelectionScrollSettled(page)
+
+    await expect(page.getByRole('button', { name: '展开 31 张连拍' })).toBeVisible()
+    await expect(page.getByRole('button', { name: '收起 31 张连拍' })).toHaveCount(0)
+    await expect(
+      page.locator('.photo-group').filter({
+        has: page.getByRole('button', { name: '展开 31 张连拍' }),
+      }),
+    ).toHaveCount(1)
+    await expect(
+      page
+        .locator('.photo-group')
+        .filter({ has: page.getByRole('button', { name: '展开 31 张连拍' }) })
+        .locator('.photo-tile'),
+    ).toHaveCount(1)
+  })
+
+  test('compact filtering and back-to-top stay stable after collapsing a default stack', async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 2048, height: 1152 })
+    await mockBackend(page, { realisticStacks: true })
+    await page.goto('/')
+    await page.getByRole('button', { name: '选片', exact: true }).click()
+
+    const scroller = page.locator('.selection-main.selection-scroll')
+    await page.getByRole('button', { name: '收起 31 张连拍' }).click()
+    await waitForSelectionScrollSettled(page)
+    await scrollSelectionToRatio(page, 0.42)
+
+    const beforeFilterTop = await scroller.evaluate((node) => (node as HTMLElement).scrollTop)
+    expect(beforeFilterTop).toBeGreaterThan(1200)
+    await expect(page.locator('.selection-compact-header--visible')).toBeVisible()
+
+    await page
+      .locator('.selection-compact-filter-row')
+      .getByRole('button', { name: '可用', exact: true })
+      .click()
+    await waitForSelectionScrollSettled(page)
+
+    const afterFilterTop = await scroller.evaluate((node) => (node as HTMLElement).scrollTop)
+    expect(afterFilterTop).toBeGreaterThan(Math.max(1, beforeFilterTop - 700))
+    await expectVirtualListHasNoLargeVisibleGap(page, 260)
+
+    await page.getByRole('button', { name: '回到顶部' }).click()
+    await expect
+      .poll(async () => scroller.evaluate((node) => (node as HTMLElement).scrollTop), {
+        timeout: 2500,
+      })
+      .toBeLessThan(2)
+    await expect(page.locator('.folder-topline h1')).toBeVisible()
+    await expectVirtualListHasNoLargeVisibleGap(page)
   })
 
   test('slowly drifting subjects stay in one burst stack despite species label jitter', async ({

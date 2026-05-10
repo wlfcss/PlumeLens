@@ -41,7 +41,7 @@ import {
   type RefObject,
 } from 'react'
 import { useTranslation } from 'react-i18next'
-import { useVirtualizer } from '@tanstack/react-virtual'
+import { useVirtualizer, type VirtualItem, type Virtualizer } from '@tanstack/react-virtual'
 
 import { EngineStatusBanner } from '@/components/engine-status-banner'
 import { ReviewModal } from '@/components/review/review-modal'
@@ -137,6 +137,8 @@ type PhotoSegment = {
   coverPhoto: PhotoRecord
 }
 
+type SegmentExpansionOverrides = Record<string, string[]>
+
 type StackCollapseControl = {
   count: number
   onCollapse: () => void
@@ -213,7 +215,9 @@ const FOLDER_CONTEXT_MENU_WIDTH = 188
 const FOLDER_CONTEXT_MENU_HEIGHT = 88
 
 const EMPTY_PHOTOS: PhotoRecord[] = []
+const EMPTY_SEGMENTS: PhotoSegment[] = []
 const EMPTY_SPECIES: SpeciesRecord[] = []
+const EMPTY_STRING_ARRAY: string[] = []
 const EMPTY_FOLDER_SUMMARY: FolderSummary = {
   newSpeciesCount: 0,
   birdPhotoCount: 0,
@@ -964,13 +968,24 @@ function defaultExpandedSegmentIdsForSegments(segments: PhotoSegment[]): Set<str
   return stackSegments.length === 1 ? new Set([stackSegments[0].id]) : new Set()
 }
 
-function defaultVisibleTileCountForSegments(segments: PhotoSegment[]): number {
+function resolveExpandedSegmentIdsForSegments(
+  segments: PhotoSegment[],
+  override: string[] | undefined,
+): Set<string> {
+  const validIds = new Set(segments.map((segment) => segment.id))
+  const source = override ?? Array.from(defaultExpandedSegmentIdsForSegments(segments))
+  return new Set(source.filter((id) => validIds.has(id)))
+}
+
+function visibleTileCountForSegments(segments: PhotoSegment[], expandedSegmentIds: Set<string>) {
   const stackSegments = segments.filter((segment) => segment.photos.length > 1)
   if (stackSegments.length === 0) {
     return segments.reduce((count, segment) => count + segment.photos.length, 0)
   }
-  if (stackSegments.length === 1) return stackSegments[0].photos.length
-  return stackSegments.length
+  return stackSegments.reduce(
+    (count, segment) => count + (expandedSegmentIds.has(segment.id) ? segment.photos.length : 1),
+    0,
+  )
 }
 
 function formatGroupClock(value: string | null | undefined): string | null {
@@ -4643,6 +4658,8 @@ function PhotoGroupsList({
   t: ReturnType<typeof useTranslation>['t']
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null)
+  const [segmentExpansionOverrides, setSegmentExpansionOverrides] =
+    useState<SegmentExpansionOverrides>({})
   const gridLayout = useResponsiveGridLayout(
     containerRef,
     PHOTO_GRID_MIN_COLUMN_WIDTH,
@@ -4650,10 +4667,30 @@ function PhotoGroupsList({
   )
   const columns = gridLayout.columns
   const scrollMargin = useVirtualScrollMargin(containerRef, scrollElement)
+  const segmentsByGroup = useMemo(
+    () => groups.map((entry) => buildPhotoSegments(entry.photos)),
+    [groups],
+  )
   const estimatedTileCountByGroup = useMemo(
     () =>
-      groups.map((entry) => defaultVisibleTileCountForSegments(buildPhotoSegments(entry.photos))),
-    [groups],
+      groups.map((entry, index) => {
+        const segments = segmentsByGroup[index] ?? EMPTY_SEGMENTS
+        return visibleTileCountForSegments(
+          segments,
+          resolveExpandedSegmentIdsForSegments(segments, segmentExpansionOverrides[entry.group.id]),
+        )
+      }),
+    [groups, segmentExpansionOverrides, segmentsByGroup],
+  )
+  const groupMeasurementSignature = useMemo(
+    () =>
+      groups
+        .map((entry, index) => {
+          const segments = segmentsByGroup[index] ?? EMPTY_SEGMENTS
+          return `${entry.group.id}:${entry.photos.length}:${segments.map((segment) => segment.id).join(',')}`
+        })
+        .join('|'),
+    [groups, segmentsByGroup],
   )
   const estimatedTileHeight = useMemo(() => {
     const tileWidth = Math.max(
@@ -4675,7 +4712,7 @@ function PhotoGroupsList({
     },
     [columns, estimatedTileCountByGroup, estimatedTileHeight],
   )
-  const virtualizer = useVirtualizer({
+  const virtualizer = useVirtualizer<HTMLElement, HTMLDivElement>({
     count: groups.length,
     getItemKey: (index) => groups[index]?.group.id ?? index,
     getScrollElement: () => scrollElement,
@@ -4683,13 +4720,41 @@ function PhotoGroupsList({
     overscan: 4,
     scrollMargin,
   })
-  const handleLayoutChange = useCallback(() => {
-    virtualizer.measure()
-  }, [virtualizer])
+  const setExpandedSegmentOverride = useCallback((groupId: string, segmentIds: string[]) => {
+    const nextIds = segmentIds.toSorted()
+    setSegmentExpansionOverrides((current) => {
+      const hasCurrentOverride = Object.prototype.hasOwnProperty.call(current, groupId)
+      const currentIds = hasCurrentOverride ? current[groupId] : EMPTY_STRING_ARRAY
+      if (
+        hasCurrentOverride &&
+        currentIds.length === nextIds.length &&
+        currentIds.every((id, index) => id === nextIds[index])
+      ) {
+        return current
+      }
+      return { ...current, [groupId]: nextIds }
+    })
+  }, [])
 
   useLayoutEffect(() => {
     virtualizer.measure()
-  }, [columns, estimatedTileCountByGroup, virtualizer])
+  }, [columns, estimatedTileHeight, groupMeasurementSignature, virtualizer])
+
+  useEffect(() => {
+    const groupIds = new Set(groups.map((entry) => entry.group.id))
+    setSegmentExpansionOverrides((current) => {
+      let changed = false
+      const next: SegmentExpansionOverrides = {}
+      for (const [groupId, ids] of Object.entries(current)) {
+        if (!groupIds.has(groupId)) {
+          changed = true
+          continue
+        }
+        next[groupId] = ids
+      }
+      return changed ? next : current
+    })
+  }, [groups])
 
   if (groups.length === 0) return null
 
@@ -4699,28 +4764,117 @@ function PhotoGroupsList({
         {virtualizer.getVirtualItems().map((virtualRow) => {
           const entry = groups[virtualRow.index]
           if (!entry) return null
+          const segments = segmentsByGroup[virtualRow.index] ?? EMPTY_SEGMENTS
           return (
-            <div
-              className="photo-flow-virtual__item"
-              data-index={virtualRow.index}
+            <VirtualizedPhotoGroupRow
+              entry={entry}
+              expandedSegmentOverride={segmentExpansionOverrides[entry.group.id]}
+              focusedPhotoId={focusedPhotoId}
               key={virtualRow.key}
-              ref={virtualizer.measureElement}
-              style={{ transform: `translateY(${virtualRow.start - scrollMargin}px)` }}
-            >
-              <PhotoGroup
-                focusedPhotoId={focusedPhotoId}
-                group={entry.group}
-                onLayoutChange={handleLayoutChange}
-                onFocusPhoto={onFocusPhoto}
-                onOpenReview={onOpenReview}
-                onThumbnailLoadStatus={onThumbnailLoadStatus}
-                photos={entry.photos}
-                t={t}
-              />
-            </div>
+              onExpandedSegmentIdsChange={setExpandedSegmentOverride}
+              onFocusPhoto={onFocusPhoto}
+              onOpenReview={onOpenReview}
+              onThumbnailLoadStatus={onThumbnailLoadStatus}
+              scrollMargin={scrollMargin}
+              segments={segments}
+              t={t}
+              virtualizer={virtualizer}
+              virtualRow={virtualRow}
+            />
           )
         })}
       </div>
+    </div>
+  )
+}
+
+function VirtualizedPhotoGroupRow({
+  entry,
+  expandedSegmentOverride,
+  focusedPhotoId,
+  onExpandedSegmentIdsChange,
+  onFocusPhoto,
+  onOpenReview,
+  onThumbnailLoadStatus,
+  scrollMargin,
+  segments,
+  t,
+  virtualizer,
+  virtualRow,
+}: {
+  entry: { group: PhotoGroupRecord; photos: PhotoRecord[] }
+  expandedSegmentOverride: string[] | undefined
+  focusedPhotoId: string | null
+  onExpandedSegmentIdsChange: (groupId: string, segmentIds: string[]) => void
+  onFocusPhoto: (photoId: string | null) => void
+  onOpenReview: (photoId: string) => void
+  onThumbnailLoadStatus: (photoId: string, status: ThumbnailLoadStatus) => void
+  scrollMargin: number
+  segments: PhotoSegment[]
+  t: ReturnType<typeof useTranslation>['t']
+  virtualizer: Virtualizer<HTMLElement, HTMLDivElement>
+  virtualRow: VirtualItem
+}) {
+  const rowRef = useRef<HTMLDivElement | null>(null)
+  const measureFrameRef = useRef<number | null>(null)
+  const measureTimeoutRef = useRef<number | null>(null)
+
+  const cancelDeferredMeasure = useCallback(() => {
+    if (measureFrameRef.current !== null) {
+      window.cancelAnimationFrame(measureFrameRef.current)
+      measureFrameRef.current = null
+    }
+    if (measureTimeoutRef.current !== null) {
+      window.clearTimeout(measureTimeoutRef.current)
+      measureTimeoutRef.current = null
+    }
+  }, [])
+
+  const measureRow = useCallback(() => {
+    const node = rowRef.current
+    if (!node) return
+    virtualizer.measureElement(node)
+    cancelDeferredMeasure()
+    measureFrameRef.current = window.requestAnimationFrame(() => {
+      measureFrameRef.current = null
+      if (rowRef.current) virtualizer.measureElement(rowRef.current)
+    })
+    measureTimeoutRef.current = window.setTimeout(() => {
+      measureTimeoutRef.current = null
+      if (rowRef.current) virtualizer.measureElement(rowRef.current)
+    }, 120)
+  }, [cancelDeferredMeasure, virtualizer])
+
+  const setRowNode = useCallback(
+    (node: HTMLDivElement | null) => {
+      rowRef.current = node
+      virtualizer.measureElement(node)
+    },
+    [virtualizer],
+  )
+
+  useEffect(() => cancelDeferredMeasure, [cancelDeferredMeasure])
+
+  return (
+    <div
+      className="photo-flow-virtual__item"
+      data-index={virtualRow.index}
+      ref={setRowNode}
+      style={{ transform: `translateY(${virtualRow.start - scrollMargin}px)` }}
+    >
+      <PhotoGroup
+        expandedSegmentOverride={expandedSegmentOverride}
+        focusedPhotoId={focusedPhotoId}
+        group={entry.group}
+        onExpandedSegmentIdsChange={onExpandedSegmentIdsChange}
+        onLayoutChange={measureRow}
+        onFocusPhoto={onFocusPhoto}
+        onOpenReview={onOpenReview}
+        onThumbnailLoadStatus={onThumbnailLoadStatus}
+        photos={entry.photos}
+        segments={segments}
+        t={t}
+      />
     </div>
   )
 }
@@ -4764,7 +4918,7 @@ function VirtualizedPhotoGrid({
     )
     return Math.round(tileWidth * 0.75 + PHOTO_GRID_GAP)
   }, [columns, gridLayout.width])
-  const virtualizer = useVirtualizer({
+  const virtualizer = useVirtualizer<HTMLElement, HTMLDivElement>({
     count: rows.length,
     getItemKey: (index) => rows[index]?.[0]?.id ?? index,
     getScrollElement: () => scrollElement,
@@ -4815,27 +4969,33 @@ function VirtualizedPhotoGrid({
 }
 
 function PhotoGroup({
+  expandedSegmentOverride,
   focusedPhotoId,
   group,
+  onExpandedSegmentIdsChange,
   onLayoutChange,
   onFocusPhoto,
   onOpenReview,
   onThumbnailLoadStatus,
   photos,
+  segments,
   t,
 }: {
+  expandedSegmentOverride: string[] | undefined
   focusedPhotoId: string | null
   group: PhotoGroupRecord
+  onExpandedSegmentIdsChange: (groupId: string, segmentIds: string[]) => void
   onLayoutChange: () => void
   onFocusPhoto: (photoId: string | null) => void
   onOpenReview: (photoId: string) => void
   onThumbnailLoadStatus: (photoId: string, status: ThumbnailLoadStatus) => void
   photos: PhotoRecord[]
+  segments: PhotoSegment[]
   t: ReturnType<typeof useTranslation>['t']
 }) {
-  const segments = useMemo(() => buildPhotoSegments(photos), [photos])
-  const [expandedSegmentIds, setExpandedSegmentIds] = useState<Set<string>>(() =>
-    defaultExpandedSegmentIdsForSegments(segments),
+  const expandedSegmentIds = useMemo(
+    () => resolveExpandedSegmentIdsForSegments(segments, expandedSegmentOverride),
+    [expandedSegmentOverride, segments],
   )
   const segmentSignature = useMemo(
     () => segments.map((segment) => segment.id).join('|'),
@@ -4854,31 +5014,29 @@ function PhotoGroup({
     onLayoutChangeRef.current = onLayoutChange
   }, [onLayoutChange])
 
-  useEffect(() => {
-    setExpandedSegmentIds(defaultExpandedSegmentIdsForSegments(segments))
-  }, [group.id, segmentSignature, segments])
-
   useLayoutEffect(() => {
     onLayoutChangeRef.current()
   }, [expandedSegmentKey, group.id, segmentSignature])
 
-  const expandStack = useCallback((segment: PhotoSegment) => {
-    setExpandedSegmentIds((current) => {
-      if (current.has(segment.id)) return current
-      const next = new Set(current)
+  const expandStack = useCallback(
+    (segment: PhotoSegment) => {
+      if (expandedSegmentIds.has(segment.id)) return
+      const next = new Set(expandedSegmentIds)
       next.add(segment.id)
-      return next
-    })
-  }, [])
+      onExpandedSegmentIdsChange(group.id, Array.from(next))
+    },
+    [expandedSegmentIds, group.id, onExpandedSegmentIdsChange],
+  )
 
-  const collapseStack = useCallback((segment: PhotoSegment) => {
-    setExpandedSegmentIds((current) => {
-      if (!current.has(segment.id)) return current
-      const next = new Set(current)
+  const collapseStack = useCallback(
+    (segment: PhotoSegment) => {
+      if (!expandedSegmentIds.has(segment.id)) return
+      const next = new Set(expandedSegmentIds)
       next.delete(segment.id)
-      return next
-    })
-  }, [])
+      onExpandedSegmentIdsChange(group.id, Array.from(next))
+    },
+    [expandedSegmentIds, group.id, onExpandedSegmentIdsChange],
+  )
 
   return (
     <section className="photo-group">
