@@ -70,6 +70,7 @@ function KeyField({
 
 const CONTACT_EMAIL = 'wlfcss@gmail.com'
 const GITHUB_URL = 'https://github.com/wlfcss/PlumeLens'
+const BLOG_URL = 'https://www.wlfcss.com'
 
 function formatDate(value: string | null): string {
   if (!value) return '--'
@@ -324,7 +325,16 @@ export function SettingsModal(): ReactElement | null {
               </div>
               <div className="settings-about">
                 <span className="settings-about__label">{t('settings.about.author')}</span>
-                <span className="settings-about__value">{t('settings.about.authorValue')}</span>
+                <button
+                  aria-label={t('settings.about.authorBlog')}
+                  className="settings-link settings-link--mono"
+                  onClick={() => openExternal(BLOG_URL)}
+                  title={BLOG_URL}
+                  type="button"
+                >
+                  {t('settings.about.authorValue')}
+                  <ExternalLink className="h-3 w-3" />
+                </button>
               </div>
               <div className="settings-about">
                 <span className="settings-about__label">{t('settings.about.contact')}</span>

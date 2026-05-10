@@ -1280,6 +1280,17 @@ test.describe('Photo decision flow (mock backend)', () => {
     await expect(panel).toContainText('汪淼 wlfcss')
     await expect(panel).toContainText('wlfcss@gmail.com')
     await expect(panel).toContainText('github.com/wlfcss/PlumeLens')
+    const authorLink = panel.getByRole('button', { name: '打开作者个人博客' })
+    await expect(authorLink).toBeVisible()
+    await authorLink.click()
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            (window as unknown as { __openedExternalUrls: string[] }).__openedExternalUrls,
+        ),
+      )
+      .toContain('https://www.wlfcss.com')
     await expect(panel).toContainText('当前已是最新版本')
     await expect(panel).toContainText('YOLOv26l-bird-det')
     await expect(panel).toContainText('DINOv3 species')
@@ -1297,16 +1308,23 @@ test.describe('Photo decision flow (mock backend)', () => {
     await expect(panel).toContainText('已清理')
   })
 
-  test('inspector defaults to folder report and blank list click restores it', async ({ page }) => {
-    await expect(page.getByTestId('folder-report')).toBeVisible()
-    await expect(page.getByTestId('folder-report')).toContainText('当前文件夹整体概览')
+  test('inspector defaults to shooting report and blank list click restores it', async ({
+    page,
+  }) => {
+    await expect(page.getByTestId('shooting-report')).toBeVisible()
+    await expect(page.getByTestId('shooting-report')).toContainText('本次拍摄成就清单')
+    await expect(page.getByTestId('shooting-report')).toContainText('照片平均分')
+    await expect(page.getByTestId('shooting-report')).toContainText('新增鸟种')
+    await expect(page.getByTestId('shooting-report')).toContainText('最高分')
+    await expect(page.getByTestId('shooting-report')).toContainText('张照片')
+    await expect(page.getByTestId('shooting-report')).not.toContainText('刷新 0 个历史最高分')
 
     await page.locator('.photo-preview').first().click()
     await expect(page.locator('.inspector-species')).toContainText('池鹭')
-    await expect(page.getByTestId('folder-report')).toHaveCount(0)
+    await expect(page.getByTestId('shooting-report')).toHaveCount(0)
 
     await page.getByTestId('selection-photo-flow').click({ position: { x: 12, y: 12 } })
-    await expect(page.getByTestId('folder-report')).toBeVisible()
+    await expect(page.getByTestId('shooting-report')).toBeVisible()
   })
 
   test('selection inspector species name opens wiki-backed species popover', async ({ page }) => {
@@ -1317,7 +1335,13 @@ test.describe('Photo decision flow (mock backend)', () => {
 
     const popover = page.getByTestId('species-detail-popover')
     await expect(popover).toBeVisible()
+    await expect(popover.locator('.species-detail-popover')).toHaveJSProperty('nodeType', 1)
+    const popoverWidth = await popover.locator('.species-detail-popover').evaluate((node) => {
+      return node.getBoundingClientRect().width
+    })
+    expect(popoverWidth).toBeGreaterThan(600)
     await expect(popover.getByTestId('species-pinyin')).toContainText('chí lù')
+    await expect(popover.locator('.species-detail-popover__extract')).toContainText('池鹭')
     await expect(popover.locator('.species-detail-popover__art img')).toHaveAttribute(
       'src',
       /wikimedia|upload\.wikimedia\.org/,

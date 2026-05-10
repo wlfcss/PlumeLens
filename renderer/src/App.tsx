@@ -3,7 +3,11 @@ import {
   ArrowLeft,
   ArrowRight,
   ArrowUp,
+  BadgePlus,
+  BookOpenText,
   Brush,
+  CalendarDays,
+  Camera,
   Check,
   Clock3,
   Download,
@@ -20,6 +24,7 @@ import {
   Settings2,
   Shield,
   Sparkles,
+  TrendingUp,
   TriangleAlert,
   Trophy,
   Wand2,
@@ -42,9 +47,11 @@ import {
   type ReactNode,
   type RefObject,
 } from 'react'
+import { createPortal } from 'react-dom'
 import { useTranslation } from 'react-i18next'
 import { useVirtualizer, type VirtualItem, type Virtualizer } from '@tanstack/react-virtual'
 
+import appIconUrl from '../../build/icon.png?url'
 import { EngineStatusBanner } from '@/components/engine-status-banner'
 import { ReviewModal } from '@/components/review/review-modal'
 import { SettingsModal } from '@/components/settings-modal'
@@ -1221,6 +1228,10 @@ export function SpeciesInfoPopover({
   const sourceLabel = wiki?.zh_url ? t('speciesDetail.sourceZh') : t('speciesDetail.sourceEn')
   const imageUrl = wiki?.image_url ?? null
   const familyName = wiki?.family_zh ?? wiki?.family_sci ?? null
+  const extractParagraphs = extract
+    .split(/\n+/)
+    .map((paragraph) => paragraph.trim())
+    .filter(Boolean)
 
   return (
     <div
@@ -1286,7 +1297,19 @@ export function SpeciesInfoPopover({
             ) : null}
           </div>
 
-          <p className="species-detail-popover__extract">{extract}</p>
+          <section className="species-detail-popover__narrative">
+            <div className="species-detail-popover__section-title">
+              <BookOpenText className="h-3.5 w-3.5" />
+              <span>{t('speciesDetail.descriptionTitle')}</span>
+            </div>
+            <div className="species-detail-popover__extract">
+              {(extractParagraphs.length > 0 ? extractParagraphs : [extract]).map(
+                (paragraph, index) => (
+                  <p key={`${detail.latinName}-extract-${index}`}>{paragraph}</p>
+                ),
+              )}
+            </div>
+          </section>
           {sourceUrl ? (
             <a
               className="species-detail-popover__source"
@@ -1341,9 +1364,12 @@ export function SpeciesNameAction({
       >
         {children}
       </button>
-      {open ? (
-        <SpeciesInfoPopover identity={identity} onClose={() => setOpen(false)} t={t} />
-      ) : null}
+      {open
+        ? createPortal(
+            <SpeciesInfoPopover identity={identity} onClose={() => setOpen(false)} t={t} />,
+            document.body,
+          )
+        : null}
     </>
   )
 }
@@ -3260,8 +3286,8 @@ function AppShell({
           title={disabledTitle}
           type="button"
         >
-          <span className="brand-mark__icon">
-            <Feather className="h-4 w-4" />
+          <span className="brand-mark__icon brand-mark__icon--app">
+            <img alt="" aria-hidden="true" className="brand-mark__logo" src={appIconUrl} />
           </span>
           <span className="brand-mark__copy">
             <span>{t('app.title')}</span>
@@ -3359,6 +3385,7 @@ function StartScreen({
     right.lastOpenedAt.localeCompare(left.lastOpenedAt),
   )
   const hasRecentFolders = recentFolders.length > 0
+  const recentFoldersOverflow = recentFolders.length > 4
 
   return (
     <main
@@ -3425,8 +3452,13 @@ function StartScreen({
               <h2>{t('start.recentFolders')}</h2>
               <span>{`${recentFolders.length} ${t('start.entries')}`}</span>
             </div>
-            <div className="folder-stack">
-              {recentFolders.slice(0, 3).map((folder) => (
+            <div
+              aria-label={t('start.recentFolders')}
+              className={cn('folder-stack', recentFoldersOverflow && 'folder-stack--scrollable')}
+              data-testid="recent-folder-stack"
+              tabIndex={recentFoldersOverflow ? 0 : undefined}
+            >
+              {recentFolders.map((folder) => (
                 <button
                   className="folder-line"
                   key={folder.id}
@@ -4138,6 +4170,7 @@ function SelectionScreen({
       </button>
 
       <InspectorPanel
+        allPhotos={workspace.photos}
         folder={activeFolder}
         folderGroups={activeFolderGroups}
         folderPhotos={folderPhotos}
@@ -5992,14 +6025,21 @@ function InspectorSubjectSection({
   )
 }
 
-type FolderSpeciesStat = {
+type ShootingSpeciesStat = {
+  key: string
   bestScore: number | null
+  bestPhoto: PhotoRecord | null
   count: number
   latinName: string | null
   name: string
 }
 
-function formatFolderReportDateRange(
+type ShootingRecordStat = ShootingSpeciesStat & {
+  previousBestScore: number
+  deltaScore: number
+}
+
+function formatShootingReportDateRange(
   photos: PhotoRecord[],
   t: ReturnType<typeof useTranslation>['t'],
 ) {
@@ -6021,19 +6061,23 @@ function formatFolderReportDateRange(
   return `${format(first)} - ${format(last)}`
 }
 
-function buildFolderSpeciesStats(photos: PhotoRecord[]): FolderSpeciesStat[] {
-  const stats = new Map<string, FolderSpeciesStat>()
+function buildShootingSpeciesStats(photos: PhotoRecord[]): ShootingSpeciesStat[] {
+  const stats = new Map<string, ShootingSpeciesStat>()
   for (const photo of photos) {
     for (const entry of getArchiveSpeciesEntries(photo)) {
       const current = stats.get(entry.key)
       if (current) {
         current.count += 1
-        if ((photo.finalScore ?? -1) > (current.bestScore ?? -1))
+        if ((photo.finalScore ?? -1) > (current.bestScore ?? -1)) {
           current.bestScore = photo.finalScore
+          current.bestPhoto = photo
+        }
         continue
       }
       stats.set(entry.key, {
+        key: entry.key,
         bestScore: photo.finalScore,
+        bestPhoto: photo,
         count: 1,
         latinName: entry.latinName,
         name: entry.name,
@@ -6046,114 +6090,254 @@ function buildFolderSpeciesStats(photos: PhotoRecord[]): FolderSpeciesStat[] {
   })
 }
 
-function FolderReportMetric({ label, value }: { label: string; value: string }) {
+function bestScoreBySpeciesForPhotos(photos: PhotoRecord[]): Map<string, number> {
+  const best = new Map<string, number>()
+  for (const photo of photos) {
+    if (photo.finalScore === null) continue
+    for (const entry of getArchiveSpeciesEntries(photo)) {
+      const current = best.get(entry.key)
+      if (current === undefined || photo.finalScore > current) {
+        best.set(entry.key, photo.finalScore)
+      }
+    }
+  }
+  return best
+}
+
+function averageScoreForPhotos(photos: PhotoRecord[]): number | null {
+  const scores = photos
+    .map((photo) => photo.finalScore)
+    .filter((score): score is number => score !== null && Number.isFinite(score))
+  if (scores.length === 0) return null
+  return scores.reduce((sum, score) => sum + score, 0) / scores.length
+}
+
+function ShootingReportMetric({
+  icon,
+  label,
+  value,
+}: {
+  icon: ReactNode
+  label: string
+  value: string
+}) {
   return (
-    <div className="folder-report-metric">
-      <span>{label}</span>
-      <strong>{value}</strong>
+    <div className="shooting-report-metric">
+      <span className="shooting-report-metric__icon">{icon}</span>
+      <div>
+        <span>{label}</span>
+        <strong>{value}</strong>
+      </div>
     </div>
   )
 }
 
-function FolderReportPanel({
+function ShootingAchievementCard({
+  icon,
+  item,
+  meta,
+  scoreLabel,
+  tone,
+}: {
+  icon: ReactNode
+  item: ShootingSpeciesStat
+  meta: string
+  scoreLabel: string
+  tone: 'new' | 'record'
+}) {
+  return (
+    <div className={cn('shooting-achievement-card', `shooting-achievement-card--${tone}`)}>
+      <span className="shooting-achievement-card__icon">{icon}</span>
+      <div className="shooting-achievement-card__body">
+        <strong>{item.name}</strong>
+        <span>{meta}</span>
+      </div>
+      <div className="shooting-achievement-card__score">
+        <small>{scoreLabel}</small>
+        <b>{formatScore(item.bestScore)}</b>
+      </div>
+    </div>
+  )
+}
+
+function ShootingReportPanel({
+  allPhotos,
   folder,
   groups,
   photos,
   summary,
   t,
 }: {
+  allPhotos: PhotoRecord[]
   folder: FolderRecord
   groups: PhotoGroupRecord[]
   photos: PhotoRecord[]
   summary: FolderSummary
   t: ReturnType<typeof useTranslation>['t']
 }) {
-  const speciesStats = useMemo(() => buildFolderSpeciesStats(photos), [photos])
-  const bestPhotos = useMemo(() => {
-    return photos
-      .filter((photo) => photo.analysisStatus === 'done' && photo.finalScore !== null)
-      .toSorted((left, right) => (right.finalScore ?? -1) - (left.finalScore ?? -1))
-      .slice(0, 3)
-  }, [photos])
-  const reviewedCount = photos.filter((photo) => photo.decision !== null).length
+  const speciesStats = useMemo(() => buildShootingSpeciesStats(photos), [photos])
+  const averageScore = useMemo(() => averageScoreForPhotos(photos), [photos])
+  const historicalSpeciesKeys = useMemo(() => {
+    const keys = new Set<string>()
+    for (const photo of allPhotos) {
+      if (photo.folderId === folder.id) continue
+      for (const entry of getArchiveSpeciesEntries(photo)) keys.add(entry.key)
+    }
+    return keys
+  }, [allPhotos, folder.id])
+  const newSpeciesStats = useMemo(() => {
+    return speciesStats.filter((item) => !historicalSpeciesKeys.has(item.key)).slice(0, 6)
+  }, [historicalSpeciesKeys, speciesStats])
+  const refreshedStats = useMemo<ShootingRecordStat[]>(() => {
+    const previousBest = bestScoreBySpeciesForPhotos(
+      allPhotos.filter((photo) => photo.folderId !== folder.id),
+    )
+    return speciesStats
+      .flatMap((item) => {
+        const previousBestScore = previousBest.get(item.key)
+        if (previousBestScore === undefined) return []
+        const currentBestScore = item.bestScore
+        if (currentBestScore === null || currentBestScore <= previousBestScore + 0.0001) {
+          return []
+        }
+        return [
+          {
+            ...item,
+            previousBestScore,
+            deltaScore: currentBestScore - previousBestScore,
+          },
+        ]
+      })
+      .toSorted((left, right) => right.deltaScore - left.deltaScore)
+      .slice(0, 4)
+  }, [allPhotos, folder.id, speciesStats])
   const keepCount =
     summary.gradeCounts.select + summary.gradeCounts.usable + summary.gradeCounts.record
-  const flyingCount = photos.filter(photoHasFlyingPosture).length
+  const reportText = useMemo(() => {
+    if (photos.length === 0) return t('selection.report.emptySummary')
+    const base = t('selection.report.summary', {
+      average: formatScore(averageScore),
+      birdPhotos: summary.birdPhotoCount,
+      keep: keepCount,
+      photos: photos.length,
+      timeRange: formatShootingReportDateRange(photos, t),
+    })
+    let achievements = t('selection.report.noAchievementSummary')
+    if (newSpeciesStats.length > 0 && refreshedStats.length > 0) {
+      achievements = t('selection.report.achievementSummaryCombined', {
+        newSpecies: newSpeciesStats.length,
+        refreshed: refreshedStats.length,
+      })
+    } else if (newSpeciesStats.length > 0) {
+      achievements = t('selection.report.achievementSummaryNewOnly', {
+        newSpecies: newSpeciesStats.length,
+      })
+    } else if (refreshedStats.length > 0) {
+      achievements = t('selection.report.achievementSummaryRefreshOnly', {
+        refreshed: refreshedStats.length,
+      })
+    }
+    return `${base}${achievements}`
+  }, [averageScore, keepCount, newSpeciesStats.length, photos, refreshedStats.length, summary, t])
 
   return (
-    <div className="folder-report" data-testid="folder-report">
-      <div className="folder-report__heading">
-        <SectionLabel label={t('selection.report.label')} />
-        <h2>{t('selection.report.title')}</h2>
-        <p>{t('selection.report.subtitle', { folder: folder.displayName })}</p>
-      </div>
-
-      <div className="folder-report__metrics">
-        <FolderReportMetric
-          label={t('selection.metrics.birdPhotos')}
-          value={formatRatio(summary.birdPhotoCount, photos.length)}
-        />
-        <FolderReportMetric
-          label={t('selection.metrics.speciesCount')}
-          value={String(speciesStats.length)}
-        />
-        <FolderReportMetric label={t('selection.report.keepFrames')} value={String(keepCount)} />
-        <FolderReportMetric
-          label={t('selection.report.flyingFrames')}
-          value={String(flyingCount)}
-        />
-      </div>
-
-      <div className="folder-report__section">
-        <h3>{t('selection.report.shootingWindow')}</h3>
-        <p>{formatFolderReportDateRange(photos, t)}</p>
-        <span>
-          {t('selection.report.sceneSummary', {
-            scenes: groups.length,
-            reviewed: reviewedCount,
-            total: photos.length,
-          })}
+    <div className="shooting-report" data-testid="shooting-report">
+      <div className="shooting-report__hero">
+        <div>
+          <SectionLabel label={t('selection.report.label')} />
+          <h2>{t('selection.report.title')}</h2>
+          <p>{reportText}</p>
+        </div>
+        <span className="shooting-report__hero-icon">
+          <Trophy className="h-5 w-5" />
         </span>
       </div>
 
-      <div className="folder-report__section">
-        <h3>{t('selection.report.topSpecies')}</h3>
-        {speciesStats.length > 0 ? (
-          <div className="folder-report__species-list">
-            {speciesStats.slice(0, 4).map((item) => (
-              <span key={`${item.latinName ?? item.name}`}>
-                <b>{item.name}</b>
-                <em>{t('selection.report.speciesFrames', { count: item.count })}</em>
-              </span>
+      <div className="shooting-report__metrics">
+        <ShootingReportMetric
+          icon={<CalendarDays className="h-3.5 w-3.5" />}
+          label={t('selection.report.shootingWindow')}
+          value={formatShootingReportDateRange(photos, t)}
+        />
+        <ShootingReportMetric
+          icon={<Camera className="h-3.5 w-3.5" />}
+          label={t('selection.report.photoCount')}
+          value={t('selection.report.photoCountValue', { count: photos.length })}
+        />
+        <ShootingReportMetric
+          icon={<Sparkles className="h-3.5 w-3.5" />}
+          label={t('selection.report.averageScore')}
+          value={formatScore(averageScore)}
+        />
+        <ShootingReportMetric
+          icon={<Check className="h-3.5 w-3.5" />}
+          label={t('selection.report.keepFrames')}
+          value={t('selection.report.photoCountValue', { count: keepCount })}
+        />
+      </div>
+
+      <div className="shooting-report__section shooting-report__section--new">
+        <div className="shooting-report__section-head">
+          <BadgePlus className="h-4 w-4" />
+          <h3>{t('selection.report.newSpecies')}</h3>
+        </div>
+        {newSpeciesStats.length > 0 ? (
+          <div className="shooting-achievement-list">
+            {newSpeciesStats.map((item) => (
+              <ShootingAchievementCard
+                icon={<Sparkles className="h-4 w-4" />}
+                item={item}
+                key={item.key}
+                meta={t('selection.report.speciesAchievementMeta', {
+                  count: item.count,
+                  file: item.bestPhoto?.fileName ?? '--',
+                })}
+                scoreLabel={t('selection.report.highestScore')}
+                tone="new"
+              />
             ))}
           </div>
         ) : (
-          <p>{t('selection.report.noSpecies')}</p>
+          <p>{t('selection.report.noNewSpecies')}</p>
         )}
       </div>
 
-      <div className="folder-report__section">
-        <h3>{t('selection.report.bestFrames')}</h3>
-        {bestPhotos.length > 0 ? (
-          <div className="folder-report__best-list">
-            {bestPhotos.map((photo) => (
-              <span key={photo.id}>
-                <b>{formatPhotoSpeciesDisplay(photo, t)}</b>
-                <em>
-                  {photo.fileName} · {formatScore(photo.finalScore)}
-                </em>
-              </span>
+      {refreshedStats.length > 0 ? (
+        <div className="shooting-report__section shooting-report__section--record">
+          <div className="shooting-report__section-head">
+            <TrendingUp className="h-4 w-4" />
+            <h3>{t('selection.report.refreshedSpecies')}</h3>
+          </div>
+          <div className="shooting-achievement-list">
+            {refreshedStats.map((item) => (
+              <ShootingAchievementCard
+                icon={<Trophy className="h-4 w-4" />}
+                item={item}
+                key={item.key}
+                meta={t('selection.report.refreshedSpeciesMeta', {
+                  delta: `+${(item.deltaScore * 100).toFixed(1)}`,
+                  previous: formatScore(item.previousBestScore),
+                })}
+                scoreLabel={t('selection.report.newHighScore')}
+                tone="record"
+              />
             ))}
           </div>
-        ) : (
-          <p>{t('selection.report.noBestFrames')}</p>
-        )}
+        </div>
+      ) : null}
+
+      <div className="shooting-report__footnote">
+        {t('selection.report.contextLine', {
+          scenes: groups.length,
+          species: speciesStats.length,
+        })}
       </div>
     </div>
   )
 }
 
 function InspectorPanel({
+  allPhotos,
   folder,
   folderGroups,
   folderPhotos,
@@ -6165,6 +6349,7 @@ function InspectorPanel({
   sourceMissing,
   t,
 }: {
+  allPhotos: PhotoRecord[]
   folder: FolderRecord
   folderGroups: PhotoGroupRecord[]
   folderPhotos: PhotoRecord[]
@@ -6235,7 +6420,8 @@ function InspectorPanel({
           </div>
         </div>
       ) : (
-        <FolderReportPanel
+        <ShootingReportPanel
+          allPhotos={allPhotos}
           folder={folder}
           groups={folderGroups}
           photos={folderPhotos}

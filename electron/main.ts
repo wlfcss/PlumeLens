@@ -29,6 +29,9 @@ protocol.registerSchemesAsPrivileged([
 
 let mainWindow: BrowserWindow | null = null
 let processManager: ProcessManager | null = null
+let allowAppQuit = false
+let allowWindowClose = false
+let closePromptOpen = false
 
 const windowBounds = {
   width: 1680,
@@ -42,6 +45,7 @@ const REALPATH_CACHE_MAX = 2048
 const GITHUB_REPO = 'wlfcss/PlumeLens'
 const GITHUB_REPO_PATH = `/${GITHUB_REPO.toLowerCase()}`
 const GITHUB_LATEST_RELEASE_API = `https://api.github.com/repos/${GITHUB_REPO}/releases/latest`
+const SKIP_CLOSE_CONFIRM = process.env['PLUMELENS_E2E_DISABLE_CLOSE_CONFIRM'] === '1'
 
 const realpathCache = new Map<string, { value: string; expiresAt: number }>()
 
@@ -58,6 +62,8 @@ function normalizeExternalUrl(target: unknown): string | null {
     const path = url.pathname.toLowerCase()
     const allowed =
       host === 'maps.apple.com' ||
+      host === 'wlfcss.com' ||
+      host === 'www.wlfcss.com' ||
       (host === 'github.com' &&
         (path === GITHUB_REPO_PATH || path.startsWith(`${GITHUB_REPO_PATH}/`))) ||
       host === 'wikipedia.org' ||
@@ -170,6 +176,41 @@ function isTrustedAppNavigation(target: string, isDev: boolean): boolean {
   return false
 }
 
+async function requestCloseConfirmation(kind: 'window' | 'quit'): Promise<boolean> {
+  if (SKIP_CLOSE_CONFIRM) return true
+  if (closePromptOpen) return false
+  closePromptOpen = true
+
+  const closesApp = kind === 'quit' || process.platform !== 'darwin'
+  const options = {
+    type: 'question' as const,
+    title: closesApp ? '退出鉴翎？' : '关闭窗口？',
+    message: closesApp ? '确定要退出鉴翎吗？' : '确定要关闭当前窗口吗？',
+    detail: closesApp
+      ? '本地引擎会停止；历史记录和已完成的筛选会保留。'
+      : '窗口关闭后可从 Dock 重新打开；历史记录和已完成的筛选会保留。',
+    buttons: ['继续使用', closesApp ? '退出' : '关闭'],
+    defaultId: 0,
+    cancelId: 0,
+    noLink: true,
+  }
+  const owner = mainWindow && !mainWindow.isDestroyed() ? mainWindow : null
+
+  try {
+    const result = owner
+      ? await dialog.showMessageBox(owner, options)
+      : await dialog.showMessageBox(options)
+    return result.response === 1
+  } finally {
+    closePromptOpen = false
+  }
+}
+
+function quitWithoutConfirmation(): void {
+  allowAppQuit = true
+  app.quit()
+}
+
 async function openExternalUrl(
   target: unknown,
 ): Promise<{ ok: true } | { ok: false; reason: 'invalid_url' | 'open_failed'; message?: string }> {
@@ -263,7 +304,23 @@ function createWindow(): void {
     mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
   }
 
+  mainWindow.on('close', (event) => {
+    if (allowWindowClose || allowAppQuit) return
+    event.preventDefault()
+
+    const windowToClose = mainWindow
+    void requestCloseConfirmation('window').then((confirmed) => {
+      if (!confirmed || !windowToClose || windowToClose.isDestroyed()) return
+      allowWindowClose = true
+      if (process.platform !== 'darwin') {
+        allowAppQuit = true
+      }
+      windowToClose.close()
+    })
+  })
+
   mainWindow.on('closed', () => {
+    allowWindowClose = false
     mainWindow = null
   })
 }
@@ -706,8 +763,17 @@ app.on('activate', () => {
   }
 })
 
-app.on('before-quit', () => {
+app.on('before-quit', (event) => {
   // 真正退出（cmd-Q / 关闭整个应用）才杀 engine。
+  if (!allowAppQuit) {
+    event.preventDefault()
+    void requestCloseConfirmation('quit').then((confirmed) => {
+      if (!confirmed) return
+      allowAppQuit = true
+      app.quit()
+    })
+    return
+  }
   processManager?.stop()
 })
 
@@ -741,7 +807,7 @@ process.on('uncaughtException', (err) => {
   } catch {
     /* ignore — best effort */
   }
-  app.quit()
+  quitWithoutConfirmation()
 })
 process.on('unhandledRejection', (reason) => {
   process.stderr.write(`[main] unhandledRejection: ${String(reason)}\n`)
@@ -749,9 +815,9 @@ process.on('unhandledRejection', (reason) => {
 
 process.on('SIGTERM', () => {
   processManager?.stop()
-  app.quit()
+  quitWithoutConfirmation()
 })
 process.on('SIGINT', () => {
   processManager?.stop()
-  app.quit()
+  quitWithoutConfirmation()
 })

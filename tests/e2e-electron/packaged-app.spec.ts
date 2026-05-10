@@ -34,7 +34,14 @@ let app: ElectronApplication
 let page: Page
 
 test.beforeAll(async () => {
-  app = await _electron.launch({ executablePath: APP_PATH, timeout: 30_000 })
+  app = await _electron.launch({
+    executablePath: APP_PATH,
+    env: {
+      ...process.env,
+      PLUMELENS_E2E_DISABLE_CLOSE_CONFIRM: '1',
+    },
+    timeout: 30_000,
+  })
   app.process().stdout?.on('data', (d) => console.log('[main stdout]', d.toString().trim()))
   app.process().stderr?.on('data', (d) => console.log('[main stderr]', d.toString().trim()))
   page = await app.firstWindow({ timeout: 30_000 })

@@ -149,6 +149,7 @@ test.describe('App shell', () => {
   test('shows the PlumeLens brand mark', async ({ page }) => {
     await page.goto('/')
     await expect(page.getByText('PLUMELENS').first()).toBeVisible()
+    await expect(page.locator('.brand-mark__logo')).toBeVisible()
   })
 
   test('start screen has the primary CTA', async ({ page }) => {
@@ -156,6 +157,31 @@ test.describe('App shell', () => {
     await expect(
       page.getByRole('button', { name: /选择照片文件夹/ }),
     ).toBeVisible()
+  })
+})
+
+test.describe('Start recent folders', () => {
+  test('keeps all recent folders accessible when there are more than four', async ({ page }) => {
+    const libraries = Array.from({ length: 6 }, (_, index) => ({
+      ...DEFAULT_LIB,
+      id: `lib-recent-${index + 1}`,
+      display_name: `最近文件夹-${index + 1}`,
+      root_path: `/tmp/recent-${index + 1}`,
+      last_opened_at: `2026-04-2${index}T07:00:00+00:00`,
+    }))
+    await mockBackend(page, { libraries })
+    await page.goto('/')
+
+    const stack = page.getByTestId('recent-folder-stack')
+    await expect(stack).toBeVisible()
+    await expect(page.getByText('6 项')).toBeVisible()
+    await expect(stack.locator('.folder-line')).toHaveCount(6)
+
+    const metrics = await stack.evaluate((node) => ({
+      clientHeight: node.clientHeight,
+      scrollHeight: node.scrollHeight,
+    }))
+    expect(metrics.scrollHeight).toBeGreaterThan(metrics.clientHeight)
   })
 })
 
