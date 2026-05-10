@@ -192,7 +192,7 @@ exports.default = async function (context) {
   const dmgbuildPython = await getDmgbuildPythonPath()
 
   // 选择背景图源 — 优先 multi-rep TIFF(retina 用 @2× rep,字体清晰),
-  // tiffutil/sips 缺失时回落到 1× PNG。提到 try 块外 — 验证步骤在 finally
+  // tiffutil 缺失时回落到 1× PNG。提到 try 块外 — 验证步骤在 finally
   // 之后还需要引用 bgDestName。
   const bgTiff = path.join(__dirname, '..', 'build', 'dmg-background.tiff')
   const bgPng = path.join(__dirname, '..', 'build', 'dmg-background.png')

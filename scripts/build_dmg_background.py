@@ -7,15 +7,16 @@ DMG 窗口是 640×400 logical points。Finder 早期版本只识别 1px=1pt 的
 其中 @1x 是 72 DPI 的 640×400,@2x 是 144 DPI 的 1280×800。
 
 本脚本:
-1. 用 PIL 分别渲染两个分辨率的 PNG (font / 线宽 / 坐标全部按 scale 等比放大)
-2. 用 sips 把 PNG 转 TIFF 并打标 DPI
+1. 用 PIL 分别渲染两个分辨率的 PNG (内部 4× supersampling 后再 Lanczos
+   downsample,确保 1× 图里的箭头/圆角也有抗锯齿)
+2. 用 PIL 把 PNG 转 TIFF 并写入 DPI
 3. 用 tiffutil 合成一个 background.tiff(同时含 1× + 2× 表示)
 
 retina 用户挂载时 Finder 取 144 DPI 的 1280×800,字体清晰;1× 屏幕取 640×400 直接
 按 1:1 渲染,也是清晰。
 
 regenerate: ``uv run python scripts/build_dmg_background.py``
-失败兜底:多 rep TIFF 没生成时(系统缺 sips/tiffutil),build-dmg.cjs 会回落到
+失败兜底:多 rep TIFF 没生成时(系统缺 tiffutil),build-dmg.cjs 会回落到
 单 rep PNG。
 """
 
@@ -33,6 +34,7 @@ OUT_DIR = Path(__file__).resolve().parent.parent / "build"
 # DMG 窗口逻辑大小 (logical points / @1× pixels)。
 W_LOGICAL = 640
 H_LOGICAL = 400
+RENDER_SUPERSAMPLE = 4
 
 # 与 build-dmg.cjs 内 .DS_Store 写入坐标保持一致;128 px 图标中心点 (logical)。
 LEFT_ICON_CENTER = (180, 176)
@@ -214,8 +216,8 @@ def _text(
     draw.text(((width - tw) // 2, y), text, fill=color, font=font)
 
 
-def render(scale: int) -> Image.Image:
-    """Render the background at the given pixel scale (1 → 640×400, 2 → 1280×800)."""
+def _render_at_scale(scale: int) -> Image.Image:
+    """Render the background at an internal pixel scale."""
     width = W_LOGICAL * scale
     height = H_LOGICAL * scale
     img = Image.new("RGBA", (width, height), (248, 249, 252, 255))
@@ -290,38 +292,38 @@ def render(scale: int) -> Image.Image:
     return img.convert("RGB")
 
 
+def render(scale: int) -> Image.Image:
+    """Render the background at the target pixel scale with antialiased vector shapes.
+
+    PIL ImageDraw primitives (line / polygon / rounded_rectangle) are not antialiased at
+    1×. Drawing the whole composition at 4× and downsampling gives Finder a crisp 640×400
+    fallback instead of visible stair-stepped arrows and rounded corners.
+    """
+    target_size = (W_LOGICAL * scale, H_LOGICAL * scale)
+    supersampled = _render_at_scale(scale * RENDER_SUPERSAMPLE)
+    return supersampled.resize(target_size, Image.Resampling.LANCZOS)
+
+
 def _png_to_tiff(png_path: Path, tiff_path: Path, dpi: int) -> None:
-    """sips: 把 PNG 转成 TIFF 并打 DPI 标记。 tiffutil 用 DPI 区分 1×/2× rep。"""
-    subprocess.run(
-        [
-            "sips",
-            "-s",
-            "format",
-            "tiff",
-            "-s",
-            "dpiHeight",
-            str(dpi),
-            "-s",
-            "dpiWidth",
-            str(dpi),
-            str(png_path),
-            "--out",
-            str(tiff_path),
-        ],
-        check=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    """Convert PNG to TIFF and write DPI metadata.
+
+    `sips -s dpiWidth/-s dpiHeight` is not reliable here: on some macOS versions the
+    converted TIFF still reports 72 DPI, so Finder may pick the low-res representation.
+    PIL writes the resolution tags directly, which tiffutil preserves.
+    """
+    with Image.open(png_path) as image:
+        image.convert("RGB").save(tiff_path, dpi=(dpi, dpi), compression="tiff_lzw")
 
 
 def _build_hidpi_tiff(low_png: Path, high_png: Path, out_tiff: Path) -> bool:
-    """合成 multi-rep TIFF;失败返回 False(系统缺 sips/tiffutil)。"""
-    if not (shutil.which("sips") and shutil.which("tiffutil")):
+    """合成 multi-rep TIFF;失败返回 False(系统缺 tiffutil)。"""
+    if not shutil.which("tiffutil"):
         return False
     with tempfile.TemporaryDirectory() as td:
         td_path = Path(td)
         low_tiff = td_path / "low.tiff"
-        high_tiff = td_path / "high.tiff"
+        # tiffutil 的 -cathidpicheck 会根据 @2x 文件名保留高倍表示元数据。
+        high_tiff = td_path / "low@2x.tiff"
         try:
             _png_to_tiff(low_png, low_tiff, dpi=72)
             _png_to_tiff(high_png, high_tiff, dpi=144)
@@ -360,7 +362,7 @@ def main() -> int:
     if _build_hidpi_tiff(png_1x, png_2x, tiff_path):
         print(f"Wrote {tiff_path} (multi-rep 1× + 2× HiDPI)")
     else:
-        print("WARN: sips/tiffutil unavailable, skipping HiDPI TIFF; build-dmg falls back to PNG")
+        print("WARN: tiffutil unavailable, skipping HiDPI TIFF; build-dmg falls back to PNG")
     return 0
 
 
