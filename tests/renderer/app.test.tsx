@@ -10,14 +10,16 @@ import App, {
   buildReviewPhotoOrderForGroup,
   buildSpeciesCollectionGroups,
   deriveSpeciesRecords,
-  effectiveSpeciesSummary,
   extractPhotoGps,
-  getArchiveSpeciesEntries,
   isPlainSpaceKey,
   pipelineRuntimeFromProvider,
   shouldIgnoreSelectionReviewShortcutTarget,
-  tileSpeciesSourceBadge,
 } from '@/App'
+import {
+  effectiveSpeciesSummary,
+  getArchiveSpeciesEntries,
+  tileSpeciesSourceBadge,
+} from '@/lib/photo-display'
 import i18next from 'i18next'
 import { listAllSpecies, resolveSpeciesCanonicalSci } from '@/lib/species-wiki'
 import type {
