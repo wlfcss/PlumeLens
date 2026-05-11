@@ -17,6 +17,17 @@ export type ReviewDetail = {
   group: PhotoGroupRecord | null
 }
 
+// 单文件夹的统计汇总 — 选片头部 metric strip / inspector / 导出预检 / archive
+// 数据派生(scanner/SSE 实时更新)统一消费。
+export type FolderSummary = {
+  newSpeciesCount: number
+  birdPhotoCount: number
+  noBirdCount: number
+  failedCount: number
+  speciesCount: number
+  gradeCounts: Record<PhotoGrade, number>
+}
+
 export function formatScore(score: number | null | undefined): string {
   if (score === null || score === undefined || !Number.isFinite(score)) return '--'
   return (score * 100).toFixed(1)
