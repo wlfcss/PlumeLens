@@ -8,13 +8,13 @@ import App, {
   buildArchiveMapPins,
   buildGroupStartMsMap,
   buildReviewPhotoOrderForGroup,
-  buildSpeciesCollectionGroups,
   deriveSpeciesRecords,
   extractPhotoGps,
   isPlainSpaceKey,
   pipelineRuntimeFromProvider,
   shouldIgnoreSelectionReviewShortcutTarget,
 } from '@/App'
+import { buildSpeciesCollectionGroups } from '@/lib/archive-collection'
 import {
   effectiveSpeciesSummary,
   getArchiveSpeciesEntries,
