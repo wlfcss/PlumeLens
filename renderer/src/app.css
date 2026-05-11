@@ -3303,10 +3303,25 @@ button:disabled {
   gap: 3px;
 }
 
-.inspector-hero__score span,
-.inspector-hero__meta,
-.inspector-subject__posture span {
+.inspector-hero__score span {
+  /* "评分"小标签 — 主从层次上需弱于强体数字,维持 fg-3。 */
   color: var(--pl-fg-3);
+  font-family: var(--pl-font-data);
+  font-size: 11px;
+}
+
+.inspector-hero__meta {
+  /* 文件名行 — 功能性标识符,用户对照 Finder/原片定位,与 EXIF (capture) 一致 fg-2。
+     兄弟 em (grade source) 已是 fg-2 显式覆盖,本规则只影响 span (file name)。 */
+  color: var(--pl-fg-2);
+  font-family: var(--pl-font-data);
+  font-size: 11px;
+}
+
+.inspector-subject__posture span {
+  /* 姿态可见性摘要("眼/头不可见")— 决定是否进羽迹的关键判断信息,
+     提升到 fg-2 (~7:1) 满足 WCAG AA;fg-3 (~3:1) 不达标。 */
+  color: var(--pl-fg-2);
   font-family: var(--pl-font-data);
   font-size: 11px;
 }
@@ -6329,6 +6344,7 @@ button:disabled {
 }
 
 .review-stage {
+  position: relative;
   grid-area: stage;
   display: grid;
   grid-template-rows: auto auto auto minmax(0, 1fr);
@@ -6337,6 +6353,107 @@ button:disabled {
   min-height: 0;
   overflow: hidden;
   padding: 18px 22px 14px;
+}
+
+@keyframes pl-grade-hud-flash {
+  0% {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(0.86);
+  }
+  18% {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1.02);
+  }
+  72% {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(0.96);
+  }
+}
+
+.review-grade-hud {
+  position: absolute;
+  left: 50%;
+  top: 38%;
+  z-index: 5;
+  display: inline-flex;
+  align-items: center;
+  gap: 14px;
+  padding: 14px 22px;
+  border-radius: 14px;
+  border: 1px solid var(--pl-border-1);
+  background: color-mix(in srgb, var(--pl-bg-0) 84%, transparent);
+  backdrop-filter: blur(14px);
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.42);
+  font-family: var(--pl-font-data);
+  pointer-events: none;
+  animation: pl-grade-hud-flash 700ms var(--pl-ease) forwards;
+}
+
+.review-grade-hud__key {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--pl-fg-1);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.review-grade-hud__label {
+  color: var(--pl-fg-0);
+  font-size: 15px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+}
+
+.review-grade-hud--success {
+  border-color: color-mix(in srgb, var(--pl-success) 60%, var(--pl-border-1));
+  background: color-mix(in srgb, var(--pl-success) 14%, color-mix(in srgb, var(--pl-bg-0) 84%, transparent));
+}
+
+.review-grade-hud--success .review-grade-hud__key {
+  background: color-mix(in srgb, var(--pl-success) 22%, rgba(255, 255, 255, 0.06));
+  color: var(--pl-success);
+}
+
+.review-grade-hud--warning {
+  border-color: color-mix(in srgb, var(--pl-warning) 60%, var(--pl-border-1));
+  background: color-mix(in srgb, var(--pl-warning) 12%, color-mix(in srgb, var(--pl-bg-0) 84%, transparent));
+}
+
+.review-grade-hud--warning .review-grade-hud__key {
+  background: color-mix(in srgb, var(--pl-warning) 22%, rgba(255, 255, 255, 0.06));
+  color: var(--pl-warning);
+}
+
+.review-grade-hud--accent {
+  border-color: color-mix(in srgb, var(--pl-accent) 60%, var(--pl-border-1));
+  background: color-mix(in srgb, var(--pl-accent) 14%, color-mix(in srgb, var(--pl-bg-0) 84%, transparent));
+}
+
+.review-grade-hud--accent .review-grade-hud__key {
+  background: color-mix(in srgb, var(--pl-accent) 22%, rgba(255, 255, 255, 0.06));
+  color: var(--pl-accent);
+}
+
+.review-grade-hud--neutral .review-grade-hud__key {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--pl-fg-0);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .review-grade-hud {
+    animation: none;
+    opacity: 1;
+    transform: translate(-50%, -50%);
+  }
 }
 
 .review-detail {

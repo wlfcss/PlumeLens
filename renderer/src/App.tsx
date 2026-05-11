@@ -33,6 +33,7 @@ import {
 import {
   Suspense,
   lazy,
+  memo,
   startTransition,
   useCallback,
   useDeferredValue,
@@ -376,6 +377,25 @@ function isInsideRoundedGlyphFrame(rowIndex: number, columnIndex: number): boole
   const cornerY = y < radius ? radius : height - radius
   return Math.hypot(x - cornerX, y - cornerY) <= radius
 }
+
+// 预计算 glyph 单元 JSX 数组 — 模块加载时一次性完成,避免 StartScreen 每次 re-render
+// (SSE 引擎状态推送频繁)都重算 504 个 React element + className/style 字符串。
+// 隐式 grid flow 不变,outside-frame cell 仍保留 DOM 位置占位(用 visibility:hidden),
+// 维持原渲染语义。
+const birdGlyphElements: ReactNode[] = birdGlyphPattern.flatMap((row, rowIndex) =>
+  [...row].map((cell, columnIndex) => (
+    <i
+      className={cn(
+        cell !== '.' && 'is-lit',
+        cell === '2' && 'is-bright',
+        cell === '3' && 'is-eye-falloff',
+        !isInsideRoundedGlyphFrame(rowIndex, columnIndex) && 'is-outside-frame',
+      )}
+      key={`bird-glyph-${rowIndex}-${columnIndex}`}
+      style={{ animationDelay: `${(rowIndex + columnIndex) * 42}ms` }}
+    />
+  )),
+)
 
 function matchesQuery(parts: Array<string | null | undefined>, query: string): boolean {
   const normalized = query.trim().toLowerCase()
@@ -3788,26 +3808,13 @@ function PipelineStatusItem({
   )
 }
 
-function BirdGlyph() {
+const BirdGlyph = memo(function BirdGlyph() {
   return (
     <div className="start-glyph-bird" aria-hidden="true">
-      {birdGlyphPattern.flatMap((row, rowIndex) =>
-        [...row].map((cell, columnIndex) => (
-          <i
-            className={cn(
-              cell !== '.' && 'is-lit',
-              cell === '2' && 'is-bright',
-              cell === '3' && 'is-eye-falloff',
-              !isInsideRoundedGlyphFrame(rowIndex, columnIndex) && 'is-outside-frame',
-            )}
-            key={`bird-glyph-${rowIndex}-${columnIndex}`}
-            style={{ animationDelay: `${(rowIndex + columnIndex) * 42}ms` }}
-          />
-        )),
-      )}
+      {birdGlyphElements}
     </div>
   )
-}
+})
 
 function SelectionScreen({
   activeFolder,

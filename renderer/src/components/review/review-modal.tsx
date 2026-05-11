@@ -59,6 +59,7 @@ import { computeIqaCropBox } from '@/lib/backend-adapter'
 import type {
   AfOverlay,
   BirdDetectionRecord,
+  PhotoGrade,
   PhotoRecord,
   SelectionDecision,
 } from '@/lib/mock-workspace'
@@ -71,6 +72,24 @@ const SEQUENCE_RAIL_MAX_DOTS = 64
 const REVIEW_FILMSTRIP_ITEM_WIDTH = 110
 const REVIEW_FILMSTRIP_ITEM_GAP = 7
 const REVIEW_FILMSTRIP_ITEM_ESTIMATE = REVIEW_FILMSTRIP_ITEM_WIDTH + REVIEW_FILMSTRIP_ITEM_GAP
+
+// HUD 反馈用 — 键盘 1/2/3/4 评级时在舞台角落 flash 一下确认动作生效。
+// nonce 用于强制重 mount,同键连按时重新触发动画。
+type HudFlashState = { grade: PhotoGrade; nonce: number } | null
+
+const GRADE_HUD_TONE: Record<PhotoGrade, 'success' | 'warning' | 'neutral' | 'accent'> = {
+  select: 'success',
+  usable: 'neutral',
+  record: 'warning',
+  reject: 'accent',
+}
+
+const GRADE_HUD_KEY: Record<PhotoGrade, '1' | '2' | '3' | '4'> = {
+  select: '1',
+  usable: '2',
+  record: '3',
+  reject: '4',
+}
 
 export function ReviewModal({
   detail,
@@ -105,6 +124,27 @@ export function ReviewModal({
   const [showAfPoint, setShowAfPoint] = useState(true)
   const [zoomScale, setZoomScale] = useState<number>(DEFAULT_REVIEW_ZOOM)
   const [fullscreenOpen, setFullscreenOpen] = useState(false)
+  const [hudFlash, setHudFlash] = useState<HudFlashState>(null)
+  const hudTimerRef = useRef<number | null>(null)
+
+  const flashHud = useCallback((grade: PhotoGrade) => {
+    if (hudTimerRef.current !== null) {
+      window.clearTimeout(hudTimerRef.current)
+    }
+    setHudFlash({ grade, nonce: Date.now() })
+    hudTimerRef.current = window.setTimeout(() => {
+      setHudFlash(null)
+      hudTimerRef.current = null
+    }, 700)
+  }, [])
+
+  useEffect(() => {
+    return () => {
+      if (hudTimerRef.current !== null) {
+        window.clearTimeout(hudTimerRef.current)
+      }
+    }
+  }, [])
 
   const imgW = photo.imageWidth ?? null
   const imgH = photo.imageHeight ?? null
@@ -222,31 +262,24 @@ export function ReviewModal({
         return
       }
       if (event.metaKey || event.ctrlKey || event.altKey) return
-      if (event.key === '1') {
-        event.preventDefault()
-        onSetDecision(photo.id, 'select')
-        return
+      const gradeByKey: Record<string, PhotoGrade> = {
+        '1': 'select',
+        '2': 'usable',
+        '3': 'record',
+        '4': 'reject',
       }
-      if (event.key === '2') {
+      const grade = gradeByKey[event.key]
+      if (grade) {
         event.preventDefault()
-        onSetDecision(photo.id, 'usable')
-        return
-      }
-      if (event.key === '3') {
-        event.preventDefault()
-        onSetDecision(photo.id, 'record')
-        return
-      }
-      if (event.key === '4') {
-        event.preventDefault()
-        onSetDecision(photo.id, 'reject')
+        onSetDecision(photo.id, grade)
+        flashHud(grade)
         return
       }
     }
 
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [fullscreenOpen, onClose, onSetDecision, photo.id, selectRelativePhoto])
+  }, [flashHud, fullscreenOpen, onClose, onSetDecision, photo.id, selectRelativePhoto])
 
   // IQA 裁切框（与后端 expand_for_iqa 一致：2.5× + 比例约束 + cap + shift）
   const iqaCrop = useMemo(() => {
@@ -263,6 +296,21 @@ export function ReviewModal({
     >
       <div className="review-panel" onPointerDown={(event) => event.stopPropagation()}>
         <div className="review-stage">
+          {hudFlash ? (
+            <div
+              aria-hidden="true"
+              className={cn(
+                'review-grade-hud',
+                `review-grade-hud--${GRADE_HUD_TONE[hudFlash.grade]}`,
+              )}
+              key={hudFlash.nonce}
+            >
+              <span className="review-grade-hud__key">{GRADE_HUD_KEY[hudFlash.grade]}</span>
+              <span className="review-grade-hud__label">
+                {t(gradeLabelKey(hudFlash.grade))}
+              </span>
+            </div>
+          ) : null}
           <div className="modal-heading review-heading">
             <div>
               <SectionLabel label={t('selection.review.label')} />
