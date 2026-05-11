@@ -93,7 +93,6 @@ import {
   resolveSpeciesCanonicalSci,
 } from '@/lib/species-wiki'
 import type {
-  AfOverlay,
   AnalysisStatus,
   ArchiveTab,
   AppRoute,
@@ -102,8 +101,6 @@ import type {
   PhotoGrade,
   PhotoGroupRecord,
   PhotoRecord,
-  ProblemTagId,
-  PoseTagId,
   SelectionDecision,
   SpeciesRecord,
   WorkspaceSnapshot,
@@ -111,6 +108,21 @@ import type {
 import { cn } from '@/lib/utils'
 import { useShallow, useUIStore, type QuickFilter, type ViewMode } from '@/stores/ui-store'
 import { subscribeEngineStatus, useEngineStore } from '@/stores/engine-store'
+import { IconButton } from '@/components/common/icon-button'
+import { SectionLabel } from '@/components/common/section-label'
+import { gradeLabelKey, problemTagKey } from '@/lib/i18n-keys'
+import {
+  effectivePhotoGrade,
+  effectiveSpeciesLatinName,
+  effectiveSpeciesName,
+  formatScore,
+  type Tone,
+} from '@/lib/photo-helpers'
+import {
+  speciesSourceBadge,
+  speciesSourceKind,
+  type DetectionLike,
+} from '@/lib/species-source'
 
 const PHOTO_GRID_MIN_COLUMN_WIDTH = 260
 const PHOTO_GRID_GAP = 18
@@ -136,7 +148,6 @@ const ArchiveGeoMap = lazy(() =>
   import('@/components/archive-geo-map').then((module) => ({ default: module.ArchiveGeoMap })),
 )
 
-type Tone = 'neutral' | 'warning' | 'accent' | 'success' | 'muted'
 type SortMode = 'score' | 'shot_at' | 'name'
 type PhotoCategory = PhotoGrade | 'no_bird'
 type ExportLayout = 'merged' | 'by_grade'
@@ -254,11 +265,6 @@ const EMPTY_FOLDER_SUMMARY: FolderSummary = {
   gradeCounts: { reject: 0, record: 0, usable: 0, select: 0 },
 }
 
-export type ReviewDetail = {
-  photo: PhotoRecord
-  group: PhotoGroupRecord | null
-}
-
 const routeIcons: Record<AppRoute, typeof Aperture> = {
   start: Aperture,
   selection: Sparkles,
@@ -329,11 +335,6 @@ export interface ArchiveMapPin {
   y: number
   photos: PhotoRecord[]
   source: 'gps'
-}
-
-export function formatScore(score: number | null | undefined): string {
-  if (score === null || score === undefined || !Number.isFinite(score)) return '--'
-  return (score * 100).toFixed(1)
 }
 
 const birdGlyphPattern = [
@@ -550,10 +551,6 @@ function buildFolderSummary(photos: PhotoRecord[]): FolderSummary {
       gradeCounts: { reject: 0, record: 0, usable: 0, select: 0 },
     },
   )
-}
-
-export function effectivePhotoGrade(photo: PhotoRecord): PhotoGrade {
-  return photo.decision ?? photo.grade
 }
 
 function photoCategory(photo: PhotoRecord): PhotoCategory {
@@ -1394,153 +1391,6 @@ export function SpeciesNameAction({
   )
 }
 
-// Source helpers 接收可选 detection — 多鸟图深度复核切鸟时，ScoreHeader 会
-// 把 activeBird 传进来；其他场景（PhotoTile、CompareModal）按 photo-level。
-type DetectionLike = NonNullable<PhotoRecord['birdDetections']>[number]
-type UnconfirmedSpeciesCause = 'uncertain' | 'head' | 'generic'
-
-function resolveSourceFor(
-  photo: PhotoRecord,
-  detection?: DetectionLike | null,
-): { source: PhotoRecord['speciesSource']; manualSpecies: boolean } {
-  if (detection) {
-    const source =
-      photo.speciesSource === 'group_consensus' && detection.isBest && !detection.manualSpecies
-        ? photo.speciesSource
-        : detection.speciesSource
-    return {
-      source,
-      manualSpecies: detection.manualSpecies,
-    }
-  }
-  return {
-    source: photo.speciesSource,
-    manualSpecies: photo.manualSpecies ?? false,
-  }
-}
-
-export function speciesUnconfirmedCause(
-  photo: PhotoRecord,
-  detection?: DetectionLike | null,
-): UnconfirmedSpeciesCause | null {
-  const { source } = resolveSourceFor(photo, detection)
-  if (source !== 'model_unconfirmed') return null
-
-  const top = detection?.speciesCandidates?.[0] ?? photo.speciesCandidates?.[0]
-  if (top?.recognitionState === 'uncertain') return 'uncertain'
-
-  const pose = detection?.pose ?? photo.bestPose ?? null
-  if (!pose || !pose.head_visible) return 'head'
-
-  return 'generic'
-}
-
-export function speciesSourceTone(photo: PhotoRecord, detection?: DetectionLike | null): Tone {
-  const { source, manualSpecies } = resolveSourceFor(photo, detection)
-  if (source === 'group_consensus') return 'success'
-  if (photo.speciesConflict || source === 'conflict') return 'warning'
-  if (source === 'model_unconfirmed') return 'warning'
-  if (source === 'manual' || manualSpecies) return 'accent'
-  return 'muted'
-}
-
-export function speciesSourceKind(
-  photo: PhotoRecord,
-  detection?: DetectionLike | null,
-): 'conflict' | 'correction' | 'manual' | 'unconfirmed' | null {
-  const { source, manualSpecies } = resolveSourceFor(photo, detection)
-  if (source === 'group_consensus') return 'correction'
-  if (photo.speciesConflict || source === 'conflict') return 'conflict'
-  if (source === 'model_unconfirmed') return 'unconfirmed'
-  if (source === 'manual' || manualSpecies) return 'manual'
-  return null
-}
-
-export function speciesSourceBadge(
-  photo: PhotoRecord,
-  t: ReturnType<typeof useTranslation>['t'],
-  detection?: DetectionLike | null,
-): string | null {
-  const { source, manualSpecies } = resolveSourceFor(photo, detection)
-  if (source === 'group_consensus') {
-    return t('selection.speciesSource.groupConsensus')
-  }
-  if (photo.speciesConflict || source === 'conflict') {
-    return t('selection.speciesSource.conflict')
-  }
-  if (source === 'model_unconfirmed') {
-    const cause = speciesUnconfirmedCause(photo, detection)
-    if (cause === 'uncertain') return t('selection.speciesSource.unconfirmedSpecies')
-    if (cause === 'head') return t('selection.speciesSource.unconfirmedIncomplete')
-    return t('selection.speciesSource.unconfirmedGeneric')
-  }
-  if (source === 'manual' || manualSpecies) {
-    return t('selection.speciesSource.manual')
-  }
-  return null
-}
-
-export function effectiveSpeciesName(photo: PhotoRecord): string | null {
-  if (photo.manualSpecies || photo.speciesSource === 'manual') return photo.speciesName
-  if (photo.speciesSource === 'group_consensus') return photo.groupSpeciesName ?? photo.speciesName
-  if (photo.speciesSource === 'model') return photo.modelSpeciesName ?? photo.speciesName
-  // model_unconfirmed: 仍展示模型识别物种（但 UI 会带"待审"徽标）
-  if (photo.speciesSource === 'model_unconfirmed') return photo.speciesName
-  return photo.speciesName
-}
-
-export function effectiveSpeciesLatinName(photo: PhotoRecord): string | null {
-  if (photo.manualSpecies || photo.speciesSource === 'manual') return photo.speciesLatinName
-  if (photo.speciesSource === 'group_consensus') {
-    return photo.groupSpeciesLatinName ?? photo.speciesLatinName
-  }
-  if (photo.speciesSource === 'model') return photo.modelSpeciesLatinName ?? photo.speciesLatinName
-  // model_unconfirmed: 仍展示模型识别拉丁名（带"待审"徽标）
-  if (photo.speciesSource === 'model_unconfirmed') return photo.speciesLatinName
-  return photo.speciesLatinName
-}
-
-export function speciesSourceDetail(
-  photo: PhotoRecord,
-  t: ReturnType<typeof useTranslation>['t'],
-  detection?: DetectionLike | null,
-): string | null {
-  const { source, manualSpecies } = resolveSourceFor(photo, detection)
-  const support =
-    photo.groupSpeciesSupport !== null &&
-    photo.groupSpeciesSupport !== undefined &&
-    photo.groupSpeciesEvidence !== null &&
-    photo.groupSpeciesEvidence !== undefined
-      ? `${photo.groupSpeciesSupport}/${photo.groupSpeciesEvidence}`
-      : '--'
-  const raw = photo.modelSpeciesName
-  const effective = effectiveSpeciesName(photo)
-
-  if (source === 'group_consensus') {
-    if (raw && raw !== effective) {
-      return t('selection.speciesSource.groupConsensusWithRaw', { species: raw, support })
-    }
-    return t('selection.speciesSource.groupConsensusDetail', { support })
-  }
-  if (photo.speciesConflict || source === 'conflict') {
-    return t('selection.speciesSource.conflictDetail')
-  }
-  if (source === 'model_unconfirmed') {
-    const cause = speciesUnconfirmedCause(photo, detection)
-    if (cause === 'uncertain') {
-      return t('selection.speciesSource.unconfirmedUncertainDetail')
-    }
-    if (cause === 'head') {
-      return t('selection.speciesSource.unconfirmedHeadDetail')
-    }
-    return t('selection.speciesSource.unconfirmedGenericDetail')
-  }
-  if (source === 'manual' || manualSpecies) {
-    return t('selection.speciesSource.manualDetail')
-  }
-  return null
-}
-
 // 多鸟图按 detection 维度聚合的物种摘要 — tile / 物种照片浏览统一
 // 使用，避免 photo.speciesName（best 那只）淹没其他鸟的物种信息。
 //
@@ -1727,20 +1577,8 @@ function statusLabelKey(status: FolderStatus) {
   return `selection.folderStatus.${status}` as const
 }
 
-export function gradeLabelKey(grade: PhotoGrade) {
-  return `selection.grade.${grade}` as const
-}
-
 function categoryLabelKey(category: PhotoCategory) {
   return category === 'no_bird' ? 'selection.quickFilters.no_bird' : gradeLabelKey(category)
-}
-
-function poseTagKey(tag: PoseTagId) {
-  return `selection.poseTags.${tag}` as const
-}
-
-function problemTagKey(tag: ProblemTagId) {
-  return `selection.problemTags.${tag}` as const
 }
 
 function routeLabelKey(route: AppRoute) {
@@ -1770,21 +1608,6 @@ export function photoReviewReason(photo: PhotoRecord): string {
   if (effectivePhotoGrade(photo) === 'select') return 'selection.reviewReasons.top_pick'
   if (photo.problemTags.length > 0) return 'selection.reviewReasons.has_issues'
   return 'selection.reviewReasons.candidate'
-}
-
-export function legacyAfPointToOverlay(point: { x: number; y: number } | null): AfOverlay | null {
-  if (!point) return null
-  return {
-    kind: 'point',
-    source: 'legacy',
-    center: point,
-    points: [{ ...point, in_focus: true, selected: true }],
-    focused_points: [{ ...point, in_focus: true, selected: true }],
-    selected_points: [{ ...point, in_focus: true, selected: true }],
-    focused_count: 1,
-    selected_count: 1,
-    point_count: 1,
-  }
 }
 
 function stableHue(input: string): number {
@@ -7461,33 +7284,6 @@ function BackgroundTaskBar({
   )
 }
 
-export function TagCluster({
-  photo,
-  t,
-}: {
-  photo: PhotoRecord
-  t: ReturnType<typeof useTranslation>['t']
-}) {
-  return (
-    <div className="tag-cluster">
-      {photo.problemTags.length === 0 ? (
-        <span className="chip chip--success">{t('selection.inspector.cleanFrame')}</span>
-      ) : (
-        photo.problemTags.map((tag) => (
-          <span className="chip chip--warning" key={tag}>
-            {t(problemTagKey(tag))}
-          </span>
-        ))
-      )}
-      {photo.poseTags.map((tag) => (
-        <span className="chip" key={tag}>
-          {t(poseTagKey(tag))}
-        </span>
-      ))}
-    </div>
-  )
-}
-
 function GlyphMatrix({ tone, value }: { tone: Tone; value: number }) {
   return (
     <span className="glyph-matrix" aria-hidden="true">
@@ -7496,10 +7292,6 @@ function GlyphMatrix({ tone, value }: { tone: Tone; value: number }) {
       ))}
     </span>
   )
-}
-
-export function SectionLabel({ label }: { label: string }) {
-  return <div className="section-label">{label}</div>
 }
 
 function ArchiveMetricCell({
@@ -7615,40 +7407,6 @@ function StatusPill({
 
 function StatusDot({ tone = 'neutral' }: { tone?: Tone }) {
   return <span className={cn('status-dot', `status-dot--${tone}`)} />
-}
-
-export function IconButton({
-  active,
-  ariaKeyShortcuts,
-  children,
-  className,
-  disabled,
-  label,
-  onClick,
-  title,
-}: {
-  active?: boolean
-  ariaKeyShortcuts?: string
-  children: ReactNode
-  className?: string
-  disabled?: boolean
-  label: string
-  onClick?: () => void
-  title?: string
-}) {
-  return (
-    <button
-      aria-label={label}
-      aria-keyshortcuts={ariaKeyShortcuts}
-      className={cn('icon-button', active && 'icon-button--active', className)}
-      disabled={disabled}
-      onClick={onClick}
-      title={title}
-      type="button"
-    >
-      {children}
-    </button>
-  )
 }
 
 function ExportOption({ title, value }: { title: string; value: string }) {

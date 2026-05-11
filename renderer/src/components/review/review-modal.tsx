@@ -36,26 +36,14 @@ import {
 } from 'react'
 import type { useTranslation } from 'react-i18next'
 
+import { IconButton } from '@/components/common/icon-button'
+import { SectionLabel } from '@/components/common/section-label'
+import { TagCluster } from '@/components/common/tag-cluster'
 import { ThumbnailImage, type ThumbnailLoadStatus } from '@/components/thumbnail-image'
-import {
-  IconButton,
-  SectionLabel,
-  SpeciesNameAction,
-  TagCluster,
-  effectivePhotoGrade,
-  effectiveSpeciesLatinName,
-  effectiveSpeciesName,
-  formatScore,
-  gradeLabelKey,
-  legacyAfPointToOverlay,
-  speciesSourceBadge,
-  speciesSourceDetail,
-  speciesSourceKind,
-  speciesSourceTone,
-  type ReviewDetail,
-} from '@/App'
+import { SpeciesNameAction } from '@/App'
 import type { SpeciesOverrideBBox, SpeciesOverrideValue } from '@/lib/api-client'
 import { computeIqaCropBox } from '@/lib/backend-adapter'
+import { gradeLabelKey } from '@/lib/i18n-keys'
 import type {
   AfOverlay,
   BirdDetectionRecord,
@@ -63,6 +51,20 @@ import type {
   PhotoRecord,
   SelectionDecision,
 } from '@/lib/mock-workspace'
+import {
+  effectivePhotoGrade,
+  effectiveSpeciesLatinName,
+  effectiveSpeciesName,
+  formatScore,
+  legacyAfPointToOverlay,
+  type ReviewDetail,
+} from '@/lib/photo-helpers'
+import {
+  speciesSourceBadge,
+  speciesSourceDetail,
+  speciesSourceKind,
+  speciesSourceTone,
+} from '@/lib/species-source'
 import { listAllSpecies } from '@/lib/species-wiki'
 import { cn } from '@/lib/utils'
 

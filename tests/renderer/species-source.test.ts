@@ -9,7 +9,7 @@
  */
 import { describe, expect, it } from 'vitest'
 
-import { speciesSourceBadge, speciesSourceDetail } from '@/App'
+import { speciesSourceBadge, speciesSourceDetail } from '@/lib/species-source'
 import type { PhotoRecord } from '@/lib/mock-workspace'
 
 type Detection = NonNullable<PhotoRecord['birdDetections']>[number]
