@@ -102,17 +102,21 @@ import type {
 import { cn } from '@/lib/utils'
 import { useShallow, useUIStore, type QuickFilter, type ViewMode } from '@/stores/ui-store'
 import { subscribeEngineStatus, useEngineStore } from '@/stores/engine-store'
+import { BackgroundTaskBar } from '@/components/common/background-task-bar'
 import { IconButton } from '@/components/common/icon-button'
 import { MetricCell, StatusDot } from '@/components/common/metric-cell'
 import { SectionLabel } from '@/components/common/section-label'
+import { StatRow } from '@/components/common/stat-row'
+import { StatusPill } from '@/components/common/status-pill'
 import { ExportDrawer, type ExportSourceSnapshot } from '@/components/export-drawer'
 import { SpeciesNameAction } from '@/components/species/species-detail-popover'
 import { openExternalLink } from '@/lib/external-link'
-import { gradeLabelKey, problemTagKey } from '@/lib/i18n-keys'
+import { gradeLabelKey, problemTagKey, statusLabelKey } from '@/lib/i18n-keys'
 import {
   effectivePhotoGrade,
   effectiveSpeciesLatinName,
   effectiveSpeciesName,
+  formatRatio,
   formatScore,
   type FolderSummary,
   type Tone,
@@ -359,10 +363,6 @@ function matchesQuery(parts: Array<string | null | undefined>, query: string): b
   const normalized = query.trim().toLowerCase()
   if (!normalized) return true
   return parts.some((part) => part?.toLowerCase().includes(normalized))
-}
-
-function formatRatio(current: number, total: number): string {
-  return `${current}/${total}`
 }
 
 function useResponsiveGridLayout(
@@ -1326,10 +1326,6 @@ function analysisTone(status: AnalysisStatus): Tone {
   return 'neutral'
 }
 
-function statusLabelKey(status: FolderStatus) {
-  return `selection.folderStatus.${status}` as const
-}
-
 function categoryLabelKey(category: PhotoCategory) {
   return category === 'no_bird' ? 'selection.quickFilters.no_bird' : gradeLabelKey(category)
 }
@@ -1678,10 +1674,6 @@ export function deriveSpeciesRecords(workspace: WorkspaceSnapshot): SpeciesRecor
     }
     return speciesSortValue(left).localeCompare(speciesSortValue(right), 'zh-Hans-CN')
   })
-}
-
-function folderHasActiveTasks(status: FolderStatus): boolean {
-  return ['scanning', 'hashing', 'analyzing_partial', 'updating', 'exporting'].includes(status)
 }
 
 const chinaMapRegions: Array<{
@@ -6552,44 +6544,6 @@ function SpeciesPhotosModal({
 }
 
 
-function BackgroundTaskBar({
-  activeFolder,
-  t,
-}: {
-  activeFolder: FolderRecord | null
-  t: ReturnType<typeof useTranslation>['t']
-}) {
-  if (!activeFolder || !folderHasActiveTasks(activeFolder.status)) return null
-
-  return (
-    <footer className="background-taskbar">
-      <span>{t(statusLabelKey(activeFolder.status))}</span>
-      {/* 进度条本身用 success(绿色)而非 statusTone — 状态文案仍由
-          statusLabelKey 控制(分析进行中 / 扫描中 / 哈希中),颜色语义在
-          glyph-matrix 上单独表达"已经完成的进度",绿色更直观;breathing 动画
-          见 app.css `.glyph-matrix .tone-success`,提示仍在运行。 */}
-      <GlyphMatrix
-        tone="success"
-        value={Math.max(
-          3,
-          Math.round((activeFolder.analyzedCount / Math.max(activeFolder.totalCount, 1)) * 12),
-        )}
-      />
-      <span>{formatRatio(activeFolder.analyzedCount, activeFolder.totalCount)}</span>
-    </footer>
-  )
-}
-
-function GlyphMatrix({ tone, value }: { tone: Tone; value: number }) {
-  return (
-    <span className="glyph-matrix" aria-hidden="true">
-      {Array.from({ length: 12 }, (_item, index) => (
-        <i className={cn(index < value && `tone-${tone}`)} key={`glyph-${index + 1}`} />
-      ))}
-    </span>
-  )
-}
-
 function ArchiveMetricCell({
   active,
   filterId,
@@ -6633,53 +6587,4 @@ function ArchiveMetricCell({
   )
 }
 
-function StatRow({
-  label,
-  onValueClick,
-  tone = 'neutral',
-  value,
-  valueAriaLabel,
-}: {
-  label: string
-  onValueClick?: () => void
-  tone?: Tone
-  value: number | string
-  valueAriaLabel?: string
-}) {
-  return (
-    <div className="stat-row">
-      <span>{label}</span>
-      {onValueClick ? (
-        <button
-          aria-label={valueAriaLabel}
-          className={cn('stat-row__value-button', `tone-text-${tone}`)}
-          onClick={onValueClick}
-          type="button"
-        >
-          {value}
-        </button>
-      ) : (
-        <strong className={`tone-text-${tone}`}>{value}</strong>
-      )}
-    </div>
-  )
-}
-
-function StatusPill({
-  className,
-  label,
-  tone = 'neutral',
-  title,
-}: {
-  className?: string
-  label: string
-  tone?: Tone
-  title?: string
-}) {
-  return (
-    <span className={cn('status-pill', `status-pill--${tone}`, className)} title={title}>
-      {label}
-    </span>
-  )
-}
 

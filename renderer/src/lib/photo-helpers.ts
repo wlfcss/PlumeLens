@@ -33,6 +33,11 @@ export function formatScore(score: number | null | undefined): string {
   return (score * 100).toFixed(1)
 }
 
+// "已完成/总数"格式化 — folder 进度 / collection 点亮率 / 物种统计共用。
+export function formatRatio(current: number, total: number): string {
+  return `${current}/${total}`
+}
+
 // 用户人工评级覆盖模型评级 — 选片/复核/羽迹各处展示统一走这个。
 export function effectivePhotoGrade(photo: PhotoRecord): PhotoGrade {
   return photo.decision ?? photo.grade
