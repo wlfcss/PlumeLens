@@ -62,6 +62,7 @@ export function gradeTone(grade: PhotoGrade): Tone {
 }
 
 export function statusTone(status: FolderStatus): Tone {
+  if (status === 'ready') return 'success'
   if (status === 'path_missing' || status === 'error') return 'accent'
   if (status === 'analyzing_partial' || status === 'scanning' || status === 'hashing')
     return 'warning'

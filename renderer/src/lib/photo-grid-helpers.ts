@@ -493,7 +493,7 @@ export function buildReviewSegmentPhotosByPhotoId(
 ): Map<string, PhotoRecord[]> {
   const groups = new Map<string, PhotoRecord[]>()
   for (const photo of photos) {
-    const key = `${photo.folderId} ${photo.groupId}`
+    const key = `${photo.folderId}\u0000${photo.groupId}`
     const groupPhotos = groups.get(key)
     if (groupPhotos) {
       groupPhotos.push(photo)
