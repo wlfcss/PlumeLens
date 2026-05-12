@@ -6,14 +6,16 @@ import '@/i18n'
 import App, {
   applyNewSpeciesMarkers,
   buildArchiveMapPins,
-  buildGroupStartMsMap,
-  buildReviewPhotoOrderForGroup,
   deriveSpeciesRecords,
   extractPhotoGps,
   isPlainSpaceKey,
   shouldIgnoreSelectionReviewShortcutTarget,
 } from '@/App'
 import { buildSpeciesCollectionGroups } from '@/lib/archive-collection'
+import {
+  buildGroupStartMsMap,
+  buildReviewPhotoOrderForGroup,
+} from '@/lib/photo-grid-helpers'
 import { pipelineRuntimeFromProvider } from '@/components/start/start-screen'
 import {
   effectiveSpeciesSummary,
