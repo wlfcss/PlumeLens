@@ -4,7 +4,14 @@
  * 留在 App.tsx 作为私有 helper。
  */
 
-import type { ArchiveTab, FolderStatus, PhotoGrade, PoseTagId, ProblemTagId } from '@/lib/mock-workspace'
+import type {
+  AppRoute,
+  ArchiveTab,
+  FolderStatus,
+  PhotoGrade,
+  PoseTagId,
+  ProblemTagId,
+} from '@/lib/mock-workspace'
 
 export function gradeLabelKey(grade: PhotoGrade) {
   return `selection.grade.${grade}` as const
@@ -24,4 +31,8 @@ export function statusLabelKey(status: FolderStatus) {
 
 export function archiveTabLabelKey(tab: ArchiveTab) {
   return `archive.tabs.${tab}` as const
+}
+
+export function routeLabelKey(route: AppRoute) {
+  return `nav.${route}` as const
 }

@@ -15,7 +15,7 @@
 
 import type { useTranslation } from 'react-i18next'
 
-import type { PhotoGrade, PhotoRecord } from '@/lib/mock-workspace'
+import type { FolderStatus, PhotoGrade, PhotoRecord } from '@/lib/mock-workspace'
 import {
   effectiveSpeciesName,
   effectivePhotoGrade,
@@ -58,6 +58,13 @@ export function gradeTone(grade: PhotoGrade): Tone {
   if (grade === 'select') return 'success'
   if (grade === 'record') return 'warning'
   if (grade === 'reject') return 'accent'
+  return 'neutral'
+}
+
+export function statusTone(status: FolderStatus): Tone {
+  if (status === 'path_missing' || status === 'error') return 'accent'
+  if (status === 'analyzing_partial' || status === 'scanning' || status === 'hashing')
+    return 'warning'
   return 'neutral'
 }
 

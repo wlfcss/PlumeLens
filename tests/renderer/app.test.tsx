@@ -11,10 +11,10 @@ import App, {
   deriveSpeciesRecords,
   extractPhotoGps,
   isPlainSpaceKey,
-  pipelineRuntimeFromProvider,
   shouldIgnoreSelectionReviewShortcutTarget,
 } from '@/App'
 import { buildSpeciesCollectionGroups } from '@/lib/archive-collection'
+import { pipelineRuntimeFromProvider } from '@/components/start/start-screen'
 import {
   effectiveSpeciesSummary,
   getArchiveSpeciesEntries,
