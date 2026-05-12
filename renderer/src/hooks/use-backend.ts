@@ -1,4 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
+import { logger } from '@/lib/logger'
 import { useEffect, useState } from 'react'
 
 export interface BackendHealth {
@@ -54,7 +55,7 @@ export function useBackendHealth() {
             // 卡 null,继续 backoff 重试。否则 EnginePanel 永远 loading,backendUrl
             // 永远 null,所有走 IPC 的 query 都接不上后端。
             if (cancelled) return
-            console.warn('getBackendUrl IPC failed, retrying:', err)
+            logger.warn('getBackendUrl IPC failed, retrying:', err)
             setTimeout(poll, 500)
           })
       }

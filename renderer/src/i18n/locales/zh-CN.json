@@ -19,6 +19,13 @@
     "settings": "设置",
     "close": "关闭"
   },
+  "errors": {
+    "renderFailed": {
+      "title": "界面渲染异常",
+      "body": "出现了未预料的渲染错误。已尝试在本子树内隔离,不影响其它路由。",
+      "retry": "重试"
+    }
+  },
   "speciesDetail": {
     "label": "鸟种资料",
     "dialogLabel": "{{species}} 鸟种资料",

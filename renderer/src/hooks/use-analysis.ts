@@ -9,6 +9,7 @@ import {
   type AnalysisProgressEvent,
   type QueueStatsResponse,
 } from '@/lib/api-client'
+import { logger } from '@/lib/logger'
 
 const QUEUE_STATS_KEY = (libraryId: string) => ['queue-stats', libraryId] as const
 const LIBRARY_DETAIL_KEY = (libraryId: string) => ['library', libraryId] as const
@@ -134,7 +135,7 @@ export function useAnalysisProgress(
                 qc.invalidateQueries({ queryKey: LIBRARIES_KEY })
               }
             } catch (e) {
-              console.warn('SSE malformed frame:', e)
+              logger.warn('SSE malformed frame:', e)
             }
           }
           // 原生 EventSource 只对网络断开 / 5xx 做自动重连;对 4xx(本工程的 429
@@ -144,18 +145,18 @@ export function useAnalysisProgress(
           source.onerror = (e) => {
             if (cancelled || !source) return
             if (source.readyState === EventSource.CLOSED) {
-              console.warn('SSE closed (likely 4xx), retrying in 5s')
+              logger.warn('SSE closed (likely 4xx), retrying in 5s')
               source.close()
               source = null
               reconnectTimer = setTimeout(connect, 5000)
             } else {
-              console.warn('SSE error (browser auto-reconnecting):', e)
+              logger.warn('SSE error (browser auto-reconnecting):', e)
             }
           }
         })
         .catch((e) => {
           if (cancelled) return
-          console.warn('Failed to resolve SSE URL, retrying in 5s:', e)
+          logger.warn('Failed to resolve SSE URL, retrying in 5s:', e)
           reconnectTimer = setTimeout(connect, 5000)
         })
     }

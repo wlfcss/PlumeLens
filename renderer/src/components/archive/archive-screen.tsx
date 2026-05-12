@@ -9,6 +9,7 @@ import { Shield, Trophy, X } from 'lucide-react'
 import {
   Suspense,
   lazy,
+  memo,
   useEffect,
   useMemo,
   useRef,
@@ -61,7 +62,9 @@ const COLLECTION_GRID_GAP = 8
 const COLLECTION_HEADING_ESTIMATED_HEIGHT = 52
 const COLLECTION_CARD_ROW_ESTIMATED_HEIGHT = 204
 
-function CollectionSpeciesCard({
+// memo:1591 个物种卡虚拟滚动时同一 species 引用稳定,memo 防止滚动期间
+// 不在 viewport 的卡片重渲染。
+const CollectionSpeciesCard = memo(function CollectionSpeciesCard({
   active,
   onSelectSpecies,
   species,
@@ -109,7 +112,7 @@ function CollectionSpeciesCard({
       </span>
     </button>
   )
-}
+})
 
 function VirtualizedCollectionBoard({
   activeSpeciesId,

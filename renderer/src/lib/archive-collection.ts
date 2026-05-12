@@ -9,7 +9,7 @@ import { getArchiveSpeciesEntries } from '@/lib/photo-display'
 import type { PhotoRecord, SpeciesRecord } from '@/lib/mock-workspace'
 import type { Tone } from '@/lib/photo-helpers'
 
-export type SpeciesCollectionGroupId =
+type SpeciesCollectionGroupId =
   | 'protected1'
   | 'protected2'
   | 'threatened'
@@ -37,7 +37,7 @@ export type CollectionVirtualRow =
       species: SpeciesRecord[]
     }
 
-export const speciesCollectionGroupOrder: SpeciesCollectionGroupId[] = [
+const speciesCollectionGroupOrder: SpeciesCollectionGroupId[] = [
   'protected1',
   'protected2',
   'threatened',
@@ -121,7 +121,7 @@ export function speciesArtworkStyle(
   } as CSSProperties
 }
 
-export type SpeciesArtworkAspect = 'unknown' | 'landscape' | 'portrait' | 'square'
+type SpeciesArtworkAspect = 'unknown' | 'landscape' | 'portrait' | 'square'
 
 const speciesArtworkAspectCache = new Map<string, SpeciesArtworkAspect>()
 

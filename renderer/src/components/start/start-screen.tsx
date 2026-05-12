@@ -30,6 +30,7 @@ import type { FolderRecord } from '@/lib/mock-workspace'
 import { statusTone } from '@/lib/photo-display'
 import type { Tone } from '@/lib/photo-helpers'
 import { cn } from '@/lib/utils'
+import { logger } from '@/lib/logger'
 
 export type FolderContextMenuState = {
   folder: FolderRecord
@@ -159,7 +160,7 @@ export function FolderContextMenu({
             event.stopPropagation()
             onClose()
             void onRelinkFolder(menu.folder.id).catch((err) => {
-              console.warn('Failed to relink library source folder:', err)
+              logger.warn('Failed to relink library source folder:', err)
             })
           }}
           role="menuitem"

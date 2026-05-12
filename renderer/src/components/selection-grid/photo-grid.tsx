@@ -18,6 +18,7 @@
 
 import { Images } from 'lucide-react'
 import {
+  memo,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -585,7 +586,11 @@ function PhotoSegmentGrid({
   )
 }
 
-function PhotoStackTile({
+// memo:虚拟列表滚动时同一 photo.id 行可能反复 mount/unmount,同 viewport 内
+// photo 引用稳定。memo + 浅比较避免 50+ React element / 字符串 className 的
+// 重渲染开销;onFocusPhoto/onOpenReview/onThumbnailLoadStatus 由 App.tsx 用
+// useCallback 包过,引用稳定。
+const PhotoStackTile = memo(function PhotoStackTile({
   focused,
   group,
   onExpand,
@@ -703,9 +708,9 @@ function PhotoStackTile({
       </div>
     </article>
   )
-}
+})
 
-function PhotoTile({
+const PhotoTile = memo(function PhotoTile({
   focused,
   onFocusPhoto,
   onOpenReview,
@@ -836,4 +841,4 @@ function PhotoTile({
       </div>
     </article>
   )
-}
+})

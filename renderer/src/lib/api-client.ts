@@ -1,3 +1,5 @@
+import { logger } from '@/lib/logger'
+
 /**
  * API client for PlumeLens backend.
  *
@@ -34,7 +36,7 @@ async function getBackendUrl(): Promise<string> {
       if (url) return url
       attempts += 1
       if (attempts % 25 === 0) {
-        console.warn(`等待 engine 后端启动... ${(attempts * BACKEND_BOOT_POLL_MS) / 1000}s`)
+        logger.warn(`等待 engine 后端启动... ${(attempts * BACKEND_BOOT_POLL_MS) / 1000}s`)
       }
       await new Promise((resolve) => setTimeout(resolve, BACKEND_BOOT_POLL_MS))
     }

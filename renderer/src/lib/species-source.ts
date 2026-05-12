@@ -16,7 +16,7 @@ import type { PhotoRecord } from '@/lib/mock-workspace'
 import { effectiveSpeciesName, type Tone } from './photo-helpers'
 
 export type DetectionLike = NonNullable<PhotoRecord['birdDetections']>[number]
-export type UnconfirmedSpeciesCause = 'uncertain' | 'head' | 'generic'
+type UnconfirmedSpeciesCause = 'uncertain' | 'head' | 'generic'
 
 function resolveSourceFor(
   photo: PhotoRecord,
@@ -38,7 +38,7 @@ function resolveSourceFor(
   }
 }
 
-export function speciesUnconfirmedCause(
+function speciesUnconfirmedCause(
   photo: PhotoRecord,
   detection?: DetectionLike | null,
 ): UnconfirmedSpeciesCause | null {

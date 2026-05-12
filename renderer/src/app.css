@@ -8758,6 +8758,51 @@ button:disabled {
   animation: pl-surface-in var(--pl-motion-reveal) var(--pl-ease-soft) both;
 }
 
+.error-boundary-fallback {
+  display: grid;
+  height: 100%;
+  place-items: center;
+  padding: 32px;
+}
+
+.error-boundary-fallback > div {
+  display: grid;
+  max-width: 560px;
+  gap: 14px;
+  padding: 28px;
+  border: 1px solid color-mix(in srgb, var(--pl-accent) 30%, var(--pl-border-1));
+  border-radius: var(--pl-radius-lg);
+  background: color-mix(in srgb, var(--pl-accent) 6%, var(--pl-bg-1));
+}
+
+.error-boundary-fallback h2 {
+  margin: 0;
+  font-size: 16px;
+  color: var(--pl-fg-0);
+}
+
+.error-boundary-fallback p {
+  margin: 0;
+  color: var(--pl-fg-2);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.error-boundary-fallback__detail {
+  max-height: 200px;
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: var(--pl-radius-md);
+  background: rgba(0, 0, 0, 0.32);
+  font-family: var(--pl-font-data);
+  font-size: 11px;
+  line-height: 1.45;
+  color: color-mix(in srgb, var(--pl-accent) 50%, var(--pl-fg-1));
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 @media (prefers-reduced-motion: no-preference) {
   .app-shell {
     animation: pl-grid-drift 64s linear infinite;

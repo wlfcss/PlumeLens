@@ -19,6 +19,13 @@
     "settings": "Settings",
     "close": "Close"
   },
+  "errors": {
+    "renderFailed": {
+      "title": "Render failed",
+      "body": "An unexpected render error occurred. The failure is isolated to this subtree; other routes are unaffected.",
+      "retry": "Retry"
+    }
+  },
   "speciesDetail": {
     "label": "Species profile",
     "dialogLabel": "{{species}} species profile",

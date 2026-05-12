@@ -7,6 +7,8 @@ import {
   Sparkles,
 } from 'lucide-react'
 import {
+  Suspense,
+  lazy,
   startTransition,
   useCallback,
   useDeferredValue,
@@ -21,8 +23,15 @@ import { useTranslation } from 'react-i18next'
 
 import appIconUrl from '../../build/icon.png?url'
 import { EngineStatusBanner } from '@/components/engine-status-banner'
-import { ReviewModal } from '@/components/review/review-modal'
-import { SettingsModal } from '@/components/settings-modal'
+const ReviewModal = lazy(() =>
+  import('@/components/review/review-modal').then((m) => ({ default: m.ReviewModal })),
+)
+// SettingsModal / ExportDrawer / ReviewModal / ArchiveScreen / SelectionScreen
+// 全部 lazy — 起始页只下载 StartScreen + AppShell + EngineStatusBanner 子集,
+// 主 bundle 从 4.4MB 起步显著缩水(实测见构建 stat)。
+const SettingsModal = lazy(() =>
+  import('@/components/settings-modal').then((m) => ({ default: m.SettingsModal })),
+)
 import { type ThumbnailLoadStatus } from '@/components/thumbnail-image'
 import { useAnalysisProgress, useStartBatch } from '@/hooks/use-analysis'
 import { useBackendHealth } from '@/hooks/use-backend'
@@ -61,10 +70,20 @@ import type {
 import { cn } from '@/lib/utils'
 import { useShallow, useUIStore, type QuickFilter } from '@/stores/ui-store'
 import { subscribeEngineStatus, useEngineStore } from '@/stores/engine-store'
+import { ErrorBoundary } from '@/components/common/error-boundary'
 import { IconButton } from '@/components/common/icon-button'
-import { ExportDrawer, type ExportSourceSnapshot } from '@/components/export-drawer'
-import { ArchiveScreen } from '@/components/archive/archive-screen'
-import { SelectionScreen } from '@/components/selection-chrome/selection-screen'
+import type { ExportSourceSnapshot } from '@/components/export-drawer'
+const ExportDrawer = lazy(() =>
+  import('@/components/export-drawer').then((m) => ({ default: m.ExportDrawer })),
+)
+const ArchiveScreen = lazy(() =>
+  import('@/components/archive/archive-screen').then((m) => ({ default: m.ArchiveScreen })),
+)
+const SelectionScreen = lazy(() =>
+  import('@/components/selection-chrome/selection-screen').then((m) => ({
+    default: m.SelectionScreen,
+  })),
+)
 import {
   FolderContextMenu,
   StartScreen,
@@ -91,6 +110,7 @@ import {
   effectivePhotoGrade,
   type FolderSummary,
 } from '@/lib/photo-helpers'
+import { logger } from '@/lib/logger'
 
 
 type ExportSession = {
@@ -863,10 +883,10 @@ export default function App() {
     try {
       const result = await window.plumelens?.openPathInFinder?.(folder.rootPath)
       if (result && !result.ok) {
-        console.warn('Failed to open folder in Finder:', result.reason)
+        logger.warn('Failed to open folder in Finder:', result.reason)
       }
     } catch (err) {
-      console.warn('Failed to open folder in Finder:', err)
+      logger.warn('Failed to open folder in Finder:', err)
     }
   }, [])
   const photosByFolder = useMemo(() => {
@@ -1313,7 +1333,7 @@ export default function App() {
       // (历史上的 createImportedFolder 会注入"池鹭/翠鸟/崇明东滩"等假种子,
       // 用户当真照片处理 → 快捷键 1234 命中不存在的 photo_id → 错乱)。
       // 切回 start 页,用应用内错误条把 backend 错误透传给用户。
-      console.error('Library import to backend failed:', err)
+      logger.error('Library import to backend failed:', err)
       const detail = err instanceof Error ? err.message : String(err)
       setImportError(detail)
       startTransition(() => {
@@ -1364,7 +1384,7 @@ export default function App() {
         }))
         void queryClient.refetchQueries({ queryKey: LIBRARY_DETAIL_KEY(folderId), type: 'active' })
       } catch (err) {
-        console.warn('Failed to relink library source folder:', err)
+        logger.warn('Failed to relink library source folder:', err)
         throw err
       } finally {
         setRelinkingFolderId(null)
@@ -1380,7 +1400,7 @@ export default function App() {
       // bump key 让 useAnalysisProgress 重建 SSE 连接（如果上一个 idle 死了）
       setSseRestartKey((k) => k + 1)
     } catch (err) {
-      console.error('Failed to start batch analysis:', err)
+      logger.error('Failed to start batch analysis:', err)
     }
   }
 
@@ -1417,7 +1437,7 @@ export default function App() {
       { photoId, decision: decision as DecisionValue },
       {
         onError: (err) => {
-          console.warn('Failed to persist decision (will rollback via refetch):', err)
+          logger.warn('Failed to persist decision (will rollback via refetch):', err)
         },
       },
     )
@@ -1471,7 +1491,7 @@ export default function App() {
       { photoId, birdIndex, species, bbox: bbox ?? null },
       {
         onError: (err) => {
-          console.warn('Failed to persist species override (will rollback via refetch):', err)
+          logger.warn('Failed to persist species override (will rollback via refetch):', err)
         },
       },
     )
@@ -1511,6 +1531,7 @@ export default function App() {
       controlsDisabled={!appInteractive}
       exportDisabled={Boolean(activeSourceMissing)}
     >
+      <Suspense fallback={null}>
       {route === 'selection' ? (
         <SelectionScreen
           activeFolder={activeFolder}
@@ -1572,32 +1593,38 @@ export default function App() {
           t={t}
         />
       )}
+      </Suspense>
 
       {reviewPhoto ? (
-        <ReviewModal
-          detail={{ photo: reviewPhoto, group: reviewGroup }}
-          groupPhotos={reviewGroupPhotos}
-          onClose={() => setReviewPhotoId(null)}
-          onSelectPhoto={handleOpenReview}
-          onSetDecision={handleSetDecision}
-          onSetSpeciesOverride={handleSetSpeciesOverride}
-          onThumbnailLoadStatus={handleThumbnailLoadStatus}
-          photos={reviewPhotos}
-          t={t}
-        />
+        <Suspense fallback={null}>
+          {/* ReviewModal 自带 backdrop,fallback 用 null 避免双重 overlay */}
+          <ReviewModal
+            detail={{ photo: reviewPhoto, group: reviewGroup }}
+            groupPhotos={reviewGroupPhotos}
+            onClose={() => setReviewPhotoId(null)}
+            onSelectPhoto={handleOpenReview}
+            onSetDecision={handleSetDecision}
+            onSetSpeciesOverride={handleSetSpeciesOverride}
+            onThumbnailLoadStatus={handleThumbnailLoadStatus}
+            photos={reviewPhotos}
+            t={t}
+          />
+        </Suspense>
       ) : null}
 
       {exportSessions.length > 0 ? (
-        <div className="export-session-stack">
-          {exportSessions.map((session) => (
-            <ExportDrawer
-              key={session.id}
-              onClose={() => closeExportSession(session.id)}
-              source={getExportSource(session)}
-              t={t}
-            />
-          ))}
-        </div>
+        <Suspense fallback={null}>
+          <div className="export-session-stack">
+            {exportSessions.map((session) => (
+              <ExportDrawer
+                key={session.id}
+                onClose={() => closeExportSession(session.id)}
+                source={getExportSource(session)}
+                t={t}
+              />
+            ))}
+          </div>
+        </Suspense>
       ) : null}
 
       <FolderContextMenu
@@ -1713,8 +1740,12 @@ function AppShell({
       </header>
 
       <EngineStatusBanner />
-      <div className="app-body">{children}</div>
-      <SettingsModal />
+      <ErrorBoundary t={t}>
+        <div className="app-body">{children}</div>
+      </ErrorBoundary>
+      <Suspense fallback={null}>
+        <SettingsModal />
+      </Suspense>
     </div>
   )
 }

@@ -13,7 +13,7 @@ import {
   type RefObject,
 } from 'react'
 
-export type ResponsiveGridLayout = {
+type ResponsiveGridLayout = {
   columns: number
   width: number
 }
@@ -33,6 +33,7 @@ export function useResponsiveGridLayout(
     const element = containerRef.current
     if (!element) return undefined
 
+    let frame = 0
     const updateColumns = () => {
       const width = Math.max(minColumnWidth, element.clientWidth)
       const nextColumns = Math.max(1, Math.floor((width + gap) / (minColumnWidth + gap)))
@@ -43,15 +44,31 @@ export function useResponsiveGridLayout(
       )
     }
 
-    updateColumns()
-    if (typeof ResizeObserver !== 'undefined') {
-      const observer = new ResizeObserver(updateColumns)
-      observer.observe(element)
-      return () => observer.disconnect()
+    // rAF throttle:用户拖窗口大小时 ResizeObserver 每帧触发,合并到一个 rAF
+    // 内更新避免一帧多次 setState 触发虚拟列表重测量。
+    const scheduleUpdate = () => {
+      if (frame !== 0) return
+      frame = window.requestAnimationFrame(() => {
+        frame = 0
+        updateColumns()
+      })
     }
 
-    window.addEventListener('resize', updateColumns)
-    return () => window.removeEventListener('resize', updateColumns)
+    updateColumns()
+    if (typeof ResizeObserver !== 'undefined') {
+      const observer = new ResizeObserver(scheduleUpdate)
+      observer.observe(element)
+      return () => {
+        observer.disconnect()
+        if (frame !== 0) window.cancelAnimationFrame(frame)
+      }
+    }
+
+    window.addEventListener('resize', scheduleUpdate)
+    return () => {
+      window.removeEventListener('resize', scheduleUpdate)
+      if (frame !== 0) window.cancelAnimationFrame(frame)
+    }
   }, [containerRef, gap, minColumnWidth])
 
   return layout
@@ -88,19 +105,31 @@ export function useVirtualScrollMargin(
   })
 
   useEffect(() => {
+    let frame = 0
+    const scheduleUpdate = () => {
+      if (frame !== 0) return
+      frame = window.requestAnimationFrame(() => {
+        frame = 0
+        updateScrollMargin()
+      })
+    }
     updateScrollMargin()
     if (typeof ResizeObserver === 'undefined') {
-      window.addEventListener('resize', updateScrollMargin)
-      return () => window.removeEventListener('resize', updateScrollMargin)
+      window.addEventListener('resize', scheduleUpdate)
+      return () => {
+        window.removeEventListener('resize', scheduleUpdate)
+        if (frame !== 0) window.cancelAnimationFrame(frame)
+      }
     }
 
-    const observer = new ResizeObserver(updateScrollMargin)
+    const observer = new ResizeObserver(scheduleUpdate)
     if (containerRef.current) observer.observe(containerRef.current)
     if (scrollElement) observer.observe(scrollElement)
-    window.addEventListener('resize', updateScrollMargin)
+    window.addEventListener('resize', scheduleUpdate)
     return () => {
       observer.disconnect()
-      window.removeEventListener('resize', updateScrollMargin)
+      window.removeEventListener('resize', scheduleUpdate)
+      if (frame !== 0) window.cancelAnimationFrame(frame)
     }
   }, [containerRef, scrollElement, updateScrollMargin])
 

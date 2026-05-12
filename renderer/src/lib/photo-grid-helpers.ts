@@ -86,7 +86,7 @@ function photoShotMs(photo: PhotoRecord): number | null {
   return Number.isFinite(ts) ? ts : null
 }
 
-export function comparePhotosByShotTimeAsc(left: PhotoRecord, right: PhotoRecord): number {
+function comparePhotosByShotTimeAsc(left: PhotoRecord, right: PhotoRecord): number {
   const leftTs = photoShotMs(left)
   const rightTs = photoShotMs(right)
   if (leftTs !== null && rightTs !== null && leftTs !== rightTs) return leftTs - rightTs
@@ -104,7 +104,7 @@ function comparePhotosByShotTimeDesc(left: PhotoRecord, right: PhotoRecord): num
   return left.fileName.localeCompare(right.fileName)
 }
 
-export function comparePhotosByScoreDesc(left: PhotoRecord, right: PhotoRecord): number {
+function comparePhotosByScoreDesc(left: PhotoRecord, right: PhotoRecord): number {
   // 综合评分（默认）：先按档位降序（精选 → 可用 → 记录 → 淘汰），
   // 同档内按 quality_score 降序。
   const gradeDiff = GRADE_RANK[effectivePhotoGrade(right)] - GRADE_RANK[effectivePhotoGrade(left)]

@@ -19,6 +19,7 @@ import {
   type PhotoThumbnailResponse,
   type RelinkLibraryResponse,
 } from '@/lib/api-client'
+import { logger } from '@/lib/logger'
 
 export const LIBRARIES_KEY = ['libraries'] as const
 export const LIBRARY_DETAIL_KEY = (id: string) => ['library', id] as const
@@ -171,18 +172,18 @@ export function useLibraryEvents(libraryId: string | null | undefined, enabled =
           source.onerror = (event) => {
             if (cancelled || !source) return
             if (source.readyState === EventSource.CLOSED) {
-              console.warn('Library event stream closed (likely 4xx), retrying in 5s')
+              logger.warn('Library event stream closed (likely 4xx), retrying in 5s')
               source.close()
               source = null
               reconnectTimer = setTimeout(connect, 5000)
             } else {
-              console.warn('Library event stream error (browser auto-reconnecting):', event)
+              logger.warn('Library event stream error (browser auto-reconnecting):', event)
             }
           }
         })
         .catch((error) => {
           if (cancelled) return
-          console.warn('Failed to resolve library event URL, retrying in 5s:', error)
+          logger.warn('Failed to resolve library event URL, retrying in 5s:', error)
           reconnectTimer = setTimeout(connect, 5000)
         })
     }

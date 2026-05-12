@@ -42,7 +42,7 @@ const unknownSpeciesAliases = new Set([
   'unknown',
 ])
 
-export type ArchiveSpeciesEntry = {
+type ArchiveSpeciesEntry = {
   key: string
   name: string
   latinName: string
@@ -180,7 +180,7 @@ export function getArchiveSpeciesEntries(photo: PhotoRecord): ArchiveSpeciesEntr
   return entries
 }
 
-export interface SpeciesSummaryEntry {
+interface SpeciesSummaryEntry {
   name: string | null
   latinName: string | null
   englishName: string | null
@@ -188,7 +188,7 @@ export interface SpeciesSummaryEntry {
   isBest: boolean
 }
 
-export interface SpeciesSummary {
+interface SpeciesSummary {
   confirmedEntries: SpeciesSummaryEntry[]
   hasUnconfirmed: boolean
   hasConflict: boolean

@@ -61,6 +61,7 @@ import { formatRatio, type FolderSummary } from '@/lib/photo-helpers'
 import type { SortMode } from '@/lib/photo-grid-helpers'
 import { cn } from '@/lib/utils'
 import type { QuickFilter, ViewMode } from '@/stores/ui-store'
+import { logger } from '@/lib/logger'
 
 const SELECTION_COMPACT_ENTER_SCROLL_PX = 148
 const SELECTION_COMPACT_EXIT_SCROLL_PX = 72
@@ -90,10 +91,6 @@ function sortLabelKey(sort: SortMode) {
 function quickFilterLabelKey(filter: QuickFilter) {
   return `selection.quickFilters.${filter}` as const
 }
-
-// 限定本子树自己消费的轻量 progress event 类型 — App.tsx 用同名 alias 全文流传,
-// 子树只读 4 个字段,不需要完整接口。
-type AnalysisProgressEventLite = AnalysisProgressEvent
 
 export function SelectionScreen({
   activeFolder,
@@ -150,7 +147,7 @@ export function SelectionScreen({
   onSetDecision: (photoId: string, decision: SelectionDecision) => void
   onStartAnalysis: () => void
   onThumbnailLoadStatus: (photoId: string, status: ThumbnailLoadStatus) => void
-  progressEvent: AnalysisProgressEventLite | null
+  progressEvent: AnalysisProgressEvent | null
   relinkingFolderId: string | null
   setActiveQuickFilter: (filter: QuickFilter) => void
   setOnlyFlying: (enabled: boolean) => void
@@ -587,7 +584,7 @@ function SelectionCompactHeader({
   onOpenExport: () => void
   onStartAnalysis: () => void
   onlyFlying: boolean
-  progressEvent: AnalysisProgressEventLite | null
+  progressEvent: AnalysisProgressEvent | null
   setActiveQuickFilter: (filter: QuickFilter) => void
   setActiveSort: (sort: SortMode) => void
   setCompactMoreOpen: (open: boolean) => void
@@ -825,7 +822,7 @@ function FolderTopline({
   onRelinkFolder: (folderId: string) => Promise<void>
   onRenameFolder: (folderId: string, displayName: string) => Promise<void>
   onStartAnalysis: () => void
-  progressEvent: AnalysisProgressEventLite | null
+  progressEvent: AnalysisProgressEvent | null
   relinking: boolean
   t: ReturnType<typeof useTranslation>['t']
 }) {
@@ -884,7 +881,7 @@ function FolderTopline({
       await onRenameFolder(activeFolder.id, trimmed)
       setAliasEditing(false)
     } catch (err) {
-      console.warn('Failed to update library display name:', err)
+      logger.warn('Failed to update library display name:', err)
       setAliasError(t('selection.folderHeader.aliasFailed'))
     } finally {
       setAliasSaving(false)
