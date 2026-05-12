@@ -813,6 +813,7 @@ export default function App() {
     setFocusedPhotoId,
     setReviewPhotoId,
     setSettingsOpen,
+    settingsOpen,
   } = useUIStore(
     useShallow((state) => ({
       route: state.route,
@@ -838,6 +839,7 @@ export default function App() {
       setFocusedPhotoId: state.setFocusedPhotoId,
       setReviewPhotoId: state.setReviewPhotoId,
       setSettingsOpen: state.setSettingsOpen,
+      settingsOpen: state.settingsOpen,
     })),
   )
 
@@ -1519,6 +1521,24 @@ export default function App() {
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [flatSelectionPhotos, focusedPhotoId, reviewPhotoId, route])
 
+  const routeErrorResetKey = [
+    route,
+    activeFolderId ?? '',
+    archiveTab,
+    activeSpeciesId ?? '',
+    viewMode,
+    activeSort,
+    onlyFlying ? 'flying' : 'all',
+    activeQuickFilters.join(','),
+    deferredSearch,
+    visibleFolders.length,
+    folderGroups.length,
+    flatSelectionPhotos.length,
+    archivePhotos.length,
+    archiveSpecies.length,
+  ].join(':')
+  const exportErrorResetKey = exportSessions.map((session) => session.id).join('|')
+
   return (
     <AppShell
       onNavigate={handleNavigate}
@@ -1527,104 +1547,111 @@ export default function App() {
       onSearchChange={setSearchQuery}
       route={route}
       searchQuery={searchQuery}
+      settingsOpen={settingsOpen}
       t={t}
       controlsDisabled={!appInteractive}
       exportDisabled={Boolean(activeSourceMissing)}
     >
-      <Suspense fallback={null}>
-      {route === 'selection' ? (
-        <SelectionScreen
-          activeFolder={activeFolder}
-          activeFolderSummary={activeFolderSummary}
-          activeQuickFilters={activeQuickFilters}
-          onlyFlying={onlyFlying}
-          activeSort={activeSort}
-          analysisStarting={startBatch.isPending}
-          filteredGroups={folderGroups}
-          flatPhotos={flatSelectionPhotos}
-          focusedPhoto={focusedPhoto}
-          focusedPhotoId={focusedPhotoId}
-          folderPhotos={activeFolderPhotos}
-          folders={visibleFolders}
-          onThumbnailLoadStatus={handleThumbnailLoadStatus}
-          onOpenFolderContextMenu={openFolderContextMenu}
-          onOpenExport={openExportForActiveFolder}
-          onOpenReview={handleOpenReview}
-          onRelinkFolder={handleRelinkFolder}
-          onRenameFolder={handleRenameFolder}
-          onSelectFolder={handleSelectFolder}
-          onSetDecision={handleSetDecision}
-          onStartAnalysis={handleStartAnalysis}
-          progressEvent={progressEvent}
-          relinkingFolderId={relinkingFolderId}
-          setActiveQuickFilter={setActiveQuickFilter}
-          setOnlyFlying={setOnlyFlying}
-          setActiveSort={setActiveSort}
-          setFocusedPhotoId={setFocusedPhotoId}
-          setRoute={setRoute}
-          setViewMode={setViewMode}
-          t={t}
-          viewMode={viewMode}
-          workspace={workspace}
-        />
-      ) : route === 'archive' ? (
-        <ArchiveScreen
-          activeSpecies={activeSpecies}
-          archivePhotos={archivePhotos}
-          archiveSpecies={archiveSpecies}
-          archiveTab={archiveTab}
-          onOpenReview={handleOpenReview}
-          onSelectSpecies={setActiveSpeciesId}
-          onSetArchiveTab={setArchiveTab}
-          t={t}
-        />
-      ) : (
-        <StartScreen
-          backendData={backendData}
-          folders={visibleFolders}
-          importError={importError}
-          isError={isError}
-          isReady={isReady}
-          onChooseFolder={handleChooseFolder}
-          onContinueLatest={() => handleNavigate('selection')}
-          onDismissImportError={() => setImportError(null)}
-          onOpenFolderContextMenu={openFolderContextMenu}
-          onOpenFolder={handleSelectFolder}
-          t={t}
-        />
-      )}
-      </Suspense>
+      <ErrorBoundary resetKey={routeErrorResetKey} t={t}>
+        <Suspense fallback={null}>
+          {route === 'selection' ? (
+            <SelectionScreen
+              activeFolder={activeFolder}
+              activeFolderSummary={activeFolderSummary}
+              activeQuickFilters={activeQuickFilters}
+              onlyFlying={onlyFlying}
+              activeSort={activeSort}
+              analysisStarting={startBatch.isPending}
+              filteredGroups={folderGroups}
+              flatPhotos={flatSelectionPhotos}
+              focusedPhoto={focusedPhoto}
+              focusedPhotoId={focusedPhotoId}
+              folderPhotos={activeFolderPhotos}
+              folders={visibleFolders}
+              onThumbnailLoadStatus={handleThumbnailLoadStatus}
+              onOpenFolderContextMenu={openFolderContextMenu}
+              onOpenExport={openExportForActiveFolder}
+              onOpenReview={handleOpenReview}
+              onRelinkFolder={handleRelinkFolder}
+              onRenameFolder={handleRenameFolder}
+              onSelectFolder={handleSelectFolder}
+              onSetDecision={handleSetDecision}
+              onStartAnalysis={handleStartAnalysis}
+              progressEvent={progressEvent}
+              relinkingFolderId={relinkingFolderId}
+              setActiveQuickFilter={setActiveQuickFilter}
+              setOnlyFlying={setOnlyFlying}
+              setActiveSort={setActiveSort}
+              setFocusedPhotoId={setFocusedPhotoId}
+              setRoute={setRoute}
+              setViewMode={setViewMode}
+              t={t}
+              viewMode={viewMode}
+              workspace={workspace}
+            />
+          ) : route === 'archive' ? (
+            <ArchiveScreen
+              activeSpecies={activeSpecies}
+              archivePhotos={archivePhotos}
+              archiveSpecies={archiveSpecies}
+              archiveTab={archiveTab}
+              onOpenReview={handleOpenReview}
+              onSelectSpecies={setActiveSpeciesId}
+              onSetArchiveTab={setArchiveTab}
+              t={t}
+            />
+          ) : (
+            <StartScreen
+              backendData={backendData}
+              folders={visibleFolders}
+              importError={importError}
+              isError={isError}
+              isReady={isReady}
+              onChooseFolder={handleChooseFolder}
+              onContinueLatest={() => handleNavigate('selection')}
+              onDismissImportError={() => setImportError(null)}
+              onOpenFolderContextMenu={openFolderContextMenu}
+              onOpenFolder={handleSelectFolder}
+              t={t}
+            />
+          )}
+        </Suspense>
+      </ErrorBoundary>
 
       {reviewPhoto ? (
-        <Suspense fallback={null}>
-          {/* ReviewModal 自带 backdrop,fallback 用 null 避免双重 overlay */}
-          <ReviewModal
-            detail={{ photo: reviewPhoto, group: reviewGroup }}
-            groupPhotos={reviewGroupPhotos}
-            onClose={() => setReviewPhotoId(null)}
-            onSelectPhoto={handleOpenReview}
-            onSetDecision={handleSetDecision}
-            onSetSpeciesOverride={handleSetSpeciesOverride}
-            onThumbnailLoadStatus={handleThumbnailLoadStatus}
-            photos={reviewPhotos}
-            t={t}
-          />
-        </Suspense>
+        <ErrorBoundary resetKey={`review:${reviewPhoto.id}`} t={t}>
+          <Suspense fallback={null}>
+            {/* ReviewModal 自带 backdrop,fallback 用 null 避免双重 overlay */}
+            <ReviewModal
+              detail={{ photo: reviewPhoto, group: reviewGroup }}
+              groupPhotos={reviewGroupPhotos}
+              onClose={() => setReviewPhotoId(null)}
+              onSelectPhoto={handleOpenReview}
+              onSetDecision={handleSetDecision}
+              onSetSpeciesOverride={handleSetSpeciesOverride}
+              onThumbnailLoadStatus={handleThumbnailLoadStatus}
+              photos={reviewPhotos}
+              t={t}
+            />
+          </Suspense>
+        </ErrorBoundary>
       ) : null}
 
       {exportSessions.length > 0 ? (
-        <Suspense fallback={null}>
-          <div className="export-session-stack">
-            {exportSessions.map((session) => (
-              <ExportDrawer
-                key={session.id}
-                onClose={() => closeExportSession(session.id)}
-                source={getExportSource(session)}
-                t={t}
-              />
-            ))}
-          </div>
-        </Suspense>
+        <ErrorBoundary resetKey={`exports:${exportErrorResetKey}`} t={t}>
+          <Suspense fallback={null}>
+            <div className="export-session-stack">
+              {exportSessions.map((session) => (
+                <ExportDrawer
+                  key={session.id}
+                  onClose={() => closeExportSession(session.id)}
+                  source={getExportSource(session)}
+                  t={t}
+                />
+              ))}
+            </div>
+          </Suspense>
+        </ErrorBoundary>
       ) : null}
 
       <FolderContextMenu
@@ -1638,7 +1665,6 @@ export default function App() {
   )
 }
 
-
 function AppShell({
   children,
   controlsDisabled,
@@ -1649,6 +1675,7 @@ function AppShell({
   onSearchChange,
   route,
   searchQuery,
+  settingsOpen,
   t,
 }: {
   children: ReactNode
@@ -1660,6 +1687,7 @@ function AppShell({
   onSearchChange: (value: string) => void
   route: AppRoute
   searchQuery: string
+  settingsOpen: boolean
   t: ReturnType<typeof useTranslation>['t']
 }) {
   const disabledTitle = controlsDisabled ? t('nav.loadingDisabled') : undefined
@@ -1740,14 +1768,14 @@ function AppShell({
       </header>
 
       <EngineStatusBanner />
-      <ErrorBoundary t={t}>
-        <div className="app-body">{children}</div>
-      </ErrorBoundary>
-      <Suspense fallback={null}>
-        <SettingsModal />
-      </Suspense>
+      <div className="app-body">{children}</div>
+      {settingsOpen ? (
+        <ErrorBoundary resetKey="settings" t={t}>
+          <Suspense fallback={null}>
+            <SettingsModal />
+          </Suspense>
+        </ErrorBoundary>
+      ) : null}
     </div>
   )
 }
-
-

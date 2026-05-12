@@ -20,7 +20,7 @@ type ResponsiveGridLayout = {
 
 /** 容器宽度 / 最小列宽 / 间距 → 当前列数。ResizeObserver 跟踪容器尺寸变化。 */
 export function useResponsiveGridLayout(
-  containerRef: RefObject<HTMLElement | null>,
+  containerElement: HTMLElement | null,
   minColumnWidth: number,
   gap: number,
 ): ResponsiveGridLayout {
@@ -29,13 +29,19 @@ export function useResponsiveGridLayout(
     width: minColumnWidth,
   })
 
-  useEffect(() => {
-    const element = containerRef.current
-    if (!element) return undefined
+  useLayoutEffect(() => {
+    if (!containerElement) {
+      setLayout((current) =>
+        current.columns === 1 && current.width === minColumnWidth
+          ? current
+          : { columns: 1, width: minColumnWidth },
+      )
+      return undefined
+    }
 
     let frame = 0
     const updateColumns = () => {
-      const width = Math.max(minColumnWidth, element.clientWidth)
+      const width = Math.max(minColumnWidth, containerElement.clientWidth)
       const nextColumns = Math.max(1, Math.floor((width + gap) / (minColumnWidth + gap)))
       setLayout((current) =>
         current.columns === nextColumns && current.width === width
@@ -57,7 +63,7 @@ export function useResponsiveGridLayout(
     updateColumns()
     if (typeof ResizeObserver !== 'undefined') {
       const observer = new ResizeObserver(scheduleUpdate)
-      observer.observe(element)
+      observer.observe(containerElement)
       return () => {
         observer.disconnect()
         if (frame !== 0) window.cancelAnimationFrame(frame)
@@ -69,7 +75,7 @@ export function useResponsiveGridLayout(
       window.removeEventListener('resize', scheduleUpdate)
       if (frame !== 0) window.cancelAnimationFrame(frame)
     }
-  }, [containerRef, gap, minColumnWidth])
+  }, [containerElement, gap, minColumnWidth])
 
   return layout
 }

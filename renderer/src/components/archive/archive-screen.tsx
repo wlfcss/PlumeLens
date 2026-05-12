@@ -127,9 +127,9 @@ function VirtualizedCollectionBoard({
   scrollRef: RefObject<HTMLElement | null>
   t: ReturnType<typeof useTranslation>['t']
 }) {
-  const containerRef = useRef<HTMLDivElement | null>(null)
+  const [containerElement, setContainerElement] = useState<HTMLDivElement | null>(null)
   const gridLayout = useResponsiveGridLayout(
-    containerRef,
+    containerElement,
     COLLECTION_GRID_MIN_COLUMN_WIDTH,
     COLLECTION_GRID_GAP,
   )
@@ -166,7 +166,7 @@ function VirtualizedCollectionBoard({
   if (groups.length === 0) return null
 
   return (
-    <div className="collection-virtual-board" ref={containerRef}>
+    <div className="collection-virtual-board" ref={setContainerElement}>
       <div
         className="collection-virtual-board__spacer"
         style={{ height: virtualizer.getTotalSize() }}

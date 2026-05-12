@@ -7,9 +7,8 @@
  * - ReviewFilmstrip：底部横向缩略图滚动条
  * - ScoreHeader / CompactStat / CompactKV / ExifPanel：复核专用紧凑信息子组件
  *
- * 公用 helpers / 公用小组件（IconButton / SectionLabel / TagCluster）目前
- * 反向 import 自 @/App，是从 App.tsx 拆分过程中的过渡状态；后续会迁到独立
- * lib / ui 模块反转 import 方向。
+ * 公用 helpers / 小组件已经下沉到 components/common 与 lib/*,避免 review 子树
+ * 反向依赖 App.tsx。
  */
 
 import {

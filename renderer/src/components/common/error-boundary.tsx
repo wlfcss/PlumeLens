@@ -2,9 +2,9 @@
  * 应用级错误边界 — 子树 render 抛出未捕获异常时,降级到"出错信息 + 重试"占位,
  * 防止白屏。
  *
- * 范围:包在 AppShell 内层(EngineStatusBanner 之下、各页面之上),仅捕获
- * 渲染期错误;后台 hook(query/SSE/IPC) 的 promise reject 不会在这里冒泡,
- * 那些走自己的错误状态(react-query / EngineStatusBanner 已处理)。
+ * 范围:由调用方按路由、弹窗、导出等子树分域包裹,仅捕获渲染期错误;
+ * 后台 hook(query/SSE/IPC) 的 promise reject 不会在这里冒泡,那些走自己的
+ * 错误状态(react-query / EngineStatusBanner 已处理)。
  */
 
 import { Component, type ErrorInfo, type ReactNode } from 'react'
@@ -14,6 +14,7 @@ import { logger } from '@/lib/logger'
 
 interface Props {
   children: ReactNode
+  resetKey?: string
   t: ReturnType<typeof useTranslation>['t']
 }
 
@@ -30,6 +31,12 @@ export class ErrorBoundary extends Component<Props, State> {
 
   componentDidCatch(error: Error, info: ErrorInfo): void {
     logger.error('[ErrorBoundary] uncaught render error', error, info.componentStack)
+  }
+
+  componentDidUpdate(prevProps: Props): void {
+    if (this.state.error && prevProps.resetKey !== this.props.resetKey) {
+      this.setState({ error: null })
+    }
   }
 
   private handleRetry = (): void => {

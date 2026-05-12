@@ -87,10 +87,15 @@ export function PhotoGroupsList({
   t: ReturnType<typeof useTranslation>['t']
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null)
+  const [containerElement, setContainerElement] = useState<HTMLDivElement | null>(null)
+  const setContainerNode = useCallback((node: HTMLDivElement | null) => {
+    containerRef.current = node
+    setContainerElement(node)
+  }, [])
   const [segmentExpansionOverrides, setSegmentExpansionOverrides] =
     useState<SegmentExpansionOverrides>({})
   const gridLayout = useResponsiveGridLayout(
-    containerRef,
+    containerElement,
     PHOTO_GRID_MIN_COLUMN_WIDTH,
     PHOTO_GRID_GAP,
   )
@@ -188,7 +193,7 @@ export function PhotoGroupsList({
   if (groups.length === 0) return null
 
   return (
-    <div className="photo-flow-virtual" ref={containerRef}>
+    <div className="photo-flow-virtual" ref={setContainerNode}>
       <div className="photo-flow-virtual__spacer" style={{ height: virtualizer.getTotalSize() }}>
         {virtualizer.getVirtualItems().map((virtualRow) => {
           const entry = groups[virtualRow.index]
@@ -326,8 +331,13 @@ export function VirtualizedPhotoGrid({
   t: ReturnType<typeof useTranslation>['t']
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null)
+  const [containerElement, setContainerElement] = useState<HTMLDivElement | null>(null)
+  const setContainerNode = useCallback((node: HTMLDivElement | null) => {
+    containerRef.current = node
+    setContainerElement(node)
+  }, [])
   const gridLayout = useResponsiveGridLayout(
-    containerRef,
+    containerElement,
     PHOTO_GRID_MIN_COLUMN_WIDTH,
     PHOTO_GRID_GAP,
   )
@@ -363,7 +373,7 @@ export function VirtualizedPhotoGrid({
   if (photos.length === 0) return null
 
   return (
-    <div className="photo-grid-virtual" ref={containerRef}>
+    <div className="photo-grid-virtual" ref={setContainerNode}>
       <div className="photo-grid-virtual__spacer" style={{ height: virtualizer.getTotalSize() }}>
         {virtualizer.getVirtualItems().map((virtualRow) => {
           const rowPhotos = rows[virtualRow.index] ?? EMPTY_PHOTOS
@@ -559,12 +569,11 @@ function PhotoSegmentGrid({
               focused={segment.photos.some((photo) => photo.id === focusedPhotoId)}
               group={group}
               key={segment.id}
-              onExpand={() => onExpandSegment(segment)}
+              onExpandSegment={onExpandSegment}
               onFocusPhoto={onFocusPhoto}
               onOpenReview={onOpenReview}
               onThumbnailLoadStatus={onThumbnailLoadStatus}
-              photo={segment.coverPhoto}
-              photoCount={segment.photos.length}
+              segment={segment}
               t={t}
             />
           )
@@ -586,31 +595,29 @@ function PhotoSegmentGrid({
   )
 }
 
-// memo:虚拟列表滚动时同一 photo.id 行可能反复 mount/unmount,同 viewport 内
-// photo 引用稳定。memo + 浅比较避免 50+ React element / 字符串 className 的
-// 重渲染开销;onFocusPhoto/onOpenReview/onThumbnailLoadStatus 由 App.tsx 用
-// useCallback 包过,引用稳定。
+// memo:同一 viewport 内 segment/photo 引用稳定,避免滚动或 chrome 状态变化时重复
+// 构造 tile 内的大块 JSX。
 const PhotoStackTile = memo(function PhotoStackTile({
   focused,
   group,
-  onExpand,
+  onExpandSegment,
   onFocusPhoto,
   onOpenReview,
   onThumbnailLoadStatus,
-  photoCount,
-  photo,
+  segment,
   t,
 }: {
   focused: boolean
   group: PhotoGroupRecord
-  onExpand: () => void
+  onExpandSegment: (segment: PhotoSegment) => void
   onFocusPhoto: (photoId: string | null) => void
   onOpenReview: (photoId: string) => void
   onThumbnailLoadStatus: (photoId: string, status: ThumbnailLoadStatus) => void
-  photoCount: number
-  photo: PhotoRecord
+  segment: PhotoSegment
   t: ReturnType<typeof useTranslation>['t']
 }) {
+  const photo = segment.coverPhoto
+  const photoCount = segment.photos.length
   const category = photoCategory(photo)
   const displaySpecies = group.primarySpecies ?? formatPhotoSpeciesDisplay(photo, t)
   const tileSourceBadge = tileSpeciesSourceBadge(photo, t)
@@ -669,7 +676,7 @@ const PhotoStackTile = memo(function PhotoStackTile({
           onClick={(event) => {
             event.stopPropagation()
             event.preventDefault()
-            onExpand()
+            onExpandSegment(segment)
           }}
           title={t('selection.group.expandTooltip', { count: photoCount })}
           type="button"

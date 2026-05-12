@@ -321,7 +321,6 @@ export function SelectionScreen({
     </main>
   )
 }
-
 function FolderRail({
   activeFolderId,
   folders,
@@ -1034,4 +1033,3 @@ function SelectionControls({
     </section>
   )
 }
-
