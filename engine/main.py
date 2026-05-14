@@ -23,9 +23,9 @@ from engine.core.lifespan import lifespan
 def _request_token(request: Request) -> str | None:
     """Read token from supported local client channels.
 
-    Normal fetch requests use Authorization. Native EventSource cannot set
-    headers, so SSE is allowed to pass the same one-time token in the query
-    string. The server is loopback-only; the token prevents casual cross-origin
+    Normal requests and packaged Electron SSE use Authorization from preload.
+    The query token path remains for legacy/native EventSource fallback in dev
+    shells. The server is loopback-only; the token prevents casual cross-origin
     probes from talking to the random local port.
     """
     auth = request.headers.get("authorization", "")
@@ -40,9 +40,12 @@ def _request_token(request: Request) -> str | None:
 
 
 def create_app() -> FastAPI:
+    if settings.require_api_token and not settings.api_token:
+        raise RuntimeError("PLUMELENS_API_TOKEN is required when PLUMELENS_REQUIRE_API_TOKEN=1")
+
     application = FastAPI(
         title="PlumeLens Engine",
-        version="0.7.0",
+        version="0.7.5",
         lifespan=lifespan,
     )
 
@@ -59,11 +62,13 @@ def create_app() -> FastAPI:
 
     application.middleware("http")(require_local_token)
 
-    # dev 环境允许 electron-vite 的渲染进程（http://localhost:5173）跨源请求。
-    # prod 由 Electron 注入一次性 token；CORS 只影响开发期的 vite HMR shell。
+    # Dev 环境允许 electron-vite 的渲染进程跨源请求。5173 被占用时 Vite 会自动
+    # 递增到 5174/5175；这里放开 loopback 的任意端口，实际访问仍由一次性
+    # bearer token 保护，避免 dev 端口漂移导致 UI 误判后端离线。
     application.add_middleware(
         CORSMiddleware,
         allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+        allow_origin_regex=r"^http://(localhost|127\.0\.0\.1|\[::1\]):\d+$",
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],

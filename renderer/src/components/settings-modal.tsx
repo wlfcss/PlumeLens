@@ -286,7 +286,7 @@ export function SettingsModal(): ReactElement | null {
         </header>
 
         <div className="settings-panel__body selection-scroll">
-          <section className="settings-section">
+          <section className="settings-section settings-section--geocoding">
             <h3 className="settings-section__title">{t('settings.geocoding.title')}</h3>
             <p className="settings-section__hint">{t('settings.geocoding.hint')}</p>
 
@@ -316,7 +316,7 @@ export function SettingsModal(): ReactElement | null {
             />
           </section>
 
-          <section className="settings-section">
+          <section className="settings-section settings-section--about">
             <h3 className="settings-section__title">{t('settings.about.title')}</h3>
             <div className="settings-about-list">
               <div className="settings-about">
@@ -368,7 +368,7 @@ export function SettingsModal(): ReactElement | null {
             </div>
           </section>
 
-          <section className="settings-section">
+          <section className="settings-section settings-section--update">
             <h3 className="settings-section__title">{t('settings.update.title')}</h3>
             <div className="settings-update">
               <div>
@@ -416,51 +416,6 @@ export function SettingsModal(): ReactElement | null {
                 </button>
               </div>
             </div>
-          </section>
-
-          <section className="settings-section">
-            <h3 className="settings-section__title">{t('settings.models.title')}</h3>
-            <p className="settings-section__hint">
-              {t('settings.models.hint', {
-                pipeline: modelVersions?.pipeline_version ?? '--',
-              })}
-            </p>
-            {modelError ? (
-              <p className="settings-panel__error">
-                {t('settings.models.failed', { error: modelError })}
-              </p>
-            ) : modelVersions ? (
-              <div className="settings-model-list">
-                {modelVersions.models.map((model) => (
-                  <div className="settings-model-row" key={model.id}>
-                    <div className="settings-model-row__main">
-                      <span className="settings-model-row__name">{model.label}</span>
-                      <span className="settings-model-row__meta">
-                        {model.version} · {model.revision}
-                      </span>
-                    </div>
-                    <span
-                      className={
-                        model.loaded
-                          ? 'settings-model-row__status settings-model-row__status--loaded'
-                          : 'settings-model-row__status'
-                      }
-                    >
-                      {model.loaded ? t('settings.models.loaded') : t('settings.models.notLoaded')}
-                    </span>
-                  </div>
-                ))}
-                <p className="settings-section__hint settings-section__hint--compact">
-                  {t('settings.models.generatedAt', {
-                    date: formatDate(modelVersions.manifest_generated_at),
-                  })}
-                </p>
-              </div>
-            ) : (
-              <p className="settings-section__hint settings-section__hint--compact">
-                {t('settings.models.loading')}
-              </p>
-            )}
           </section>
 
           <section className="settings-section settings-section--danger">
@@ -517,6 +472,51 @@ export function SettingsModal(): ReactElement | null {
                 <Trash2 className="h-4 w-4" />
                 {t('settings.history.clearAction')}
               </button>
+            )}
+          </section>
+
+          <section className="settings-section settings-section--models">
+            <h3 className="settings-section__title">{t('settings.models.title')}</h3>
+            <p className="settings-section__hint">
+              {t('settings.models.hint', {
+                pipeline: modelVersions?.pipeline_version ?? '--',
+              })}
+            </p>
+            {modelError ? (
+              <p className="settings-panel__error">
+                {t('settings.models.failed', { error: modelError })}
+              </p>
+            ) : modelVersions ? (
+              <div className="settings-model-list">
+                {modelVersions.models.map((model) => (
+                  <div className="settings-model-row" key={model.id}>
+                    <div className="settings-model-row__main">
+                      <span className="settings-model-row__name">{model.label}</span>
+                      <span className="settings-model-row__meta">
+                        {model.version} · {model.revision}
+                      </span>
+                    </div>
+                    <span
+                      className={
+                        model.loaded
+                          ? 'settings-model-row__status settings-model-row__status--loaded'
+                          : 'settings-model-row__status'
+                      }
+                    >
+                      {model.loaded ? t('settings.models.loaded') : t('settings.models.notLoaded')}
+                    </span>
+                  </div>
+                ))}
+                <p className="settings-section__hint settings-section__hint--compact">
+                  {t('settings.models.generatedAt', {
+                    date: formatDate(modelVersions.manifest_generated_at),
+                  })}
+                </p>
+              </div>
+            ) : (
+              <p className="settings-section__hint settings-section__hint--compact">
+                {t('settings.models.loading')}
+              </p>
             )}
           </section>
         </div>

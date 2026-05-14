@@ -176,30 +176,277 @@ function isTrustedAppNavigation(target: string, isDev: boolean): boolean {
   return false
 }
 
-async function requestCloseConfirmation(kind: 'window' | 'quit'): Promise<boolean> {
+type ClosePromptContent = {
+  title: string
+  detail: string
+  confirmLabel: string
+}
+
+const CLOSE_PROMPT_SCHEME = 'plumelens-close-prompt:'
+
+function escapeHtml(value: string): string {
+  return value
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;')
+}
+
+function buildClosePromptHtml(content: ClosePromptContent): string {
+  const title = escapeHtml(content.title)
+  const detail = escapeHtml(content.detail)
+  const confirmLabel = escapeHtml(content.confirmLabel)
+
+  return `<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; style-src 'unsafe-inline'; navigate-to ${CLOSE_PROMPT_SCHEME};"
+    />
+    <title>${title}</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #050505;
+        --panel: #101010;
+        --panel-low: #080808;
+        --fg: #f4f4f4;
+        --muted: #a3a3a3;
+        --border: rgba(255, 255, 255, 0.14);
+        --border-strong: rgba(255, 255, 255, 0.28);
+        --accent: #ff1f2d;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        width: 100%;
+        height: 100%;
+        margin: 0;
+        overflow: hidden;
+        background: transparent;
+        color: var(--fg);
+        font-family:
+          -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'PingFang SC',
+          'Hiragino Sans GB', system-ui, sans-serif;
+        text-rendering: optimizeLegibility;
+        user-select: none;
+        -webkit-font-smoothing: antialiased;
+      }
+
+      .overlay {
+        display: grid;
+        width: 100vw;
+        height: 100vh;
+        place-items: center;
+        padding: 24px;
+        background:
+          radial-gradient(circle at 50% 46%, rgba(255, 255, 255, 0.04), transparent 34%),
+          rgba(0, 0, 0, 0.58);
+        backdrop-filter: blur(8px);
+      }
+
+      .panel {
+        width: min(374px, calc(100vw - 48px));
+        border: 1px solid var(--border);
+        border-radius: 18px;
+        background:
+          linear-gradient(180deg, rgba(255, 255, 255, 0.055), rgba(255, 255, 255, 0.018)),
+          linear-gradient(180deg, var(--panel), var(--panel-low));
+        box-shadow:
+          0 30px 90px rgba(0, 0, 0, 0.58),
+          0 0 0 1px rgba(0, 0, 0, 0.72),
+          inset 0 1px 0 rgba(255, 255, 255, 0.055);
+        padding: 18px;
+      }
+
+      h1 {
+        margin: 0;
+        color: var(--fg);
+        font-size: 17px;
+        font-weight: 650;
+        letter-spacing: 0;
+        line-height: 1.25;
+      }
+
+      p {
+        margin: 9px 0 0;
+        color: var(--muted);
+        font-size: 13px;
+        font-weight: 450;
+        letter-spacing: 0;
+        line-height: 1.62;
+      }
+
+      .actions {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
+        margin-top: 18px;
+      }
+
+      .action {
+        display: inline-flex;
+        height: 36px;
+        align-items: center;
+        justify-content: center;
+        border: 1px solid var(--border);
+        border-radius: 9px;
+        color: var(--fg);
+        font-size: 13px;
+        font-weight: 600;
+        letter-spacing: 0;
+        text-decoration: none;
+        transition:
+          border-color 140ms ease,
+          background-color 140ms ease,
+          color 140ms ease,
+          transform 140ms ease;
+      }
+
+      .action:focus-visible {
+        outline: 0;
+        box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.44);
+      }
+
+      .action:hover {
+        transform: translateY(-1px);
+      }
+
+      .action--primary {
+        border-color: rgba(255, 255, 255, 0.82);
+        background: #f2f2f2;
+        color: var(--bg);
+      }
+
+      .action--secondary {
+        background: rgba(255, 255, 255, 0.045);
+        color: color-mix(in srgb, var(--fg) 86%, transparent);
+      }
+
+      .action--secondary:hover {
+        border-color: color-mix(in srgb, var(--accent) 44%, var(--border-strong));
+        background: color-mix(in srgb, var(--accent) 9%, rgba(255, 255, 255, 0.045));
+        color: var(--fg);
+      }
+    </style>
+  </head>
+  <body>
+    <main class="overlay">
+      <section class="panel" role="dialog" aria-modal="true" aria-labelledby="close-title">
+        <h1 id="close-title">${title}</h1>
+        <p>${detail}</p>
+        <div class="actions">
+          <a class="action action--primary" href="${CLOSE_PROMPT_SCHEME}//cancel">继续使用</a>
+          <a class="action action--secondary" href="${CLOSE_PROMPT_SCHEME}//confirm">${confirmLabel}</a>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>`
+}
+
+async function showClosePromptWindow(
+  owner: BrowserWindow,
+  content: ClosePromptContent,
+): Promise<boolean> {
+  if (owner.isDestroyed()) return false
+
+  const bounds = owner.getBounds()
+  const promptWindow = new BrowserWindow({
+    parent: owner,
+    modal: true,
+    show: false,
+    frame: false,
+    transparent: true,
+    resizable: false,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    skipTaskbar: true,
+    movable: false,
+    x: bounds.x,
+    y: bounds.y,
+    width: bounds.width,
+    height: bounds.height,
+    backgroundColor: '#00000000',
+    hasShadow: false,
+    title: content.title,
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  })
+
+  const promptUrl = `data:text/html;charset=utf-8,${encodeURIComponent(buildClosePromptHtml(content))}`
+
+  return new Promise((resolve) => {
+    let settled = false
+
+    const settle = (value: boolean): void => {
+      if (settled) return
+      settled = true
+      resolve(value)
+      if (!promptWindow.isDestroyed()) promptWindow.close()
+    }
+
+    promptWindow.webContents.on('will-navigate', (event, target) => {
+      if (!target.startsWith(CLOSE_PROMPT_SCHEME)) return
+      event.preventDefault()
+      const action = new URL(target).host
+      settle(action === 'confirm')
+    })
+    promptWindow.webContents.on('before-input-event', (event, input) => {
+      if (input.type === 'keyDown' && input.key === 'Escape') {
+        event.preventDefault()
+        settle(false)
+      }
+    })
+    promptWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+    promptWindow.once('closed', () => settle(false))
+    promptWindow.once('ready-to-show', () => {
+      if (owner.isDestroyed()) {
+        settle(false)
+        return
+      }
+      promptWindow.show()
+      promptWindow.focus()
+    })
+    promptWindow.loadURL(promptUrl).catch(() => settle(false))
+  })
+}
+
+async function requestCloseConfirmation(): Promise<boolean> {
   if (SKIP_CLOSE_CONFIRM) return true
   if (closePromptOpen) return false
   closePromptOpen = true
 
-  const closesApp = kind === 'quit' || process.platform !== 'darwin'
-  const options = {
-    type: 'question' as const,
-    title: closesApp ? '退出鉴翎？' : '关闭窗口？',
-    message: closesApp ? '确定要退出鉴翎吗？' : '确定要关闭当前窗口吗？',
-    detail: closesApp
-      ? '本地引擎会停止；历史记录和已完成的筛选会保留。'
-      : '窗口关闭后可从 Dock 重新打开；历史记录和已完成的筛选会保留。',
-    buttons: ['继续使用', closesApp ? '退出' : '关闭'],
-    defaultId: 0,
-    cancelId: 0,
-    noLink: true,
+  const content: ClosePromptContent = {
+    title: '确定要退出鉴翎吗？',
+    detail: '本地引擎会停止；历史记录和已完成的筛选会保留。',
+    confirmLabel: '退出',
   }
   const owner = mainWindow && !mainWindow.isDestroyed() ? mainWindow : null
 
   try {
-    const result = owner
-      ? await dialog.showMessageBox(owner, options)
-      : await dialog.showMessageBox(options)
+    if (owner) return await showClosePromptWindow(owner, content)
+    const result = await dialog.showMessageBox({
+      type: 'question',
+      title: content.title,
+      message: content.title,
+      detail: content.detail,
+      buttons: ['继续使用', content.confirmLabel],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true,
+    })
     return result.response === 1
   } finally {
     closePromptOpen = false
@@ -252,6 +499,7 @@ function createWindow(): void {
     ...windowBounds,
     backgroundColor: '#050505',
     titleBarStyle: 'hiddenInset',
+    ...(process.platform === 'darwin' ? { trafficLightPosition: { x: 16, y: 22 } } : {}),
     webPreferences: {
       preload: join(__dirname, '../preload/index.cjs'),
       contextIsolation: true,
@@ -308,14 +556,10 @@ function createWindow(): void {
     if (allowWindowClose || allowAppQuit) return
     event.preventDefault()
 
-    const windowToClose = mainWindow
-    void requestCloseConfirmation('window').then((confirmed) => {
-      if (!confirmed || !windowToClose || windowToClose.isDestroyed()) return
-      allowWindowClose = true
-      if (process.platform !== 'darwin') {
-        allowAppQuit = true
-      }
-      windowToClose.close()
+    void requestCloseConfirmation().then((confirmed) => {
+      if (!confirmed) return
+      allowAppQuit = true
+      app.quit()
     })
   })
 
@@ -404,6 +648,20 @@ const EDITOR_REGISTRY: Record<EditorTool, EditorEntry> = {
   },
 }
 
+function isEditorTool(value: unknown): value is EditorTool {
+  return value === 'topaz' || value === 'photoshop'
+}
+
+function parseOpenInEditorArgs(args: unknown): { tool: EditorTool; filePath: string } | null {
+  if (typeof args !== 'object' || args === null || Array.isArray(args)) return null
+  const maybeArgs = args as { tool?: unknown; path?: unknown }
+  if (!isEditorTool(maybeArgs.tool)) return null
+  if (typeof maybeArgs.path !== 'string') return null
+  const filePath = maybeArgs.path.trim()
+  if (!filePath || filePath.includes('\0')) return null
+  return { tool: maybeArgs.tool, filePath }
+}
+
 function findEditorAppPath(root: string, name: string): string | null {
   const candidates = [
     join(root, `${name}.app`),
@@ -484,8 +742,12 @@ ipcMain.handle('list-editors', () => {
   }
 })
 
-ipcMain.handle('open-in-editor', async (_event, args: { tool: EditorTool; path: string }) => {
-  const { tool, path: filePath } = args
+ipcMain.handle('open-in-editor', async (_event, args: unknown) => {
+  const parsed = parseOpenInEditorArgs(args)
+  if (!parsed) {
+    return { ok: false, reason: 'invalid_args' as const }
+  }
+  const { tool, filePath } = parsed
   const entry = EDITOR_REGISTRY[tool]
   if (!entry || !entry.resolved) {
     return { ok: false, reason: 'not_installed' as const }
@@ -748,16 +1010,14 @@ app.whenReady().then(async () => {
 })
 
 app.on('window-all-closed', () => {
-  // macOS：关闭窗口 != 退出应用（用户预期 dock 还在）。**不要** stop engine，
-  // 否则用户从 dock 重开窗口会拿到死后端。
-  // 非 macOS：关窗即退出应用，stop 由 before-quit 兜底。
+  // 主窗口关闭确认后会走 app.quit();这里仅保留非 macOS 的兜底语义。
   if (process.platform !== 'darwin') {
     app.quit()
   }
 })
 
 app.on('activate', () => {
-  // macOS Dock 激活时重建窗口；engine 进程保持原样，preload 会继续取现有 URL。
+  // macOS 隐藏/最小化后从 Dock 激活时重建窗口；正常关闭已退出进程。
   if (BrowserWindow.getAllWindows().length === 0) {
     createWindow()
   }
@@ -767,7 +1027,7 @@ app.on('before-quit', (event) => {
   // 真正退出（cmd-Q / 关闭整个应用）才杀 engine。
   if (!allowAppQuit) {
     event.preventDefault()
-    void requestCloseConfirmation('quit').then((confirmed) => {
+    void requestCloseConfirmation().then((confirmed) => {
       if (!confirmed) return
       allowAppQuit = true
       app.quit()

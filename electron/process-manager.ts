@@ -218,6 +218,9 @@ export class ProcessManager extends EventEmitter {
       // Strict 模式：缺 IQA 模型直接启动失败，不允许伪造 0.5 中性分。
       // 不在这里设 dev 也跑不起来（开发期还没下载所有模型时方便迭代）。
       env.PLUMELENS_REQUIRE_IQA = '1'
+      // Production 必须启用一次性 API token。后端启动期会校验这个 guard，
+      // 避免打包态因 env 注入异常而退回到无鉴权 loopback API。
+      env.PLUMELENS_REQUIRE_API_TOKEN = '1'
     }
 
     // detached: true + 后续按进程组 kill (-pid) → 杀掉整个 engine 子树（含 torch /

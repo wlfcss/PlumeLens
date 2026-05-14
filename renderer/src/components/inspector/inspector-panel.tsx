@@ -22,17 +22,18 @@ import {
   X,
 } from 'lucide-react'
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { createPortal } from 'react-dom'
 import type { useTranslation } from 'react-i18next'
 
 import { SectionLabel } from '@/components/common/section-label'
-import { SpeciesNameAction } from '@/components/species/species-detail-popover'
+import { SpeciesInfoPopover, SpeciesNameAction } from '@/components/species/species-detail-popover'
 import { gradeLabelKey, problemTagKey } from '@/lib/i18n-keys'
 import type {
   FolderRecord,
   PhotoGroupRecord,
   PhotoRecord,
   SelectionDecision,
-} from '@/lib/mock-workspace'
+} from '@/lib/workspace-types'
 import {
   effectivePhotoGrade,
   effectiveSpeciesLatinName,
@@ -46,11 +47,8 @@ import {
   gradeTone,
   tileSpeciesSourceBadge,
 } from '@/lib/photo-display'
-import {
-  speciesSourceBadge,
-  speciesSourceKind,
-  type DetectionLike,
-} from '@/lib/species-source'
+import { speciesSourceBadge, speciesSourceKind, type DetectionLike } from '@/lib/species-source'
+import { getSpeciesWiki, resolveSpeciesCanonicalSci } from '@/lib/species-wiki'
 import { cn } from '@/lib/utils'
 
 function useExternalEditors(): { topaz: string | null; photoshop: string | null } {
@@ -411,6 +409,7 @@ type ShootingSpeciesStat = {
   bestScore: number | null
   bestPhoto: PhotoRecord | null
   count: number
+  englishName: string | null
   latinName: string | null
   name: string
 }
@@ -420,26 +419,40 @@ type ShootingRecordStat = ShootingSpeciesStat & {
   deltaScore: number
 }
 
+type ShootingReportDateRange = {
+  display: string
+  tooltip?: string
+}
+
 function formatShootingReportDateRange(
   photos: PhotoRecord[],
   t: ReturnType<typeof useTranslation>['t'],
-) {
+): ShootingReportDateRange {
   const times = photos
     .map((photo) => Date.parse(photo.shotAt))
     .filter((value) => Number.isFinite(value))
     .toSorted((left, right) => left - right)
-  if (times.length === 0) return t('selection.report.unknownTimeRange')
+  if (times.length === 0) return { display: t('selection.report.unknownTimeRange') }
   const first = new Date(times[0])
   const last = new Date(times[times.length - 1])
-  const format = (date: Date) =>
-    `${date.toLocaleDateString(t('selection.dateLocale'), {
+  const formatMonthDay = (date: Date) =>
+    date.toLocaleDateString(t('selection.dateLocale'), {
       month: '2-digit',
       day: '2-digit',
-    })} ${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
+    })
+  const formatFull = (date: Date) =>
+    `${date.getFullYear()}/${String(date.getMonth() + 1).padStart(2, '0')}/${String(date.getDate()).padStart(2, '0')} ${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
+  const tooltip = `${formatFull(first)} - ${formatFull(last)}`
   if (first.toDateString() === last.toDateString()) {
-    return `${format(first)}-${String(last.getHours()).padStart(2, '0')}:${String(last.getMinutes()).padStart(2, '0')}`
+    return {
+      display: formatMonthDay(first),
+      tooltip,
+    }
   }
-  return `${format(first)} - ${format(last)}`
+  return {
+    display: `${formatMonthDay(first)} - ${formatMonthDay(last)}`,
+    tooltip,
+  }
 }
 
 function buildShootingSpeciesStats(photos: PhotoRecord[]): ShootingSpeciesStat[] {
@@ -460,6 +473,7 @@ function buildShootingSpeciesStats(photos: PhotoRecord[]): ShootingSpeciesStat[]
         bestScore: photo.finalScore,
         bestPhoto: photo,
         count: 1,
+        englishName: entry.englishName,
         latinName: entry.latinName,
         name: entry.name,
       })
@@ -496,21 +510,36 @@ function averageScoreForPhotos(photos: PhotoRecord[]): number | null {
 function ShootingReportMetric({
   icon,
   label,
+  title,
   value,
 }: {
   icon: ReactNode
   label: string
+  title?: string
   value: string
 }) {
   return (
-    <div className="shooting-report-metric">
+    <div className="shooting-report-metric" title={title}>
       <span className="shooting-report-metric__icon">{icon}</span>
       <div>
         <span>{label}</span>
-        <strong>{value}</strong>
+        <strong title={title}>{value}</strong>
       </div>
     </div>
   )
+}
+
+function resolveShootingSpeciesImageUrl(item: ShootingSpeciesStat): string | null {
+  const localThumbnail = item.bestPhoto?.thumbPreviewUrl ?? item.bestPhoto?.thumbGridUrl ?? null
+  if (localThumbnail) return localThumbnail
+
+  const keyLatinName = item.key.startsWith('sci:') ? item.key.slice(4) : null
+  const canonicalSci =
+    resolveSpeciesCanonicalSci(keyLatinName) ??
+    resolveSpeciesCanonicalSci(item.latinName) ??
+    resolveSpeciesCanonicalSci(item.name) ??
+    resolveSpeciesCanonicalSci(item.englishName)
+  return canonicalSci ? (getSpeciesWiki(canonicalSci)?.image_url ?? null) : null
 }
 
 function ShootingAchievementCard({
@@ -518,26 +547,72 @@ function ShootingAchievementCard({
   item,
   meta,
   scoreLabel,
+  t,
   tone,
 }: {
   icon: ReactNode
   item: ShootingSpeciesStat
   meta: string
   scoreLabel: string
+  t: ReturnType<typeof useTranslation>['t']
   tone: 'new' | 'record'
 }) {
+  const [detailOpen, setDetailOpen] = useState(false)
+  const [imageFailed, setImageFailed] = useState(false)
+  const imageUrl = resolveShootingSpeciesImageUrl(item)
+  const speciesIdentity = {
+    englishName: item.englishName,
+    latinName: item.latinName,
+    name: item.name,
+  }
+
+  useEffect(() => {
+    setImageFailed(false)
+  }, [imageUrl])
+
   return (
-    <div className={cn('shooting-achievement-card', `shooting-achievement-card--${tone}`)}>
-      <span className="shooting-achievement-card__icon">{icon}</span>
-      <div className="shooting-achievement-card__body">
-        <strong>{item.name}</strong>
-        <span>{meta}</span>
-      </div>
-      <div className="shooting-achievement-card__score">
-        <small>{scoreLabel}</small>
-        <b>{formatScore(item.bestScore)}</b>
-      </div>
-    </div>
+    <>
+      <button
+        aria-label={t('speciesDetail.dialogLabel', { species: item.name })}
+        className={cn('shooting-achievement-card', `shooting-achievement-card--${tone}`)}
+        onClick={() => setDetailOpen(true)}
+        title={t('speciesDetail.tooltip')}
+        type="button"
+      >
+        <span className="shooting-achievement-card__photo" aria-hidden="true">
+          {imageUrl ? (
+            <img
+              alt=""
+              className={imageFailed ? 'is-hidden' : undefined}
+              loading="lazy"
+              onError={() => setImageFailed(true)}
+              src={imageUrl}
+            />
+          ) : null}
+          {!imageUrl || imageFailed ? (
+            <span className="shooting-achievement-card__photo-fallback">{icon}</span>
+          ) : null}
+        </span>
+        <span className="shooting-achievement-card__body">
+          <strong>{item.name}</strong>
+          <span>{meta}</span>
+        </span>
+        <span className="shooting-achievement-card__score">
+          <small>{scoreLabel}</small>
+          <b>{formatScore(item.bestScore)}</b>
+        </span>
+      </button>
+      {detailOpen
+        ? createPortal(
+            <SpeciesInfoPopover
+              identity={speciesIdentity}
+              onClose={() => setDetailOpen(false)}
+              t={t}
+            />,
+            document.body,
+          )
+        : null}
+    </>
   )
 }
 
@@ -594,6 +669,7 @@ function ShootingReportPanel({
   }, [allPhotos, folder.id, speciesStats])
   const keepCount =
     summary.gradeCounts.select + summary.gradeCounts.usable + summary.gradeCounts.record
+  const dateRange = useMemo(() => formatShootingReportDateRange(photos, t), [photos, t])
   const reportText = useMemo(() => {
     if (photos.length === 0) return t('selection.report.emptySummary')
     const base = t('selection.report.summary', {
@@ -601,7 +677,7 @@ function ShootingReportPanel({
       birdPhotos: summary.birdPhotoCount,
       keep: keepCount,
       photos: photos.length,
-      timeRange: formatShootingReportDateRange(photos, t),
+      timeRange: dateRange.display,
     })
     let achievements = t('selection.report.noAchievementSummary')
     if (newSpeciesStats.length > 0 && refreshedStats.length > 0) {
@@ -619,7 +695,16 @@ function ShootingReportPanel({
       })
     }
     return `${base}${achievements}`
-  }, [averageScore, keepCount, newSpeciesStats.length, photos, refreshedStats.length, summary, t])
+  }, [
+    averageScore,
+    dateRange.display,
+    keepCount,
+    newSpeciesStats.length,
+    photos.length,
+    refreshedStats.length,
+    summary,
+    t,
+  ])
 
   return (
     <div className="shooting-report" data-testid="shooting-report">
@@ -627,7 +712,7 @@ function ShootingReportPanel({
         <div>
           <SectionLabel label={t('selection.report.label')} />
           <h2>{t('selection.report.title')}</h2>
-          <p>{reportText}</p>
+          <p title={dateRange.tooltip}>{reportText}</p>
         </div>
         <span className="shooting-report__hero-icon">
           <Trophy className="h-5 w-5" />
@@ -638,7 +723,8 @@ function ShootingReportPanel({
         <ShootingReportMetric
           icon={<CalendarDays className="h-3.5 w-3.5" />}
           label={t('selection.report.shootingWindow')}
-          value={formatShootingReportDateRange(photos, t)}
+          title={dateRange.tooltip}
+          value={dateRange.display}
         />
         <ShootingReportMetric
           icon={<Camera className="h-3.5 w-3.5" />}
@@ -674,6 +760,7 @@ function ShootingReportPanel({
                   file: item.bestPhoto?.fileName ?? '--',
                 })}
                 scoreLabel={t('selection.report.highestScore')}
+                t={t}
                 tone="new"
               />
             ))}
@@ -700,6 +787,7 @@ function ShootingReportPanel({
                   previous: formatScore(item.previousBestScore),
                 })}
                 scoreLabel={t('selection.report.newHighScore')}
+                t={t}
                 tone="record"
               />
             ))}

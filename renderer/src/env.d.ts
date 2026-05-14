@@ -32,6 +32,11 @@ export interface EngineRequestInit {
   timeoutMs?: number
 }
 
+export type EngineSseBridgeEvent =
+  | { type: 'open' }
+  | { type: 'message'; event: string; data: string }
+  | { type: 'error'; message: string; status?: number }
+
 export type UpdateCheckResult =
   | {
       ok: true
@@ -54,7 +59,9 @@ interface PlumeLensAPI {
   /** Engine API 请求 — 在 preload 内完成 fetch,token 不进 renderer JS(H5)。
    *  vite-only / 单元测试可能没有这个 method;调用方 ?. 后 fallback 直连。 */
   engineRequest?: (path: string, init?: EngineRequestInit) => Promise<EngineResponse>
-  /** 构造 SSE URL(包含 query token,native EventSource 限制)。 */
+  /** 订阅 engine SSE；Electron packaged 路径下 token 留在 preload Authorization header。 */
+  engineSseSubscribe?: (path: string, onEvent: (event: EngineSseBridgeEvent) => void) => () => void
+  /** Legacy fallback:构造 SSE URL(可能包含 query token,native EventSource 限制)。 */
   engineSseUrl?: (path: string) => Promise<string>
   getAppVersion(): Promise<string>
   checkForUpdates(): Promise<UpdateCheckResult>
@@ -78,13 +85,16 @@ interface PlumeLensAPI {
   onEngineStatus(cb: (payload: EngineStatusPayload) => void): () => void
   /** 启动期探测的外部编辑器解析名;null = 未安装,UI 应隐藏对应按钮。 */
   listEditors(): Promise<{ topaz: string | null; photoshop: string | null }>
-  /** 用指定外部编辑器打开文件。失败时 reason: not_installed/file_missing/app_missing/spawn_failed。 */
+  /** 用指定外部编辑器打开文件。失败时 reason: invalid_args/not_installed/file_missing/app_missing/spawn_failed。 */
   openInEditor(
     tool: 'topaz' | 'photoshop',
     path: string,
   ): Promise<
     | { ok: true; app: string }
-    | { ok: false; reason: 'not_installed' | 'file_missing' | 'app_missing' | 'spawn_failed' }
+    | {
+        ok: false
+        reason: 'invalid_args' | 'not_installed' | 'file_missing' | 'app_missing' | 'spawn_failed'
+      }
   >
   /** 读用户设置(API keys 等),持久化在 userData/settings.json */
   getUserSettings(): Promise<UserSettings>

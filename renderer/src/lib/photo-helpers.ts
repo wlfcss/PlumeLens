@@ -6,7 +6,7 @@
  * 从 App.tsx 剥离,反转 import 方向。
  */
 
-import type { AfOverlay, PhotoGrade, PhotoGroupRecord, PhotoRecord } from '@/lib/mock-workspace'
+import type { AfOverlay, PhotoGrade, PhotoGroupRecord, PhotoRecord } from '@/lib/workspace-types'
 
 // 全局 UI 语义色调 — status pill / metric cell / glyph matrix 等小组件统一消费。
 export type Tone = 'neutral' | 'warning' | 'accent' | 'success' | 'muted'

@@ -247,7 +247,7 @@
     },
     "report": {
       "label": "拍摄报告",
-      "title": "本次拍摄成就清单",
+      "title": "成就清单",
       "summary": "{{timeRange}} 共拍摄 {{photos}} 张，平均分 {{average}}；其中 {{birdPhotos}} 张识别到鸟，{{keep}} 张进入保留候选。",
       "achievementSummaryCombined": " 本次新增 {{newSpecies}} 个鸟种，并刷新 {{refreshed}} 个历史最高分。",
       "achievementSummaryNewOnly": " 本次新增 {{newSpecies}} 个鸟种。",
@@ -467,6 +467,7 @@
       "openInTopaz": "Topaz",
       "openInPhotoshop": "Photoshop",
       "error": {
+        "invalid_args": "外部编辑参数无效",
         "not_installed": "未检测到外部编辑器",
         "source_missing": "源文件夹已失联，重新关联后可外部编辑",
         "file_missing": "目标文件已不存在",

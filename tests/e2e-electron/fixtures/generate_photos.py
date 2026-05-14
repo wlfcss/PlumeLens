@@ -19,7 +19,6 @@ source 选择逻辑(优先级):
 from __future__ import annotations
 
 import os
-import shutil
 from pathlib import Path
 
 from PIL import Image, ImageOps

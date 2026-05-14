@@ -54,7 +54,7 @@ import type {
   PhotoRecord,
   SelectionDecision,
   WorkspaceSnapshot,
-} from '@/lib/mock-workspace'
+} from '@/lib/workspace-types'
 import { photoCategory, statusTone } from '@/lib/photo-display'
 import { formatRatio, type FolderSummary } from '@/lib/photo-helpers'
 import type { SortMode } from '@/lib/photo-grid-helpers'

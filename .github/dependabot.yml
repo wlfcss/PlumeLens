@@ -3,6 +3,8 @@
 # .github/workflows/*.yml 内 actions 已 pin 到 commit SHA(C5: 阻断供应链
 # 攻击 — 第三方 Action 篡改 floating tag 不会影响 PlumeLens CI)。
 # Dependabot 周期性检查上游 release,自动 PR 升级 SHA + 注释里的 vX.Y.Z。
+# GitHub Actions 更新统一合成一个 PR,避免 checkout/setup-node/upload-artifact
+# 这类 major bump 分散成多条噪音;是否合并仍由人工 review + CI 决定。
 
 version: 2
 updates:
@@ -16,8 +18,7 @@ updates:
       prefix: chore(ci)
       include: scope
     groups:
-      actions-minor-and-patch:
+      github-actions:
         applies-to: version-updates
-        update-types:
-          - minor
-          - patch
+        patterns:
+          - '*'

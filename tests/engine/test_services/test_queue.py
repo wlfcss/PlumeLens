@@ -21,6 +21,7 @@ from engine.services.queue import (
     pause_library,
     pick_next,
     recover_on_startup,
+    reset_transient_tasks,
     resume_library,
     transition,
 )
@@ -328,6 +329,23 @@ class TestRecovery:
             assert t is not None
             assert t.status is TaskStatus.PENDING
             assert t.started_at is None
+
+    async def test_reset_transient_tasks_recovers_shutdown_states(
+        self,
+        db_with_photos: Database,
+    ) -> None:
+        db = db_with_photos
+        await enqueue_photos(db, "lib-1", ["photo-0"])
+        task_id = (await list_tasks(db))[0].id
+        await transition(db, task_id, TaskStatus.PROCESSING)
+
+        recovered = await reset_transient_tasks(db, reason="shutdown")
+
+        task = await get_task(db, task_id)
+        assert recovered == 1
+        assert task is not None
+        assert task.status is TaskStatus.PENDING
+        assert task.started_at is None
 
 
 class TestStuckSweeper:

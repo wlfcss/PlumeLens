@@ -5,8 +5,8 @@ import { logger } from '@/lib/logger'
  *
  * Backend URL resolution:
  * - Electron runtime: 通过 ``window.plumelens.engineRequest`` 在 preload 完成
- *   fetch,token 不进入 renderer JS(H5 修复)。renderer 这边只看到 URL string
- *   和已经反序列化的 response body — 没有 raw token 可被 XSS / 第三方依赖窃取。
+ *   fetch,token 不进入 renderer JS。SSE 优先走 ``engineSseSubscribe``，同样由
+ *   preload 注入 Authorization。renderer 只看到 path/response body，不接触 raw token。
  * - Fallback (dev shell / 单元测试 / vite-only renderer): 直连 ``http://127.0.0.1:8000``
  *   不带 token (开发期 engine 通常无 api_token)。
  *
@@ -548,9 +548,8 @@ export const api = {
   buildPhotoThumbnail: (photoId: string) =>
     request<PhotoThumbnailResponse>(`/library/photo/${photoId}/thumbnail`, { method: 'POST' }),
   libraryEventsUrl: async (libraryId: string): Promise<string> => {
-    // preload 的 engineSseUrl 在 isolated world 内拼接 token,renderer 这边收到的是
-    // 已经包含 ?token=xxx 的 URL string(SSE native EventSource 不能传 header 的妥协)。
-    // 见 preload.ts::performEngineSseUrl 注释。
+    // Legacy fallback only. Electron runtime 优先用 window.plumelens.engineSseSubscribe，
+    // 这个 URL builder 只服务 vite-only/旧 native EventSource 调用面。
     if (typeof window !== 'undefined' && window.plumelens?.engineSseUrl) {
       return window.plumelens.engineSseUrl(`/library/${libraryId}/events`)
     }
@@ -574,7 +573,7 @@ export const api = {
   getQueueStats: (libraryId: string) =>
     request<QueueStatsResponse>(`/analysis/library/${libraryId}/stats`),
 
-  // SSE — returns URL only; caller constructs EventSource
+  // Legacy SSE URL fallback — Electron runtime should prefer engineSseSubscribe.
   progressUrl: async (libraryId: string): Promise<string> => {
     if (typeof window !== 'undefined' && window.plumelens?.engineSseUrl) {
       return window.plumelens.engineSseUrl(`/analysis/library/${libraryId}/progress`)

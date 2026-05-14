@@ -50,9 +50,7 @@ test.describe('Cold start - fresh data dir (新装首次打开)', () => {
   test('start screen 主按钮可点 + 无最近文件夹时不渲染列表', async () => {
     if (!handle) throw new Error('handle not initialized from previous test')
     // "选择照片文件夹" 主按钮
-    await expect(
-      handle.page.getByRole('button', { name: /选择照片文件夹/ }),
-    ).toBeVisible()
+    await expect(handle.page.getByRole('button', { name: /选择照片文件夹/ })).toBeVisible()
     // "继续上次文件夹" 在 empty state 下应该 disabled
     const continueBtn = handle.page.getByRole('button', { name: /继续上次文件夹/ })
     await expect(continueBtn).toBeDisabled()
@@ -134,6 +132,53 @@ test.describe('Cold start - persisted history (装新版后的回归测试)', ()
       }).toPass({ timeout: 30_000 })
     } finally {
       await handle.app.close()
+    }
+  })
+
+  test('Phase 4 — close prompt 确认后退出进程 → 同 data dir 重启初始化正常', async () => {
+    const handle = await launchApp(dataDir, { disableCloseConfirm: false })
+    const childProcess = handle.app.process()
+    const exited = new Promise<void>((resolve) => {
+      if (childProcess.exitCode !== null || childProcess.signalCode !== null) {
+        resolve()
+        return
+      }
+      childProcess.once('exit', () => resolve())
+    })
+
+    await waitForEngineReady(handle.page)
+
+    const promptWindow = handle.app.waitForEvent('window', { timeout: 10_000 })
+    await handle.app.evaluate(({ BrowserWindow }) => {
+      const mainWindow = BrowserWindow.getAllWindows().find((win) => !win.isDestroyed())
+      mainWindow?.close()
+    })
+
+    const prompt = await promptWindow
+    await prompt.waitForLoadState('domcontentloaded')
+    await expect(prompt.getByText('确定要退出鉴翎吗？')).toBeVisible()
+    await expect(prompt.getByText(/本地引擎会停止/)).toBeVisible()
+    await prompt.getByRole('link', { name: '退出' }).click()
+
+    await Promise.race([
+      exited,
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('app did not exit after close confirmation')), 15_000),
+      ),
+    ])
+
+    const relaunched = await launchApp(dataDir)
+    try {
+      await waitForEngineReady(relaunched.page)
+      await expect(relaunched.page.getByText('最近文件夹').first()).toBeVisible({
+        timeout: 15_000,
+      })
+      await expect(relaunched.page.getByText('e2e-fixture-lib').first()).toBeVisible({
+        timeout: 15_000,
+      })
+      await expect(relaunched.page.getByRole('button', { name: /继续上次文件夹/ })).toBeEnabled()
+    } finally {
+      await relaunched.app.close()
     }
   })
 })

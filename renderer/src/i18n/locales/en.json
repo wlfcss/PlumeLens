@@ -467,6 +467,7 @@
       "openInTopaz": "Topaz",
       "openInPhotoshop": "Photoshop",
       "error": {
+        "invalid_args": "External editor request was invalid",
         "not_installed": "External editor was not detected",
         "source_missing": "Source folder is disconnected; relink it before external editing",
         "file_missing": "The target file no longer exists",

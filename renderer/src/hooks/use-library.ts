@@ -133,6 +133,7 @@ export function useLibraryEvents(libraryId: string | null | undefined, enabled =
   useEffect(() => {
     if (!libraryId || !enabled) return undefined
     let source: EventSource | null = null
+    let unsubscribeBridge: (() => void) | null = null
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null
     let cancelled = false
 
@@ -149,6 +150,27 @@ export function useLibraryEvents(libraryId: string | null | undefined, enabled =
 
     const connect = (): void => {
       if (cancelled) return
+      if (typeof window !== 'undefined' && window.plumelens?.engineSseSubscribe) {
+        unsubscribeBridge = window.plumelens.engineSseSubscribe(
+          `/library/${libraryId}/events`,
+          (bridgeEvent) => {
+            if (cancelled) return
+            if (bridgeEvent.type === 'open') {
+              scheduleRefresh()
+              return
+            }
+            if (bridgeEvent.type === 'message') {
+              scheduleRefresh()
+              return
+            }
+            logger.warn('Library event bridge closed, retrying in 5s:', bridgeEvent.message)
+            unsubscribeBridge?.()
+            unsubscribeBridge = null
+            reconnectTimer = setTimeout(connect, 5000)
+          },
+        )
+        return
+      }
       api
         .libraryEventsUrl(libraryId)
         .then((url) => {
@@ -193,6 +215,8 @@ export function useLibraryEvents(libraryId: string | null | undefined, enabled =
     return () => {
       cancelled = true
       if (reconnectTimer !== null) clearTimeout(reconnectTimer)
+      unsubscribeBridge?.()
+      unsubscribeBridge = null
       source?.close()
       source = null
       if (refreshTimerRef.current !== null) {

@@ -2,6 +2,44 @@
 
 所有值得用户或维护者感知的版本变化记录在这里。更细的内部交接与完整提交台账见 `docs/releases/`。
 
+## 0.7.5
+
+范围：`v0.7.0..HEAD` 的 post-release 技术债清理，并同步应用版本号到 0.7.5。
+
+### 版本定位
+
+0.7.5 是 0.7.0 发布后的全栈技术债清理版本。目标是全面清理前端、服务端、测试、文档在之前快速开发过程中遗留的结构债，确保架构稳定、代码整洁、质量闸门可信。
+
+### 前端结构清理
+
+- `App.tsx` 拆分继续推进，从 7000+ 行降到约 990 行，Start / Selection / Archive / Export / Review 等子树、workspace projection 纯函数、thumbnail repair queue 与 library workspace sync 已迁出根组件。
+- 历史 `mock-workspace.ts` 已拆为 `workspace-types.ts`、`workspace-projection.ts` 与 `workspace-fixtures.ts`，生产代码和测试不再从 mock 命名模块导入领域类型。
+- `SettingsModal`、`ExportDrawer`、`ReviewModal`、`ArchiveScreen`、`SelectionScreen` 改为 lazy loading，起始屏首包减负。
+- `ReviewImageStage` 与 `SpeciesOverrideEditor` 拆出独立文件，消除 review-modal 反向 import App 的旧依赖。
+- `SelectionScreen` 的滚动状态、紧凑头部、更多菜单和回顶按钮抽为 `useSelectionScrollState`。
+- 选片网格与羽迹物种墙共用 `lib/virtual-grid.ts`，补齐空容器恢复、ResizeObserver rAF throttle 和单元测试。
+- 公用展示逻辑迁出到 `components/common/*` 与 `lib/photo-display.ts`、`lib/photo-helpers.ts`、`lib/photo-grid-helpers.ts`、`lib/archive-collection.ts`、`lib/species-source.ts`。
+- 新增 renderer logger 与 ErrorBoundary，收口散落日志和页面级错误恢复。
+- 移除未使用依赖 `class-variance-authority`。
+
+### 服务端与测试清理
+
+- packaged Electron 启动时显式要求 `PLUMELENS_API_TOKEN`，后端在 `PLUMELENS_REQUIRE_API_TOKEN=1` 且缺 token 时拒绝启动，避免生产态退回无鉴权 loopback API。
+- packaged SSE 改为 preload fetch stream 注入 Authorization header，query token 仅保留为 vite/native EventSource legacy fallback。
+- `open-in-editor` IPC 增加 renderer/preload/main 三层参数校验，非法 tool/path 以 `invalid_args` 明确返回。
+- engine shutdown 会先取消分析 worker、恢复 transient queue 状态，再等待默认线程池收干，降低 `PROCESSING` 任务和推理线程残留风险。
+- 修复 `/settings/models` manifest fallback 的 assets 类型收窄问题，`uv run pyright` 恢复通过。
+- 清理 packaged E2E fixture generator 的未使用 import，全仓库 `uv run ruff check` 恢复通过。
+- 清理未接入空壳 stub，并把 `evals/run_eval.py` / `evals/report.py` 补成可执行的数据集清单与 manifest diff 工具。
+- macOS 主窗口关闭确认后改为退出整个应用并停止本地引擎，避免 Dock 残留运行态与从 Dock 二次启动初始化异常；packaged cold-start smoke 增加该回归覆盖。
+- Electron 从 39.8.10 升级到 41.6.0（39.x 已 EOL），依赖图保持最小变化：除 `electron` 本体外仅新增其嵌套的 Node 24 types，不带动 electron-builder / electron-vite / Playwright / Vite / React。
+- 当前基础检查重新拉绿：`npm run typecheck`、`npm run lint`、`npm run test`、`uv run pyright`、`uv run ruff check`、`uv run pytest tests/engine -q`、`npm run build`、`npm run dist:mac:bundle`、`npm run dist:mac:smoke`；另补 packaged thumbnail smoke 覆盖 `plumelens://thumb`。
+
+### 文档同步
+
+- README、架构、开发、交接、审计文档同步到 0.7.5 真实状态。
+- 0.7.0 release note 保留为历史快照，0.7.5 的当前状态以 `docs/HANDOVER.md` 和本节为准。
+
 ## 0.7.0
 
 范围：`v0.6.0..e77ff04`，共 58 个提交。
@@ -64,65 +102,65 @@
 
 ### 完整提交清单
 
-| Commit | 日期 | 类型 | 说明 |
-| --- | --- | --- | --- |
-| `9d954a5` | 2026-05-08 | feat | 优化连拍分组与复核体验 |
-| `1713e1a` | 2026-05-08 | feat | 切换鸟种识别模型至 dino v4 |
-| `ce8191c` | 2026-05-08 | fix | 加固后端启动与监听清理 |
-| `fdd98a9` | 2026-05-08 | fix | 加固后端关闭与日志清理 |
-| `3a70c43` | 2026-05-08 | fix | 修复地理解析未解状态统计 |
-| `c67744f` | 2026-05-08 | perf | 限制跨图库详情请求并发 |
-| `31b2159` | 2026-05-08 | fix | 修复羽迹缓存失效、mac CI 模型清单、英文导出翻译 |
-| `078b635` | 2026-05-08 | feat | 补齐羽迹百科至 DINOv3 species v4 全 1591 种 |
-| `f1f617a` | 2026-05-08 | feat | 羽迹封面图 100%，补齐青藏楔尾伯劳 Commons 摄影图 |
-| `494d58f` | 2026-05-08 | fix | 修正学名 Lanius giganteu 到 Lanius giganteus，并升级老 override 到 schema v10 |
-| `001c258` | 2026-05-08 | feat | 升级 bird_visibility v1 到 v2，接入 11 关键点与飞版自动升档 |
-| `3df4f24` | 2026-05-08 | feat | 深度复核屏展示姿态信息 |
-| `b21768b` | 2026-05-08 | refactor | 移除选片对比功能 |
-| `416b83a` | 2026-05-08 | feat | IQA 综合分权重重平衡并做全面审计修复 |
-| `9ac2351` | 2026-05-08 | fix | 全代码审计修复 11 处真隐患 |
-| `4a860c6` | 2026-05-08 | fix | IQA 综合分权重再次调整为 0.40 CLIPIQA / 0.60 HyperIQA |
-| `83ab16f` | 2026-05-08 | fix | 核心安全与供应链 6 项加固 |
-| `bc469f3` | 2026-05-08 | fix | 9 项高/中风险安全与健壮性加固 |
-| `802f6a9` | 2026-05-08 | fix | 修复 5 项审计发现的新隐患 |
-| `0f0d802` | 2026-05-08 | chore | 自定义 DMG 安装窗口外观、中文品牌背景与图标布局 |
-| `3ddecce` | 2026-05-08 | chore | DMG 背景升级到 HiDPI multi-rep TIFF |
-| `a3ec2c8` | 2026-05-08 | fix | 后台任务栏点阵进度条改用绿色 |
-| `333698c` | 2026-05-08 | fix | 孤儿 PENDING tasks 兜底自动复活 worker |
-| `dbb9369` | 2026-05-08 | fix | 修复两处 SSE / 后台任务静默卡死 |
-| `5fcd191` | 2026-05-08 | fix | 物种待审文案按实际成因区分 |
-| `4068b67` | 2026-05-08 | fix | 修复 5 项数据正确性硬伤 |
-| `7f90834` | 2026-05-08 | fix | 数值正确性与队列守门 3 项修复 |
-| `68a0474` | 2026-05-08 | fix | SSE、轮询、启动状态 4 项 P1 收紧 |
-| `3b28576` | 2026-05-08 | fix | 羽迹直辖市钻取、Nominatim 超时、pose 序列化补全 |
-| `12dcf1c` | 2026-05-08 | fix | 引擎冷启时核心 query 永久 error 导致历史库不显示 |
-| `5341f76` | 2026-05-08 | fix | 根除 8 项瞬态失败导致永久卡死的反模式 |
-| `5153002` | 2026-05-09 | feat | 真 E2E 测试、dist:mac 强制 smoke 与打包闸门 |
-| `c415495` | 2026-05-09 | fix | E2E fixture 改为从用户真照片库拷贝缩放 |
-| `1929bf8` | 2026-05-09 | fix | 打包前 detach stale volume，防 Finder layout 失效 |
-| `fc1cbb4` | 2026-05-09 | fix | 搜索/列表重排时缩略图不再闪渐变占位 |
-| `f1acf78` | 2026-05-09 | fix | loupe 放大改为 hold-to-zoom 语义 |
-| `bdb81d6` | 2026-05-09 | fix | 分析失败照片不混入场景组，顶部统计加失败 cell，修复进度停滞 |
-| `189b6f3` | 2026-05-09 | fix | 去掉场景上方“记录片”标签，新增种 chip 移到标题内联 |
-| `138e91c` | 2026-05-09 | fix | 连拍堆叠改整卡 focus + badge 单独展开，多帧采样修漂移 |
-| `b7297af` | 2026-05-09 | fix | 物种识别默认折叠，地点去省国，多鸟切换不展开 |
-| `a69b01f` | 2026-05-09 | fix | 右侧信息栏紧凑结构重构 |
-| `eed8eea` | 2026-05-09 | fix | 修复最近 4 次提交引入的 4 处 UI 隐患 |
-| `0ede6a8` | 2026-05-10 | fix | 更新模型管线与分组逻辑 |
-| `c9bd2d6` | 2026-05-10 | fix | 优化选片列表与复核交互 |
-| `c16865b` | 2026-05-10 | chore | 准备 0.7.0 打包资源 |
-| `7a0d40f` | 2026-05-10 | fix | 同步复核胶片条顺序 |
-| `3ec0535` | 2026-05-10 | fix | 完善选片复核与信息抽屉体验 |
-| `509fe55` | 2026-05-10 | fix | 优化选片复核与滚动体验 |
-| `c23f0c1` | 2026-05-10 | fix | 优化 DMG 背景抗锯齿 |
-| `921bc68` | 2026-05-10 | fix | 修正选片虚拟列表滚动高度 |
-| `e46f8c3` | 2026-05-10 | fix | 保持选片筛选滚动位置 |
-| `902f874` | 2026-05-10 | fix | 调整眼部可见性提示文案 |
-| `0b9477d` | 2026-05-10 | fix | 调整眼部可见阈值与标签 |
-| `06e8ae3` | 2026-05-10 | fix | 修复选片回到顶部滚动归零 |
-| `1851658` | 2026-05-10 | feat | 增加仅飞版筛选 |
-| `842b869` | 2026-05-10 | fix | 修复连拍收起后的列表虚拟高度 |
-| `10a60bc` | 2026-05-10 | feat | 完善设置与鸟种资料交互 |
-| `e77ff04` | 2026-05-11 | fix | 优化发布前交互与首页展示 |
+| Commit    | 日期       | 类型     | 说明                                                                          |
+| --------- | ---------- | -------- | ----------------------------------------------------------------------------- |
+| `9d954a5` | 2026-05-08 | feat     | 优化连拍分组与复核体验                                                        |
+| `1713e1a` | 2026-05-08 | feat     | 切换鸟种识别模型至 dino v4                                                    |
+| `ce8191c` | 2026-05-08 | fix      | 加固后端启动与监听清理                                                        |
+| `fdd98a9` | 2026-05-08 | fix      | 加固后端关闭与日志清理                                                        |
+| `3a70c43` | 2026-05-08 | fix      | 修复地理解析未解状态统计                                                      |
+| `c67744f` | 2026-05-08 | perf     | 限制跨图库详情请求并发                                                        |
+| `31b2159` | 2026-05-08 | fix      | 修复羽迹缓存失效、mac CI 模型清单、英文导出翻译                               |
+| `078b635` | 2026-05-08 | feat     | 补齐羽迹百科至 DINOv3 species v4 全 1591 种                                   |
+| `f1f617a` | 2026-05-08 | feat     | 羽迹封面图 100%，补齐青藏楔尾伯劳 Commons 摄影图                              |
+| `494d58f` | 2026-05-08 | fix      | 修正学名 Lanius giganteu 到 Lanius giganteus，并升级老 override 到 schema v10 |
+| `001c258` | 2026-05-08 | feat     | 升级 bird_visibility v1 到 v2，接入 11 关键点与飞版自动升档                   |
+| `3df4f24` | 2026-05-08 | feat     | 深度复核屏展示姿态信息                                                        |
+| `b21768b` | 2026-05-08 | refactor | 移除选片对比功能                                                              |
+| `416b83a` | 2026-05-08 | feat     | IQA 综合分权重重平衡并做全面审计修复                                          |
+| `9ac2351` | 2026-05-08 | fix      | 全代码审计修复 11 处真隐患                                                    |
+| `4a860c6` | 2026-05-08 | fix      | IQA 综合分权重再次调整为 0.40 CLIPIQA / 0.60 HyperIQA                         |
+| `83ab16f` | 2026-05-08 | fix      | 核心安全与供应链 6 项加固                                                     |
+| `bc469f3` | 2026-05-08 | fix      | 9 项高/中风险安全与健壮性加固                                                 |
+| `802f6a9` | 2026-05-08 | fix      | 修复 5 项审计发现的新隐患                                                     |
+| `0f0d802` | 2026-05-08 | chore    | 自定义 DMG 安装窗口外观、中文品牌背景与图标布局                               |
+| `3ddecce` | 2026-05-08 | chore    | DMG 背景升级到 HiDPI multi-rep TIFF                                           |
+| `a3ec2c8` | 2026-05-08 | fix      | 后台任务栏点阵进度条改用绿色                                                  |
+| `333698c` | 2026-05-08 | fix      | 孤儿 PENDING tasks 兜底自动复活 worker                                        |
+| `dbb9369` | 2026-05-08 | fix      | 修复两处 SSE / 后台任务静默卡死                                               |
+| `5fcd191` | 2026-05-08 | fix      | 物种待审文案按实际成因区分                                                    |
+| `4068b67` | 2026-05-08 | fix      | 修复 5 项数据正确性硬伤                                                       |
+| `7f90834` | 2026-05-08 | fix      | 数值正确性与队列守门 3 项修复                                                 |
+| `68a0474` | 2026-05-08 | fix      | SSE、轮询、启动状态 4 项 P1 收紧                                              |
+| `3b28576` | 2026-05-08 | fix      | 羽迹直辖市钻取、Nominatim 超时、pose 序列化补全                               |
+| `12dcf1c` | 2026-05-08 | fix      | 引擎冷启时核心 query 永久 error 导致历史库不显示                              |
+| `5341f76` | 2026-05-08 | fix      | 根除 8 项瞬态失败导致永久卡死的反模式                                         |
+| `5153002` | 2026-05-09 | feat     | 真 E2E 测试、dist:mac 强制 smoke 与打包闸门                                   |
+| `c415495` | 2026-05-09 | fix      | E2E fixture 改为从用户真照片库拷贝缩放                                        |
+| `1929bf8` | 2026-05-09 | fix      | 打包前 detach stale volume，防 Finder layout 失效                             |
+| `fc1cbb4` | 2026-05-09 | fix      | 搜索/列表重排时缩略图不再闪渐变占位                                           |
+| `f1acf78` | 2026-05-09 | fix      | loupe 放大改为 hold-to-zoom 语义                                              |
+| `bdb81d6` | 2026-05-09 | fix      | 分析失败照片不混入场景组，顶部统计加失败 cell，修复进度停滞                   |
+| `189b6f3` | 2026-05-09 | fix      | 去掉场景上方“记录片”标签，新增种 chip 移到标题内联                            |
+| `138e91c` | 2026-05-09 | fix      | 连拍堆叠改整卡 focus + badge 单独展开，多帧采样修漂移                         |
+| `b7297af` | 2026-05-09 | fix      | 物种识别默认折叠，地点去省国，多鸟切换不展开                                  |
+| `a69b01f` | 2026-05-09 | fix      | 右侧信息栏紧凑结构重构                                                        |
+| `eed8eea` | 2026-05-09 | fix      | 修复最近 4 次提交引入的 4 处 UI 隐患                                          |
+| `0ede6a8` | 2026-05-10 | fix      | 更新模型管线与分组逻辑                                                        |
+| `c9bd2d6` | 2026-05-10 | fix      | 优化选片列表与复核交互                                                        |
+| `c16865b` | 2026-05-10 | chore    | 准备 0.7.0 打包资源                                                           |
+| `7a0d40f` | 2026-05-10 | fix      | 同步复核胶片条顺序                                                            |
+| `3ec0535` | 2026-05-10 | fix      | 完善选片复核与信息抽屉体验                                                    |
+| `509fe55` | 2026-05-10 | fix      | 优化选片复核与滚动体验                                                        |
+| `c23f0c1` | 2026-05-10 | fix      | 优化 DMG 背景抗锯齿                                                           |
+| `921bc68` | 2026-05-10 | fix      | 修正选片虚拟列表滚动高度                                                      |
+| `e46f8c3` | 2026-05-10 | fix      | 保持选片筛选滚动位置                                                          |
+| `902f874` | 2026-05-10 | fix      | 调整眼部可见性提示文案                                                        |
+| `0b9477d` | 2026-05-10 | fix      | 调整眼部可见阈值与标签                                                        |
+| `06e8ae3` | 2026-05-10 | fix      | 修复选片回到顶部滚动归零                                                      |
+| `1851658` | 2026-05-10 | feat     | 增加仅飞版筛选                                                                |
+| `842b869` | 2026-05-10 | fix      | 修复连拍收起后的列表虚拟高度                                                  |
+| `10a60bc` | 2026-05-10 | feat     | 完善设置与鸟种资料交互                                                        |
+| `e77ff04` | 2026-05-11 | fix      | 优化发布前交互与首页展示                                                      |
 
 内部交接详版见 `docs/releases/0.7.0.md`。

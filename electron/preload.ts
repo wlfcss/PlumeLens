@@ -40,6 +40,11 @@ export interface EngineRequestInit {
   timeoutMs?: number
 }
 
+export type EngineSseBridgeEvent =
+  | { type: 'open' }
+  | { type: 'message'; event: string; data: string }
+  | { type: 'error'; message: string; status?: number }
+
 export type UpdateCheckResult =
   | {
       ok: true
@@ -56,6 +61,20 @@ export type UpdateCheckResult =
       reason: 'network' | 'invalid_response'
       message: string
     }
+
+function isEditorTool(value: unknown): value is 'topaz' | 'photoshop' {
+  return value === 'topaz' || value === 'photoshop'
+}
+
+function normalizeEnginePath(path: string): string {
+  if (typeof path !== 'string' || !path.startsWith('/') || path.startsWith('//')) {
+    throw new Error('Engine path must be an absolute local path')
+  }
+  if (path.includes('\0')) {
+    throw new Error('Engine path contains invalid characters')
+  }
+  return path
+}
 
 // 缓存 url + token,首次调用时通过 IPC 拉一次,engine 重启后清空让下次重取。
 // 关键点:这两个变量 *只存在于 preload 的 isolated context*,renderer JS
@@ -117,6 +136,7 @@ async function performEngineRequest(
   init: EngineRequestInit = {},
 ): Promise<EngineResponse> {
   const url = await ensureUrl()
+  const enginePath = normalizeEnginePath(path)
   const headers = new Headers(init.headers ?? {})
   if (cachedAuthToken && !headers.has('Authorization')) {
     headers.set('Authorization', `Bearer ${cachedAuthToken}`)
@@ -127,7 +147,7 @@ async function performEngineRequest(
   const ctrl = new AbortController()
   const timer = setTimeout(() => ctrl.abort(), init.timeoutMs ?? 60_000)
   try {
-    const res = await fetch(`${url}${path}`, {
+    const res = await fetch(`${url}${enginePath}`, {
       method: init.method ?? 'GET',
       headers,
       body: init.body ?? undefined,
@@ -146,19 +166,119 @@ async function performEngineRequest(
   }
 }
 
+function emitSseMessage(
+  eventName: string,
+  dataLines: string[],
+  onEvent: (event: EngineSseBridgeEvent) => void,
+): 'message' {
+  if (dataLines.length > 0) {
+    onEvent({ type: 'message', event: eventName, data: dataLines.join('\n') })
+  }
+  return 'message'
+}
+
+async function readSseStream(
+  body: ReadableStream<Uint8Array>,
+  onEvent: (event: EngineSseBridgeEvent) => void,
+  isCancelled: () => boolean,
+): Promise<void> {
+  const reader = body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let eventName = 'message'
+  let dataLines: string[] = []
+
+  const processLine = (rawLine: string): void => {
+    const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine
+    if (line === '') {
+      eventName = emitSseMessage(eventName, dataLines, onEvent)
+      dataLines = []
+      return
+    }
+    if (line.startsWith(':')) return
+    const separator = line.indexOf(':')
+    const field = separator === -1 ? line : line.slice(0, separator)
+    const value =
+      separator === -1
+        ? ''
+        : line.slice(separator + 1).startsWith(' ')
+          ? line.slice(separator + 2)
+          : line.slice(separator + 1)
+    if (field === 'event') eventName = value || 'message'
+    if (field === 'data') dataLines.push(value)
+  }
+
+  while (!isCancelled()) {
+    const { value, done } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    const lines = buffer.split('\n')
+    buffer = lines.pop() ?? ''
+    for (const line of lines) {
+      if (isCancelled()) break
+      processLine(line)
+    }
+  }
+
+  buffer += decoder.decode()
+  if (!isCancelled() && buffer) processLine(buffer)
+  if (!isCancelled()) emitSseMessage(eventName, dataLines, onEvent)
+}
+
+function performEngineSseSubscribe(
+  path: string,
+  onEvent: (event: EngineSseBridgeEvent) => void,
+): () => void {
+  const ctrl = new AbortController()
+  let cancelled = false
+
+  void (async () => {
+    try {
+      const url = await ensureUrl()
+      const enginePath = normalizeEnginePath(path)
+      const headers = new Headers({ Accept: 'text/event-stream' })
+      if (cachedAuthToken) headers.set('Authorization', `Bearer ${cachedAuthToken}`)
+      const res = await fetch(`${url}${enginePath}`, {
+        headers,
+        signal: ctrl.signal,
+      })
+      if (!res.ok) {
+        onEvent({ type: 'error', message: `SSE HTTP ${res.status}`, status: res.status })
+        return
+      }
+      if (!res.body) {
+        onEvent({ type: 'error', message: 'SSE response body is unavailable' })
+        return
+      }
+      if (cancelled) return
+      onEvent({ type: 'open' })
+      await readSseStream(res.body, onEvent, () => cancelled)
+      if (!cancelled) {
+        onEvent({ type: 'error', message: 'SSE stream closed' })
+      }
+    } catch (error) {
+      if (cancelled || ctrl.signal.aborted) return
+      onEvent({
+        type: 'error',
+        message: error instanceof Error ? error.message : String(error),
+      })
+    }
+  })()
+
+  return () => {
+    cancelled = true
+    ctrl.abort()
+  }
+}
+
 /**
- * 给 SSE 消费者构造 EventSource URL(原生 EventSource 不支持自定义 header,
- * 因此 token 必须以 query string 形式传到 server)。
- *
- * **已知限制:这一步会把 token 带回 renderer 上下文(URL string)。** 与
- * engineRequest 的 token-not-in-renderer 模型不同,因为 native EventSource
- * 只能接受 URL 参数。后续若做 IPC SSE bridge(main 主控 EventSource → 转发
- * IPC event)可彻底切断;当前 trade-off:复用浏览器自带 reconnect / backoff,
- * 简化 renderer 代码。
+ * Legacy fallback for vite-only runs that still construct native EventSource
+ * in renderer. Packaged Electron uses engineSseSubscribe so the token stays in
+ * preload and travels as an Authorization header instead of a query string.
  */
 async function performEngineSseUrl(path: string): Promise<string> {
   const url = await ensureUrl()
-  const final = new URL(`${url}${path}`)
+  const final = new URL(`${url}${normalizeEnginePath(path)}`)
   if (cachedAuthToken) final.searchParams.set('token', cachedAuthToken)
   return final.toString()
 }
@@ -171,8 +291,13 @@ contextBridge.exposeInMainWorld('plumelens', {
    */
   engineRequest: (path: string, init?: EngineRequestInit): Promise<EngineResponse> =>
     performEngineRequest(path, init),
-  /** 构造 SSE URL(包含 token 的 query string,详见 performEngineSseUrl 注释)。 */
+  /** Legacy SSE URL fallback(可能包含 query token,native EventSource 限制)。 */
   engineSseUrl: (path: string): Promise<string> => performEngineSseUrl(path),
+  /** 订阅 engine SSE — fetch stream 在 preload 内注入 Authorization,token 不进 renderer。 */
+  engineSseSubscribe: (
+    path: string,
+    onEvent: (event: EngineSseBridgeEvent) => void,
+  ): (() => void) => performEngineSseSubscribe(path, onEvent),
   getAppVersion: (): Promise<string> => ipcRenderer.invoke('get-app-version'),
   checkForUpdates: (): Promise<UpdateCheckResult> => ipcRenderer.invoke('check-for-updates'),
   openFolder: (): Promise<string | null> => ipcRenderer.invoke('dialog:open-folder'),
@@ -220,8 +345,12 @@ contextBridge.exposeInMainWorld('plumelens', {
   openInEditor: (
     tool: 'topaz' | 'photoshop',
     path: string,
-  ): Promise<{ ok: true; app: string } | { ok: false; reason: string }> =>
-    ipcRenderer.invoke('open-in-editor', { tool, path }),
+  ): Promise<{ ok: true; app: string } | { ok: false; reason: string }> => {
+    if (!isEditorTool(tool) || typeof path !== 'string' || path.trim() === '') {
+      return Promise.resolve({ ok: false, reason: 'invalid_args' })
+    }
+    return ipcRenderer.invoke('open-in-editor', { tool, path })
+  },
   /** 兼容老 channel；调用方必须保存返回值并在 unmount 时调用，避免 listener 泄漏。 */
   onBackendReady: (cb: (url: string) => void): (() => void) => {
     const handler = (_event: unknown, url: string): void => cb(url)

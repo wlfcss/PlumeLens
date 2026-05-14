@@ -24,7 +24,7 @@ import {
 } from 'react'
 import type { useTranslation } from 'react-i18next'
 
-import type { AfOverlay, PhotoRecord } from '@/lib/mock-workspace'
+import type { AfOverlay, PhotoRecord } from '@/lib/workspace-types'
 import { cn } from '@/lib/utils'
 
 export function ReviewImageStage({

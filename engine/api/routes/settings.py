@@ -127,6 +127,14 @@ def _model_revision(group_assets: list[str], assets: dict[str, Any]) -> str:
     return digest.hexdigest()[:12] if found else "unknown"
 
 
+def _meta_assets(meta: dict[str, object]) -> list[str]:
+    """Return manifest/group asset paths with runtime validation for typed callers."""
+    raw_assets = meta.get("assets", [])
+    if not isinstance(raw_assets, list):
+        return []
+    return [str(item) for item in raw_assets]
+
+
 def _read_model_manifest() -> tuple[str | None, dict[str, dict[str, object]]]:
     path = _manifest_path()
     if not path.is_file():
@@ -148,7 +156,7 @@ def _read_model_manifest() -> tuple[str | None, dict[str, dict[str, object]]]:
     # useful by deriving asset revisions from the legacy asset section.
     models: dict[str, dict[str, object]] = {}
     for model_id, meta in LEGACY_MODEL_GROUPS.items():
-        group_assets = list(meta["assets"])
+        group_assets = _meta_assets(meta)
         models[model_id] = {
             "label": meta["label"],
             "version": meta["version"],
@@ -184,7 +192,7 @@ async def model_versions(request: Request) -> ModelVersionsResponse:
                 label=str(models[model_id].get("label", model_id)),
                 version=str(models[model_id].get("version", "unknown")),
                 revision=str(models[model_id].get("revision", "unknown")),
-                assets=[str(item) for item in models[model_id].get("assets", [])],
+                assets=_meta_assets(models[model_id]),
                 loaded=bool(status.get(model_id, False)),
                 provider=(
                     str(providers.get(model_id)) if providers.get(model_id) is not None else None

@@ -28,7 +28,7 @@ import { MetricCell } from '@/components/common/metric-cell'
 import { SectionLabel } from '@/components/common/section-label'
 import { api, type ExportLibraryResponse } from '@/lib/api-client'
 import { gradeLabelKey } from '@/lib/i18n-keys'
-import type { FolderRecord, PhotoGrade, PhotoRecord } from '@/lib/mock-workspace'
+import type { FolderRecord, PhotoGrade, PhotoRecord } from '@/lib/workspace-types'
 import { effectivePhotoGrade, type FolderSummary } from '@/lib/photo-helpers'
 import { cn } from '@/lib/utils'
 

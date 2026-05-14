@@ -11,24 +11,9 @@
  * 反向依赖 App.tsx。
  */
 
-import {
-  Check,
-  ChevronLeft,
-  ChevronRight,
-  Clock3,
-  Images,
-  Sparkles,
-  X,
-} from 'lucide-react'
+import { Check, ChevronLeft, ChevronRight, Clock3, Images, Sparkles, X } from 'lucide-react'
 import { useVirtualizer } from '@tanstack/react-virtual'
-import {
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  type CSSProperties,
-} from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import type { useTranslation } from 'react-i18next'
 
 import { IconButton } from '@/components/common/icon-button'
@@ -44,7 +29,7 @@ import type {
   PhotoGrade,
   PhotoRecord,
   SelectionDecision,
-} from '@/lib/mock-workspace'
+} from '@/lib/workspace-types'
 import {
   effectivePhotoGrade,
   effectiveSpeciesLatinName,
@@ -303,9 +288,7 @@ export function ReviewModal({
               key={hudFlash.nonce}
             >
               <span className="review-grade-hud__key">{GRADE_HUD_KEY[hudFlash.grade]}</span>
-              <span className="review-grade-hud__label">
-                {t(gradeLabelKey(hudFlash.grade))}
-              </span>
+              <span className="review-grade-hud__label">{t(gradeLabelKey(hudFlash.grade))}</span>
             </div>
           ) : null}
           <div className="modal-heading review-heading">
@@ -640,8 +623,6 @@ export function ReviewModal({
     </div>
   )
 }
-
-
 
 function ReviewFullscreenViewer({
   aspect,

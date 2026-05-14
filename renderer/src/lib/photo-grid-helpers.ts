@@ -20,7 +20,7 @@ import type {
   PhotoGroupRecord,
   PhotoRecord,
   SelectionDecision,
-} from '@/lib/mock-workspace'
+} from '@/lib/workspace-types'
 import { gradeLabelKey } from '@/lib/i18n-keys'
 import {
   effectivePhotoGrade,

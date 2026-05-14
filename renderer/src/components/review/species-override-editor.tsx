@@ -17,7 +17,7 @@ import type { useTranslation } from 'react-i18next'
 
 import { SectionLabel } from '@/components/common/section-label'
 import type { SpeciesOverrideBBox, SpeciesOverrideValue } from '@/lib/api-client'
-import type { PhotoRecord } from '@/lib/mock-workspace'
+import type { PhotoRecord } from '@/lib/workspace-types'
 import { listAllSpecies } from '@/lib/species-wiki'
 import { cn } from '@/lib/utils'
 

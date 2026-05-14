@@ -20,7 +20,7 @@ import type {
   ProblemTagId,
   SelectionDecision,
   SpeciesCandidate,
-} from '@/lib/mock-workspace'
+} from '@/lib/workspace-types'
 import { resolveSpeciesCanonicalSci } from '@/lib/species-wiki'
 
 type Translate = (key: string, options?: Record<string, unknown>) => string
@@ -372,9 +372,8 @@ export function buildPhotoRecordFromRow(
           : [],
     birdDetections: buildBirdDetections(row),
     // 单 library 维度的 backend-adapter 看不到全局物种历史,这里先给 false。
-    // App.tsx 的 applyNewSpeciesMarkers 在所有 library detail 注入 workspace 后跨库
-    // 按 shotAt 升序统一回标 photo.isNewSpecies + group.containsNewSpecies(每个物种第
-    // 一张照片为 true)。
+    // workspace-projection 的 applyNewSpeciesMarkers 在所有 library detail 注入 workspace
+    // 后跨库按 shotAt 升序统一回标 photo.isNewSpecies + group.containsNewSpecies。
     isNewSpecies: false,
     birdCount: row.bird_count ?? 0,
     grade,

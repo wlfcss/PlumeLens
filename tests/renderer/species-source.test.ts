@@ -10,7 +10,7 @@
 import { describe, expect, it } from 'vitest'
 
 import { speciesSourceBadge, speciesSourceDetail } from '@/lib/species-source'
-import type { PhotoRecord } from '@/lib/mock-workspace'
+import type { PhotoRecord } from '@/lib/workspace-types'
 
 type Detection = NonNullable<PhotoRecord['birdDetections']>[number]
 const tFake = (key: string): string => key

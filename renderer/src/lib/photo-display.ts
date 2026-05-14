@@ -15,17 +15,9 @@
 
 import type { useTranslation } from 'react-i18next'
 
-import type { FolderStatus, PhotoGrade, PhotoRecord } from '@/lib/mock-workspace'
-import {
-  effectiveSpeciesName,
-  effectivePhotoGrade,
-  type Tone,
-} from '@/lib/photo-helpers'
-import {
-  speciesSourceBadge,
-  speciesSourceKind,
-  type DetectionLike,
-} from '@/lib/species-source'
+import type { FolderStatus, PhotoGrade, PhotoRecord } from '@/lib/workspace-types'
+import { effectiveSpeciesName, effectivePhotoGrade, type Tone } from '@/lib/photo-helpers'
+import { speciesSourceBadge, speciesSourceKind, type DetectionLike } from '@/lib/species-source'
 import {
   getSpeciesWiki,
   normalizeSpeciesAlias,
@@ -35,12 +27,7 @@ import {
 export type PhotoCategory = PhotoGrade | 'no_bird'
 
 const archiveEligibleGrades = new Set<PhotoGrade>(['select', 'usable', 'record'])
-const unknownSpeciesAliases = new Set([
-  '未识别物种',
-  'unidentified',
-  'unknown species',
-  'unknown',
-])
+const unknownSpeciesAliases = new Set(['未识别物种', 'unidentified', 'unknown species', 'unknown'])
 
 type ArchiveSpeciesEntry = {
   key: string

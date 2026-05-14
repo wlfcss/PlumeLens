@@ -6,7 +6,7 @@
 import { useEffect, useState, type CSSProperties } from 'react'
 
 import { getArchiveSpeciesEntries } from '@/lib/photo-display'
-import type { PhotoRecord, SpeciesRecord } from '@/lib/mock-workspace'
+import type { PhotoRecord, SpeciesRecord } from '@/lib/workspace-types'
 import type { Tone } from '@/lib/photo-helpers'
 
 type SpeciesCollectionGroupId =
@@ -112,10 +112,7 @@ function cssImageUrl(url: string): string {
   return `url("${url.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}")`
 }
 
-export function speciesArtworkStyle(
-  imageUrl: string | null | undefined,
-  fallbackGradient: string,
-) {
+export function speciesArtworkStyle(imageUrl: string | null | undefined, fallbackGradient: string) {
   return {
     '--species-artwork-bg': imageUrl ? cssImageUrl(imageUrl) : fallbackGradient,
   } as CSSProperties

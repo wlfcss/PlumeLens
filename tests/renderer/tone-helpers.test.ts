@@ -7,17 +7,8 @@
  */
 import { describe, expect, it } from 'vitest'
 
-import {
-  categoryTone,
-  gradeTone,
-  statusTone,
-  type PhotoCategory,
-} from '@/lib/photo-display'
-import {
-  analysisTone,
-  decisionTone,
-  categoryLabelKey,
-} from '@/lib/photo-grid-helpers'
+import { categoryTone, gradeTone, statusTone, type PhotoCategory } from '@/lib/photo-display'
+import { analysisTone, decisionTone, categoryLabelKey } from '@/lib/photo-grid-helpers'
 import {
   archiveTabLabelKey,
   gradeLabelKey,
@@ -35,7 +26,7 @@ import type {
   PoseTagId,
   ProblemTagId,
   SelectionDecision,
-} from '@/lib/mock-workspace'
+} from '@/lib/workspace-types'
 
 describe('tone helpers', () => {
   it('gradeTone — 4 档分级 → 4 个 tone', () => {
@@ -117,8 +108,15 @@ describe('i18n key generators', () => {
 
   it('statusLabelKey — 9 个 folder status', () => {
     const statuses: FolderStatus[] = [
-      'idle', 'ready', 'path_missing', 'error', 'analyzing_partial',
-      'scanning', 'hashing', 'updating', 'exporting',
+      'idle',
+      'ready',
+      'path_missing',
+      'error',
+      'analyzing_partial',
+      'scanning',
+      'hashing',
+      'updating',
+      'exporting',
     ]
     for (const s of statuses) {
       expect(statusLabelKey(s)).toBe(`selection.folderStatus.${s}`)
@@ -133,8 +131,12 @@ describe('i18n key generators', () => {
     const poses: PoseTagId[] = ['eye_visible', 'head_clean', 'wings_open', 'perched', 'multi_bird']
     for (const p of poses) expect(poseTagKey(p)).toBe(`selection.poseTags.${p}`)
     const problems: ProblemTagId[] = [
-      'no_bird', 'subject_small', 'eye_soft',
-      'head_occluded', 'wing_cropped', 'low_species_confidence',
+      'no_bird',
+      'subject_small',
+      'eye_soft',
+      'head_occluded',
+      'wing_cropped',
+      'low_species_confidence',
     ]
     for (const p of problems) expect(problemTagKey(p)).toBe(`selection.problemTags.${p}`)
   })

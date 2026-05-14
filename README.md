@@ -10,7 +10,7 @@
 
 <p align="center">
   <a href="https://github.com/wlfcss/PlumeLens/actions/workflows/mac-build.yml"><img alt="macOS build" src="https://github.com/wlfcss/PlumeLens/actions/workflows/mac-build.yml/badge.svg"></a>
-  <img alt="version" src="https://img.shields.io/badge/version-0.7.0-white">
+  <img alt="version" src="https://img.shields.io/badge/version-0.7.5-white">
   <img alt="platform" src="https://img.shields.io/badge/platform-macOS%20arm64-111111">
   <img alt="local inference" src="https://img.shields.io/badge/inference-local-74F69C">
   <a href="LICENSE"><img alt="license" src="https://img.shields.io/badge/license-GPL--3.0-FFD45A"></a>
@@ -39,6 +39,18 @@
 | 开始                                            | 选片                                                    | 羽迹                                                |
 | ----------------------------------------------- | ------------------------------------------------------- | --------------------------------------------------- |
 | ![Start screen](assets/readme/start-screen.png) | ![Selection screen](assets/readme/selection-screen.png) | ![Archive screen](assets/readme/archive-screen.png) |
+
+## 0.7.5 技术债清理
+
+0.7.5 是 0.7.0 发布后的全栈清债版本，目标不是新增大功能，而是把前端、后端、测试和文档在快速迭代中积累的结构债收紧：
+
+- **前端结构**：`App.tsx` 路由/组件拆分与 workspace projection 抽离完成，Start / Selection / Archive / Export / Review 等子树已下沉到独立组件，thumbnail repair 与 library workspace sync 也已抽为 hooks，根组件约 990 行。
+- **领域类型**：历史 `mock-workspace.ts` 已拆为正式 `workspace-types.ts`、`workspace-projection.ts` 与仅用于 fixture 的 `workspace-fixtures.ts`。
+- **列表稳定性**：选片/羽迹共用虚拟网格工具，滚动状态、回顶、紧凑头部和错误恢复做了加固。
+- **复核模块化**：复核图片舞台与物种编辑器拆出独立文件，消除 review-modal 反向依赖 App 的旧结构。
+- **安全硬化**：preload 统一注入 API/SSE bearer token，生产打包态缺 token 会拒绝启动，`open-in-editor` IPC 增加运行时参数校验。
+- **质量闸门**：TypeScript、ESLint、Vitest、pyright、ruff、pytest、build 重新校准为全绿基线。
+- **文档同步**：README、CHANGELOG、架构、开发、交接和审计文档同步到 0.7.5 真实状态，0.7.0 release note 保留为历史快照。
 
 ## 0.7.0 更新重点
 
@@ -74,28 +86,28 @@
 
 PlumeLens 的模型不是一个单点分类器，而是一条以摄影筛选为目标的流水线：先判断画面里有没有鸟，再判断鸟的姿态与画质，最后识别物种，并把模型结果与人工复核、场景共识合并成稳定业务口径。
 
-| 阶段          | 模型 / 模块              | 输入与输出                          | 作用                                                                                                         |
-| ------------- | ------------------------ | ----------------------------------- | ------------------------------------------------------------------------------------------------------------ |
-| 1. 原片解码   | Pillow / rawpy           | RAW/JPEG → EXIF 转正 RGB 图像       | 读取照片、补齐元数据、生成可分析图像                                                                         |
-| 2. 鸟类检测   | `YOLOv26l-bird-det v1.1` | `1280×1280` letterbox → bird bbox   | 找到照片中的鸟类主体，支持多鸟图                                                                             |
+| 阶段          | 模型 / 模块                                     | 输入与输出                          | 作用                                                                                                         |
+| ------------- | ----------------------------------------------- | ----------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| 1. 原片解码   | Pillow / rawpy                                  | RAW/JPEG → EXIF 转正 RGB 图像       | 读取照片、补齐元数据、生成可分析图像                                                                         |
+| 2. 鸟类检测   | `YOLOv26l-bird-det v1.1`                        | `1280×1280` letterbox → bird bbox   | 找到照片中的鸟类主体，支持多鸟图                                                                             |
 | 3. 姿态可见性 | `bird_visibility v2.0` + `flight classifier v1` | bbox crop → 11 关键点 + P(fly)      | 输出 5 项 visibility(头/眼/身/尾/翼) + 3 项 posture(view_angle/facing/perched\|flying);头眼齐 + 飞版自动升档 |
-| 4. 语义画质   | `CLIPIQA+`               | 2.5× 语义裁切 → 0-1 分              | 判断构图、主体语义质量和整体观感                                                                             |
-| 5. 技术画质   | `HyperIQA`               | bbox +10% 技术裁切 → 0-1 分         | 判断清晰度、噪声、曝光和主体技术质量                                                                         |
-| 6. 鸟种识别   | `DINOv3 species v4`      | 384px crop → 1591 类 top-K + reject | 输出识别 / 待确认 / 拒识三态，接入保护等级与百科                                                             |
-| 7. 业务融合   | grader + consensus       | detections → photo result           | 计算分级、物种来源、场景共识、羽迹有效性                                                                     |
+| 4. 语义画质   | `CLIPIQA+`                                      | 2.5× 语义裁切 → 0-1 分              | 判断构图、主体语义质量和整体观感                                                                             |
+| 5. 技术画质   | `HyperIQA`                                      | bbox +10% 技术裁切 → 0-1 分         | 判断清晰度、噪声、曝光和主体技术质量                                                                         |
+| 6. 鸟种识别   | `DINOv3 species v4`                             | 384px crop → 1591 类 top-K + reject | 输出识别 / 待确认 / 拒识三态，接入保护等级与百科                                                             |
+| 7. 业务融合   | grader + consensus                              | detections → photo result           | 计算分级、物种来源、场景共识、羽迹有效性                                                                     |
 
 ### 当前模型资产
 
-| 模型资产                | 文件                                                  | 规模      | 状态                       |
-| ----------------------- | ----------------------------------------------------- | --------- | -------------------------- |
-| YOLOv26l-bird-det v1.1  | `engine/models/yolo26l-bird-det.onnx`                 | 约 100 MB | 入仓                       |
-| bird_visibility v2.0    | `engine/models/bird_visibility11.onnx`                | 约 98 MB  | 入仓                       |
-| bird flight classifier v1 | `engine/models/bird_flight_classifier.onnx`          | 约 40 MB  | 入仓                       |
-| CLIPIQA+                | `engine/models/clipiqa_plus.onnx`                     | 约 293 MB | 大文件，打包时由模型包恢复 |
-| HyperIQA                | `engine/models/hyperiqa.onnx`                         | 约 104 MB | 大文件，打包时由模型包恢复 |
+| 模型资产                   | 文件                                                  | 规模      | 状态                       |
+| -------------------------- | ----------------------------------------------------- | --------- | -------------------------- |
+| YOLOv26l-bird-det v1.1     | `engine/models/yolo26l-bird-det.onnx`                 | 约 100 MB | 入仓                       |
+| bird_visibility v2.0       | `engine/models/bird_visibility11.onnx`                | 约 98 MB  | 入仓                       |
+| bird flight classifier v1  | `engine/models/bird_flight_classifier.onnx`           | 约 40 MB  | 入仓                       |
+| CLIPIQA+                   | `engine/models/clipiqa_plus.onnx`                     | 约 293 MB | 大文件，打包时由模型包恢复 |
+| HyperIQA                   | `engine/models/hyperiqa.onnx`                         | 约 104 MB | 大文件，打包时由模型包恢复 |
 | DINOv3 species v4 backbone | `engine/models/species/backbone/model.safetensors`    | 约 578 MB | 大文件，不入 git           |
 | DINOv3 species v4 adapter  | `engine/models/species/v4/seed42_adapter.pt`          | 约 32 MB  | 大文件，不入 git           |
-| 分类与百科元数据        | `canonical_extended.parquet` / `species_wiki.parquet` | 1591 种   | 入仓                       |
+| 分类与百科元数据           | `canonical_extended.parquet` / `species_wiki.parquet` | 1591 种   | 入仓                       |
 
 更多模型细节见 [engine/models/README.md](engine/models/README.md)、[YOLO model card](engine/models/yolo26l-bird-det.MODEL_CARD.md) 和 [bird visibility model card](engine/models/bird_visibility.MODEL_CARD.md)。
 
@@ -120,7 +132,7 @@ species v4 使用 dino 项目校准出的 `balanced_v1` 策略：只有 `recogni
 
 | 层       | 技术选型                                                  | 职责                                           |
 | -------- | --------------------------------------------------------- | ---------------------------------------------- |
-| 桌面外壳 | Electron 35、electron-vite、electron-builder              | 窗口、菜单、安全边界、Python 后端子进程守护    |
+| 桌面外壳 | Electron 41、electron-vite、electron-builder              | 窗口、菜单、安全边界、Python 后端子进程守护    |
 | 前端     | React 19、TypeScript、Tailwind CSS v4、shadcn/ui、i18next | 开始/选片/羽迹三大工作区与本地化界面           |
 | 服务端态 | TanStack Query、SSE                                       | 后端数据同步、分析进度、导出进度和事件通知     |
 | 后端     | Python 3.11、FastAPI、Pydantic、structlog                 | API、扫描、队列、导出、地理回填、业务聚合      |
@@ -133,7 +145,7 @@ species v4 使用 dino 项目校准出的 `balanced_v1` 策略：只有 `recogni
 - 分析推理在本机运行，不需要把照片上传到云端。
 - 用户选择的照片目录保持只读，PlumeLens 不写回原始照片。
 - 数据库、日志、缩略图与导出记录写入应用数据目录。
-- Electron renderer 通过一次性 token 调用仅绑定 `127.0.0.1` 的后端 API。
+- Electron preload 通过一次性 bearer token 调用仅绑定 `127.0.0.1` 的后端 API/SSE，renderer 不直接接触原始 token。
 - 反地理编码可由后台回填，地图与羽迹读取持久化后的地点结果。
 
 ## 工作流
@@ -200,19 +212,20 @@ GitHub Actions 当前只保留 macOS arm64 自动构建流程：
 - tag 构建会发布 GitHub Release asset
 - Windows / Linux 自动构建暂时停用
 
-完整应用需要恢复未入 git 的模型大文件。CI 默认从同仓库 `models-v3` Release 下载 `plumelens-models-v3.tar.gz`，也可以通过以下配置覆盖：
+完整应用需要恢复未入 git 的模型大文件。CI 默认从同仓库 `models-v4` Release 下载 `plumelens-models-v4.tar.gz`，也可以通过以下配置覆盖：
 
 | 配置                                           | 用途                                          |
 | ---------------------------------------------- | --------------------------------------------- |
 | secret `PLUMELENS_MODELS_URL`                  | 指向 `.tar.gz` / `.zip` 模型包                |
-| repo variable `PLUMELENS_MODELS_RELEASE_TAG`   | 模型 Release tag，默认 `models-v3`            |
-| repo variable `PLUMELENS_MODELS_RELEASE_ASSET` | 模型包名称，默认 `plumelens-models-v3.tar.gz` |
+| repo variable `PLUMELENS_MODELS_RELEASE_TAG`   | 模型 Release tag，默认 `models-v4`            |
+| repo variable `PLUMELENS_MODELS_RELEASE_ASSET` | 模型包名称，默认 `plumelens-models-v4.tar.gz` |
 
 ## 项目状态
 
 - 已完成：本地 hybrid 推理、选片工作台、深度复核、拍摄报告、导出、羽迹物种墙、地理分布、macOS arm64 自动构建。
 - 已完成：源文件夹失联检测与重新关联、导出快照锁定、JPG/RAW/XMP 导出、中文报告、大列表虚拟化、缩略图自动修复、设置页版权/更新/模型版本/清理历史。
-- 持续优化：App.tsx 拆分、更多真实相机样张覆盖、物种资料图片人工审核。
+- 已完成：0.7.5 技术债清理，App.tsx 路由/组件拆分、workspace projection 抽离、thumbnail repair / library workspace sync hook 化、SSE/token 与 IPC 安全边界收紧、质量闸门恢复全绿。
+- 持续优化：active view / mutation glue 可继续从 App 编排层下沉、更多真实相机样张覆盖、物种资料图片人工审核。
 - 待验证：Windows 打包、更多相机品牌的 AF 对焦点解析、更多 RAW 组合样本。
 
 ## 许可证与模型版权

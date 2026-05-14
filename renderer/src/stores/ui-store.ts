@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 
-import type { AppRoute, ArchiveTab, PhotoGrade } from '@/lib/mock-workspace'
+import type { AppRoute, ArchiveTab, PhotoGrade } from '@/lib/workspace-types'
 
 export { useShallow } from 'zustand/react/shallow'
 

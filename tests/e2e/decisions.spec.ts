@@ -1263,7 +1263,7 @@ test.describe('Photo decision flow (mock backend)', () => {
   })
 
   test('user can navigate into selection and see photo tiles', async ({ page }) => {
-    // mock-workspace 数据会让至少一个照片 tile 可见
+    // fixture workspace 数据会让至少一个照片 tile 可见
     // 等主工作区面板出现
     await expect(page.locator('.photo-tile, [class*="tile"]').first()).toBeVisible({
       timeout: 5000,
@@ -1277,6 +1277,15 @@ test.describe('Photo decision flow (mock backend)', () => {
     await page.getByLabel('设置').click()
     const panel = page.locator('.settings-panel')
     await expect(panel).toBeVisible()
+    const panelBox = await panel.boundingBox()
+    expect(panelBox?.width).toBeGreaterThan(900)
+    expect(panelBox?.height).toBeLessThan(760)
+
+    const geocodingBox = await panel.locator('.settings-section--geocoding').boundingBox()
+    const aboutBox = await panel.locator('.settings-section--about').boundingBox()
+    const modelsBox = await panel.locator('.settings-section--models').boundingBox()
+    expect(geocodingBox?.x ?? 0).toBeLessThan(aboutBox?.x ?? 0)
+    expect(modelsBox?.width ?? 0).toBeGreaterThan(900)
     await expect(panel).toContainText('汪淼 wlfcss')
     await expect(panel).toContainText('wlfcss@gmail.com')
     await expect(panel).toContainText('github.com/wlfcss/PlumeLens')
@@ -1286,8 +1295,7 @@ test.describe('Photo decision flow (mock backend)', () => {
     await expect
       .poll(() =>
         page.evaluate(
-          () =>
-            (window as unknown as { __openedExternalUrls: string[] }).__openedExternalUrls,
+          () => (window as unknown as { __openedExternalUrls: string[] }).__openedExternalUrls,
         ),
       )
       .toContain('https://www.wlfcss.com')
@@ -1311,13 +1319,30 @@ test.describe('Photo decision flow (mock backend)', () => {
   test('inspector defaults to shooting report and blank list click restores it', async ({
     page,
   }) => {
-    await expect(page.getByTestId('shooting-report')).toBeVisible()
-    await expect(page.getByTestId('shooting-report')).toContainText('本次拍摄成就清单')
-    await expect(page.getByTestId('shooting-report')).toContainText('照片平均分')
-    await expect(page.getByTestId('shooting-report')).toContainText('新增鸟种')
-    await expect(page.getByTestId('shooting-report')).toContainText('最高分')
-    await expect(page.getByTestId('shooting-report')).toContainText('张照片')
-    await expect(page.getByTestId('shooting-report')).not.toContainText('刷新 0 个历史最高分')
+    const report = page.getByTestId('shooting-report')
+    await expect(report).toBeVisible()
+    await expect(report).toContainText('成就清单')
+    await expect(report).toContainText('04/23 共拍摄')
+    await expect(report).toContainText('照片平均分')
+    await expect(report).toContainText('新增鸟种')
+    await expect(report).toContainText('最高分')
+    await expect(report).toContainText('张照片')
+    await expect(report).not.toContainText('刷新 0 个历史最高分')
+    const shootingTimeMetric = report.locator('.shooting-report-metric').filter({
+      hasText: '拍摄时间',
+    })
+    await expect(shootingTimeMetric.locator('strong')).toHaveText('04/23')
+    await expect(shootingTimeMetric).toHaveAttribute(
+      'title',
+      /2026\/04\/23 15:00 - 2026\/04\/23 15:03/,
+    )
+    await expect(report.locator('.shooting-achievement-card__photo img').first()).toHaveAttribute(
+      'src',
+      /upload\.wikimedia\.org|plumelens:/,
+    )
+    await report.locator('.shooting-achievement-card').filter({ hasText: '须浮鸥' }).first().click()
+    await expect(page.getByTestId('species-detail-popover')).toBeVisible()
+    await page.getByTestId('species-detail-popover').getByRole('button', { name: '关闭' }).click()
 
     await page.locator('.photo-preview').first().click()
     await expect(page.locator('.inspector-species')).toContainText('池鹭')
@@ -1775,7 +1800,7 @@ test.describe('Archive species panel (local wiki data)', () => {
       .first()
       .click()
     await page.locator('.collection-card--lit').first().click()
-    // mock-workspace 里首选物种（按分数排序）应是须浮鸥或翠鸟（Wikipedia 都有对应页）
+    // fixture workspace 里首选物种（按分数排序）应是须浮鸥或翠鸟（Wikipedia 都有对应页）
     // 等待右侧详情面板出现 Wikipedia 外链
     await expect(page.getByText('中文维基百科 →')).toBeVisible({ timeout: 5000 })
     const link = page.getByText('中文维基百科 →')

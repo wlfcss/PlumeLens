@@ -1,32 +1,24 @@
 /**
- * 起始页 — 文件夹历史 + 引擎/管线状态条 + BirdGlyph 装饰。
+ * 起始页 — 文件夹历史 + 引擎/管线状态条 + 神经鸟视觉图层。
  *
  * 子组件:
  *   - StartScreen (主入口)
  *   - FolderContextMenu (右键文件夹弹小菜单 — 在 Finder 打开 / 重新链接路径)
  *   - EnginePanel (底部管线状态条 — 5 个模型 loaded/loading/error 状态)
  *   - PipelineStatusItem (管线条单格)
- *   - BirdGlyph (右上角点阵鸟,memo 化避免 SSE 健康推送驱动重渲染)
+ *   - StartBirdVisual (右侧神经鸟装饰图层,memo 化避免 SSE 健康推送驱动重渲染)
  *
- * BirdGlyph 数组 birdGlyphElements 在模块加载时一次性计算,避免 StartScreen 在
- * SSE 频繁触发的 re-render 中反复重建 504 个 React element + className 字符串。
  */
 
 import { ArrowRight, FolderOpen, FolderSearch2, TriangleAlert, X } from 'lucide-react'
-import {
-  memo,
-  useCallback,
-  useEffect,
-  useMemo,
-  type MouseEvent as ReactMouseEvent,
-  type ReactNode,
-} from 'react'
+import { memo, useCallback, useEffect, useMemo, type MouseEvent as ReactMouseEvent } from 'react'
 import type { useTranslation } from 'react-i18next'
 
+import startBirdNeuralUrl from '@/assets/start-bird-neural.webp'
 import { StatusDot } from '@/components/common/metric-cell'
 import type { useBackendHealth } from '@/hooks/use-backend'
 import { statusLabelKey } from '@/lib/i18n-keys'
-import type { FolderRecord } from '@/lib/mock-workspace'
+import type { FolderRecord } from '@/lib/workspace-types'
 import { statusTone } from '@/lib/photo-display'
 import type { Tone } from '@/lib/photo-helpers'
 import { cn } from '@/lib/utils'
@@ -38,71 +30,10 @@ export type FolderContextMenuState = {
   y: number
 } | null
 
-const birdGlyphPattern = [
-  '........................',
-  '...............11.......',
-  '.............111111.....',
-  '............11111111....',
-  '...........111....111...',
-  '..........111..33..11...',
-  '..........111.3223.1112.',
-  '.........1111..33..1112.',
-  '........111111.....11...',
-  '.......111.111.....11...',
-  '.......111..11.....11...',
-  '......111...11....111...',
-  '.....111...111....111...',
-  '....111....111...111....',
-  '....111...111...111.....',
-  '...111111111111111......',
-  '..111111111111111.......',
-  '.11111111111111.........',
-  '.111.....11..11.........',
-  '.........11..11.........',
-  '........................',
-] as const
-const birdGlyphRows = birdGlyphPattern.length
-const birdGlyphColumns = birdGlyphPattern[0].length
-const birdGlyphCornerRadius = 5
-
-function isInsideRoundedGlyphFrame(rowIndex: number, columnIndex: number): boolean {
-  const radius = birdGlyphCornerRadius
-  const x = columnIndex + 0.5
-  const y = rowIndex + 0.5
-  const width = birdGlyphColumns
-  const height = birdGlyphRows
-
-  if (x >= radius && x <= width - radius) return true
-  if (y >= radius && y <= height - radius) return true
-
-  const cornerX = x < radius ? radius : width - radius
-  const cornerY = y < radius ? radius : height - radius
-  return Math.hypot(x - cornerX, y - cornerY) <= radius
-}
-
-// 预计算 glyph 单元 JSX 数组 — 模块加载时一次性完成,避免 StartScreen 每次 re-render
-// (SSE 引擎状态推送频繁)都重算 504 个 React element + className/style 字符串。
-// 隐式 grid flow 不变,outside-frame cell 仍保留 DOM 位置占位(用 visibility:hidden),
-// 维持原渲染语义。
-const birdGlyphElements: ReactNode[] = birdGlyphPattern.flatMap((row, rowIndex) =>
-  [...row].map((cell, columnIndex) => (
-    <i
-      className={cn(
-        cell !== '.' && 'is-lit',
-        cell === '2' && 'is-bright',
-        cell === '3' && 'is-eye-falloff',
-        !isInsideRoundedGlyphFrame(rowIndex, columnIndex) && 'is-outside-frame',
-      )}
-      key={`bird-glyph-${rowIndex}-${columnIndex}`}
-      style={{ animationDelay: `${(rowIndex + columnIndex) * 42}ms` }}
-    />
-  )),
-)
-
-const BirdGlyph = memo(function BirdGlyph() {
+const StartBirdVisual = memo(function StartBirdVisual() {
   return (
-    <div className="start-glyph-bird" aria-hidden="true">
-      {birdGlyphElements}
+    <div className="start-bird-visual" aria-hidden="true">
+      <img alt="" decoding="async" draggable={false} src={startBirdNeuralUrl} />
     </div>
   )
 })
@@ -515,6 +446,7 @@ export function StartScreen({
         !hasRecentFolders && 'start-screen--empty-history',
       )}
     >
+      <StartBirdVisual />
       <section className="start-hero">
         <div className="start-copy">
           <div className="eyebrow-row">
@@ -562,8 +494,6 @@ export function StartScreen({
             </div>
           ) : null}
         </div>
-
-        <BirdGlyph />
       </section>
 
       {hasRecentFolders ? (

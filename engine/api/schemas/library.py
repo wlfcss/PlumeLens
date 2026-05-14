@@ -23,7 +23,7 @@ def _empty_species_candidates() -> list[dict[str, Any]]:
 
 
 class LibraryStatus(StrEnum):
-    """Library status enum (matches mock-workspace FolderStatus on frontend)."""
+    """Library status enum (matches frontend workspace FolderStatus)."""
 
     IDLE = "idle"
     SCANNING = "scanning"

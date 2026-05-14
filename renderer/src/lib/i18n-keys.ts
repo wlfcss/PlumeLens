@@ -11,7 +11,7 @@ import type {
   PhotoGrade,
   PoseTagId,
   ProblemTagId,
-} from '@/lib/mock-workspace'
+} from '@/lib/workspace-types'
 
 export function gradeLabelKey(grade: PhotoGrade) {
   return `selection.grade.${grade}` as const

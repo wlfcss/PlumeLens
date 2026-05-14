@@ -1,6 +1,6 @@
 {
   "name": "plumelens",
-  "version": "0.7.0",
+  "version": "0.7.5",
   "description": "鉴翎 - 辅助鸟类摄影爱好者快速筛选鸟类照片",
   "main": "./out/main/index.js",
   "author": "wlfcss",
@@ -42,7 +42,7 @@
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^5.0.0",
     "clsx": "^2.0.0",
-    "electron": "^39.8.10",
+    "electron": "^41.6.0",
     "electron-builder": "^26.0.0",
     "electron-vite": "^5.0.0",
     "eslint": "^9.0.0",
@@ -62,6 +62,8 @@
     "zustand": "^5.0.0"
   },
   "dependencies": {
+    "@fontsource-variable/geist": "^5.2.8",
+    "@fontsource-variable/geist-mono": "^5.2.7",
     "echarts": "^6.0.0",
     "pinyin-pro": "^3.28.1"
   }

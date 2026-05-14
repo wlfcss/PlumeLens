@@ -4,11 +4,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useRef, useState } from 'react'
 
-import {
-  api,
-  type AnalysisProgressEvent,
-  type QueueStatsResponse,
-} from '@/lib/api-client'
+import { api, type AnalysisProgressEvent, type QueueStatsResponse } from '@/lib/api-client'
 import { logger } from '@/lib/logger'
 
 const QUEUE_STATS_KEY = (libraryId: string) => ['queue-stats', libraryId] as const
@@ -32,8 +28,7 @@ export function usePauseAnalysis() {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: (libraryId: string) => api.pauseAnalysis(libraryId),
-    onSuccess: (_, libraryId) =>
-      qc.invalidateQueries({ queryKey: QUEUE_STATS_KEY(libraryId) }),
+    onSuccess: (_, libraryId) => qc.invalidateQueries({ queryKey: QUEUE_STATS_KEY(libraryId) }),
   })
 }
 
@@ -41,8 +36,7 @@ export function useResumeAnalysis() {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: (libraryId: string) => api.resumeAnalysis(libraryId),
-    onSuccess: (_, libraryId) =>
-      qc.invalidateQueries({ queryKey: QUEUE_STATS_KEY(libraryId) }),
+    onSuccess: (_, libraryId) => qc.invalidateQueries({ queryKey: QUEUE_STATS_KEY(libraryId) }),
   })
 }
 
@@ -50,8 +44,7 @@ export function useCancelAnalysis() {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: (libraryId: string) => api.cancelAnalysis(libraryId),
-    onSuccess: (_, libraryId) =>
-      qc.invalidateQueries({ queryKey: QUEUE_STATS_KEY(libraryId) }),
+    onSuccess: (_, libraryId) => qc.invalidateQueries({ queryKey: QUEUE_STATS_KEY(libraryId) }),
   })
 }
 
@@ -87,12 +80,72 @@ export function useAnalysisProgress(
 
     if (!libraryId || !enabled) return undefined
     let source: EventSource | null = null
+    let unsubscribeBridge: (() => void) | null = null
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null
     let cancelled = false
 
+    const handleProgressFrame = (data: string): void => {
+      try {
+        const parsed = JSON.parse(data) as AnalysisProgressEvent
+        setEvent(parsed)
+
+        // SSE 本身只更新进度按钮；照片卡片/统计来自 library detail 查询。
+        // 分析完成数变化时节流刷新 detail/list，让识别结果持续进入 UI。
+        const signature = [
+          parsed.completed,
+          parsed.failed,
+          parsed.dead,
+          parsed.pending,
+          parsed.processing,
+          parsed.total,
+        ].join(':')
+        const active = parsed.pending + parsed.processing > 0
+        const finished =
+          parsed.total > 0 &&
+          parsed.pending + parsed.processing === 0 &&
+          parsed.completed + parsed.failed + parsed.dead >= parsed.total
+        const previous = lastDetailRefreshRef.current
+        const now = Date.now()
+        const due =
+          !previous ||
+          (signature !== previous.signature &&
+            (finished || now - previous.at >= DETAIL_REFRESH_THROTTLE_MS))
+        if ((active || finished) && due) {
+          lastDetailRefreshRef.current = { at: now, signature }
+          qc.invalidateQueries({ queryKey: LIBRARY_DETAIL_KEY(parsed.library_id) })
+          qc.invalidateQueries({ queryKey: LIBRARIES_KEY })
+        }
+      } catch (e) {
+        logger.warn('SSE malformed frame:', e)
+      }
+    }
+
     const connect = (): void => {
       if (cancelled) return
-      api.progressUrl(libraryId)
+      if (typeof window !== 'undefined' && window.plumelens?.engineSseSubscribe) {
+        unsubscribeBridge = window.plumelens.engineSseSubscribe(
+          `/analysis/library/${libraryId}/progress`,
+          (bridgeEvent) => {
+            if (cancelled) return
+            if (bridgeEvent.type === 'open') {
+              qc.invalidateQueries({ queryKey: LIBRARY_DETAIL_KEY(libraryId) })
+              qc.invalidateQueries({ queryKey: LIBRARIES_KEY })
+              return
+            }
+            if (bridgeEvent.type === 'message') {
+              handleProgressFrame(bridgeEvent.data)
+              return
+            }
+            logger.warn('SSE bridge closed, retrying in 5s:', bridgeEvent.message)
+            unsubscribeBridge?.()
+            unsubscribeBridge = null
+            reconnectTimer = setTimeout(connect, 5000)
+          },
+        )
+        return
+      }
+      api
+        .progressUrl(libraryId)
         .then((url) => {
           if (cancelled) return
           source = new EventSource(url)
@@ -104,39 +157,7 @@ export function useAnalysisProgress(
             qc.invalidateQueries({ queryKey: LIBRARIES_KEY })
           }
           source.onmessage = (msg) => {
-            try {
-              const parsed = JSON.parse(msg.data) as AnalysisProgressEvent
-              setEvent(parsed)
-
-              // SSE 本身只更新进度按钮；照片卡片/统计来自 library detail 查询。
-              // 分析完成数变化时节流刷新 detail/list，让识别结果持续进入 UI。
-              const signature = [
-                parsed.completed,
-                parsed.failed,
-                parsed.dead,
-                parsed.pending,
-                parsed.processing,
-                parsed.total,
-              ].join(':')
-              const active = parsed.pending + parsed.processing > 0
-              const finished =
-                parsed.total > 0 &&
-                parsed.pending + parsed.processing === 0 &&
-                parsed.completed + parsed.failed + parsed.dead >= parsed.total
-              const previous = lastDetailRefreshRef.current
-              const now = Date.now()
-              const due =
-                !previous ||
-                (signature !== previous.signature &&
-                  (finished || now - previous.at >= DETAIL_REFRESH_THROTTLE_MS))
-              if ((active || finished) && due) {
-                lastDetailRefreshRef.current = { at: now, signature }
-                qc.invalidateQueries({ queryKey: LIBRARY_DETAIL_KEY(parsed.library_id) })
-                qc.invalidateQueries({ queryKey: LIBRARIES_KEY })
-              }
-            } catch (e) {
-              logger.warn('SSE malformed frame:', e)
-            }
+            handleProgressFrame(msg.data)
           }
           // 原生 EventSource 只对网络断开 / 5xx 做自动重连;对 4xx(本工程的 429
           // SSE 限流)直接 readyState=CLOSED 不重试。这种 CLOSED 通过手动延时
@@ -166,6 +187,8 @@ export function useAnalysisProgress(
     return () => {
       cancelled = true
       if (reconnectTimer !== null) clearTimeout(reconnectTimer)
+      unsubscribeBridge?.()
+      unsubscribeBridge = null
       source?.close()
       source = null
     }

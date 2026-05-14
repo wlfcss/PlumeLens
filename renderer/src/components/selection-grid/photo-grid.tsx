@@ -17,15 +17,7 @@
  */
 
 import { Images } from 'lucide-react'
-import {
-  memo,
-  useCallback,
-  useEffect,
-  useLayoutEffect,
-  useMemo,
-  useRef,
-  useState,
-} from 'react'
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { useTranslation } from 'react-i18next'
 import { useVirtualizer, type VirtualItem, type Virtualizer } from '@tanstack/react-virtual'
 
@@ -33,7 +25,7 @@ import { StatusDot } from '@/components/common/metric-cell'
 import { StatusPill } from '@/components/common/status-pill'
 import { ThumbnailImage, type ThumbnailLoadStatus } from '@/components/thumbnail-image'
 import { gradeLabelKey } from '@/lib/i18n-keys'
-import type { PhotoGroupRecord, PhotoRecord } from '@/lib/mock-workspace'
+import type { PhotoGroupRecord, PhotoRecord } from '@/lib/workspace-types'
 import {
   categoryTone,
   formatPhotoSpeciesDisplay,

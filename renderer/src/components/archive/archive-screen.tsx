@@ -6,16 +6,7 @@
  */
 
 import { Shield, Trophy, X } from 'lucide-react'
-import {
-  Suspense,
-  lazy,
-  memo,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  type RefObject,
-} from 'react'
+import { Suspense, lazy, memo, useEffect, useMemo, useRef, useState, type RefObject } from 'react'
 import type { useTranslation } from 'react-i18next'
 import { useVirtualizer } from '@tanstack/react-virtual'
 
@@ -37,19 +28,12 @@ import {
 } from '@/lib/archive-collection'
 import { openExternalLink } from '@/lib/external-link'
 import { archiveTabLabelKey } from '@/lib/i18n-keys'
-import type {
-  ArchiveTab,
-  PhotoRecord,
-  SpeciesRecord,
-} from '@/lib/mock-workspace'
+import type { ArchiveTab, PhotoRecord, SpeciesRecord } from '@/lib/workspace-types'
 import { formatRatio, formatScore, type Tone } from '@/lib/photo-helpers'
 import { formatSpeciesPinyin } from '@/lib/species-pinyin'
 import { getSpeciesWiki } from '@/lib/species-wiki'
 import { cn } from '@/lib/utils'
-import {
-  useResponsiveGridLayout,
-  virtualGridStyle,
-} from '@/lib/virtual-grid'
+import { useResponsiveGridLayout, virtualGridStyle } from '@/lib/virtual-grid'
 
 const ArchiveGeoMap = lazy(() =>
   import('@/components/archive-geo-map').then((module) => ({ default: module.ArchiveGeoMap })),

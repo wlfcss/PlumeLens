@@ -18,6 +18,10 @@ class Settings(BaseSettings):
     # Optional local API bearer token. Electron sets this per process launch; when unset
     # (pytest / standalone development), auth is disabled for convenience.
     api_token: str | None = None
+    # Production guard: packaged Electron sets PLUMELENS_REQUIRE_API_TOKEN=1 so a
+    # missing one-time token fails loudly instead of exposing an unauthenticated
+    # loopback API. Dev/test keep this false for direct uvicorn/ASGI workflows.
+    require_api_token: bool = False
 
     # Pipeline — model files
     models_dir: Path = Path(__file__).resolve().parent.parent / "models"

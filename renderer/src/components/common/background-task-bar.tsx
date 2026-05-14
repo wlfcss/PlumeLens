@@ -2,7 +2,7 @@ import type { useTranslation } from 'react-i18next'
 
 import { GlyphMatrix } from '@/components/common/glyph-matrix'
 import { statusLabelKey } from '@/lib/i18n-keys'
-import type { FolderRecord, FolderStatus } from '@/lib/mock-workspace'
+import type { FolderRecord, FolderStatus } from '@/lib/workspace-types'
 import { formatRatio } from '@/lib/photo-helpers'
 
 // "活跃任务"指 scanner / hashing / 后台 analyzer / metadata updater / exporter

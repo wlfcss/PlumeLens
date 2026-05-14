@@ -3,25 +3,21 @@ import { act, render, screen } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { describe, it, expect, beforeAll, vi } from 'vitest'
 import '@/i18n'
-import App, {
-  applyNewSpeciesMarkers,
-  buildArchiveMapPins,
-  deriveSpeciesRecords,
-  extractPhotoGps,
-  isPlainSpaceKey,
-  shouldIgnoreSelectionReviewShortcutTarget,
-} from '@/App'
+import App, { isPlainSpaceKey, shouldIgnoreSelectionReviewShortcutTarget } from '@/App'
 import { buildSpeciesCollectionGroups } from '@/lib/archive-collection'
-import {
-  buildGroupStartMsMap,
-  buildReviewPhotoOrderForGroup,
-} from '@/lib/photo-grid-helpers'
+import { buildGroupStartMsMap, buildReviewPhotoOrderForGroup } from '@/lib/photo-grid-helpers'
 import { pipelineRuntimeFromProvider } from '@/components/start/start-screen'
 import {
   effectiveSpeciesSummary,
   getArchiveSpeciesEntries,
   tileSpeciesSourceBadge,
 } from '@/lib/photo-display'
+import {
+  applyNewSpeciesMarkers,
+  buildArchiveMapPins,
+  deriveSpeciesRecords,
+  extractPhotoGps,
+} from '@/lib/workspace-projection'
 import i18next from 'i18next'
 import { listAllSpecies, resolveSpeciesCanonicalSci } from '@/lib/species-wiki'
 import type {
@@ -29,7 +25,7 @@ import type {
   PhotoGroupRecord,
   PhotoRecord,
   WorkspaceSnapshot,
-} from '@/lib/mock-workspace'
+} from '@/lib/workspace-types'
 
 // Mock the Electron preload API
 beforeAll(() => {

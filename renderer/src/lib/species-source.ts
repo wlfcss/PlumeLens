@@ -11,7 +11,7 @@
 
 import type { useTranslation } from 'react-i18next'
 
-import type { PhotoRecord } from '@/lib/mock-workspace'
+import type { PhotoRecord } from '@/lib/workspace-types'
 
 import { effectiveSpeciesName, type Tone } from './photo-helpers'
 

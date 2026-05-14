@@ -17,7 +17,7 @@ from engine.core.database import Database
 from engine.core.imaging import configure_pil_decompression_bomb_guard
 from engine.core.logging import setup_logging
 from engine.pipeline.manager import PipelineManager
-from engine.services.queue import mark_stuck_tasks_failed, recover_on_startup
+from engine.services.queue import mark_stuck_tasks_failed, recover_on_startup, reset_transient_tasks
 from engine.services.scene_grouper import regroup_library
 from engine.services.thumbnail import generate_library_thumbnails, thumbnail_cache_root
 
@@ -426,11 +426,21 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     await _await_cancelled_task(sweep_task, "sweep_stuck_tasks")
     await _await_cancelled_task(geocode_task, "backfill_locations")
 
+    from engine.api.routes.analysis import cancel_all_workers
+
+    workers_cancelled = await cancel_all_workers(wait_seconds=10.0)
+    if not workers_cancelled:
+        await logger.awarning("Timed out cancelling analysis workers during shutdown")
+    reset_count = await reset_transient_tasks(db, reason="shutdown")
+    if reset_count > 0:
+        await logger.ainfo("Reset transient queue tasks during shutdown", count=reset_count)
+
+    thread_pool.shutdown(wait=True, cancel_futures=True)
+
     close_pipeline = getattr(app.state.pipeline, "close", None)
     if callable(close_pipeline):
         close_result = close_pipeline()
         if inspect.isawaitable(close_result):
             await close_result
     await app.state.db.close()
-    thread_pool.shutdown(wait=False, cancel_futures=True)
     await logger.ainfo("PlumeLens Engine shutting down")

@@ -468,10 +468,10 @@ async def mark_failed_with_retry(
 # ---------------------------------------------------------------------------
 
 
-async def recover_on_startup(db: Database) -> int:
-    """Recover tasks left in transient states when the app crashed.
+async def reset_transient_tasks(db: Database, *, reason: str) -> int:
+    """Reset tasks left in transient states back to pending.
 
-    覆盖两类孤儿:
+    覆盖两类瞬态:
     1. PROCESSING:worker 卡死/进程被杀,任务永远在 PROCESSING。
     2. FAILED:mark_failed_with_retry 是两步 transition(FAILED → PENDING/DEAD),如果
        第一步 commit 成功后第二步还没跑完进程就 crash,task 会永远停在 FAILED。
@@ -499,8 +499,13 @@ async def recover_on_startup(db: Database) -> int:
     await conn.commit()
     recovered = len(rows)
     if recovered > 0:
-        await logger.ainfo("Recovered orphan tasks", count=recovered)
+        await logger.ainfo("Reset transient tasks", count=recovered, reason=reason)
     return recovered
+
+
+async def recover_on_startup(db: Database) -> int:
+    """Recover queue tasks left in transient states when the app crashed."""
+    return await reset_transient_tasks(db, reason="startup")
 
 
 # 一张照片正常分析(YOLO + pose + IQA + species)经验值 ~0.4-1s。冷启 species 第一推

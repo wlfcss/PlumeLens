@@ -39,6 +39,10 @@ export interface LaunchHandle {
   dataDir: string
 }
 
+export interface LaunchOptions {
+  disableCloseConfirm?: boolean
+}
+
 /**
  * 创一个新的 tmp data dir(每次 launchFresh 一个独立目录,模拟全新安装)。
  * 调用方负责 cleanup(app.close 后 cleanupDataDir(dir))。
@@ -64,7 +68,11 @@ export function cleanupDataDir(dir: string): void {
  * 返回这个值,主进程 process-manager 会把它作为 PLUMELENS_DATA_DIR 注入 engine env。
  * 整个 app + engine 子进程都跑在隔离目录里,完全和用户真实数据无关。
  */
-export async function launchApp(dataDir: string): Promise<LaunchHandle> {
+export async function launchApp(
+  dataDir: string,
+  options: LaunchOptions = {},
+): Promise<LaunchHandle> {
+  const disableCloseConfirm = options.disableCloseConfirm ?? true
   const app = await _electron.launch({
     executablePath: APP_PATH,
     args: [`--user-data-dir=${dataDir}`],
@@ -73,8 +81,8 @@ export async function launchApp(dataDir: string): Promise<LaunchHandle> {
       // 防止 engine lifespan 的 _kill_orphan_engines 通过 pgrep -f 误杀用户正在跑
       // 的 PlumeLens engine(那个 engine 跑在不同 data dir,但 binary 名一致)。
       PLUMELENS_SKIP_ORPHAN_KILL: '1',
-      // 自动化关闭应用时跳过二次确认,真实用户路径仍由主进程弹窗保护。
-      PLUMELENS_E2E_DISABLE_CLOSE_CONFIRM: '1',
+      // 默认自动化关闭应用时跳过二次确认;需要覆盖真实确认弹窗的 spec 可显式关闭。
+      ...(disableCloseConfirm ? { PLUMELENS_E2E_DISABLE_CLOSE_CONFIRM: '1' } : {}),
     },
     timeout: 30_000,
   })
