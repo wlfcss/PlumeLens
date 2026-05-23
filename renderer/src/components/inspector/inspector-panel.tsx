@@ -47,8 +47,9 @@ import {
   gradeTone,
   tileSpeciesSourceBadge,
 } from '@/lib/photo-display'
+import { speciesArtworkAssetUrl } from '@/lib/species-artwork'
 import { speciesSourceBadge, speciesSourceKind, type DetectionLike } from '@/lib/species-source'
-import { getSpeciesWiki, resolveSpeciesCanonicalSci } from '@/lib/species-wiki'
+import { resolveSpeciesCanonicalSci } from '@/lib/species-wiki'
 import { cn } from '@/lib/utils'
 
 function useExternalEditors(): { topaz: string | null; photoshop: string | null } {
@@ -539,7 +540,7 @@ function resolveShootingSpeciesImageUrl(item: ShootingSpeciesStat): string | nul
     resolveSpeciesCanonicalSci(item.latinName) ??
     resolveSpeciesCanonicalSci(item.name) ??
     resolveSpeciesCanonicalSci(item.englishName)
-  return canonicalSci ? (getSpeciesWiki(canonicalSci)?.image_url ?? null) : null
+  return canonicalSci ? speciesArtworkAssetUrl(canonicalSci) : null
 }
 
 function ShootingAchievementCard({

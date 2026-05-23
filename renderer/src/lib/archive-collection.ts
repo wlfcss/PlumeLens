@@ -114,7 +114,9 @@ function cssImageUrl(url: string): string {
 
 export function speciesArtworkStyle(imageUrl: string | null | undefined, fallbackGradient: string) {
   return {
-    '--species-artwork-bg': imageUrl ? cssImageUrl(imageUrl) : fallbackGradient,
+    '--species-artwork-bg': imageUrl
+      ? `${cssImageUrl(imageUrl)}, ${fallbackGradient}`
+      : fallbackGradient,
   } as CSSProperties
 }
 

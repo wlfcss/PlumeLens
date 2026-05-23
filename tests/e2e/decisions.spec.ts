@@ -1338,7 +1338,7 @@ test.describe('Photo decision flow (mock backend)', () => {
     )
     await expect(report.locator('.shooting-achievement-card__photo img').first()).toHaveAttribute(
       'src',
-      /upload\.wikimedia\.org|plumelens:/,
+      /^plumelens:/,
     )
     await report.locator('.shooting-achievement-card').filter({ hasText: '须浮鸥' }).first().click()
     await expect(page.getByTestId('species-detail-popover')).toBeVisible()
@@ -1369,7 +1369,7 @@ test.describe('Photo decision flow (mock backend)', () => {
     await expect(popover.locator('.species-detail-popover__extract')).toContainText('池鹭')
     await expect(popover.locator('.species-detail-popover__art img')).toHaveAttribute(
       'src',
-      /wikimedia|upload\.wikimedia\.org/,
+      /^plumelens:\/\/species-artwork\//,
     )
   })
 
@@ -1787,9 +1787,43 @@ test.describe('Archive species panel (local wiki data)', () => {
     )
     await expect(page.locator('.collection-section__heading')).toHaveCount(1)
     await expect(page.locator('.collection-section__heading')).toContainText('国家一级保护')
+    await expect(page.locator('.archive-detail')).toContainText('等级一级')
 
     await page.getByRole('button', { name: /图鉴总数/ }).click()
     await expect(page.locator('.archive-filter-cell--all')).toHaveAttribute('aria-pressed', 'true')
+
+    const initialMaxVirtualRow = await page
+      .locator('.collection-virtual-row')
+      .evaluateAll((rows) =>
+        Math.max(...rows.map((row) => Number(row.getAttribute('data-index') ?? 0))),
+      )
+    const archiveMain = page.locator('.archive-main')
+    await archiveMain.evaluate((node) => {
+      node.scrollTop = node.scrollHeight
+    })
+    await expect
+      .poll(async () =>
+        page.locator('.collection-virtual-row').evaluateAll((rows) =>
+          Math.max(...rows.map((row) => Number(row.getAttribute('data-index') ?? 0))),
+        ),
+      )
+      .toBeGreaterThan(initialMaxVirtualRow + 5)
+
+    const visibleCardCount = await archiveMain.evaluate((node) => {
+      const scrollerRect = node.getBoundingClientRect()
+      return Array.from(node.querySelectorAll('.collection-card')).filter((card) => {
+        const cardRect = card.getBoundingClientRect()
+        return cardRect.bottom > scrollerRect.top && cardRect.top < scrollerRect.bottom
+      }).length
+    })
+    expect(visibleCardCount).toBeGreaterThan(0)
+
+    await page.getByPlaceholder('搜索文件夹、文件名或物种').fill('Alcedo atthis')
+    await expect(page.locator('.collection-card--active')).toContainText('翠鸟')
+    await expect(page.locator('.archive-detail h2')).toContainText('翠鸟')
+    await expect
+      .poll(async () => page.locator('.archive-main').evaluate((node) => node.scrollTop))
+      .toBe(0)
   })
 
   test('species detail panel shows Wikipedia link when available', async ({ page }) => {

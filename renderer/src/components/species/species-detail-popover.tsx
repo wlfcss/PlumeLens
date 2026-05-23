@@ -20,6 +20,7 @@ import type { useTranslation } from 'react-i18next'
 import { IconButton } from '@/components/common/icon-button'
 import { SectionLabel } from '@/components/common/section-label'
 import { openExternalLink } from '@/lib/external-link'
+import { speciesArtworkAssetUrl } from '@/lib/species-artwork'
 import { formatSpeciesPinyin } from '@/lib/species-pinyin'
 import { getSpeciesWiki, resolveSpeciesCanonicalSci } from '@/lib/species-wiki'
 import { cn } from '@/lib/utils'
@@ -88,7 +89,7 @@ export function SpeciesInfoPopover({
   const extract = wiki?.zh_extract ?? wiki?.en_extract ?? t('speciesDetail.noExtract')
   const sourceUrl = wiki?.zh_url ?? wiki?.en_url ?? null
   const sourceLabel = wiki?.zh_url ? t('speciesDetail.sourceZh') : t('speciesDetail.sourceEn')
-  const imageUrl = wiki?.image_url ?? null
+  const imageUrl = speciesArtworkAssetUrl(detail.canonicalSci)
   const familyName = wiki?.family_zh ?? wiki?.family_sci ?? null
   const extractParagraphs = extract
     .split(/\n+/)

@@ -148,7 +148,7 @@ test.describe('App shell', () => {
 
   test('shows the PlumeLens brand mark', async ({ page }) => {
     await page.goto('/')
-    await expect(page.getByText('PLUMELENS').first()).toBeVisible()
+    await expect(page.locator('.brand-mark__copy')).toContainText('鉴翎')
     await expect(page.locator('.brand-mark__logo')).toBeVisible()
   })
 
@@ -272,8 +272,8 @@ test.describe('Visual regression', () => {
     await page.goto('/')
     await page.getByRole('button', { name: '羽迹', exact: true }).click()
     await page.waitForTimeout(500)
-    // 物种详情面板会拉 Wikipedia 缩略图（image_url），网络慢时 500ms 等不到
-    // 等图片真正加载完，避免基线截屏与实际截屏相差一个 cover 图带来的 flakiness
+    // 物种详情面板的封面走 plumelens://species-artwork 随包资源协议；
+    // Chromium UI 层 E2E 无 Electron protocol handler,这里仅等待常规 img 稳定。
     await page.waitForFunction(
       () => Array.from(document.images).every((img) => img.complete),
       undefined,

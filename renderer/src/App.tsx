@@ -806,6 +806,7 @@ export default function App() {
               archivePhotos={archivePhotos}
               archiveSpecies={archiveSpecies}
               archiveTab={archiveTab}
+              archiveSearchKey={deferredSearch}
               onOpenReview={handleOpenReview}
               onSelectSpecies={setActiveSpeciesId}
               onSetArchiveTab={setArchiveTab}

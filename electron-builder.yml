@@ -30,6 +30,7 @@ files:
 #             │   └── seed42_adapter.pt       （LoRA + species/reject head ~32MB）
 #             ├── canonical_extended.parquet  （1591 类元数据）
 #             └── v4_calibration_policy.json  （recognized / uncertain / unrecognized 三态阈值）
+#     └── species-artwork/          ← 羽迹物种封面图,运行时离线读取
 extraResources:
   - from: dist/plumelens-engine
     to: plumelens-engine
@@ -54,6 +55,12 @@ extraResources:
       - "!**/__pycache__/**"
       - "!**/*.bak"
       - "!**/*.tmp"
+  - from: resources/species-artwork
+    to: species-artwork
+    filter:
+      - "*.webp"
+      - "manifest.json"
+      - "THIRD_PARTY_ATTRIBUTIONS.md"
 mac:
   # target 用 dir：electron-builder 的 dmg-builder 在打包时**丢失 Electron Framework
   # binary**（157MB 的核心库），导致从 dmg 装机后启动 dyld 报 Library missing。

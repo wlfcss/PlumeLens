@@ -2,6 +2,7 @@ import type { LibraryDetail } from '@/lib/api-client'
 import { speciesCollectionGroupId, speciesCollectionGroupRank } from '@/lib/archive-collection'
 import { getArchiveSpeciesEntries, photoCategory } from '@/lib/photo-display'
 import { effectivePhotoGrade, type FolderSummary } from '@/lib/photo-helpers'
+import { speciesArtworkAssetUrl } from '@/lib/species-artwork'
 import { listAllSpecies, normalizeSpeciesAlias } from '@/lib/species-wiki'
 import type {
   PhotoGroupRecord,
@@ -293,7 +294,7 @@ export function deriveSpeciesRecords(workspace: WorkspaceSnapshot): SpeciesRecor
       latinName: item.canonical_sci,
       englishName: item.canonical_en,
       coverGradient: `linear-gradient(135deg, hsl(${hue}, 45%, 32%), hsl(${(hue + 40) % 360}, 38%, 16%))`,
-      imageUrl: item.image_url,
+      imageUrl: speciesArtworkAssetUrl(item.canonical_sci),
       photoCount: captured?.photos.length ?? 0,
       firstSeenAt: captured?.firstSeenAt ?? '',
       lastSeenAt: captured?.lastSeenAt ?? '',

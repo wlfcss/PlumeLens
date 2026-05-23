@@ -9,6 +9,10 @@
   "scripts": {
     "start": "electron-vite dev",
     "build:engine": "node scripts/build-engine.cjs",
+    "species:artwork:download": "uv run --project engine python scripts/download_species_artwork.py",
+    "species:artwork:optimize": "uv run --project engine python scripts/optimize_species_artwork.py",
+    "species:artwork:attribution": "uv run --project engine python scripts/generate_species_artwork_attributions.py",
+    "species:artwork": "npm run species:artwork:download && npm run species:artwork:optimize && npm run species:artwork:attribution",
     "build": "electron-vite build",
     "dist:mac:bundle": "npm run build && npx electron-builder --mac --arm64",
     "dist:mac:smoke": "uv run --no-sync --project engine python tests/e2e-electron/fixtures/generate_photos.py && npx playwright test --config=tests/e2e-electron/playwright.config.ts cold-start.spec.ts",

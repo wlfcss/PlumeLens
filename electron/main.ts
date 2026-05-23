@@ -21,6 +21,7 @@ protocol.registerSchemesAsPrivileged([
     privileges: {
       standard: true,
       secure: true,
+      corsEnabled: true,
       supportFetchAPI: true,
       stream: true,
     },
@@ -42,6 +43,7 @@ const windowBounds = {
 
 const REALPATH_CACHE_TTL_MS = 60_000
 const REALPATH_CACHE_MAX = 2048
+const SPECIES_ARTWORK_EXTENSIONS = ['.webp', '.jpg', '.png'] as const
 const GITHUB_REPO = 'wlfcss/PlumeLens'
 const GITHUB_REPO_PATH = `/${GITHUB_REPO.toLowerCase()}`
 const GITHUB_LATEST_RELEASE_API = `https://api.github.com/repos/${GITHUB_REPO}/releases/latest`
@@ -71,6 +73,54 @@ function normalizeExternalUrl(target: unknown): string | null {
     return allowed ? url.toString() : null
   } catch {
     return null
+  }
+}
+
+function speciesArtworkKeyFromName(name: string): string {
+  return name
+    .normalize('NFKD')
+    .replace(/[^a-zA-Z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .toLowerCase()
+}
+
+function normalizeSpeciesArtworkKey(target: unknown): string | null {
+  if (typeof target !== 'string') return null
+  const raw = target.trim()
+  if (!raw || raw.length > 180) return null
+  if (raw.includes('/') || raw.includes('\\') || raw.includes('..')) return null
+  const key = speciesArtworkKeyFromName(raw)
+  return key ? key : null
+}
+
+function resolveCachedSpeciesArtworkPath(root: string, key: string): string | null {
+  for (const ext of SPECIES_ARTWORK_EXTENSIONS) {
+    const candidate = join(root, `${key}${ext}`)
+    if (existsSync(candidate)) return candidate
+  }
+  return null
+}
+
+async function serveLocalCacheFile(
+  filePath: string,
+  rootResolved: string,
+  realRoot: string,
+  logPrefix: string,
+): Promise<Response> {
+  const resolved = resolve(filePath)
+  if (!resolved.startsWith(rootResolved + '/') && resolved !== rootResolved) {
+    return new Response('Forbidden (escape)', { status: 403 })
+  }
+  try {
+    const realFile = await cachedRealpath(resolved)
+    if (!realFile.startsWith(realRoot + '/') && realFile !== realRoot) {
+      return new Response('Forbidden (symlink escape)', { status: 403 })
+    }
+    return await net.fetch(pathToFileURL(realFile).toString())
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    process.stderr.write(`[${logPrefix}] failed resolved=${resolved} error=${message}\n`)
+    return new Response('Not found', { status: 404 })
   }
 }
 
@@ -526,7 +576,7 @@ function createWindow(): void {
           "script-src 'self' 'unsafe-inline' 'unsafe-eval' http://localhost:5173;",
           "style-src 'self' 'unsafe-inline';",
           "connect-src 'self' http://127.0.0.1:* http://localhost:5173 ws://localhost:5173 plumelens:;",
-          "img-src 'self' data: blob: plumelens: https://upload.wikimedia.org;",
+          "img-src 'self' data: blob: plumelens:;",
           "font-src 'self' data:;",
         ].join(' ')
       : [
@@ -534,7 +584,7 @@ function createWindow(): void {
           "script-src 'self';",
           "style-src 'self' 'unsafe-inline';",
           "connect-src 'self' http://127.0.0.1:* plumelens:;",
-          "img-src 'self' data: blob: plumelens: https://upload.wikimedia.org;",
+          "img-src 'self' data: blob: plumelens:;",
           "font-src 'self' data:;",
         ].join(' ')
 
@@ -892,22 +942,52 @@ app.whenReady().then(async () => {
   lockdownUserData(userDataDir)
 
   const thumbnailsRoot = join(userDataDir, 'derived', 'thumbnails')
-  const rootResolved = resolve(thumbnailsRoot)
+  const speciesArtworkRoot = app.isPackaged
+    ? join(process.resourcesPath, 'species-artwork')
+    : join(app.getAppPath(), 'resources', 'species-artwork')
+  const thumbnailsRootResolved = resolve(thumbnailsRoot)
+  const speciesArtworkRootResolved = resolve(speciesArtworkRoot)
   // 启动期一次性算 realpath(thumbnailsRoot) — userData 目录在应用运行期间不会变,
   // 之前每个 plumelens:// 请求都重新 realpath 这个根,大量并发缩略图加载时会让
   // main process 的 fs worker 排队。先尝试 realpath,thumbnailsRoot 不存在时
   // (首次启动 / 数据被清)用 rootResolved 兜底,等首次 ensure_dir 后下次启动再算对。
-  let realRootCache: string = rootResolved
+  let realThumbnailRootCache: string = thumbnailsRootResolved
   try {
-    realRootCache = await realpath(thumbnailsRoot)
+    realThumbnailRootCache = await realpath(thumbnailsRoot)
   } catch {
     /* dir 不存在,后续按需 realpath 单文件时会触发创建 */
   }
+  let realSpeciesArtworkRootCache: string = speciesArtworkRootResolved
+  try {
+    realSpeciesArtworkRootCache = await realpath(speciesArtworkRoot)
+  } catch {
+    /* 开发期未下载物种图时目录可能不存在;请求会返回 404 并由 UI 渐变兜底。 */
+  }
   process.stderr.write(`[main] userData=${app.getPath('userData')}\n`)
   process.stderr.write(`[main] thumbnailsRoot=${thumbnailsRoot}\n`)
+  process.stderr.write(`[main] speciesArtworkRoot=${speciesArtworkRoot}\n`)
   resolveEditors()
   protocol.handle('plumelens', async (request) => {
     const url = new URL(request.url)
+    if (url.host === 'species-artwork') {
+      let rawKey: string
+      try {
+        rawKey = decodeURIComponent(url.pathname.replace(/^\/+/, ''))
+      } catch {
+        return new Response('Bad URL', { status: 400 })
+      }
+      const key = normalizeSpeciesArtworkKey(rawKey)
+      if (!key) return new Response('Bad artwork key', { status: 400 })
+      const cachedPath = resolveCachedSpeciesArtworkPath(speciesArtworkRoot, key)
+      if (!cachedPath) return new Response('Not found', { status: 404 })
+      return await serveLocalCacheFile(
+        cachedPath,
+        speciesArtworkRootResolved,
+        realSpeciesArtworkRootCache,
+        'species-artwork',
+      )
+    }
+
     if (url.host !== 'thumb') {
       return new Response('Bad host', { status: 400 })
     }
@@ -927,24 +1007,13 @@ app.whenReady().then(async () => {
       return new Response('Forbidden (bad prefix)', { status: 403 })
     }
     const filePath = join(thumbnailsRoot, rel)
-    // path.resolve 后必须仍在 thumbnailsRoot 之内（防普通 path traversal）
-    const resolved = resolve(filePath)
-    if (!resolved.startsWith(rootResolved + '/') && resolved !== rootResolved) {
-      return new Response('Forbidden (escape)', { status: 403 })
-    }
-    try {
-      // realpath 单文件确认真实落点(防 thumbnailsRoot 内 symlink 逃逸);
-      // root 用启动期缓存的 realRootCache,无需每次重算。
-      const realFile = await cachedRealpath(resolved)
-      if (!realFile.startsWith(realRootCache + '/') && realFile !== realRootCache) {
-        return new Response('Forbidden (symlink escape)', { status: 403 })
-      }
-      return await net.fetch(pathToFileURL(realFile).toString())
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err)
-      process.stderr.write(`[thumb] failed rel=${rel} resolved=${resolved} error=${message}\n`)
-      return new Response('Not found', { status: 404 })
-    }
+    // path.resolve + realpath 单文件确认真实落点(防 path traversal / symlink 逃逸)。
+    return await serveLocalCacheFile(
+      filePath,
+      thumbnailsRootResolved,
+      realThumbnailRootCache,
+      'thumb',
+    )
   })
 
   processManager = new ProcessManager()

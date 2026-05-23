@@ -18,9 +18,16 @@
 - `ReviewImageStage` 与 `SpeciesOverrideEditor` 拆出独立文件，消除 review-modal 反向 import App 的旧依赖。
 - `SelectionScreen` 的滚动状态、紧凑头部、更多菜单和回顶按钮抽为 `useSelectionScrollState`。
 - 选片网格与羽迹物种墙共用 `lib/virtual-grid.ts`，补齐空容器恢复、ResizeObserver rAF throttle 和单元测试。
+- 羽迹物种墙修复滚动到底部后卡片图片消失、只剩黑色占位的问题；搜索/筛选仍会回到顶部，普通数据刷新不再误重置滚动。
 - 公用展示逻辑迁出到 `components/common/*` 与 `lib/photo-display.ts`、`lib/photo-helpers.ts`、`lib/photo-grid-helpers.ts`、`lib/archive-collection.ts`、`lib/species-source.ts`。
 - 新增 renderer logger 与 ErrorBoundary，收口散落日志和页面级错误恢复。
 - 移除未使用依赖 `class-variance-authority`。
+
+### 羽迹离线资源
+
+- 羽迹物种封面图改为随包 WebP 资源，1591 个物种全部通过 `plumelens://species-artwork/<canonical>` 本地协议加载，渲染器不再依赖 `image_url` 或远程 Wikimedia 图片。
+- 新增 `scripts/download_species_artwork.py`、`scripts/optimize_species_artwork.py` 与 `scripts/generate_species_artwork_attributions.py`，下载节流为 1 秒 1 次且带非空 User-Agent，统一转 WebP，并生成 Commons 第三方归因清单。
+- `electron-builder.yml` 将 `resources/species-artwork/*.webp`、`manifest.json` 与 `THIRD_PARTY_ATTRIBUTIONS.md` 打入 DMG；packaged E2E 增加 `plumelens://species-artwork` 协议加载与“无远程图片请求”覆盖。
 
 ### 服务端与测试清理
 
@@ -33,7 +40,8 @@
 - 清理未接入空壳 stub，并把 `evals/run_eval.py` / `evals/report.py` 补成可执行的数据集清单与 manifest diff 工具。
 - macOS 主窗口关闭确认后改为退出整个应用并停止本地引擎，避免 Dock 残留运行态与从 Dock 二次启动初始化异常；packaged cold-start smoke 增加该回归覆盖。
 - Electron 从 39.8.10 升级到 41.6.0（39.x 已 EOL），依赖图保持最小变化：除 `electron` 本体外仅新增其嵌套的 Node 24 types，不带动 electron-builder / electron-vite / Playwright / Vite / React。
-- 当前基础检查重新拉绿：`npm run typecheck`、`npm run lint`、`npm run test`、`uv run pyright`、`uv run ruff check`、`uv run pytest tests/engine -q`、`npm run build`、`npm run dist:mac:bundle`、`npm run dist:mac:smoke`；另补 packaged thumbnail smoke 覆盖 `plumelens://thumb`。
+- 当前基础检查重新拉绿：`npm run typecheck`、`npm run lint`、`npm run test`、`npm audit --audit-level=high`、`uv run pyright`、`uv run ruff check`、`uv run pytest tests/engine -q`、`npx playwright test`、`npx playwright test --config=tests/e2e-electron/playwright.config.ts`、`npm run build`、`npm run dist:mac:bundle`；另补 packaged thumbnail 与 species-artwork smoke 覆盖 `plumelens://thumb` / `plumelens://species-artwork`。
+- `npm audit fix` 只更新 `brace-expansion` 与 `ws` 的传递依赖补丁版本，当前 `npm audit` 为 0 vulnerabilities。
 
 ### 文档同步
 
@@ -79,6 +87,7 @@
 - 羽迹地理分布修复缓存失效、直辖市钻取、Nominatim 超时与未解析统计。
 - 地图与物种聚合严格使用有效入羽迹口径：精选/可用/记录，且来源为 `manual / group_consensus / model`。
 - 物种详情加入中文简介、照片浏览入口、保护等级、IUCN、目科信息和拼音展示。
+- 羽迹物种封面图改为 `plumelens://species-artwork` 随包 WebP 资源加载，渲染器不再直连 Wikimedia 图片。
 
 ### 设置、桌面集成与发布体验
 

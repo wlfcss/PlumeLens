@@ -47,9 +47,10 @@
 - **前端结构**：`App.tsx` 路由/组件拆分与 workspace projection 抽离完成，Start / Selection / Archive / Export / Review 等子树已下沉到独立组件，thumbnail repair 与 library workspace sync 也已抽为 hooks，根组件约 990 行。
 - **领域类型**：历史 `mock-workspace.ts` 已拆为正式 `workspace-types.ts`、`workspace-projection.ts` 与仅用于 fixture 的 `workspace-fixtures.ts`。
 - **列表稳定性**：选片/羽迹共用虚拟网格工具，滚动状态、回顶、紧凑头部和错误恢复做了加固。
+- **羽迹离线化**：1591 种羽迹封面图随包提供 WebP 资源，运行时走 `plumelens://species-artwork`，离线使用不再依赖 Wikimedia 远程图片；随包保留 Commons 第三方归因清单。
 - **复核模块化**：复核图片舞台与物种编辑器拆出独立文件，消除 review-modal 反向依赖 App 的旧结构。
 - **安全硬化**：preload 统一注入 API/SSE bearer token，生产打包态缺 token 会拒绝启动，`open-in-editor` IPC 增加运行时参数校验。
-- **质量闸门**：TypeScript、ESLint、Vitest、pyright、ruff、pytest、build 重新校准为全绿基线。
+- **质量闸门**：TypeScript、ESLint、Vitest、Playwright、packaged Electron E2E、pyright、ruff、pytest、build、DMG bundle 与 `npm audit` 重新校准为全绿基线。
 - **文档同步**：README、CHANGELOG、架构、开发、交接和审计文档同步到 0.7.5 真实状态，0.7.0 release note 保留为历史快照。
 
 ## 0.7.0 更新重点
@@ -138,7 +139,7 @@ species v4 使用 dino 项目校准出的 `balanced_v1` 策略：只有 `recogni
 | 后端     | Python 3.11、FastAPI、Pydantic、structlog                 | API、扫描、队列、导出、地理回填、业务聚合      |
 | 推理     | onnxruntime、torch、transformers                          | YOLO / pose / IQA / DINOv3 species v4          |
 | 存储     | SQLite WAL、aiosqlite                                     | 图库、照片、任务队列、分析结果、人工决策和缓存 |
-| 图片资产 | `plumelens://thumb` 协议                                  | 安全加载缩略图，不暴露 `file://`               |
+| 图片资产 | `plumelens://thumb` / `plumelens://species-artwork` 协议   | 安全加载缩略图与随包鸟种封面，不暴露 `file://` |
 
 ### 数据与隐私
 
@@ -224,7 +225,7 @@ GitHub Actions 当前只保留 macOS arm64 自动构建流程：
 
 - 已完成：本地 hybrid 推理、选片工作台、深度复核、拍摄报告、导出、羽迹物种墙、地理分布、macOS arm64 自动构建。
 - 已完成：源文件夹失联检测与重新关联、导出快照锁定、JPG/RAW/XMP 导出、中文报告、大列表虚拟化、缩略图自动修复、设置页版权/更新/模型版本/清理历史。
-- 已完成：0.7.5 技术债清理，App.tsx 路由/组件拆分、workspace projection 抽离、thumbnail repair / library workspace sync hook 化、SSE/token 与 IPC 安全边界收紧、质量闸门恢复全绿。
+- 已完成：0.7.5 技术债清理，App.tsx 路由/组件拆分、workspace projection 抽离、thumbnail repair / library workspace sync hook 化、羽迹离线 WebP 资源、SSE/token 与 IPC 安全边界收紧、质量闸门恢复全绿。
 - 持续优化：active view / mutation glue 可继续从 App 编排层下沉、更多真实相机样张覆盖、物种资料图片人工审核。
 - 待验证：Windows 打包、更多相机品牌的 AF 对焦点解析、更多 RAW 组合样本。
 
@@ -238,3 +239,4 @@ GitHub Actions 当前只保留 macOS arm64 自动构建流程：
 - DINOv3 backbone 遵循 Meta DINOv3 许可，商业使用需自行确认许可边界。
 - CLIPIQA+ / HyperIQA 基于公开 IQA 研究模型导出，需遵循原始论文与代码仓库许可。
 - 分类表基于《中国鸟类名录 v12.0》整理。
+- 随包鸟种封面来自 Wikimedia Commons 等公开来源，第三方图片归因见 `resources/species-artwork/THIRD_PARTY_ATTRIBUTIONS.md`。

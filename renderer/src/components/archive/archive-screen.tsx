@@ -6,7 +6,18 @@
  */
 
 import { Shield, Trophy, X } from 'lucide-react'
-import { Suspense, lazy, memo, useEffect, useMemo, useRef, useState, type RefObject } from 'react'
+import {
+  Suspense,
+  lazy,
+  memo,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type RefObject,
+} from 'react'
 import type { useTranslation } from 'react-i18next'
 import { useVirtualizer } from '@tanstack/react-virtual'
 
@@ -30,10 +41,15 @@ import { openExternalLink } from '@/lib/external-link'
 import { archiveTabLabelKey } from '@/lib/i18n-keys'
 import type { ArchiveTab, PhotoRecord, SpeciesRecord } from '@/lib/workspace-types'
 import { formatRatio, formatScore, type Tone } from '@/lib/photo-helpers'
+import { speciesArtworkAssetUrl } from '@/lib/species-artwork'
 import { formatSpeciesPinyin } from '@/lib/species-pinyin'
 import { getSpeciesWiki } from '@/lib/species-wiki'
 import { cn } from '@/lib/utils'
-import { useResponsiveGridLayout, virtualGridStyle } from '@/lib/virtual-grid'
+import {
+  useResponsiveGridLayout,
+  useVirtualScrollMargin,
+  virtualGridStyle,
+} from '@/lib/virtual-grid'
 
 const ArchiveGeoMap = lazy(() =>
   import('@/components/archive-geo-map').then((module) => ({ default: module.ArchiveGeoMap })),
@@ -111,13 +127,19 @@ function VirtualizedCollectionBoard({
   scrollRef: RefObject<HTMLElement | null>
   t: ReturnType<typeof useTranslation>['t']
 }) {
+  const containerRef = useRef<HTMLDivElement | null>(null)
   const [containerElement, setContainerElement] = useState<HTMLDivElement | null>(null)
+  const setContainerNode = useCallback((node: HTMLDivElement | null) => {
+    containerRef.current = node
+    setContainerElement(node)
+  }, [])
   const gridLayout = useResponsiveGridLayout(
     containerElement,
     COLLECTION_GRID_MIN_COLUMN_WIDTH,
     COLLECTION_GRID_GAP,
   )
   const columns = gridLayout.columns
+  const scrollMargin = useVirtualScrollMargin(containerRef, scrollRef.current)
   const rows = useMemo<CollectionVirtualRow[]>(() => {
     const nextRows: CollectionVirtualRow[] = []
     groups.forEach((group, groupIndex) => {
@@ -139,18 +161,29 @@ function VirtualizedCollectionBoard({
   }, [columns, groups])
   const virtualizer = useVirtualizer({
     count: rows.length,
+    getItemKey: (index) => {
+      const row = rows[index]
+      if (!row) return index
+      if (row.type === 'heading') return `heading:${row.group.id}`
+      return `cards:${row.groupId}:${row.species[0]?.id ?? index}`
+    },
     getScrollElement: () => scrollRef.current,
     estimateSize: (index) =>
       rows[index]?.type === 'heading'
         ? COLLECTION_HEADING_ESTIMATED_HEIGHT
         : COLLECTION_CARD_ROW_ESTIMATED_HEIGHT,
     overscan: 7,
+    scrollMargin,
   })
+
+  useLayoutEffect(() => {
+    virtualizer.measure()
+  }, [columns, rows, scrollMargin, virtualizer])
 
   if (groups.length === 0) return null
 
   return (
-    <div className="collection-virtual-board" ref={setContainerElement}>
+    <div className="collection-virtual-board" ref={setContainerNode}>
       <div
         className="collection-virtual-board__spacer"
         style={{ height: virtualizer.getTotalSize() }}
@@ -168,7 +201,7 @@ function VirtualizedCollectionBoard({
               data-index={virtualRow.index}
               key={virtualRow.key}
               ref={virtualizer.measureElement}
-              style={{ transform: `translateY(${virtualRow.start}px)` }}
+              style={{ transform: `translateY(${virtualRow.start - scrollMargin}px)` }}
             >
               {row.type === 'heading' ? (
                 <div className="collection-section__heading">
@@ -355,6 +388,7 @@ export function ArchiveScreen({
   archivePhotos,
   archiveSpecies,
   archiveTab,
+  archiveSearchKey,
   onOpenReview,
   onSelectSpecies,
   onSetArchiveTab,
@@ -364,6 +398,7 @@ export function ArchiveScreen({
   archivePhotos: PhotoRecord[]
   archiveSpecies: SpeciesRecord[]
   archiveTab: ArchiveTab
+  archiveSearchKey: string
   onOpenReview: (photoId: string) => void
   onSelectSpecies: (speciesId: string | null) => void
   onSetArchiveTab: (tab: ArchiveTab) => void
@@ -372,12 +407,6 @@ export function ArchiveScreen({
   const archiveScrollRef = useRef<HTMLElement | null>(null)
   const [collectionFilter, setCollectionFilter] = useState<SpeciesCollectionFilter>('all')
   const [speciesPhotosOpen, setSpeciesPhotosOpen] = useState(false)
-  const activeSpeciesWiki = useMemo(
-    () => (activeSpecies ? getSpeciesWiki(activeSpecies.latinName) : null),
-    [activeSpecies?.latinName],
-  )
-  const activeSpeciesImageUrl = activeSpeciesWiki?.image_url ?? null
-  const activeSpeciesArtworkAspect = useSpeciesArtworkAspect(activeSpeciesImageUrl)
   const collectedSpeciesCount = archiveSpecies.filter((species) => species.collected).length
   const collectionGroupStats = useMemo(() => {
     return buildSpeciesCollectionGroups(archiveSpecies)
@@ -408,13 +437,6 @@ export function ArchiveScreen({
     ],
     [archiveSpecies.length, collectedSpeciesCount, collectionGroupStats, t],
   )
-  const activeSpeciesPhotos = useMemo(() => {
-    if (!activeSpecies) return []
-    return archivePhotos.filter((photo) => photoMatchesSpecies(photo, activeSpecies))
-  }, [activeSpecies, archivePhotos])
-  useEffect(() => {
-    setSpeciesPhotosOpen(false)
-  }, [activeSpecies?.id])
   const filteredArchiveSpecies = useMemo(() => {
     if (collectionFilter === 'collected') {
       return archiveSpecies.filter((species) => species.collected)
@@ -426,22 +448,55 @@ export function ArchiveScreen({
     }
     return archiveSpecies
   }, [archiveSpecies, collectionFilter])
+  const displayedActiveSpecies = useMemo(() => {
+    if (!activeSpecies) return null
+    return filteredArchiveSpecies.some((species) => species.id === activeSpecies.id)
+      ? activeSpecies
+      : null
+  }, [activeSpecies, filteredArchiveSpecies])
+  useEffect(() => {
+    if (archiveTab !== 'species' || filteredArchiveSpecies.length === 0) return
+    if (displayedActiveSpecies) return
+    onSelectSpecies(
+      filteredArchiveSpecies.find((species) => species.collected)?.id ??
+        filteredArchiveSpecies[0]?.id ??
+        null,
+    )
+  }, [archiveTab, displayedActiveSpecies, filteredArchiveSpecies, onSelectSpecies])
+  const activeSpeciesWiki = useMemo(
+    () => (displayedActiveSpecies ? getSpeciesWiki(displayedActiveSpecies.latinName) : null),
+    [displayedActiveSpecies?.latinName],
+  )
+  const activeSpeciesImageUrl = speciesArtworkAssetUrl(displayedActiveSpecies?.latinName)
+  const activeSpeciesArtworkAspect = useSpeciesArtworkAspect(activeSpeciesImageUrl)
+  const activeSpeciesPhotos = useMemo(() => {
+    if (!displayedActiveSpecies) return []
+    return archivePhotos.filter((photo) => photoMatchesSpecies(photo, displayedActiveSpecies))
+  }, [displayedActiveSpecies, archivePhotos])
+  useEffect(() => {
+    setSpeciesPhotosOpen(false)
+  }, [displayedActiveSpecies?.id])
   const collectionGroups = useMemo(() => {
     return buildSpeciesCollectionGroups(filteredArchiveSpecies)
   }, [filteredArchiveSpecies])
   useEffect(() => {
     archiveScrollRef.current?.scrollTo({ top: 0 })
-  }, [archiveTab, collectionFilter])
+  }, [archiveSearchKey, archiveTab, collectionFilter])
 
   return (
     <main
       className={cn(
-        'archive-screen selection-scroll',
+        'archive-screen',
         archiveTab === 'map' && 'archive-screen--map',
       )}
-      ref={archiveScrollRef}
     >
-      <section className={cn('archive-main', archiveTab === 'map' && 'archive-main--map')}>
+      <section
+        className={cn(
+          'archive-main selection-scroll',
+          archiveTab === 'map' && 'archive-main--map',
+        )}
+        ref={archiveScrollRef}
+      >
         <div className="archive-heading">
           <div>
             <SectionLabel label={t('archive.label')} />
@@ -482,7 +537,7 @@ export function ArchiveScreen({
         {archiveTab === 'species' ? (
           <div className="collection-board">
             <VirtualizedCollectionBoard
-              activeSpeciesId={activeSpecies?.id ?? null}
+              activeSpeciesId={displayedActiveSpecies?.id ?? null}
               groups={collectionGroups}
               onSelectSpecies={onSelectSpecies}
               scrollRef={archiveScrollRef}
@@ -517,40 +572,40 @@ export function ArchiveScreen({
         <aside
           className={cn(
             'archive-detail',
-            activeSpecies && 'archive-detail--species',
-            activeSpecies && `archive-detail--art-${activeSpeciesArtworkAspect}`,
-            activeSpecies && !activeSpeciesImageUrl && 'archive-detail--empty',
+            displayedActiveSpecies && 'archive-detail--species',
+            displayedActiveSpecies && `archive-detail--art-${activeSpeciesArtworkAspect}`,
+            displayedActiveSpecies && !activeSpeciesImageUrl && 'archive-detail--empty',
           )}
           style={
-            activeSpecies
-              ? speciesArtworkStyle(activeSpeciesImageUrl, activeSpecies.coverGradient)
+            displayedActiveSpecies
+              ? speciesArtworkStyle(activeSpeciesImageUrl, displayedActiveSpecies.coverGradient)
               : undefined
           }
         >
-          {activeSpecies ? (
+          {displayedActiveSpecies ? (
             (() => {
               const wiki = activeSpeciesWiki
               const extract = wiki?.zh_extract ?? t('archive.detail.noChineseExtract')
               const sourceUrl = wiki?.zh_url ?? null
-              const pinyinText = formatSpeciesPinyin(activeSpecies.name)
+              const pinyinText = formatSpeciesPinyin(displayedActiveSpecies.name)
               return (
                 <div className="archive-detail__content">
                   <div className="archive-detail__heading">
                     <SectionLabel label={t('archive.detail.label')} />
-                    <h2>{activeSpecies.name}</h2>
+                    <h2>{displayedActiveSpecies.name}</h2>
                     {pinyinText ? (
                       <span className="archive-detail__pinyin" data-testid="archive-species-pinyin">
                         {pinyinText}
                       </span>
                     ) : null}
-                    <small>{activeSpecies.latinName}</small>
+                    <small>{displayedActiveSpecies.latinName}</small>
                     <StatusPill
                       label={
-                        activeSpecies.collected
+                        displayedActiveSpecies.collected
                           ? t('archive.collection.collected')
                           : t('archive.collection.locked')
                       }
-                      tone={activeSpecies.collected ? 'success' : 'muted'}
+                      tone={displayedActiveSpecies.collected ? 'success' : 'muted'}
                     />
                   </div>
                   <div className="archive-detail__body">
@@ -576,29 +631,37 @@ export function ArchiveScreen({
                         }
                         valueAriaLabel={t('archive.species.openPhotos', {
                           count: activeSpeciesPhotos.length,
-                          species: activeSpecies.name,
+                          species: displayedActiveSpecies.name,
                         })}
-                        value={activeSpecies.photoCount}
+                        value={displayedActiveSpecies.photoCount}
                       />
                       <StatRow
                         label={t('archive.species.firstSeen')}
                         value={
-                          activeSpecies.firstSeenAt ? activeSpecies.firstSeenAt.slice(0, 10) : '--'
+                          displayedActiveSpecies.firstSeenAt
+                            ? displayedActiveSpecies.firstSeenAt.slice(0, 10)
+                            : '--'
                         }
                       />
                       <StatRow
                         label={t('archive.species.lastSeen')}
                         value={
-                          activeSpecies.lastSeenAt ? activeSpecies.lastSeenAt.slice(0, 10) : '--'
+                          displayedActiveSpecies.lastSeenAt
+                            ? displayedActiveSpecies.lastSeenAt.slice(0, 10)
+                            : '--'
                         }
                       />
                       <StatRow
                         label={t('archive.species.bestScore')}
-                        value={formatScore(activeSpecies.bestScore)}
+                        value={formatScore(displayedActiveSpecies.bestScore)}
                       />
                       <StatRow
                         label={t('archive.species.rarity')}
-                        value={activeSpecies.protectLevel ?? activeSpecies.iucn ?? '--'}
+                        value={
+                          displayedActiveSpecies.protectLevel ??
+                          displayedActiveSpecies.iucn ??
+                          '--'
+                        }
                       />
                     </div>
                   </div>
@@ -613,12 +676,12 @@ export function ArchiveScreen({
           )}
         </aside>
       ) : null}
-      {speciesPhotosOpen && activeSpecies ? (
+      {speciesPhotosOpen && displayedActiveSpecies ? (
         <SpeciesPhotosModal
           onClose={() => setSpeciesPhotosOpen(false)}
           onOpenReview={onOpenReview}
           photos={activeSpeciesPhotos}
-          species={activeSpecies}
+          species={displayedActiveSpecies}
           t={t}
         />
       ) : null}
