@@ -25,11 +25,14 @@ from __future__ import annotations
 import shutil
 import subprocess
 import tempfile
+import json
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
-OUT_DIR = Path(__file__).resolve().parent.parent / "build"
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+OUT_DIR = PROJECT_ROOT / "build"
+PACKAGE_JSON = PROJECT_ROOT / "package.json"
 
 # DMG 窗口逻辑大小 (logical points / @1× pixels)。
 W_LOGICAL = 640
@@ -48,6 +51,10 @@ FONT_CANDIDATES = [
     "/System/Library/Fonts/STHeiti Medium.ttc",
     "/System/Library/Fonts/Hiragino Sans GB.ttc",
 ]
+
+
+def _package_version() -> str:
+    return json.loads(PACKAGE_JSON.read_text(encoding="utf-8"))["version"]
 
 
 def _load_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
@@ -258,7 +265,7 @@ def _render_at_scale(scale: int) -> Image.Image:
     )
     _text(
         draw,
-        "PlumeLens 0.7.0",
+        f"PlumeLens {_package_version()}",
         width=width,
         y=72 * scale,
         size=12 * scale,
