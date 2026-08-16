@@ -9,7 +9,7 @@
 import { _electron, expect, type ElectronApplication, type Page } from '@playwright/test'
 import { dirname, join } from 'path'
 import { fileURLToPath } from 'url'
-import { mkdtempSync, rmSync, existsSync } from 'fs'
+import { mkdtempSync, readdirSync, readFileSync, rmSync, existsSync } from 'fs'
 import { tmpdir } from 'os'
 
 const __filename = fileURLToPath(import.meta.url)
@@ -98,13 +98,52 @@ export async function launchApp(
 }
 
 /**
+ * 等 engine 子进程 ready 的超时,对齐产品侧 `BACKEND_BOOT_TIMEOUT_MS`
+ * (renderer/src/lib/api-client.ts)的 60s —— 测试不该比产品本身更严格。
+ *
+ * 原值 30s 的依据是本机实测(PyInstaller bundle 自解压 + 5 个模型加载约 7s),
+ * 但 GitHub macos runner 磁盘/CPU 慢 4-5 倍:v0.7.6 tag 构建有 4 个用例栽在
+ * 这个阈值上,而同一份 DMG 本机 6/6 通过、engine ready 只要 7.1s。
+ */
+const ENGINE_READY_TIMEOUT_MS = 60_000
+const ENGINE_READY_POLL_MS = 500
+
+/**
+ * 超时时把 engine 侧线索带进报错。
+ *
+ * 只报 "URL never resolved" 区分不出「还在慢慢起」「起来了又崩了」「压根没 spawn」,
+ * 而 CI 失败时不会执行 upload-artifact,日志就彻底断了 —— 必须让异常自己带上下文。
+ */
+function engineDiagnostics(dataDir?: string): string {
+  if (!dataDir) return '(no dataDir given; cannot locate engine logs)'
+  const logsDir = join(dataDir, 'logs')
+  if (!existsSync(logsDir)) {
+    return `(no logs dir at ${logsDir} — engine likely never spawned)`
+  }
+  try {
+    const files = readdirSync(logsDir).filter(
+      (name) => name.startsWith('engine.stderr') || name === 'engine.jsonl' || name === 'electron.log',
+    )
+    if (files.length === 0) return `(logs dir ${logsDir} is empty)`
+    return files
+      .map((name) => {
+        const tail = readFileSync(join(logsDir, name), 'utf8').split('\n').slice(-30).join('\n')
+        return `--- ${name} (last 30 lines) ---\n${tail}`
+      })
+      .join('\n')
+  } catch (err) {
+    return `(failed to read engine logs: ${String(err)})`
+  }
+}
+
+/**
  * 等 engine 子进程 ready + IPC 能拿到 backendUrl。
  *
- * 60 retries × 500ms = 30s timeout。PyInstaller bundle 自解压 + 5 个模型加载实测
- * 5-8s,30s 留足余量。
+ * 传 dataDir 可在超时的报错里附上 engine 日志尾部,CI 上定位失败全靠它。
  */
-export async function waitForEngineReady(page: Page): Promise<string> {
-  for (let i = 0; i < 60; i++) {
+export async function waitForEngineReady(page: Page, dataDir?: string): Promise<string> {
+  const deadline = Date.now() + ENGINE_READY_TIMEOUT_MS
+  while (Date.now() < deadline) {
     const url = await page.evaluate(async () => {
       const w = window as unknown as {
         plumelens?: { getBackendUrl: () => Promise<string | null> }
@@ -112,9 +151,12 @@ export async function waitForEngineReady(page: Page): Promise<string> {
       return (await w.plumelens?.getBackendUrl()) ?? null
     })
     if (url) return url
-    await new Promise((r) => setTimeout(r, 500))
+    await new Promise((r) => setTimeout(r, ENGINE_READY_POLL_MS))
   }
-  throw new Error('Engine URL never resolved within 30s')
+  throw new Error(
+    `Engine URL never resolved within ${ENGINE_READY_TIMEOUT_MS / 1000}s\n` +
+      engineDiagnostics(dataDir),
+  )
 }
 
 /**

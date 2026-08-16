@@ -151,6 +151,20 @@ jobs:
       - name: Build macOS DMG
         run: npm run dist:mac
 
+      # packaged E2E 失败时,upload-artifact 之前的步骤已经中断,DMG 也不会上传 ——
+      # 结果就是 CI 日志里只剩一句 "Engine URL never resolved",trace / engine 日志
+      # 全部丢失(v0.7.6 tag 构建就卡在这里,只能靠本机复现才定位到是超时阈值问题)。
+      - name: Upload packaged E2E diagnostics
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: packaged-e2e-diagnostics-${{ github.sha }}
+          path: |
+            test-results/
+            tests/e2e-electron/test-results/
+          if-no-files-found: warn
+          retention-days: 7
+
       - name: Upload DMG artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

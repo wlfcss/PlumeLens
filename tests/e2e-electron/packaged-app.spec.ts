@@ -49,7 +49,7 @@ test.beforeAll(async () => {
   })
 
   // 等 engine 子进程 ready + IPC 能拿到 URL
-  const backendUrl = await waitForEngineReady(page)
+  const backendUrl = await waitForEngineReady(page, dataDir)
   console.log('[E2E] engine URL =', backendUrl)
 
   const fixture = await importFixtureLibrary(page, undefined, 'plumelens-pkg-test')

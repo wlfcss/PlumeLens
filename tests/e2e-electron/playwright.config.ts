@@ -10,7 +10,11 @@ import { defineConfig } from '@playwright/test'
 
 export default defineConfig({
   testDir: '.',
-  timeout: 60_000,
+  // 单个用例最多跑多久。本机 6 个 cold-start 用例合计 47s（最慢的 Phase 4 要退出
+  // 再重启 engine，15.6s），但 GitHub macos runner 慢 4-5 倍：v0.7.6 tag 构建里
+  // Phase 4 就是撞了 60s 上限被判超时，而同一份产物本机 15.6s 通过。CI 上给到
+  // 180s，本机跑仍是几十秒结束，不会拖慢日常开发。
+  timeout: process.env.CI ? 180_000 : 60_000,
   retries: 0,
   fullyParallel: false,
   workers: 1,

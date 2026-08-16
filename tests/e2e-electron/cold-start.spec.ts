@@ -40,7 +40,7 @@ test.describe('Cold start - fresh data dir (新装首次打开)', () => {
 
   test('启动可见 + engine ready + 引擎状态显示已就绪', async () => {
     handle = await launchApp(dataDir)
-    const url = await waitForEngineReady(handle.page)
+    const url = await waitForEngineReady(handle.page, handle.dataDir)
     expect(url).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/)
 
     // 状态栏显示"本地引擎就绪"(engineState='ready' + pipeline.ready=true)
@@ -75,7 +75,7 @@ test.describe('Cold start - persisted history (装新版后的回归测试)', ()
   test('Phase 1 — import fixture library → 等 ready → quit', async () => {
     const handle = await launchApp(dataDir)
     try {
-      await waitForEngineReady(handle.page)
+      await waitForEngineReady(handle.page, handle.dataDir)
 
       const lib = await importFixtureLibrary(handle.page)
       expect(lib.id).toMatch(/[0-9a-f-]{36}/)
@@ -90,7 +90,7 @@ test.describe('Cold start - persisted history (装新版后的回归测试)', ()
   test('Phase 2 — relaunch same data dir → 历史 library 立刻可见(P0 回归)', async () => {
     const handle = await launchApp(dataDir)
     try {
-      await waitForEngineReady(handle.page)
+      await waitForEngineReady(handle.page, handle.dataDir)
 
       // 关键断言:start screen 必须显示 library 名字 + "继续上次文件夹"激活。
       // 失败时正是装新 dmg 看不到历史的复现 — 今天踩的两个 P0 都会让这条挂。
@@ -110,7 +110,7 @@ test.describe('Cold start - persisted history (装新版后的回归测试)', ()
   test('Phase 3 — 进入选片屏 → fixture photos 加载', async () => {
     const handle = await launchApp(dataDir)
     try {
-      await waitForEngineReady(handle.page)
+      await waitForEngineReady(handle.page, handle.dataDir)
       // 等首页 library 出现再切选片(否则可能因 list 还没 ready 导致 navigate 后空)
       await expect(handle.page.getByText('e2e-fixture-lib').first()).toBeVisible({
         timeout: 15_000,
@@ -146,7 +146,7 @@ test.describe('Cold start - persisted history (装新版后的回归测试)', ()
       childProcess.once('exit', () => resolve())
     })
 
-    await waitForEngineReady(handle.page)
+    await waitForEngineReady(handle.page, handle.dataDir)
 
     const promptWindow = handle.app.waitForEvent('window', { timeout: 10_000 })
     await handle.app.evaluate(({ BrowserWindow }) => {
@@ -169,7 +169,7 @@ test.describe('Cold start - persisted history (装新版后的回归测试)', ()
 
     const relaunched = await launchApp(dataDir)
     try {
-      await waitForEngineReady(relaunched.page)
+      await waitForEngineReady(relaunched.page, relaunched.dataDir)
       await expect(relaunched.page.getByText('最近文件夹').first()).toBeVisible({
         timeout: 15_000,
       })
