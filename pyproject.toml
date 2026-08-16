@@ -1,6 +1,6 @@
 [project]
 name = "plumelens-engine"
-version = "0.7.5"
+version = "0.7.6"
 description = "PlumeLens Python backend - hybrid ONNX + torch bird photo analysis"
 requires-python = ">=3.11"
 dependencies = [

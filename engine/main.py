@@ -45,7 +45,7 @@ def create_app() -> FastAPI:
 
     application = FastAPI(
         title="PlumeLens Engine",
-        version="0.7.5",
+        version="0.7.6",
         lifespan=lifespan,
     )
 

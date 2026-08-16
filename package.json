@@ -1,6 +1,6 @@
 {
   "name": "plumelens",
-  "version": "0.7.5",
+  "version": "0.7.6",
   "description": "鉴翎 - 辅助鸟类摄影爱好者快速筛选鸟类照片",
   "main": "./out/main/index.js",
   "author": "wlfcss",

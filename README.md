@@ -10,7 +10,7 @@
 
 <p align="center">
   <a href="https://github.com/wlfcss/PlumeLens/actions/workflows/mac-build.yml"><img alt="macOS build" src="https://github.com/wlfcss/PlumeLens/actions/workflows/mac-build.yml/badge.svg"></a>
-  <img alt="version" src="https://img.shields.io/badge/version-0.7.5-white">
+  <img alt="version" src="https://img.shields.io/badge/version-0.7.6-white">
   <img alt="platform" src="https://img.shields.io/badge/platform-macOS%20arm64-111111">
   <img alt="local inference" src="https://img.shields.io/badge/inference-local-74F69C">
   <a href="LICENSE"><img alt="license" src="https://img.shields.io/badge/license-GPL--3.0-FFD45A"></a>
@@ -39,6 +39,16 @@
 | 开始                                            | 选片                                                    | 羽迹                                                |
 | ----------------------------------------------- | ------------------------------------------------------- | --------------------------------------------------- |
 | ![Start screen](assets/readme/start-screen.png) | ![Selection screen](assets/readme/selection-screen.png) | ![Archive screen](assets/readme/archive-screen.png) |
+
+## 0.7.6 导出修复与增强
+
+0.7.6 起因是真实使用中的导出失败：964 张 / 80 GB 的导出在界面上反复报「导出失败」，后台其实一直在复制。
+
+- **导出不再假失败**：导出改为后台任务，`POST` 立即返回 `job_id`，进度走 SSE，面板显示已处理张数、已复制体积和当前文件名，可随时取消。此前导出塞在单个 HTTP 请求里，前端 60 秒超时后报失败，后端却毫不知情地继续跑到底，用户重试还会叠加并发导出。
+- **取消不留半截文件**：取消检查点落在照片之间，已完成的文件保留，不会产生大小不对的 RAW。应用关停也不再被复制线程堵死。
+- **可选照片格式**：导出面板按源文件夹里实际存在的格式展示多选，并标出各自张数与体积。此前 RAW 同伴是硬编码强制包含的，只想导 25 GB 的 JPG 会被搭上 56 GB 的 CR3，直接撞上磁盘空间上限。
+- **报错说人话**：后端返回结构化错误码，前端 i18next 渲染中文，空间不足会说明「约需 X，可用 Y，还差 Z」；同时修掉了错误提示被 CSS 裁成半句的问题。
+- **移除文件夹**：文件夹右键可从工作集移除，只清理应用内记录，源文件夹与照片不动；顺带修复了删库后缩略图缓存永久残留的泄漏。
 
 ## 0.7.5 技术债清理
 
@@ -226,6 +236,7 @@ GitHub Actions 当前只保留 macOS arm64 自动构建流程：
 - 已完成：本地 hybrid 推理、选片工作台、深度复核、拍摄报告、导出、羽迹物种墙、地理分布、macOS arm64 自动构建。
 - 已完成：源文件夹失联检测与重新关联、导出快照锁定、JPG/RAW/XMP 导出、中文报告、大列表虚拟化、缩略图自动修复、设置页版权/更新/模型版本/清理历史。
 - 已完成：0.7.5 技术债清理，App.tsx 路由/组件拆分、workspace projection 抽离、thumbnail repair / library workspace sync hook 化、羽迹离线 WebP 资源、SSE/token 与 IPC 安全边界收紧、质量闸门恢复全绿。
+- 已完成：0.7.6 导出任务化（SSE 进度 + 取消 + 并发互斥）、按源文件夹实际格式筛选导出、导出报错中文化、工作集文件夹右键移除与缩略图缓存回收。
 - 持续优化：active view / mutation glue 可继续从 App 编排层下沉、更多真实相机样张覆盖、物种资料图片人工审核。
 - 待验证：Windows 打包、更多相机品牌的 AF 对焦点解析、更多 RAW 组合样本。
 
