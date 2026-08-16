@@ -726,14 +726,16 @@
       "ready": "等待导出",
       "running": "正在导出",
       "success": "导出完成",
-      "error": "导出失败"
+      "error": "导出失败",
+      "cancelled": "已取消"
     },
     "result": {
       "output": "输出目录",
       "openFolder": "在 Finder 中打开",
       "openFailed": "无法打开输出目录，请检查目录是否仍然存在",
       "reset": "新建导出",
-      "stats": "已导出 {{exported}} 张，附带 {{companions}} 个同伴文件，写入 {{xmp}} 条 XMP 元数据，失败 {{failed}} 张"
+      "stats": "已导出 {{exported}} 张，附带 {{companions}} 个同伴文件，写入 {{xmp}} 条 XMP 元数据，失败 {{failed}} 张",
+      "cancelledHint": "已取消，输出目录里保留了取消前已完成的文件"
     },
     "scope": {
       "label": "导出范围",
@@ -787,6 +789,29 @@
     "summary": {
       "label": "导出摘要",
       "count": "当前范围将导出 {{count}} 张"
+    },
+    "cancel": "取消导出",
+    "cancelling": "正在取消…",
+    "companions": {
+      "label": "同伴文件",
+      "include": "同时导出 RAW 同伴文件",
+      "hint": "关闭后只导出 JPG。RAW 通常比 JPG 大一倍以上，空间不足时优先关掉这项。"
+    },
+    "progress": {
+      "photos": "已处理 {{processed}} / {{total}} 张",
+      "bytes": "已复制 {{copied}} / {{total}}",
+      "current": "正在复制 {{name}}"
+    },
+    "error": {
+      "insufficientSpace": "目标磁盘空间不足：本次导出约需 {{required}}，当前可用 {{free}}，还差 {{shortfall}}。可以关掉「同时导出 RAW 同伴文件」，或收窄分数区间后重试。",
+      "targetInsideSource": "导出位置不能位于源图库内部，请另选一个文件夹。",
+      "targetContainsSource": "导出位置不能包含源图库，请另选一个与源图库互不包含的文件夹。",
+      "libraryNotFound": "找不到该图库，请返回列表刷新后重试。",
+      "sourcePathMissing": "源图库路径已失效，请先重新关联文件夹再导出。",
+      "alreadyRunning": "该图库已有一个导出正在进行，请等它结束或先取消。",
+      "jobNotFound": "导出任务已不存在，可能是后台服务重启过，请重新发起导出。",
+      "internal": "导出过程中出现内部错误，详情见日志。",
+      "unknown": "导出失败：{{message}}"
     }
   },
   "background": {

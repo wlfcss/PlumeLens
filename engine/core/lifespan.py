@@ -435,6 +435,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     if reset_count > 0:
         await logger.ainfo("Reset transient queue tasks during shutdown", count=reset_count)
 
+    # 必须在 thread_pool.shutdown(wait=True) 之前置位:导出 worker 跑在同一个池里,
+    # 一个还在复制 80 GB 的循环会让 wait=True 挂住整个 shutdown,SIGTERM 形同虚设,
+    # 外层只能 SIGKILL —— 那才会留下半截文件。置位后 worker 会在当前这张照片
+    # 写完(~1s)后自行退出。
+    from engine.services.exporter import cancel_all_export_jobs
+
+    exports_cancelled = cancel_all_export_jobs()
+    if exports_cancelled > 0:
+        await logger.ainfo("Cancelled running export jobs during shutdown", count=exports_cancelled)
+
     thread_pool.shutdown(wait=True, cancel_futures=True)
 
     close_pipeline = getattr(app.state.pipeline, "close", None)

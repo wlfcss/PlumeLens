@@ -13,13 +13,17 @@ import csv
 import json
 import re
 import shutil
+import threading
 import unicodedata
+import uuid
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from xml.sax.saxutils import escape, quoteattr
+
+import structlog
 
 from engine.api.schemas.export import (
     ExportLayout,
@@ -30,9 +34,22 @@ from engine.api.schemas.export import (
 from engine.core.database import Database
 from engine.pipeline.preprocess import IMAGE_EXTENSIONS, RAW_EXTENSIONS
 
+logger = structlog.stdlib.get_logger()
+
 
 class ExportError(Exception):
-    """Raised when an export request is invalid or cannot be completed."""
+    """Raised when an export request is invalid or cannot be completed.
+
+    ``code`` 是稳定的机器可读标识,前端按 code 查 i18n 表渲染本地化文案;
+    ``context`` 携带渲染所需的数值(如空间不足时的 required/free 字节数),
+    让用户看到"还差多少"而不是一句无从下手的英文。``args[0]`` 仍是英文
+    message,作为前端没有对应 i18n key 时的兜底。
+    """
+
+    def __init__(self, code: str, message: str, **context: Any) -> None:
+        super().__init__(message)
+        self.code = code
+        self.context = context
 
 
 @dataclass
@@ -70,6 +87,184 @@ class ExportManifestRow:
     exported_companion: bool
     exported_xmp: bool
     error: str | None
+
+
+JOB_RUNNING = "running"
+JOB_SUCCEEDED = "succeeded"
+JOB_FAILED = "failed"
+JOB_CANCELLED = "cancelled"
+
+# 已结束的 job 快照保留上限 — 前端拿到 job_id 后可能因为 SSE 重连/刷新再来查一次
+# 结果,所以不能一完成就丢。超过上限按完成顺序淘汰最老的,避免长会话内存泄漏。
+_JOB_HISTORY_LIMIT = 16
+
+
+@dataclass
+class ExportJob:
+    """一次导出的可观测句柄。
+
+    worker 跑在 ``asyncio.to_thread`` 的线程里,SSE 生成器跑在事件循环里 ——
+    两边并发读写同一份计数,所以所有可变字段都只在 ``_lock`` 下更新/快照。
+
+    ``cancel_event`` 是 worker 与外界唯一的中断通道:复制循环每张照片检查一次。
+    检查点放在照片之间而不是字节流中间 —— ``shutil.copy2`` 不可中断,让它把当前
+    这张写完(单张 RAW 最多 ~60 MB,约 1 秒)换来的是"取消后不留半截文件",
+    比留下一个大小不对的 CR3 让用户误当成完整文件要好得多。
+    """
+
+    job_id: str
+    library_id: str
+    total: int
+    total_bytes: int
+    status: str = JOB_RUNNING
+    processed: int = 0
+    exported: int = 0
+    companions: int = 0
+    xmp: int = 0
+    missing: int = 0
+    failed: int = 0
+    copied_bytes: int = 0
+    current_file: str | None = None
+    output_dir: str | None = None
+    result: ExportLibraryResponse | None = None
+    error_code: str | None = None
+    error_message: str | None = None
+    error_context: dict[str, Any] = field(default_factory=dict)
+    cancel_event: threading.Event = field(default_factory=threading.Event, repr=False)
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+
+    def cancel(self) -> None:
+        self.cancel_event.set()
+
+    @property
+    def is_cancelled(self) -> bool:
+        return self.cancel_event.is_set()
+
+    def set_output_dir(self, path: str) -> None:
+        with self._lock:
+            self.output_dir = path
+
+    def note_current(self, name: str | None) -> None:
+        with self._lock:
+            self.current_file = name
+
+    def record(
+        self,
+        *,
+        exported_main: bool = False,
+        exported_companion: bool = False,
+        exported_xmp: bool = False,
+        missing: bool = False,
+        failed: bool = False,
+        copied_bytes: int = 0,
+    ) -> None:
+        with self._lock:
+            self.processed += 1
+            self.copied_bytes += copied_bytes
+            if exported_main:
+                self.exported += 1
+            if exported_companion:
+                self.companions += 1
+            if exported_xmp:
+                self.xmp += 1
+            if missing:
+                self.missing += 1
+            if failed:
+                self.failed += 1
+
+    def finish(
+        self,
+        status: str,
+        *,
+        result: ExportLibraryResponse | None = None,
+        code: str | None = None,
+        message: str | None = None,
+        context: dict[str, Any] | None = None,
+    ) -> None:
+        with self._lock:
+            self.status = status
+            self.result = result
+            self.error_code = code
+            self.error_message = message
+            self.error_context = dict(context or {})
+            self.current_file = None
+
+    def snapshot(self) -> dict[str, Any]:
+        with self._lock:
+            return {
+                "job_id": self.job_id,
+                "library_id": self.library_id,
+                "status": self.status,
+                "total": self.total,
+                "processed": self.processed,
+                "exported": self.exported,
+                "companions": self.companions,
+                "xmp": self.xmp,
+                "missing": self.missing,
+                "failed": self.failed,
+                "total_bytes": self.total_bytes,
+                "copied_bytes": self.copied_bytes,
+                "current_file": self.current_file,
+                "output_dir": self.output_dir,
+                "result": (self.result.model_dump(by_alias=True) if self.result else None),
+                "error": (
+                    {
+                        "code": self.error_code,
+                        "message": self.error_message,
+                        **self.error_context,
+                    }
+                    if self.error_code
+                    else None
+                ),
+            }
+
+
+_JOBS: dict[str, ExportJob] = {}
+_JOBS_LOCK = threading.Lock()
+
+
+def get_export_job(job_id: str) -> ExportJob | None:
+    with _JOBS_LOCK:
+        return _JOBS.get(job_id)
+
+
+def cancel_export_job(job_id: str) -> ExportJob | None:
+    job = get_export_job(job_id)
+    if job is not None and job.status == JOB_RUNNING:
+        job.cancel()
+    return job
+
+
+def cancel_all_export_jobs() -> int:
+    """Shutdown 钩子:请求所有运行中的导出停下来。
+
+    ``asyncio.to_thread`` 用的 ThreadPoolExecutor 线程是非 daemon 的,解释器退出
+    时 atexit 会 join 它们 —— 一个跑了两小时的复制循环会把 SIGTERM 整个堵死,
+    逼得外层只能 SIGKILL(那才是真正留下半截文件的原因)。这里先置取消位,让
+    worker 在当前这张照片写完后自己退出。
+    """
+    with _JOBS_LOCK:
+        running = [job for job in _JOBS.values() if job.status == JOB_RUNNING]
+    for job in running:
+        job.cancel()
+    return len(running)
+
+
+def _register_job(job: ExportJob) -> None:
+    with _JOBS_LOCK:
+        finished = [jid for jid, existing in _JOBS.items() if existing.status != JOB_RUNNING]
+        overflow = len(finished) - _JOB_HISTORY_LIMIT
+        for jid in finished[:overflow] if overflow > 0 else []:
+            _JOBS.pop(jid, None)
+        _JOBS[job.job_id] = job
+
+
+def _running_job_for_library(library_id: str) -> ExportJob | None:
+    with _JOBS_LOCK:
+        for job in _JOBS.values():
+            if job.library_id == library_id and job.status == JOB_RUNNING:
+                return job
+    return None
 
 
 _CHINESE_MANIFEST_FIELDNAMES = [
@@ -576,7 +771,14 @@ def _ensure_target_has_space(target: Path, required_bytes: int) -> None:
         return
     if free < required_bytes:
         msg = "Export target does not have enough free space"
-        raise ExportError(msg)
+        # 带上具体字节数 — 前端才能渲染"约需 84.9 GB / 可用 83.2 GB / 还差 1.7 GB",
+        # 用户据此决定是关掉 RAW 同伴还是收窄分数区间,而不是干瞪一句英文报错。
+        raise ExportError(
+            "insufficient_space",
+            msg,
+            required_bytes=required_bytes,
+            free_bytes=free,
+        )
 
 
 def _yes_no(value: bool) -> str:
@@ -690,6 +892,35 @@ def _write_manifests(
     return json_path, csv_path
 
 
+def _prepare_export(
+    *,
+    root_path: str,
+    target_dir: str,
+    photos: list[ExportPhoto],
+    body: ExportLibraryRequest,
+) -> tuple[list[ExportPhoto], Path, Path]:
+    """校验目标目录 + 预估空间,返回 (选中照片, 源根目录, 目标目录)。
+
+    这段必须在 HTTP 请求内同步跑完:路径非法 / 空间不足要立刻以 4xx 回给用户,
+    而不是先建个 job 再从 SSE 里报错(那样用户已经看到"导出中"了才被告知失败)。
+    """
+    root = Path(root_path).expanduser().resolve()
+    target = Path(target_dir).expanduser().resolve()
+    if _is_relative_to(target, root):
+        msg = "Export target must not be inside the source library"
+        raise ExportError("target_inside_source", msg)
+    # 反向包含同样要拦:target=/Volumes/dst, root=/Volumes/dst/lib 时 target 是 root
+    # 的祖先,导出会在祖先目录下创建子目录,虽不直接覆写源文件,但仍违反"导出与源
+    # 隔离"的语义。target == root 一并拦下(导出到同一根目录)。
+    if target == root or _is_relative_to(root, target):
+        msg = "Export target must not contain the source library"
+        raise ExportError("target_contains_source", msg)
+
+    selected = [photo for photo in photos if _matches_request(photo, body)]
+    _ensure_target_has_space(target, _estimate_export_bytes(selected, body))
+    return selected, root, target
+
+
 def _run_export(
     *,
     library_id: str,
@@ -698,24 +929,19 @@ def _run_export(
     target_dir: str,
     photos: list[ExportPhoto],
     body: ExportLibraryRequest,
+    job: ExportJob | None = None,
 ) -> ExportLibraryResponse:
-    root = Path(root_path).expanduser().resolve()
-    target = Path(target_dir).expanduser().resolve()
-    if _is_relative_to(target, root):
-        msg = "Export target must not be inside the source library"
-        raise ExportError(msg)
-    # 反向包含同样要拦:target=/Volumes/dst, root=/Volumes/dst/lib 时 target 是 root
-    # 的祖先,导出会在祖先目录下创建子目录,虽不直接覆写源文件,但仍违反"导出与源
-    # 隔离"的语义。target == root 一并拦下(导出到同一根目录)。
-    if target == root or _is_relative_to(root, target):
-        msg = "Export target must not contain the source library"
-        raise ExportError(msg)
-
-    selected = [photo for photo in photos if _matches_request(photo, body)]
-    _ensure_target_has_space(target, _estimate_export_bytes(selected, body))
+    selected, root, target = _prepare_export(
+        root_path=root_path,
+        target_dir=target_dir,
+        photos=photos,
+        body=body,
+    )
 
     output_dir = _unique_output_dir(target / f"{_safe_name(library_name)}-{_now_stamp()}")
     output_dir.mkdir(parents=True, exist_ok=False)
+    if job is not None:
+        job.set_output_dir(str(output_dir))
 
     rows: list[ExportManifestRow] = []
     used: set[Path] = set()
@@ -725,8 +951,15 @@ def _run_export(
     missing = 0
     failed = 0
 
+    cancelled = False
     for photo in selected:
+        # 取消检查点 — 放在每张照片开头,当前这张会完整写完再退出(见 ExportJob 注释)
+        if job is not None and job.is_cancelled:
+            cancelled = True
+            break
         source = Path(photo.file_path)
+        if job is not None:
+            job.note_current(photo.file_name)
         dest_path: Path | None = None
         companion_dest: Path | None = None
         companion_source: Path | None = None
@@ -851,6 +1084,21 @@ def _run_export(
                 error=error,
             )
         )
+        if job is not None:
+            job.record(
+                exported_main=exported_main,
+                exported_companion=exported_companion,
+                exported_xmp=exported_xmp,
+                missing=error in ("source_missing", "companion_missing"),
+                failed=error is not None and error not in ("source_missing", "companion_missing"),
+                copied_bytes=(
+                    _file_size(dest_path if exported_main else None)
+                    + _file_size(companion_dest if exported_companion else None)
+                ),
+            )
+
+    if job is not None:
+        job.note_current(None)
 
     json_path: Path | None = None
     csv_path: Path | None = None
@@ -861,6 +1109,7 @@ def _run_export(
             rows,
             {
                 "导出时间": datetime.now(UTC).isoformat(),
+                "任务状态": "已取消（仅含取消前已导出的部分）" if cancelled else "已完成",
                 "图库ID": library_id,
                 "图库名称": library_name,
                 "源图库路径": "(已脱敏)",
@@ -899,12 +1148,11 @@ def _run_export(
     )
 
 
-async def export_library(
+async def _load_export_context(
     db: Database,
     library_id: str,
-    body: ExportLibraryRequest,
-) -> ExportLibraryResponse:
-    """Export selected photos from a library."""
+) -> tuple[str, str, str, list[ExportPhoto]]:
+    """读取图库元信息 + 全部候选照片,返回 (id, 名称, 源根路径, 照片列表)。"""
     async with db.conn.execute(
         "SELECT id, display_name, root_path, status FROM libraries WHERE id = ?",
         (library_id,),
@@ -912,7 +1160,7 @@ async def export_library(
         library = await cur.fetchone()
     if library is None:
         msg = "Library not found"
-        raise ExportError(msg)
+        raise ExportError("library_not_found", msg)
 
     root_path = str(library["root_path"])
     if not await asyncio.to_thread(Path(root_path).exists):
@@ -922,7 +1170,7 @@ async def export_library(
         )
         await db.conn.commit()
         msg = "Library source path is missing; relink the folder before export"
-        raise ExportError(msg)
+        raise ExportError("source_path_missing", msg)
     if str(library["status"]) == "path_missing":
         await db.conn.execute(
             "UPDATE libraries SET status = 'ready' WHERE id = ?",
@@ -962,11 +1210,137 @@ async def export_library(
         )
         for row in rows
     ]
+    return str(library["id"]), str(library["display_name"]), root_path, photos
 
+
+# 后台 job 的 asyncio.Task 强引用 — create_task 只持弱引用,不存住会被 GC 提前回收。
+_BACKGROUND_TASKS: set[asyncio.Task[None]] = set()
+
+
+async def _run_job(
+    job: ExportJob,
+    *,
+    library_id: str,
+    library_name: str,
+    root_path: str,
+    body: ExportLibraryRequest,
+    photos: list[ExportPhoto],
+) -> None:
+    """后台跑完一次导出,把终态写回 job(SSE 生成器据此收流)。"""
+    try:
+        result = await asyncio.to_thread(
+            _run_export,
+            library_id=library_id,
+            library_name=library_name,
+            root_path=root_path,
+            target_dir=body.target_dir,
+            photos=photos,
+            body=body,
+            job=job,
+        )
+    except ExportError as exc:
+        job.finish(JOB_FAILED, code=exc.code, message=str(exc), context=exc.context)
+        await logger.aerror(
+            "Export job failed",
+            job_id=job.job_id,
+            library_id=library_id,
+            code=exc.code,
+            **exc.context,
+        )
+    except Exception as exc:
+        job.finish(JOB_FAILED, code="internal_error", message=str(exc))
+        await logger.aexception("Export job crashed", job_id=job.job_id, library_id=library_id)
+    else:
+        status = JOB_CANCELLED if job.is_cancelled else JOB_SUCCEEDED
+        job.finish(status, result=result)
+        await logger.ainfo(
+            "Export job finished",
+            job_id=job.job_id,
+            library_id=library_id,
+            status=status,
+            exported=result.exported_count,
+            companions=result.companion_count,
+            xmp=result.xmp_count,
+            missing=result.skipped_missing,
+            failed=result.failed_count,
+            output_dir=result.output_dir,
+        )
+
+
+async def start_export_job(
+    db: Database,
+    library_id: str,
+    body: ExportLibraryRequest,
+) -> ExportJob:
+    """校验请求并启动一个后台导出任务,立刻返回句柄。
+
+    预检(路径合法性 / 磁盘空间)在这里同步做完 —— 失败要以 4xx 当场回给用户,
+    而不是先建 job 再从进度流里报错。真正的文件复制交给后台 worker,HTTP 请求
+    不再需要撑到导出结束(历史 bug:964 张 / 80 GB 要跑两小时,前端 60s 超时后
+    UI 报"导出失败",后端却毫不知情地继续复制,用户重试又叠一个并发导出)。
+    """
+    lib_id, library_name, root_path, photos = await _load_export_context(db, library_id)
+
+    running = _running_job_for_library(library_id)
+    if running is not None:
+        msg = "An export for this library is already running"
+        raise ExportError("export_already_running", msg, job_id=running.job_id)
+
+    selected, _, _ = await asyncio.to_thread(
+        _prepare_export,
+        root_path=root_path,
+        target_dir=body.target_dir,
+        photos=photos,
+        body=body,
+    )
+    total_bytes = await asyncio.to_thread(_estimate_export_bytes, selected, body)
+
+    job = ExportJob(
+        job_id=uuid.uuid4().hex,
+        library_id=library_id,
+        total=len(selected),
+        total_bytes=total_bytes,
+    )
+    _register_job(job)
+    await logger.ainfo(
+        "Export job started",
+        job_id=job.job_id,
+        library_id=library_id,
+        selected=len(selected),
+        total_bytes=total_bytes,
+        target_dir=body.target_dir,
+        layout=body.layout,
+        copy_files=body.copy_files,
+        include_companions=body.include_companions,
+        include_xmp_sidecars=body.include_xmp_sidecars,
+    )
+
+    task = asyncio.create_task(
+        _run_job(
+            job,
+            library_id=lib_id,
+            library_name=library_name,
+            root_path=root_path,
+            body=body,
+            photos=photos,
+        )
+    )
+    _BACKGROUND_TASKS.add(task)
+    task.add_done_callback(_BACKGROUND_TASKS.discard)
+    return job
+
+
+async def export_library(
+    db: Database,
+    library_id: str,
+    body: ExportLibraryRequest,
+) -> ExportLibraryResponse:
+    """同步导出(等待完成) — 保留给测试与不需要进度流的调用方。"""
+    lib_id, library_name, root_path, photos = await _load_export_context(db, library_id)
     return await asyncio.to_thread(
         _run_export,
-        library_id=str(library["id"]),
-        library_name=str(library["display_name"]),
+        library_id=lib_id,
+        library_name=library_name,
         root_path=root_path,
         target_dir=body.target_dir,
         photos=photos,

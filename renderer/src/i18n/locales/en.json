@@ -726,14 +726,16 @@
       "ready": "Ready to export",
       "running": "Exporting",
       "success": "Export complete",
-      "error": "Export failed"
+      "error": "Export failed",
+      "cancelled": "Cancelled"
     },
     "result": {
       "output": "Output folder",
       "openFolder": "Open in Finder",
       "openFailed": "Cannot open the output folder. Make sure it still exists.",
       "reset": "New export",
-      "stats": "{{exported}} exported, {{companions}} companion files, {{xmp}} XMP metadata writes, {{failed}} failed"
+      "stats": "{{exported}} exported, {{companions}} companion files, {{xmp}} XMP metadata writes, {{failed}} failed",
+      "cancelledHint": "Cancelled — files finished before cancelling are kept in the output folder"
     },
     "scope": {
       "label": "Scope",
@@ -787,6 +789,29 @@
     "summary": {
       "label": "Export summary",
       "count": "{{count}} photos in current range"
+    },
+    "cancel": "Cancel export",
+    "cancelling": "Cancelling…",
+    "companions": {
+      "label": "Companion files",
+      "include": "Also export RAW companion files",
+      "hint": "Turn off to export JPGs only. RAW files are typically more than twice the size of JPGs — disable this first when space is tight."
+    },
+    "progress": {
+      "photos": "{{processed}} / {{total}} photos processed",
+      "bytes": "{{copied}} / {{total}} copied",
+      "current": "Copying {{name}}"
+    },
+    "error": {
+      "insufficientSpace": "Not enough free space on the target disk: this export needs about {{required}}, only {{free}} is available — {{shortfall}} short. Try turning off \"Also export RAW companion files\" or narrowing the score range.",
+      "targetInsideSource": "The export location cannot be inside the source library. Please choose another folder.",
+      "targetContainsSource": "The export location cannot contain the source library. Please choose a folder that neither contains nor sits inside it.",
+      "libraryNotFound": "Library not found. Go back to the list, refresh and try again.",
+      "sourcePathMissing": "The source library path is gone. Relink the folder before exporting.",
+      "alreadyRunning": "An export is already running for this library. Wait for it to finish or cancel it first.",
+      "jobNotFound": "That export job no longer exists — the backend may have restarted. Please start a new export.",
+      "internal": "The export hit an internal error. See the logs for details.",
+      "unknown": "Export failed: {{message}}"
     }
   },
   "background": {

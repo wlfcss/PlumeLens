@@ -257,6 +257,59 @@ function makePose(posture: 'flying' | 'perched' | 'unknown') {
   }
 }
 
+const EXPORT_JOB_ID = 'job-e2e'
+const EXPORT_OUTPUT_DIR = '/tmp/plumelens-export/lib-test-20260505-120000'
+
+/** 导出 job 的终态快照 —— SSE 末帧与 GET /export/jobs/{id} 都用它。 */
+function exportTerminalSnapshot(): Record<string, unknown> {
+  return {
+    job_id: EXPORT_JOB_ID,
+    library_id: 'lib-test',
+    status: 'succeeded',
+    total: 2,
+    processed: 2,
+    exported: 2,
+    companions: 0,
+    xmp: 2,
+    missing: 0,
+    failed: 0,
+    total_bytes: 2048,
+    copied_bytes: 2048,
+    current_file: null,
+    output_dir: EXPORT_OUTPUT_DIR,
+    result: {
+      library_id: 'lib-test',
+      output_dir: EXPORT_OUTPUT_DIR,
+      selected_count: 2,
+      exported_count: 2,
+      companion_count: 0,
+      xmp_count: 2,
+      skipped_missing: 0,
+      failed_count: 0,
+      manifest: {
+        json: `${EXPORT_OUTPUT_DIR}/鉴翎导出报告.json`,
+        csv: `${EXPORT_OUTPUT_DIR}/鉴翎导出清单.csv`,
+      },
+    },
+    error: null,
+  }
+}
+
+/** 一个 running 帧 + 一个终态帧,模拟真实进度流。 */
+function exportSseBody(): string {
+  const running = {
+    ...exportTerminalSnapshot(),
+    status: 'running',
+    processed: 1,
+    exported: 1,
+    copied_bytes: 1024,
+    current_file: 'IMG_0001.JPG',
+    output_dir: null,
+    result: null,
+  }
+  return `data: ${JSON.stringify(running)}\n\ndata: ${JSON.stringify(exportTerminalSnapshot())}\n\n`
+}
+
 async function mockBackend(
   page: Page,
   options: {
@@ -705,25 +758,33 @@ async function mockBackend(
       body: JSON.stringify({ library: libraryState2, photos }),
     })
   })
+  // 导出是后台任务:POST 只返回 job 句柄,进度/结果走 SSE。
   await page.route('**/export/library/**', (route: Route) => {
     const libraryId = route.request().url().split('/export/library/')[1]
     route.fulfill({
       status: 200,
       contentType: 'application/json',
       body: JSON.stringify({
+        job_id: EXPORT_JOB_ID,
         library_id: libraryId,
-        output_dir: `/tmp/plumelens-export/${libraryId}-20260505-120000`,
-        selected_count: 2,
-        exported_count: 2,
-        companion_count: 0,
-        xmp_count: 2,
-        skipped_missing: 0,
-        failed_count: 0,
-        manifest: {
-          json: `/tmp/plumelens-export/${libraryId}-20260505-120000/鉴翎导出报告.json`,
-          csv: `/tmp/plumelens-export/${libraryId}-20260505-120000/鉴翎导出清单.csv`,
-        },
+        total: 2,
+        total_bytes: 2048,
       }),
+    })
+  })
+  // 先注册快照兜底,再注册 events —— Playwright 按注册逆序匹配,后注册的优先。
+  await page.route('**/export/jobs/**', (route: Route) => {
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify(exportTerminalSnapshot()),
+    })
+  })
+  await page.route('**/export/jobs/*/events', (route: Route) => {
+    route.fulfill({
+      status: 200,
+      contentType: 'text/event-stream',
+      body: exportSseBody(),
     })
   })
   // /decisions 端点：内存里记录被 PUT 的 decision
@@ -1465,26 +1526,24 @@ test.describe('Photo decision flow (mock backend)', () => {
       releaseExport = resolve
     })
 
-    await page.unroute('**/export/library/**')
-    await page.route('**/export/library/lib-test', async (route: Route) => {
+    // 任务化后 POST 立刻返回,"导出中"状态由 SSE 决定 —— 所以这里挂住进度流
+    // (以及快照兜底),让 UI 停在 running。
+    await page.unroute('**/export/jobs/*/events')
+    await page.unroute('**/export/jobs/**')
+    await page.route('**/export/jobs/**', async (route: Route) => {
       await exportRelease
       await route.fulfill({
         status: 200,
         contentType: 'application/json',
-        body: JSON.stringify({
-          library_id: 'lib-test',
-          output_dir: '/tmp/plumelens-export/测试库-20260505-120000',
-          selected_count: 2,
-          exported_count: 2,
-          companion_count: 0,
-          xmp_count: 2,
-          skipped_missing: 0,
-          failed_count: 0,
-          manifest: {
-            json: '/tmp/plumelens-export/测试库-20260505-120000/鉴翎导出报告.json',
-            csv: '/tmp/plumelens-export/测试库-20260505-120000/鉴翎导出清单.csv',
-          },
-        }),
+        body: JSON.stringify(exportTerminalSnapshot()),
+      })
+    })
+    await page.route('**/export/jobs/*/events', async (route: Route) => {
+      await exportRelease
+      await route.fulfill({
+        status: 200,
+        contentType: 'text/event-stream',
+        body: exportSseBody(),
       })
     })
 
@@ -1502,6 +1561,88 @@ test.describe('Photo decision flow (mock backend)', () => {
 
     releaseExport?.()
     await expect(page.getByText('导出完成')).toBeVisible()
+  })
+
+  test('export can opt out of RAW companion files', async ({ page }) => {
+    await page.locator('.folder-actions').getByRole('button', { name: '导出' }).click()
+    await page.getByRole('button', { name: '选择位置' }).click()
+
+    const toggle = page.getByLabel('同时导出 RAW 同伴文件')
+    await expect(toggle).toBeChecked()
+    await toggle.uncheck()
+
+    const requestPromise = page.waitForRequest('**/export/library/lib-test')
+    await page.getByRole('button', { name: '开始导出' }).click()
+    expect(JSON.parse((await requestPromise).postData() ?? '{}')).toMatchObject({
+      include_companions: false,
+    })
+  })
+
+  test('insufficient space error renders in full Chinese without clipping', async ({ page }) => {
+    await page.unroute('**/export/library/**')
+    await page.route('**/export/library/**', (route: Route) => {
+      route.fulfill({
+        status: 400,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          detail: {
+            code: 'insufficient_space',
+            message: 'Export target does not have enough free space',
+            required_bytes: 91_100_000_000,
+            free_bytes: 89_350_000_000,
+          },
+        }),
+      })
+    })
+
+    await page.locator('.folder-actions').getByRole('button', { name: '导出' }).click()
+    await page.getByRole('button', { name: '选择位置' }).click()
+    await page.getByRole('button', { name: '开始导出' }).click()
+    await page.getByRole('button', { name: '展开' }).click()
+
+    const error = page.locator('.export-error')
+    await expect(error).toContainText('目标磁盘空间不足')
+    await expect(error).toContainText('还差')
+    await expect(error).not.toContainText('Bad Request')
+
+    // 历史 bug:`.export-sidecar p` 的单行省略(max-width 300px + nowrap + hidden)
+    // 罩住了错误提示,用户只看得到 `400 Bad Request: {"detail":"Export` 半句。
+    const clipped = await error.evaluate(
+      (el) => el.scrollWidth > el.clientWidth + 1 || el.scrollHeight > el.clientHeight + 1,
+    )
+    expect(clipped).toBe(false)
+  })
+
+  test('running export can be cancelled from the drawer', async ({ page }) => {
+    // 挂住进度流,让导出停在 running
+    await page.unroute('**/export/jobs/*/events')
+    await page.unroute('**/export/jobs/**')
+    await page.route('**/export/jobs/*/events', async () => {
+      await new Promise(() => {})
+    })
+    let cancelled = false
+    await page.route('**/export/jobs/*/cancel', (route: Route) => {
+      cancelled = true
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ job_id: EXPORT_JOB_ID, status: 'running' }),
+      })
+    })
+
+    await page.locator('.folder-actions').getByRole('button', { name: '导出' }).click()
+    await page.getByRole('button', { name: '选择位置' }).click()
+    await page.getByRole('button', { name: '开始导出' }).click()
+    await page.getByRole('button', { name: '展开' }).click()
+
+    // 按名字定位不稳:点击后文案会变成"正在取消…"。用主操作按钮的位置来定位。
+    const primaryAction = page.locator('.export-sidecar .action-row .button-primary')
+    await expect(primaryAction).toHaveText(/取消导出/)
+    await primaryAction.click()
+
+    await expect(page.locator('.export-status')).toContainText('正在取消…')
+    await expect(primaryAction).toBeDisabled()
+    expect(cancelled).toBe(true)
   })
 
   test('multiple folders can keep independent export sessions', async ({ page }) => {

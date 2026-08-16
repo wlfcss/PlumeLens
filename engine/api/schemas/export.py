@@ -51,6 +51,23 @@ class ExportLibraryRequest(BaseModel):
         return self
 
 
+class ExportJobStartResponse(BaseModel):
+    """``POST /export/library/{id}`` 的即时响应 — 导出已在后台开跑。
+
+    真正的进度与结果走 ``GET /export/jobs/{job_id}/events`` (SSE)。
+    """
+
+    job_id: str
+    library_id: str
+    total: int
+    total_bytes: int
+
+
+class ExportJobCancelResponse(BaseModel):
+    job_id: str
+    status: str
+
+
 class ExportManifestPaths(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 

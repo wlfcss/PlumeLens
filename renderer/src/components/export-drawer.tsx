@@ -2,11 +2,17 @@
  * 导出面板(sidecar 形态) — 用户筛选出"入选/可用/记录"组合 + 评分范围,
  * 把照片复制到目标文件夹,可选附 XMP sidecar / 仅 XMP / 按 grade 分目录布局。
  *
- * 状态机:idle → running → success | error。锁定状态:开始导出后 source 和
- * options 都被 snapshot 锁,UI 进 read-only,避免运行中改源数据。
+ * 状态机:idle → starting → running → succeeded | cancelled | failed。
+ * 锁定状态:开始导出后 source 和 options 都被 snapshot 锁,UI 进 read-only,
+ * 避免运行中改源数据。
  *
- * 边界:plumelens preload 暴露 selectExportDirectory + openPathInFinder;
- * 后端 api.exportLibrary 接收完整 options 一次性完成所有文件操作。
+ * **导出是后台任务**:POST 只启动并返回 job_id,进度经 SSE 推回来,用户可随时
+ * 取消。历史 bug —— 导出曾经是一次性同步请求,964 张 / 80 GB 要跑两小时,前端
+ * 60s 超时后 UI 报"导出失败",后端却毫不知情地继续复制;用户以为失败去重试,
+ * 又叠一个后台导出抢同一个卷的 IO,越跑越慢。
+ *
+ * 边界:plumelens preload 暴露 selectExportDirectory + openPathInFinder + SSE 桥;
+ * 后端负责全部文件操作与取消。
  */
 
 import {
@@ -21,19 +27,29 @@ import {
   Trophy,
   X,
 } from 'lucide-react'
-import { useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { useTranslation } from 'react-i18next'
 
 import { MetricCell } from '@/components/common/metric-cell'
 import { SectionLabel } from '@/components/common/section-label'
-import { api, type ExportLibraryResponse } from '@/lib/api-client'
+import {
+  ApiError,
+  api,
+  type ExportErrorDetail,
+  type ExportJobSnapshot,
+  type ExportLibraryResponse,
+} from '@/lib/api-client'
+import { formatBytes } from '@/lib/format-bytes'
 import { gradeLabelKey } from '@/lib/i18n-keys'
+import { logger } from '@/lib/logger'
 import type { FolderRecord, PhotoGrade, PhotoRecord } from '@/lib/workspace-types'
 import { effectivePhotoGrade, type FolderSummary } from '@/lib/photo-helpers'
 import { cn } from '@/lib/utils'
 
 export type ExportLayout = 'merged' | 'by_grade'
 export type ExportContentMode = 'files' | 'files_xmp' | 'xmp_only'
+
+type ExportPhase = 'idle' | 'starting' | 'running' | 'succeeded' | 'cancelled' | 'failed'
 
 export type ExportSourceSnapshot = {
   folder: FolderRecord
@@ -47,7 +63,37 @@ type ExportOptionsSnapshot = {
   max: number | null
   layout: ExportLayout
   contentMode: ExportContentMode
+  includeCompanions: boolean
   targetDir: string
+}
+
+/** 后端 error code → i18n key。未收录的 code 回落到 export.error.unknown + 原始 message。 */
+const ERROR_KEYS: Record<string, string> = {
+  insufficient_space: 'export.error.insufficientSpace',
+  target_inside_source: 'export.error.targetInsideSource',
+  target_contains_source: 'export.error.targetContainsSource',
+  library_not_found: 'export.error.libraryNotFound',
+  source_path_missing: 'export.error.sourcePathMissing',
+  export_already_running: 'export.error.alreadyRunning',
+  job_not_found: 'export.error.jobNotFound',
+  internal_error: 'export.error.internal',
+}
+
+/**
+ * 从 ApiError 里剥出后端的结构化 detail。
+ *
+ * FastAPI 会把 HTTPException 的 detail 再包一层 ``{detail: {...}}``,所以这里
+ * 要往里剥一层才能拿到 ``{code, ...}``。
+ */
+function parseExportError(err: unknown): ExportErrorDetail | null {
+  if (!(err instanceof ApiError)) return null
+  const raw: unknown = err.detail
+  const inner =
+    raw && typeof raw === 'object' && 'detail' in raw ? (raw as { detail: unknown }).detail : raw
+  if (inner && typeof inner === 'object' && 'code' in inner) {
+    return inner as ExportErrorDetail
+  }
+  return null
 }
 
 function ExportOption({ title, value }: { title: string; value: string }) {
@@ -73,22 +119,37 @@ export function ExportDrawer({
   const [maxScore, setMaxScore] = useState('')
   const [layout, setLayout] = useState<ExportLayout>('merged')
   const [contentMode, setContentMode] = useState<ExportContentMode>('files_xmp')
+  const [includeCompanions, setIncludeCompanions] = useState(true)
   const [targetDir, setTargetDir] = useState('')
   const [collapsed, setCollapsed] = useState(false)
-  const [status, setStatus] = useState<'idle' | 'running' | 'success' | 'error'>('idle')
+  const [phase, setPhase] = useState<ExportPhase>('idle')
+  const [job, setJob] = useState<ExportJobSnapshot | null>(null)
   const [result, setResult] = useState<ExportLibraryResponse | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [cancelRequested, setCancelRequested] = useState(false)
   const [lockedSource, setLockedSource] = useState<ExportSourceSnapshot | null>(null)
   const [lockedOptions, setLockedOptions] = useState<ExportOptionsSnapshot | null>(null)
+
+  const jobIdRef = useRef<string | null>(null)
+  const unsubscribeRef = useRef<(() => void) | null>(null)
 
   const sourceFolder = lockedSource?.folder ?? source.folder
   const sourcePhotos = lockedSource?.photos ?? source.photos
   const sourceSummary = lockedSource?.summary ?? source.summary
   const sourceMissing = sourceFolder?.status === 'path_missing'
+  const running = phase === 'starting' || phase === 'running'
 
   const min = minScore.trim() === '' ? null : Number(minScore)
   const max = maxScore.trim() === '' ? null : Number(maxScore)
-  const activeOptions = lockedOptions ?? { grades, min, max, layout, contentMode, targetDir }
+  const activeOptions = lockedOptions ?? {
+    grades,
+    min,
+    max,
+    layout,
+    contentMode,
+    includeCompanions,
+    targetDir,
+  }
   const controlsLocked = lockedOptions !== null
   const exportPhotos = useMemo(() => {
     const activeGrades = new Set(activeOptions.grades)
@@ -115,6 +176,110 @@ export function ExportDrawer({
     })
   }, [activeOptions.grades, activeOptions.max, activeOptions.min, sourcePhotos])
 
+  const describeError = useCallback(
+    (detail: ExportErrorDetail | null, fallback: string): string => {
+      if (!detail) return fallback
+      const key = ERROR_KEYS[detail.code]
+      if (!key) {
+        return t('export.error.unknown', { message: detail.message ?? fallback })
+      }
+      if (detail.code === 'insufficient_space') {
+        const required = detail.required_bytes ?? 0
+        const free = detail.free_bytes ?? 0
+        return t(key, {
+          required: formatBytes(required),
+          free: formatBytes(free),
+          shortfall: formatBytes(Math.max(0, required - free)),
+        })
+      }
+      return t(key)
+    },
+    [t],
+  )
+
+  const teardownStream = useCallback(() => {
+    unsubscribeRef.current?.()
+    unsubscribeRef.current = null
+  }, [])
+
+  // 组件卸载只断开进度流，**不取消导出** —— 后台任务继续跑到底。
+  useEffect(() => teardownStream, [teardownStream])
+
+  const applySnapshot = useCallback(
+    (snapshot: ExportJobSnapshot) => {
+      setJob(snapshot)
+      if (snapshot.status === 'running') {
+        setPhase('running')
+        return
+      }
+      teardownStream()
+      setResult(snapshot.result)
+      if (snapshot.status === 'succeeded') {
+        setPhase('succeeded')
+        setError(null)
+      } else if (snapshot.status === 'cancelled') {
+        setPhase('cancelled')
+        setError(null)
+      } else {
+        setPhase('failed')
+        setError(describeError(snapshot.error, t('export.status.error')))
+      }
+    },
+    [describeError, t, teardownStream],
+  )
+
+  const subscribe = useCallback(
+    (jobId: string) => {
+      teardownStream()
+      const handleFrame = (raw: string) => {
+        try {
+          applySnapshot(JSON.parse(raw) as ExportJobSnapshot)
+        } catch (e) {
+          logger.warn('导出进度帧解析失败:', e)
+        }
+      }
+
+      if (typeof window !== 'undefined' && window.plumelens?.engineSseSubscribe) {
+        unsubscribeRef.current = window.plumelens.engineSseSubscribe(
+          `/export/jobs/${jobId}/events`,
+          (bridgeEvent) => {
+            if (bridgeEvent.type === 'message') {
+              handleFrame(bridgeEvent.data)
+              return
+            }
+            if (bridgeEvent.type === 'error') {
+              // 后端在终态帧之后主动收流,桥会以 error 事件收尾 —— 这是正常结束。
+              // 无论是正常收流还是真断线,都回查一次快照对齐状态,不让 UI 永远转圈。
+              void api
+                .exportJobSnapshot(jobId)
+                .then(applySnapshot)
+                .catch((e: unknown) => logger.warn('导出快照回查失败:', e))
+            }
+          },
+        )
+        return
+      }
+
+      // vite-only / 无 preload 的兜底路径
+      void api
+        .exportJobEventsUrl(jobId)
+        .then((url) => {
+          const es = new EventSource(url)
+          es.onmessage = (msg) => handleFrame(msg.data)
+          es.onerror = () => {
+            es.close()
+            void api
+              .exportJobSnapshot(jobId)
+              .then(applySnapshot)
+              .catch((e: unknown) => logger.warn('导出快照回查失败:', e))
+          }
+          unsubscribeRef.current = () => es.close()
+        })
+        .catch((e: unknown) => logger.warn('导出进度流订阅失败:', e))
+    },
+    [applySnapshot, teardownStream],
+  )
+
   const toggleGrade = (grade: PhotoGrade) => {
     setGrades((current) =>
       current.includes(grade) ? current.filter((item) => item !== grade) : [...current, grade],
@@ -128,23 +293,24 @@ export function ExportDrawer({
       setTargetDir(selected)
       setResult(null)
       setError(null)
-      if (status !== 'running') setStatus('idle')
+      if (!running) setPhase('idle')
     }
   }
 
   const startExport = async () => {
-    if (!sourceFolder || !targetDir || status === 'running') return
+    if (!sourceFolder || !targetDir || running) return
     if (sourceFolder.status === 'path_missing') {
       setError(t('selection.sourceMissing.exportDisabled'))
-      setStatus('error')
+      setPhase('failed')
       return
     }
-    const exportOptions = {
+    const exportOptions: ExportOptionsSnapshot = {
       grades: [...grades],
       min: min !== null && Number.isFinite(min) ? min : null,
       max: max !== null && Number.isFinite(max) ? max : null,
       layout,
       contentMode,
+      includeCompanions,
       targetDir,
     }
     const exportSource = {
@@ -154,68 +320,125 @@ export function ExportDrawer({
     }
     setLockedSource(exportSource)
     setLockedOptions(exportOptions)
-    setStatus('running')
+    setPhase('starting')
     setCollapsed(true)
     setResult(null)
+    setJob(null)
     setError(null)
+    setCancelRequested(false)
     try {
-      const response = await api.exportLibrary(exportSource.folder.id, {
+      const started = await api.exportLibrary(exportSource.folder.id, {
         target_dir: exportOptions.targetDir,
         grades: exportOptions.grades,
         min_score: exportOptions.min,
         max_score: exportOptions.max,
         copy_files: exportOptions.contentMode !== 'xmp_only',
-        include_companions: true,
+        include_companions: exportOptions.includeCompanions,
         include_xmp_sidecars: exportOptions.contentMode !== 'files',
         layout: exportOptions.layout,
         preserve_structure: true,
         include_manifest: true,
       })
-      setResult(response)
-      setStatus('success')
+      jobIdRef.current = started.job_id
+      setJob({
+        job_id: started.job_id,
+        library_id: started.library_id,
+        status: 'running',
+        total: started.total,
+        processed: 0,
+        exported: 0,
+        companions: 0,
+        xmp: 0,
+        missing: 0,
+        failed: 0,
+        total_bytes: started.total_bytes,
+        copied_bytes: 0,
+        current_file: null,
+        output_dir: null,
+        result: null,
+        error: null,
+      })
+      setPhase('running')
+      subscribe(started.job_id)
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
-      setStatus('error')
+      const fallback = err instanceof Error ? err.message : String(err)
+      setError(describeError(parseExportError(err), fallback))
+      setPhase('failed')
+    }
+  }
+
+  const cancelExport = async () => {
+    const jobId = jobIdRef.current
+    if (!jobId || !running || cancelRequested) return
+    setCancelRequested(true)
+    try {
+      await api.cancelExportJob(jobId)
+    } catch (err) {
+      setCancelRequested(false)
+      const fallback = err instanceof Error ? err.message : String(err)
+      setError(describeError(parseExportError(err), fallback))
     }
   }
 
   const closePanel = () => {
-    if (status !== 'running') onClose()
+    if (!running) onClose()
   }
 
   const openExportOutput = async () => {
-    if (!result?.output_dir) return
-    const openResult = await window.plumelens?.openPathInFinder?.(result.output_dir)
+    const outputDir = result?.output_dir ?? job?.output_dir
+    if (!outputDir) return
+    const openResult = await window.plumelens?.openPathInFinder?.(outputDir)
     if (openResult && !openResult.ok) {
       setError(t('export.result.openFailed'))
     }
   }
 
   const resetExport = () => {
+    teardownStream()
+    jobIdRef.current = null
     setLockedSource(null)
     setLockedOptions(null)
     setResult(null)
+    setJob(null)
     setError(null)
-    setStatus('idle')
+    setCancelRequested(false)
+    setPhase('idle')
     setCollapsed(false)
   }
 
   const canStart = Boolean(
     sourceFolder &&
-    !sourceMissing &&
-    targetDir &&
-    exportPhotos.length > 0 &&
-    status === 'idle' &&
-    !controlsLocked,
+      !sourceMissing &&
+      targetDir &&
+      exportPhotos.length > 0 &&
+      phase === 'idle' &&
+      !controlsLocked,
   )
-  const statusText =
-    status === 'running'
-      ? t('export.status.running')
-      : status === 'success'
-        ? t('export.status.success')
-        : status === 'error'
+  const statusText = running
+    ? cancelRequested
+      ? t('export.cancelling')
+      : t('export.status.running')
+    : phase === 'succeeded'
+      ? t('export.status.success')
+      : phase === 'cancelled'
+        ? t('export.status.cancelled')
+        : phase === 'failed'
           ? t('export.status.error')
           : t('export.status.ready')
+
+  const progressTotal = job?.total ?? exportPhotos.length
+  const progressPercent =
+    job && job.total > 0 ? Math.min(100, Math.round((job.processed / job.total) * 100)) : 0
+  // phase 值与既有的 .export-status--* 配色类名不同名,这里做一次映射,避免改动样式表。
+  const statusTone = running
+    ? 'running'
+    : phase === 'succeeded'
+      ? 'success'
+      : phase === 'failed'
+        ? 'error'
+        : phase === 'cancelled'
+          ? 'cancelled'
+          : 'idle'
 
   if (collapsed) {
     return (
@@ -225,16 +448,20 @@ export function ExportDrawer({
           onClick={() => setCollapsed(false)}
           type="button"
         >
-          {status === 'running' ? (
+          {running ? (
             <RefreshCw className="h-4 w-4 animate-spin" />
-          ) : status === 'success' ? (
+          ) : phase === 'succeeded' ? (
             <Check className="h-4 w-4" />
           ) : (
             <Download className="h-4 w-4" />
           )}
           <span>
             <strong>{statusText}</strong>
-            <small>{t('export.summary.count', { count: exportPhotos.length })}</small>
+            <small>
+              {running && job
+                ? t('export.progress.photos', { processed: job.processed, total: job.total })
+                : t('export.summary.count', { count: exportPhotos.length })}
+            </small>
           </span>
         </button>
         <button
@@ -245,7 +472,7 @@ export function ExportDrawer({
         >
           <ArrowLeft className="h-4 w-4" />
         </button>
-        {status !== 'running' ? (
+        {!running ? (
           <button
             aria-label={t('common.close')}
             className="icon-button"
@@ -279,7 +506,7 @@ export function ExportDrawer({
           <button
             aria-label={t('common.close')}
             className="icon-button"
-            disabled={status === 'running'}
+            disabled={running}
             onClick={closePanel}
             type="button"
           >
@@ -348,6 +575,22 @@ export function ExportDrawer({
               </button>
             ))}
           </div>
+        </div>
+
+        {/* RAW 同伴文件开关 —— 曾经硬编码为 true,导致"只想导 25 GB 的 JPG"被强制
+            搭上 56 GB 的 CR3,预检直接判定磁盘空间不足。 */}
+        <div className="export-control-block">
+          <SectionLabel label={t('export.companions.label')} />
+          <label className="export-check">
+            <input
+              checked={activeOptions.includeCompanions}
+              disabled={controlsLocked || activeOptions.contentMode === 'xmp_only'}
+              onChange={(event) => setIncludeCompanions(event.target.checked)}
+              type="checkbox"
+            />
+            <span>{t('export.companions.include')}</span>
+          </label>
+          <p className="export-hint">{t('export.companions.hint')}</p>
         </div>
 
         <div className="export-control-block">
@@ -456,13 +699,35 @@ export function ExportDrawer({
           {t('export.summary.count', { count: exportPhotos.length })}
         </div>
 
-        <div className={cn('export-status', `export-status--${status}`)}>
-          {status === 'running' ? <RefreshCw className="h-4 w-4 animate-spin" /> : null}
-          {status === 'success' ? <Check className="h-4 w-4" /> : null}
-          {status === 'idle' ? <Clock3 className="h-4 w-4" /> : null}
-          {status === 'error' ? <X className="h-4 w-4" /> : null}
+        <div className={cn('export-status', `export-status--${statusTone}`)}>
+          {running ? <RefreshCw className="h-4 w-4 animate-spin" /> : null}
+          {phase === 'succeeded' ? <Check className="h-4 w-4" /> : null}
+          {phase === 'idle' ? <Clock3 className="h-4 w-4" /> : null}
+          {phase === 'failed' || phase === 'cancelled' ? <X className="h-4 w-4" /> : null}
           <span>{statusText}</span>
         </div>
+
+        {job && (running || phase === 'cancelled') ? (
+          <div className="export-progress">
+            <div className="export-progress__bar">
+              <span style={{ width: `${progressPercent}%` }} />
+            </div>
+            <small>
+              {t('export.progress.photos', { processed: job.processed, total: progressTotal })}
+              {' · '}
+              {t('export.progress.bytes', {
+                copied: formatBytes(job.copied_bytes),
+                total: formatBytes(job.total_bytes),
+              })}
+            </small>
+            {job.current_file ? (
+              <small title={job.current_file}>
+                {t('export.progress.current', { name: job.current_file })}
+              </small>
+            ) : null}
+          </div>
+        ) : null}
+
         {result ? (
           <div className="export-output">
             <small>{t('export.result.output')}</small>
@@ -475,11 +740,12 @@ export function ExportDrawer({
                 xmp: result.xmp_count ?? 0,
               })}
             </small>
+            {phase === 'cancelled' ? <small>{t('export.result.cancelledHint')}</small> : null}
           </div>
         ) : null}
         {error ? <p className="export-error">{error}</p> : null}
 
-        {controlsLocked && status !== 'running' ? (
+        {controlsLocked && !running ? (
           <div className="export-completion-actions">
             {result ? (
               <button className="button-ghost" onClick={openExportOutput} type="button">
@@ -495,19 +761,27 @@ export function ExportDrawer({
         ) : null}
 
         <div className="action-row">
-          <button
-            className="button-primary"
-            disabled={!canStart}
-            onClick={startExport}
-            type="button"
-          >
-            {status === 'running' ? (
-              <RefreshCw className="h-4 w-4 animate-spin" />
-            ) : (
+          {running ? (
+            <button
+              className="button-primary"
+              disabled={cancelRequested}
+              onClick={cancelExport}
+              type="button"
+            >
+              <X className="h-4 w-4" />
+              {cancelRequested ? t('export.cancelling') : t('export.cancel')}
+            </button>
+          ) : (
+            <button
+              className="button-primary"
+              disabled={!canStart}
+              onClick={startExport}
+              type="button"
+            >
               <Download className="h-4 w-4" />
-            )}
-            {status === 'running' ? t('export.status.running') : t('export.confirm')}
-          </button>
+              {t('export.confirm')}
+            </button>
+          )}
           <button className="button-ghost" onClick={() => setCollapsed(true)} type="button">
             {t('common.collapse')}
           </button>

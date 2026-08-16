@@ -479,6 +479,45 @@ export interface ExportLibraryResponse {
   }
 }
 
+/** POST /export/library/{id} 的即时响应 — 导出已在后台开跑，进度走 SSE。 */
+export interface ExportJobStart {
+  job_id: string
+  library_id: string
+  total: number
+  total_bytes: number
+}
+
+export type ExportJobStatus = 'running' | 'succeeded' | 'failed' | 'cancelled'
+
+/** 后端结构化错误：code 供前端查 i18n 表，其余字段是渲染文案要用的数值。 */
+export interface ExportErrorDetail {
+  code: string
+  message?: string
+  required_bytes?: number
+  free_bytes?: number
+  job_id?: string
+}
+
+/** SSE 每帧的 job 快照。 */
+export interface ExportJobSnapshot {
+  job_id: string
+  library_id: string
+  status: ExportJobStatus
+  total: number
+  processed: number
+  exported: number
+  companions: number
+  xmp: number
+  missing: number
+  failed: number
+  total_bytes: number
+  copied_bytes: number
+  current_file: string | null
+  output_dir: string | null
+  result: ExportLibraryResponse | null
+  error: ExportErrorDetail | null
+}
+
 export interface SpeciesOverrideValue {
   canonical_sci: string
   canonical_zh?: string | null
@@ -624,11 +663,25 @@ export const api = {
     request<DecisionCountsResponse>(`/decisions/library/${libraryId}/counts`),
 
   // Export
+  // 导出是长任务(实测 964 张 / 80 GB 约两小时) — POST 只启动并立刻返回 job 句柄，
+  // 进度与结果走 exportJobEventsUrl 的 SSE，中途可 cancelExportJob。
   exportLibrary: (libraryId: string, body: ExportLibraryRequest) =>
-    request<ExportLibraryResponse>(`/export/library/${libraryId}`, {
+    request<ExportJobStart>(`/export/library/${libraryId}`, {
       method: 'POST',
       body: JSON.stringify(body),
     }),
+  exportJobSnapshot: (jobId: string) => request<ExportJobSnapshot>(`/export/jobs/${jobId}`),
+  cancelExportJob: (jobId: string) =>
+    request<{ job_id: string; status: ExportJobStatus }>(`/export/jobs/${jobId}/cancel`, {
+      method: 'POST',
+    }),
+  exportJobEventsUrl: async (jobId: string): Promise<string> => {
+    if (typeof window !== 'undefined' && window.plumelens?.engineSseUrl) {
+      return window.plumelens.engineSseUrl(`/export/jobs/${jobId}/events`)
+    }
+    const base = await getBackendUrl()
+    return `${base}/export/jobs/${jobId}/events`
+  },
 
   // Reverse geocoding — provider chain(amap → baidu → tencent → nominatim → offline),
   // 后端按可用 key 自动选,前端只看 display_name + source 标识即可。

@@ -8454,11 +8454,19 @@ button:disabled {
 }
 
 .export-sidecar p {
-  max-width: 300px;
-  overflow: hidden;
   font-family: var(--pl-font-data);
   font-size: 12px;
   line-height: 1.5;
+}
+
+/* 单行省略只给"路径"用 —— 以前挂在 .export-sidecar p 上,把 body 里每个 <p>
+   都罩住了,错误提示被 max-width:300px + nowrap + overflow:hidden 裁成半句
+   ("400 Bad Request: {"detail":"Export" 后面全没了),用户根本看不到失败原因。 */
+.export-sidecar__head p,
+.export-target p,
+.export-output p {
+  max-width: 300px;
+  overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -8681,13 +8689,59 @@ button:disabled {
 }
 
 .export-error {
+  /* !important 用于压过 `.export-sidecar p, .review-reason` 那条(特异性更高)的
+     margin/color;宽度与换行现在不需要覆盖了,单行省略已收窄到路径专用选择器。 */
   margin: 0 !important;
+  max-width: 100%;
   border: 1px solid rgba(255, 108, 117, 0.35);
   border-radius: 8px;
   background: rgba(255, 108, 117, 0.08);
   padding: 10px 11px;
   color: rgb(255, 194, 199) !important;
-  white-space: normal !important;
+  overflow-wrap: anywhere;
+}
+
+.export-hint {
+  margin: 0 !important;
+  color: var(--pl-fg-3) !important;
+  font-size: 11px !important;
+  overflow-wrap: anywhere;
+}
+
+.export-progress {
+  display: grid;
+  gap: 6px;
+  border: 1px solid var(--pl-border-0);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.18);
+  padding: 11px 12px;
+}
+
+.export-progress small {
+  color: var(--pl-fg-3);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.export-progress__bar {
+  overflow: hidden;
+  height: 4px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.09);
+}
+
+.export-progress__bar span {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--pl-accent, rgb(122, 200, 160));
+  transition: width var(--pl-motion-slow, 260ms) ease;
+}
+
+.export-status--cancelled {
+  border-color: rgba(255, 196, 120, 0.38);
+  background: rgba(255, 196, 120, 0.1);
+  color: rgb(255, 216, 168);
 }
 
 .export-sidecar .export-sidecar__body > .action-row {

@@ -21,6 +21,7 @@ import { SectionLabel } from '@/components/common/section-label'
 import { TagCluster } from '@/components/common/tag-cluster'
 import { ThumbnailImage, type ThumbnailLoadStatus } from '@/components/thumbnail-image'
 import { SpeciesNameAction } from '@/components/species/species-detail-popover'
+import { formatBytes } from '@/lib/format-bytes'
 import type { SpeciesOverrideBBox, SpeciesOverrideValue } from '@/lib/api-client'
 import { computeIqaCropBox } from '@/lib/backend-adapter'
 import { gradeLabelKey } from '@/lib/i18n-keys'
@@ -944,14 +945,6 @@ function CompactStat({
       <span className="compact-stat__value">{value}</span>
     </div>
   )
-}
-
-/** 字节数 → 人读字符串(MB / GB)。RAW 文件常 30-100 MB,误差 ±0.1 可接受。 */
-function formatBytes(bytes: number): string {
-  if (bytes <= 0) return '--'
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`
-  if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`
-  return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`
 }
 
 /** 紧凑 key-value：单行，标签灰、值白；emphasis=true 时值高亮(用于飞版升档提示)。 */
