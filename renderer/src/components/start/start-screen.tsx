@@ -10,7 +10,7 @@
  *
  */
 
-import { ArrowRight, FolderOpen, FolderSearch2, TriangleAlert, X } from 'lucide-react'
+import { ArrowRight, FolderOpen, FolderSearch2, Trash2, TriangleAlert, X } from 'lucide-react'
 import { memo, useCallback, useEffect, useMemo, type MouseEvent as ReactMouseEvent } from 'react'
 import type { useTranslation } from 'react-i18next'
 
@@ -43,12 +43,14 @@ export function FolderContextMenu({
   onClose,
   onOpenFolder,
   onRelinkFolder,
+  onRequestRemove,
   t,
 }: {
   menu: FolderContextMenuState
   onClose: () => void
   onOpenFolder: (folder: FolderRecord) => void
   onRelinkFolder: (folderId: string) => Promise<void>
+  onRequestRemove: (folder: FolderRecord) => void
   t: ReturnType<typeof useTranslation>['t']
 }) {
   useEffect(() => {
@@ -101,6 +103,92 @@ export function FolderContextMenu({
           <span>{t('selection.sourceMissing.relinkAction')}</span>
         </button>
       ) : null}
+      <button
+        className="folder-context-menu__danger"
+        onClick={(event) => {
+          event.stopPropagation()
+          onClose()
+          onRequestRemove(menu.folder)
+        }}
+        role="menuitem"
+        type="button"
+      >
+        <Trash2 className="h-4 w-4" />
+        <span>{t('selection.folderMenu.remove')}</span>
+      </button>
+    </div>
+  )
+}
+
+/**
+ * 移除文件夹的确认弹窗。
+ *
+ * 这是不可撤销操作(分析结果 / 人工评级 / 物种修正全部随之消失),而且名字容易
+ * 被误读成"删除照片" —— 所以必须显式写清楚:只清应用内的记录,源文件夹和照片
+ * 原封不动。
+ */
+export function RemoveFolderDialog({
+  busy,
+  folder,
+  error,
+  onCancel,
+  onConfirm,
+  t,
+}: {
+  busy: boolean
+  folder: FolderRecord | null
+  error: string | null
+  onCancel: () => void
+  onConfirm: () => void
+  t: ReturnType<typeof useTranslation>['t']
+}) {
+  useEffect(() => {
+    if (!folder) return
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && !busy) onCancel()
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [busy, folder, onCancel])
+
+  if (!folder) return null
+
+  return (
+    <div
+      className="overlay-backdrop"
+      onPointerDown={(event) => {
+        if (event.target === event.currentTarget && !busy) onCancel()
+      }}
+    >
+      <div
+        aria-labelledby="remove-folder-title"
+        aria-modal="true"
+        className="remove-folder-dialog"
+        onPointerDown={(event) => event.stopPropagation()}
+        role="dialog"
+      >
+        <h2 id="remove-folder-title">{t('selection.removeFolder.title')}</h2>
+        <p className="remove-folder-dialog__target" title={folder.rootPath}>
+          {folder.displayName}
+        </p>
+        <p>{t('selection.removeFolder.body', { count: folder.totalCount })}</p>
+        <p className="remove-folder-dialog__safe">{t('selection.removeFolder.sourceSafe')}</p>
+        {error ? <p className="remove-folder-dialog__error">{error}</p> : null}
+        <div className="action-row">
+          <button className="button-ghost" disabled={busy} onClick={onCancel} type="button">
+            {t('common.cancel')}
+          </button>
+          <button
+            className="button-danger"
+            disabled={busy}
+            onClick={onConfirm}
+            type="button"
+          >
+            <Trash2 className="h-4 w-4" />
+            {busy ? t('selection.removeFolder.removing') : t('selection.removeFolder.confirm')}
+          </button>
+        </div>
+      </div>
     </div>
   )
 }

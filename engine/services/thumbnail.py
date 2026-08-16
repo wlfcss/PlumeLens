@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -54,6 +55,28 @@ class ThumbnailPaths:
 
     grid: Path
     preview: Path
+
+
+def delete_thumbnails_for_photos(photo_ids: Iterable[str], cache_root: Path) -> int:
+    """删除这些 photo 的 grid + preview 缩略图,返回实际删掉的文件数。
+
+    库被移除后 DB 行随 CASCADE 一起没了,缓存文件却再无任何引用能找到它们 ——
+    不在这里清就是永久泄漏(实测单个用户 derived/thumbnails 已到 3.2 GB)。
+    单个文件删除失败不影响其余(权限/占用),只记账不抛。
+    """
+    removed = 0
+    for photo_id in photo_ids:
+        for kind in ("grid", "preview"):
+            path = cache_root / kind / f"{photo_id}.jpg"
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                continue
+            except OSError as e:
+                logger.warning("Failed to delete thumbnail", path=str(path), error=str(e))
+                continue
+            removed += 1
+    return removed
 
 
 def _resize_long_edge(img: Image.Image, long_edge: int) -> Image.Image:

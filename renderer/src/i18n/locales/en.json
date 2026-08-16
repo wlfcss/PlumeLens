@@ -17,7 +17,8 @@
     "expand": "Expand",
     "collapse": "Collapse",
     "settings": "Settings",
-    "close": "Close"
+    "close": "Close",
+    "cancel": "Cancel"
   },
   "errors": {
     "renderFailed": {
@@ -233,7 +234,8 @@
     },
     "folderMenu": {
       "label": "Folder actions",
-      "openInFinder": "Open in Finder"
+      "openInFinder": "Open in Finder",
+      "remove": "Remove folder"
     },
     "sourceMissing": {
       "short": "Missing",
@@ -584,6 +586,13 @@
       "title": "No folders ready yet",
       "body": "Go back to Start, choose a photo folder, and the app will scan, analyze, and build the workspace for you.",
       "action": "Back to Start"
+    },
+    "removeFolder": {
+      "title": "Remove this folder?",
+      "body": "This clears every record PlumeLens holds for it: analysis results, manual grades, species corrections and thumbnail cache for {{count}} photos. This cannot be undone.",
+      "sourceSafe": "The source folder and your original photos are not deleted — only removed from PlumeLens.",
+      "confirm": "Remove",
+      "removing": "Removing…"
     }
   },
   "archive": {
@@ -792,11 +801,6 @@
     },
     "cancel": "Cancel export",
     "cancelling": "Cancelling…",
-    "companions": {
-      "label": "Companion files",
-      "include": "Also export RAW companion files",
-      "hint": "Turn off to export JPGs only. RAW files are typically more than twice the size of JPGs — disable this first when space is tight."
-    },
     "progress": {
       "photos": "{{processed}} / {{total}} photos processed",
       "bytes": "{{copied}} / {{total}} copied",
@@ -812,6 +816,13 @@
       "jobNotFound": "That export job no longer exists — the backend may have restarted. Please start a new export.",
       "internal": "The export hit an internal error. See the logs for details.",
       "unknown": "Export failed: {{message}}"
+    },
+    "formats": {
+      "label": "Photo formats",
+      "loading": "Reading formats in the source folder…",
+      "stat": "{{count}} photos · {{size}}",
+      "hint": "Only checked formats are exported. Unchecking RAW frees up a lot of space.",
+      "xmpOnlyHint": "\"XMP sidecars only\" copies no photo files, so format selection has no effect."
     }
   },
   "background": {

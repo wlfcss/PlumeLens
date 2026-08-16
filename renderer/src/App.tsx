@@ -32,6 +32,7 @@ import {
   LIBRARIES_KEY,
   LIBRARY_DETAIL_KEY,
   useAllLibraryDetails,
+  useDeleteLibrary,
   useImportLibrary,
   useLibraries,
   useLibraryDetail,
@@ -70,6 +71,7 @@ const SelectionScreen = lazy(() =>
 )
 import {
   FolderContextMenu,
+  RemoveFolderDialog,
   StartScreen,
   type FolderContextMenuState,
 } from '@/components/start/start-screen'
@@ -105,7 +107,8 @@ type ExportSession = {
 }
 
 const FOLDER_CONTEXT_MENU_WIDTH = 188
-const FOLDER_CONTEXT_MENU_HEIGHT = 88
+// 菜单最多 3 项(在 Finder 打开 / 重新链接 / 移除),按此估高做贴边位置修正。
+const FOLDER_CONTEXT_MENU_HEIGHT = 128
 
 const EMPTY_PHOTOS: PhotoRecord[] = []
 const EMPTY_SPECIES: SpeciesRecord[] = []
@@ -196,6 +199,9 @@ export default function App() {
   const [folderContextMenu, setFolderContextMenu] = useState<FolderContextMenuState>(null)
   const [relinkingFolderId, setRelinkingFolderId] = useState<string | null>(null)
   const [importError, setImportError] = useState<string | null>(null)
+  const [pendingRemoval, setPendingRemoval] = useState<FolderRecord | null>(null)
+  const [removeError, setRemoveError] = useState<string | null>(null)
+  const deleteLibrary = useDeleteLibrary()
 
   const {
     route,
@@ -288,6 +294,30 @@ export default function App() {
     [],
   )
   const closeFolderContextMenu = useCallback(() => setFolderContextMenu(null), [])
+  const requestRemoveFolder = useCallback((folder: FolderRecord) => {
+    setRemoveError(null)
+    setPendingRemoval(folder)
+  }, [])
+  const cancelRemoveFolder = useCallback(() => {
+    if (deleteLibrary.isPending) return
+    setPendingRemoval(null)
+    setRemoveError(null)
+  }, [deleteLibrary.isPending])
+  const confirmRemoveFolder = useCallback(async () => {
+    if (!pendingRemoval) return
+    const removedId = pendingRemoval.id
+    try {
+      await deleteLibrary.mutateAsync(removedId)
+      // 该文件夹的导出面板要一并收掉 —— 留着会指向一个已经不存在的图库。
+      setExportSessions((current) => current.filter((session) => session.folderId !== removedId))
+      setPendingRemoval(null)
+      setRemoveError(null)
+      // activeFolderId 由上面的 effect 自动纠正到剩余的第一个文件夹,这里不用管。
+    } catch (err) {
+      logger.warn('Failed to remove library:', err)
+      setRemoveError(err instanceof Error ? err.message : String(err))
+    }
+  }, [deleteLibrary, pendingRemoval])
   const openFolderInFinder = useCallback(async (folder: FolderRecord) => {
     setFolderContextMenu(null)
     try {
@@ -871,6 +901,18 @@ export default function App() {
         onClose={closeFolderContextMenu}
         onOpenFolder={openFolderInFinder}
         onRelinkFolder={handleRelinkFolder}
+        onRequestRemove={requestRemoveFolder}
+        t={t}
+      />
+
+      <RemoveFolderDialog
+        busy={deleteLibrary.isPending}
+        error={removeError}
+        folder={pendingRemoval}
+        onCancel={cancelRemoveFolder}
+        onConfirm={() => {
+          void confirmRemoveFolder()
+        }}
         t={t}
       />
     </AppShell>

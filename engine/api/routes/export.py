@@ -16,6 +16,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from engine.api.schemas.export import (
+    ExportFormatsResponse,
     ExportJobCancelResponse,
     ExportJobStartResponse,
     ExportLibraryRequest,
@@ -27,6 +28,7 @@ from engine.services.exporter import (
     ExportJob,
     cancel_export_job,
     get_export_job,
+    list_export_formats,
     start_export_job,
 )
 
@@ -79,6 +81,17 @@ async def export_library_route(
         total=job.total,
         total_bytes=job.total_bytes,
     )
+
+
+@router.get("/library/{library_id}/formats", response_model=ExportFormatsResponse)
+async def export_formats_route(request: Request, library_id: str) -> ExportFormatsResponse:
+    """源图库里实际存在哪些格式 —— 导出面板据此展示可勾选项。"""
+    db = await _db(request)
+    try:
+        formats = await list_export_formats(db, library_id)
+    except ExportError as exc:
+        raise _http_error(exc) from exc
+    return ExportFormatsResponse(formats=formats)
 
 
 def _require_job(job_id: str) -> ExportJob:

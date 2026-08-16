@@ -36,6 +36,7 @@ import {
   ApiError,
   api,
   type ExportErrorDetail,
+  type ExportFormatStat,
   type ExportJobSnapshot,
   type ExportLibraryResponse,
 } from '@/lib/api-client'
@@ -63,8 +64,37 @@ type ExportOptionsSnapshot = {
   max: number | null
   layout: ExportLayout
   contentMode: ExportContentMode
-  includeCompanions: boolean
+  formats: string[]
   targetDir: string
+}
+
+/** 文件名 → 大写扩展名（不含点）。与后端 `_ext_key` 保持一致。 */
+function extOf(name: string | null | undefined): string | null {
+  if (!name) return null
+  const dot = name.lastIndexOf('.')
+  if (dot < 0 || dot === name.length - 1) return null
+  return name.slice(dot + 1).toUpperCase()
+}
+
+/**
+ * 这张照片在给定格式白名单下会不会产出文件。
+ *
+ * 必须与后端 `_plan_files` 同构 —— 面板上"将导出 N 张"和实际导出量对不上是
+ * 比少一个功能更糟的体验。
+ */
+function photoMatchesFormats(
+  photo: PhotoRecord,
+  allowed: Set<string>,
+  copyFiles: boolean,
+): boolean {
+  if (!copyFiles) return true
+  const mainExt = extOf(photo.fileName)
+  const companionExt = photo.companionFormat
+    ? photo.companionFormat.replace(/^\./, '').toUpperCase()
+    : null
+  const wantMain = mainExt !== null && allowed.has(mainExt)
+  const wantCompanion = companionExt !== null && allowed.has(companionExt)
+  return wantMain || wantCompanion
 }
 
 /** 后端 error code → i18n key。未收录的 code 回落到 export.error.unknown + 原始 message。 */
@@ -119,7 +149,8 @@ export function ExportDrawer({
   const [maxScore, setMaxScore] = useState('')
   const [layout, setLayout] = useState<ExportLayout>('merged')
   const [contentMode, setContentMode] = useState<ExportContentMode>('files_xmp')
-  const [includeCompanions, setIncludeCompanions] = useState(true)
+  const [availableFormats, setAvailableFormats] = useState<ExportFormatStat[] | null>(null)
+  const [formats, setFormats] = useState<string[]>([])
   const [targetDir, setTargetDir] = useState('')
   const [collapsed, setCollapsed] = useState(false)
   const [phase, setPhase] = useState<ExportPhase>('idle')
@@ -147,14 +178,42 @@ export function ExportDrawer({
     max,
     layout,
     contentMode,
-    includeCompanions,
+    formats,
     targetDir,
   }
   const controlsLocked = lockedOptions !== null
+
+  // 源文件夹里实际有哪些格式 —— 面板打开时拉一次,默认全选。
+  const libraryId = sourceFolder?.id
+  useEffect(() => {
+    if (!libraryId) return
+    let cancelled = false
+    void api
+      .exportFormats(libraryId)
+      .then(({ formats: stats }) => {
+        if (cancelled) return
+        setAvailableFormats(stats)
+        setFormats(stats.map((stat) => stat.ext))
+      })
+      .catch((e: unknown) => {
+        if (cancelled) return
+        logger.warn('拉取源文件夹格式列表失败:', e)
+        setAvailableFormats([])
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [libraryId])
+
   const exportPhotos = useMemo(() => {
     const activeGrades = new Set(activeOptions.grades)
+    const allowedFormats = new Set(activeOptions.formats)
+    const copyFiles = activeOptions.contentMode !== 'xmp_only'
     return sourcePhotos.filter((photo) => {
       if (!activeGrades.has(effectivePhotoGrade(photo))) return false
+      if (allowedFormats.size > 0 && !photoMatchesFormats(photo, allowedFormats, copyFiles)) {
+        return false
+      }
       const score = photo.finalScore === null ? null : photo.finalScore * 100
       if (
         score !== null &&
@@ -174,7 +233,14 @@ export function ExportDrawer({
       }
       return true
     })
-  }, [activeOptions.grades, activeOptions.max, activeOptions.min, sourcePhotos])
+  }, [
+    activeOptions.contentMode,
+    activeOptions.formats,
+    activeOptions.grades,
+    activeOptions.max,
+    activeOptions.min,
+    sourcePhotos,
+  ])
 
   const describeError = useCallback(
     (detail: ExportErrorDetail | null, fallback: string): string => {
@@ -286,6 +352,12 @@ export function ExportDrawer({
     )
   }
 
+  const toggleFormat = (ext: string) => {
+    setFormats((current) =>
+      current.includes(ext) ? current.filter((item) => item !== ext) : [...current, ext],
+    )
+  }
+
   const chooseTargetDir = async () => {
     if (controlsLocked) return
     const selected = await window.plumelens?.selectExportDirectory?.()
@@ -310,7 +382,7 @@ export function ExportDrawer({
       max: max !== null && Number.isFinite(max) ? max : null,
       layout,
       contentMode,
-      includeCompanions,
+      formats: [...formats],
       targetDir,
     }
     const exportSource = {
@@ -333,8 +405,13 @@ export function ExportDrawer({
         min_score: exportOptions.min,
         max_score: exportOptions.max,
         copy_files: exportOptions.contentMode !== 'xmp_only',
-        include_companions: exportOptions.includeCompanions,
+        // 同伴文件是否复制由格式白名单决定 —— 勾了 CR3 才会带上 RAW。
+        include_companions: true,
         include_xmp_sidecars: exportOptions.contentMode !== 'files',
+        formats:
+          availableFormats && exportOptions.formats.length < availableFormats.length
+            ? exportOptions.formats
+            : null,
         layout: exportOptions.layout,
         preserve_structure: true,
         include_manifest: true,
@@ -577,21 +654,50 @@ export function ExportDrawer({
           </div>
         </div>
 
-        {/* RAW 同伴文件开关 —— 曾经硬编码为 true,导致"只想导 25 GB 的 JPG"被强制
-            搭上 56 GB 的 CR3,预检直接判定磁盘空间不足。 */}
-        <div className="export-control-block">
-          <SectionLabel label={t('export.companions.label')} />
-          <label className="export-check">
-            <input
-              checked={activeOptions.includeCompanions}
-              disabled={controlsLocked || activeOptions.contentMode === 'xmp_only'}
-              onChange={(event) => setIncludeCompanions(event.target.checked)}
-              type="checkbox"
-            />
-            <span>{t('export.companions.include')}</span>
-          </label>
-          <p className="export-hint">{t('export.companions.hint')}</p>
-        </div>
+        {/* 照片格式多选 —— 按源文件夹里实际存在的格式展示。此前同伴文件是硬编码
+            的 include_companions: true,只想导 25 GB 的 JPG 会被强制搭上 56 GB 的
+            CR3,预检直接判定磁盘空间不足。 */}
+        {availableFormats === null || availableFormats.length > 0 ? (
+          <div className="export-control-block">
+            <SectionLabel label={t('export.formats.label')} />
+            {availableFormats === null ? (
+              <p className="export-hint">{t('export.formats.loading')}</p>
+            ) : (
+              <>
+                <div
+                  className="export-format-grid"
+                  role="group"
+                  aria-label={t('export.formats.label')}
+                >
+                  {availableFormats.map((stat) => (
+                    <label className="export-check export-format" key={stat.ext}>
+                      <input
+                        checked={activeOptions.formats.includes(stat.ext)}
+                        disabled={controlsLocked || activeOptions.contentMode === 'xmp_only'}
+                        onChange={() => toggleFormat(stat.ext)}
+                        type="checkbox"
+                      />
+                      <span>
+                        <strong>{stat.ext}</strong>
+                        <small>
+                          {t('export.formats.stat', {
+                            count: stat.count,
+                            size: formatBytes(stat.bytes),
+                          })}
+                        </small>
+                      </span>
+                    </label>
+                  ))}
+                </div>
+                <p className="export-hint">
+                  {activeOptions.contentMode === 'xmp_only'
+                    ? t('export.formats.xmpOnlyHint')
+                    : t('export.formats.hint')}
+                </p>
+              </>
+            )}
+          </div>
+        ) : null}
 
         <div className="export-control-block">
           <SectionLabel label={t('export.layout.label')} />

@@ -26,6 +26,7 @@ from xml.sax.saxutils import escape, quoteattr
 import structlog
 
 from engine.api.schemas.export import (
+    ExportFormatStat,
     ExportLayout,
     ExportLibraryRequest,
     ExportLibraryResponse,
@@ -409,6 +410,48 @@ def _is_relative_to(path: Path, parent: Path) -> bool:
         return False
 
 
+def _ext_key(name: str | None) -> str | None:
+    """文件名 → 大写扩展名(不含点)。无扩展名返回 None。"""
+    if not name:
+        return None
+    _, dot, ext = name.rpartition(".")
+    return ext.upper() if dot and ext else None
+
+
+def _allowed_formats(body: ExportLibraryRequest) -> frozenset[str] | None:
+    return frozenset(body.formats) if body.formats else None
+
+
+def _format_ok(name: str | None, allowed: frozenset[str] | None) -> bool:
+    if allowed is None:
+        return True
+    ext = _ext_key(name)
+    return ext is not None and ext in allowed
+
+
+def _plan_files(photo: ExportPhoto, body: ExportLibraryRequest) -> tuple[bool, bool]:
+    """按格式白名单判定 (要不要导主文件, 要不要考虑同伴文件)。
+
+    两者独立判定 —— 用户只勾 CR3 时,JPG 主文件跳过而配套 CR3 仍要导出;
+    只勾 JPG 则反过来。``include_companions`` 是同伴的总开关,与白名单是 AND。
+    """
+    allowed = _allowed_formats(body)
+    want_main = _format_ok(photo.file_name, allowed)
+    want_companion = body.include_companions and _format_ok(
+        Path(photo.companion_path).name if photo.companion_path else None,
+        allowed,
+    )
+    # 没有 companion_path 记录时(v7 之前入库的老库),同伴只能靠磁盘探测,此刻还
+    # 判不出扩展名 —— 先放行,等 _discover_companion_path 拿到真实路径再过一次
+    # _format_ok。不放行的话老库勾了 CR3 会一个 RAW 都导不出来。
+    #
+    # 代价:前端只看得到 DB 字段,这类照片会被它算作"没有同伴"而不计入"将导出
+    # N 张"。偏差方向是后端多导而非少导,且仅限老库,可接受。
+    if body.include_companions and photo.companion_path is None:
+        want_companion = True
+    return want_main, want_companion
+
+
 def _effective_grade(photo: ExportPhoto) -> str | None:
     return photo.decision or photo.grade
 
@@ -427,7 +470,15 @@ def _matches_request(photo: ExportPhoto, body: ExportLibraryRequest) -> bool:
     score = _score_percent(photo)
     if score is not None and body.min_score is not None and score < body.min_score:
         return False
-    return not (score is not None and body.max_score is not None and score > body.max_score)
+    if score is not None and body.max_score is not None and score > body.max_score:
+        return False
+    # 格式白名单只在真的复制文件时参与筛选 —— xmp_only 模式下导的是 sidecar,
+    # 与源文件格式无关,不能因为"没勾 CR3"就把整张照片排除掉。
+    if body.copy_files:
+        want_main, want_companion = _plan_files(photo, body)
+        if not want_main and not want_companion:
+            return False
+    return True
 
 
 def _parse_json(raw: str | None) -> dict[str, Any]:
@@ -750,12 +801,17 @@ def _estimate_export_bytes(
     body: ExportLibraryRequest,
 ) -> int:
     total = 0
+    allowed = _allowed_formats(body)
     for photo in selected:
         source = Path(photo.file_path)
         if body.copy_files:
-            total += _file_size(source)
-            if body.include_companions:
-                total += _file_size(_discover_companion_path(photo, source))
+            want_main, want_companion = _plan_files(photo, body)
+            if want_main:
+                total += _file_size(source)
+            if want_companion:
+                companion = _discover_companion_path(photo, source)
+                if companion is not None and _format_ok(companion.name, allowed):
+                    total += _file_size(companion)
         if body.include_xmp_sidecars:
             total += 16 * 1024
     return int(total * _EXPORT_SPACE_MARGIN)
@@ -943,6 +999,7 @@ def _run_export(
     if job is not None:
         job.set_output_dir(str(output_dir))
 
+    allowed_formats = _allowed_formats(body)
     rows: list[ExportManifestRow] = []
     used: set[Path] = set()
     exported = 0
@@ -974,15 +1031,22 @@ def _run_export(
                 missing += 1
                 error = "source_missing"
             else:
-                if body.copy_files and body.include_companions:
+                want_main, want_companion = _plan_files(photo, body)
+                if body.copy_files and want_companion:
                     companion_source = _discover_companion_path(photo, source)
                     if photo.companion_path and (
                         companion_source is None or not companion_source.exists()
                     ):
                         error = "companion_missing"
                         missing += 1
+                    elif companion_source is not None and not _format_ok(
+                        companion_source.name, allowed_formats
+                    ):
+                        # 磁盘探测出来的同伴不在格式白名单内(companion_path 为空时
+                        # 才会走到这) —— 不是错误,只是不导。
+                        companion_source = None
 
-                if error is None and body.copy_files:
+                if error is None and body.copy_files and want_main:
                     rel = _dest_rel(
                         source,
                         root,
@@ -995,18 +1059,25 @@ def _run_export(
                     created_paths.append(dest_path)
                     exported_main = True
 
-                    if body.include_companions and companion_source and companion_source.exists():
-                        comp_rel = _dest_rel(
-                            companion_source,
-                            root,
-                            _effective_grade(photo),
-                            body.layout,
-                            body.preserve_structure,
-                        )
-                        companion_dest = _unique_dest(output_dir, comp_rel, used)
-                        _copy_file(companion_source, companion_dest)
-                        created_paths.append(companion_dest)
-                        exported_companion = True
+                # 同伴复制独立于主文件 —— 只勾 CR3 时主文件(JPG)被跳过,配套 CR3
+                # 仍然要导出,所以不能再嵌在"主文件复制成功"的分支里。
+                if (
+                    error is None
+                    and body.copy_files
+                    and companion_source
+                    and companion_source.exists()
+                ):
+                    comp_rel = _dest_rel(
+                        companion_source,
+                        root,
+                        _effective_grade(photo),
+                        body.layout,
+                        body.preserve_structure,
+                    )
+                    companion_dest = _unique_dest(output_dir, comp_rel, used)
+                    _copy_file(companion_source, companion_dest)
+                    created_paths.append(companion_dest)
+                    exported_companion = True
 
                 if error is None and body.include_xmp_sidecars:
                     xmp_source = (
@@ -1211,6 +1282,52 @@ async def _load_export_context(
         for row in rows
     ]
     return str(library["id"]), str(library["display_name"]), root_path, photos
+
+
+async def list_export_formats(db: Database, library_id: str) -> list[ExportFormatStat]:
+    """按扩展名聚合库内存量(主文件 + 同伴文件),供导出面板展示可选格式。
+
+    体积直接取 photos 表里已记的 file_size / companion_size,不碰磁盘 —— 面板
+    每次打开都要拉,几千行的 SQL 聚合比几千次 stat 便宜得多。
+    """
+    async with db.conn.execute(
+        "SELECT id FROM libraries WHERE id = ?",
+        (library_id,),
+    ) as cur:
+        if await cur.fetchone() is None:
+            msg = "Library not found"
+            raise ExportError("library_not_found", msg)
+
+    async with db.conn.execute(
+        "SELECT file_name, file_size, companion_path, companion_format, companion_size "
+        "FROM photos WHERE library_id = ?",
+        (library_id,),
+    ) as cur:
+        rows = await cur.fetchall()
+
+    tally: dict[str, list[int]] = {}
+
+    def _add(ext: str | None, size: int | None) -> None:
+        if ext is None:
+            return
+        entry = tally.setdefault(ext, [0, 0])
+        entry[0] += 1
+        entry[1] += int(size or 0)
+
+    for row in rows:
+        _add(_ext_key(str(row["file_name"])), row["file_size"])
+        companion_ext = row["companion_format"] or (
+            _ext_key(Path(str(row["companion_path"])).name) if row["companion_path"] else None
+        )
+        if companion_ext:
+            _add(str(companion_ext).lstrip(".").upper(), row["companion_size"])
+
+    raw_exts = {ext.lstrip(".").upper() for ext in RAW_EXTENSIONS}
+    return [
+        ExportFormatStat(ext=ext, count=count, bytes=size, is_raw=ext in raw_exts)
+        # 体积降序 —— 用户最想砍掉的就是最占地方的那一种
+        for ext, (count, size) in sorted(tally.items(), key=lambda kv: (-kv[1][1], kv[0]))
+    ]
 
 
 # 后台 job 的 asyncio.Task 强引用 — create_task 只持弱引用,不存住会被 GC 提前回收。

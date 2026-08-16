@@ -606,6 +606,131 @@ async def test_export_cancel_marks_job_cancelled(
     assert missing.json()["detail"]["code"] == "job_not_found"
 
 
+async def test_export_formats_lists_source_extensions_with_sizes(
+    export_client: tuple[AsyncClient, Path],
+) -> None:
+    client, _ = export_client
+    response = await client.get("/export/library/lib-export/formats")
+
+    assert response.status_code == 200
+    formats = {item["ext"]: item for item in response.json()["formats"]}
+    # 主文件 4 张 jpg + 1 张 missing.jpg;同伴一条 CR3(p5 的 companion_path)
+    assert formats["JPG"]["count"] == 5
+    assert formats["JPG"]["is_raw"] is False
+    assert formats["CR3"]["count"] == 1
+    assert formats["CR3"]["is_raw"] is True
+    # 体积降序 —— 用户最想砍掉的那种排最前
+    sizes = [item["bytes"] for item in response.json()["formats"]]
+    assert sizes == sorted(sizes, reverse=True)
+
+    missing = await client.get("/export/library/nope/formats")
+    assert missing.status_code == 404
+    assert missing.json()["detail"]["code"] == "library_not_found"
+
+
+async def test_export_formats_filter_skips_unselected_extensions(
+    export_client: tuple[AsyncClient, Path],
+    tmp_path: Path,
+) -> None:
+    """只勾 CR3 时:JPG 主文件跳过,配套 CR3 仍然要导出。"""
+    client, _ = export_client
+    response = await client.post(
+        "/export/library/lib-export",
+        json={
+            "target_dir": str(tmp_path / "exports"),
+            "grades": ["select"],
+            "formats": ["CR3"],
+            "include_companions": True,
+            "include_manifest": True,
+        },
+    )
+
+    data = await _await_export(client, response)
+    output_dir = AsyncPath(data["output_dir"])
+    assert data["exported_count"] == 0, "JPG 主文件不在白名单内,不该导出"
+    assert data["companion_count"] == 1
+    assert await (output_dir / "a.CR3").read_bytes() == b"raw-a"
+    assert not await (output_dir / "a.jpg").exists()
+
+
+async def test_export_formats_filter_can_keep_jpg_only(
+    export_client: tuple[AsyncClient, Path],
+    tmp_path: Path,
+) -> None:
+    """只勾 JPG —— 这正是"磁盘装不下 RAW"时用户要的那条路。"""
+    client, _ = export_client
+    response = await client.post(
+        "/export/library/lib-export",
+        json={
+            "target_dir": str(tmp_path / "exports"),
+            "grades": ["select"],
+            "formats": ["JPG"],
+            "include_companions": True,
+            "include_manifest": True,
+        },
+    )
+
+    data = await _await_export(client, response)
+    output_dir = AsyncPath(data["output_dir"])
+    assert data["exported_count"] == 1
+    assert data["companion_count"] == 0
+    assert await (output_dir / "a.jpg").read_bytes() == b"jpg-a"
+    assert not await (output_dir / "a.CR3").exists()
+
+
+async def test_export_formats_filter_excludes_photos_with_known_mismatched_pair(
+    export_client: tuple[AsyncClient, Path],
+    tmp_path: Path,
+) -> None:
+    """主文件与同伴都确定不在白名单里的照片,直接不进选中集合。
+
+    "确定"是关键 —— p5 的 companion_path 在库里有记录(.CR3),选 NEF 时可以当场
+    判定排除;而 p1/p2/p4 的 companion_path 为空(老库形态),同伴要靠磁盘探测才
+    知道,只能先放行、到复制阶段再按真实扩展名过滤,最终一个文件都不会导出。
+    """
+    client, _ = export_client
+    response = await client.post(
+        "/export/library/lib-export",
+        json={
+            "target_dir": str(tmp_path / "exports"),
+            "grades": ["select", "usable", "record"],
+            "formats": ["NEF"],
+            "include_manifest": True,
+        },
+    )
+
+    data = await _await_export(client, response)
+    assert data["exported_count"] == 0
+    assert data["companion_count"] == 0
+
+    manifest = json.loads(await AsyncPath(data["manifest"]["json"]).read_text(encoding="utf-8"))
+    photo_ids = {row["照片ID"] for row in manifest["照片清单"]}
+    assert "p5" not in photo_ids, "companion_path 已知且不匹配,应当场排除"
+
+
+async def test_export_formats_ignored_for_xmp_only_mode(
+    export_client: tuple[AsyncClient, Path],
+    tmp_path: Path,
+) -> None:
+    """xmp_only 导的是 sidecar,与源文件格式无关 —— 不能因为没勾格式就漏掉照片。"""
+    client, _ = export_client
+    response = await client.post(
+        "/export/library/lib-export",
+        json={
+            "target_dir": str(tmp_path / "exports"),
+            "grades": ["usable"],
+            "formats": ["NEF"],
+            "copy_files": False,
+            "include_xmp_sidecars": True,
+            "include_manifest": True,
+        },
+    )
+
+    data = await _await_export(client, response)
+    assert data["selected_count"] == 1
+    assert data["xmp_count"] == 1
+
+
 def test_estimate_drops_when_raw_companions_are_disabled(tmp_path: Path) -> None:
     """关掉 RAW 同伴后预估体积必须真的下降。
 

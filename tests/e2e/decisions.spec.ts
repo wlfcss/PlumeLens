@@ -772,6 +772,20 @@ async function mockBackend(
       }),
     })
   })
+  // 注册在 **/export/library/** 之后 —— Playwright 按注册逆序匹配,后注册的优先,
+  // 否则 GET .../formats 会被上面那条 POST mock 吞掉。
+  await page.route('**/export/library/*/formats', (route: Route) => {
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        formats: [
+          { ext: 'CR3', count: 4, bytes: 240_000_000, is_raw: true },
+          { ext: 'JPG', count: 4, bytes: 40_000_000, is_raw: false },
+        ],
+      }),
+    })
+  })
   // 先注册快照兜底,再注册 events —— Playwright 按注册逆序匹配,后注册的优先。
   await page.route('**/export/jobs/**', (route: Route) => {
     route.fulfill({
@@ -1563,19 +1577,60 @@ test.describe('Photo decision flow (mock backend)', () => {
     await expect(page.getByText('导出完成')).toBeVisible()
   })
 
-  test('export can opt out of RAW companion files', async ({ page }) => {
+  test('export format picker lists source formats and filters the request', async ({ page }) => {
     await page.locator('.folder-actions').getByRole('button', { name: '导出' }).click()
     await page.getByRole('button', { name: '选择位置' }).click()
 
-    const toggle = page.getByLabel('同时导出 RAW 同伴文件')
-    await expect(toggle).toBeChecked()
-    await toggle.uncheck()
+    // 按源文件夹里实际存在的格式展示,并带上各自的张数与体积
+    const rawBox = page.getByRole('checkbox', { name: /CR3/ })
+    const jpgBox = page.getByRole('checkbox', { name: /JPG/ })
+    await expect(rawBox).toBeChecked()
+    await expect(jpgBox).toBeChecked()
+    await expect(page.locator('.export-format-grid')).toContainText('228.9 MB')
+
+    // 取消 RAW —— 这正是"磁盘装不下"时的自救操作
+    await rawBox.uncheck()
 
     const requestPromise = page.waitForRequest('**/export/library/lib-test')
     await page.getByRole('button', { name: '开始导出' }).click()
     expect(JSON.parse((await requestPromise).postData() ?? '{}')).toMatchObject({
-      include_companions: false,
+      formats: ['JPG'],
     })
+  })
+
+  test('unchecking every source format leaves nothing to export', async ({ page }) => {
+    await page.locator('.folder-actions').getByRole('button', { name: '导出' }).click()
+    await page.getByRole('button', { name: '选择位置' }).click()
+    await expect(page.getByText('当前范围将导出 3 张')).toBeVisible()
+
+    // fixture 里的照片都是 JPG 主文件、无 RAW 同伴 —— 只留 CR3 就一张都导不了
+    await page.getByRole('checkbox', { name: /JPG/ }).uncheck()
+
+    await expect(page.getByText('当前范围将导出 0 张')).toBeVisible()
+    await expect(page.getByRole('button', { name: '开始导出' })).toBeDisabled()
+  })
+
+  test('folder can be removed from the workspace via context menu', async ({ page }) => {
+    let deletedId: string | null = null
+    await page.route('**/library/lib-test', async (route: Route) => {
+      if (route.request().method() === 'DELETE') {
+        deletedId = 'lib-test'
+        await route.fulfill({ status: 204, body: '' })
+        return
+      }
+      await route.fallback()
+    })
+
+    await page.locator('.folder-rail-item').first().click({ button: 'right' })
+    await page.getByRole('menuitem', { name: '移除文件夹' }).click()
+
+    // 名字容易被误读成"删除照片" —— 弹窗必须把"不动源文件"说清楚
+    const dialog = page.getByRole('dialog')
+    await expect(dialog).toContainText('源文件夹和照片原文件不会被删除')
+    await dialog.getByRole('button', { name: '移除', exact: true }).click()
+
+    await expect(dialog).toBeHidden()
+    expect(deletedId).toBe('lib-test')
   })
 
   test('insufficient space error renders in full Chinese without clipping', async ({ page }) => {

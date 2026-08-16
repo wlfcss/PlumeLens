@@ -17,7 +17,8 @@
     "expand": "展开",
     "collapse": "收起",
     "settings": "设置",
-    "close": "关闭"
+    "close": "关闭",
+    "cancel": "取消"
   },
   "errors": {
     "renderFailed": {
@@ -233,7 +234,8 @@
     },
     "folderMenu": {
       "label": "文件夹操作",
-      "openInFinder": "在 Finder 中打开"
+      "openInFinder": "在 Finder 中打开",
+      "remove": "移除文件夹"
     },
     "sourceMissing": {
       "short": "失联",
@@ -584,6 +586,13 @@
       "title": "还没有可处理的文件夹",
       "body": "先回到开始页选择一个照片文件夹，系统会完成扫描、分析并生成当前工作台",
       "action": "返回开始"
+    },
+    "removeFolder": {
+      "title": "移除这个文件夹？",
+      "body": "将清除应用内与该文件夹相关的全部记录：{{count}} 张照片的分析结果、人工评级、物种修正和缩略图缓存。此操作不可撤销。",
+      "sourceSafe": "源文件夹和照片原文件不会被删除，只是从鉴翎中移除。",
+      "confirm": "移除",
+      "removing": "正在移除…"
     }
   },
   "archive": {
@@ -792,11 +801,6 @@
     },
     "cancel": "取消导出",
     "cancelling": "正在取消…",
-    "companions": {
-      "label": "同伴文件",
-      "include": "同时导出 RAW 同伴文件",
-      "hint": "关闭后只导出 JPG。RAW 通常比 JPG 大一倍以上，空间不足时优先关掉这项。"
-    },
     "progress": {
       "photos": "已处理 {{processed}} / {{total}} 张",
       "bytes": "已复制 {{copied}} / {{total}}",
@@ -812,6 +816,13 @@
       "jobNotFound": "导出任务已不存在，可能是后台服务重启过，请重新发起导出。",
       "internal": "导出过程中出现内部错误，详情见日志。",
       "unknown": "导出失败：{{message}}"
+    },
+    "formats": {
+      "label": "照片格式",
+      "loading": "正在读取源文件夹的格式…",
+      "stat": "{{count}} 张 · {{size}}",
+      "hint": "只导出勾选的格式。取消勾选 RAW 可大幅减少占用空间。",
+      "xmpOnlyHint": "「仅 XMP sidecar」模式不复制照片文件，格式选择不生效。"
     }
   },
   "background": {

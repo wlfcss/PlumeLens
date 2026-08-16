@@ -811,6 +811,38 @@ class TestDelete:
         resp = await client.delete("/library/nope")
         assert resp.status_code == 404
 
+    async def test_delete_removes_thumbnail_cache_files(self, real_client) -> None:
+        """删库要连缩略图一起清 —— DB 行被 CASCADE 带走后就再没人能定位这些文件。
+
+        实测用户的 derived/thumbnails 已经涨到 3.2 GB,漏清就是永久泄漏。
+        """
+        from engine.services.thumbnail import thumbnail_cache_root
+
+        client, tmp = real_client
+        lib_root = tmp / "lib_thumbs"
+        _make_jpeg(lib_root / "x.jpg")
+        created = await client.post("/library/import", json={"root_path": str(lib_root)})
+        lib_id = created.json()["id"]
+
+        detail = await client.get(f"/library/{lib_id}")
+        photo_ids = [photo["id"] for photo in detail.json()["photos"]]
+        assert photo_ids
+
+        # 造出缓存文件(import 的后台缩略图任务在测试里不保证跑完)
+        cache_root = thumbnail_cache_root(tmp)
+        made: list[Path] = []
+        for photo_id in photo_ids:
+            for kind in ("grid", "preview"):
+                path = cache_root / kind / f"{photo_id}.jpg"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"thumb")
+                made.append(path)
+        assert all(path.exists() for path in made)
+
+        assert (await client.delete(f"/library/{lib_id}")).status_code == 204
+
+        assert not any(path.exists() for path in made), "缩略图应随图库一并清理"
+
 
 # ---------- Pure-function tests for species override matching helpers ----------
 # 这些是 stable manual species 的核心匹配逻辑（v6 schema bbox-based）— 不走 DB,

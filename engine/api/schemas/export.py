@@ -10,6 +10,19 @@ ExportGrade = Literal["select", "usable", "record", "reject"]
 ExportLayout = Literal["merged", "by_grade"]
 
 
+class ExportFormatStat(BaseModel):
+    """源图库里某一种文件格式的存量统计。"""
+
+    ext: str
+    count: int
+    bytes: int
+    is_raw: bool
+
+
+class ExportFormatsResponse(BaseModel):
+    formats: list[ExportFormatStat]
+
+
 class ExportLibraryRequest(BaseModel):
     """Request body for exporting one library to a user-selected directory."""
 
@@ -18,6 +31,9 @@ class ExportLibraryRequest(BaseModel):
         default_factory=lambda: ["select", "usable", "record"],
         min_length=1,
     )
+    # 格式白名单(大写、不含点,如 ["JPG", "CR3"])。None = 不限格式。
+    # 主文件与同伴文件各自判定:只选 JPG 时,JPG 主文件照导,配套 CR3 会被跳过。
+    formats: list[str] | None = None
     min_score: float | None = Field(default=None, ge=0, le=100)
     max_score: float | None = Field(default=None, ge=0, le=100)
     copy_files: bool = True
@@ -35,6 +51,19 @@ class ExportLibraryRequest(BaseModel):
             if grade not in out:
                 out.append(grade)
         return out
+
+    @field_validator("formats")
+    @classmethod
+    def _normalize_formats(cls, value: list[str] | None) -> list[str] | None:
+        """归一为大写去点去重。空列表视作 None(不限格式)而不是"一个都不导"。"""
+        if value is None:
+            return None
+        out: list[str] = []
+        for raw in value:
+            ext = raw.strip().lstrip(".").upper()
+            if ext and ext not in out:
+                out.append(ext)
+        return out or None
 
     @model_validator(mode="after")
     def _validate_score_bounds(self) -> Self:

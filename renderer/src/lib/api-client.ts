@@ -459,9 +459,19 @@ export interface ExportLibraryRequest {
   copy_files?: boolean
   include_companions?: boolean
   include_xmp_sidecars?: boolean
+  /** 格式白名单（大写不含点，如 ['JPG','CR3']）。null/省略 = 不限格式。 */
+  formats?: string[] | null
   layout?: 'merged' | 'by_grade'
   preserve_structure?: boolean
   include_manifest?: boolean
+}
+
+/** 源图库里实际存在的一种格式及其存量。 */
+export interface ExportFormatStat {
+  ext: string
+  count: number
+  bytes: number
+  is_raw: boolean
 }
 
 export interface ExportLibraryResponse {
@@ -670,6 +680,8 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(body),
     }),
+  exportFormats: (libraryId: string) =>
+    request<{ formats: ExportFormatStat[] }>(`/export/library/${libraryId}/formats`),
   exportJobSnapshot: (jobId: string) => request<ExportJobSnapshot>(`/export/jobs/${jobId}`),
   cancelExportJob: (jobId: string) =>
     request<{ job_id: string; status: ExportJobStatus }>(`/export/jobs/${jobId}/cancel`, {

@@ -46,6 +46,7 @@ from engine.services.event_bus import (
 from engine.services.geo_constants import UNRESOLVED_COUNTRY
 from engine.services.scanner import backfill_hashes, scan_library
 from engine.services.thumbnail import (
+    delete_thumbnails_for_photos,
     ensure_thumbnails_for_photo,
     generate_library_thumbnails,
     thumbnail_cache_root,
@@ -1404,7 +1405,12 @@ async def build_photo_thumbnail(request: Request, photo_id: str) -> dict:
 
 @router.delete("/{library_id}", status_code=204)
 async def delete_library(request: Request, library_id: str) -> None:
-    """DELETE /library/{id} — cascades to photos / analysis_results / task_queue."""
+    """DELETE /library/{id} — 移除应用内的全部记录,**不动源文件夹**。
+
+    DB 侧靠外键 CASCADE 清 photos / analysis_results / task_queue / decisions;
+    缩略图是磁盘文件不受 CASCADE 管,必须在删行之前把 photo_id 取出来,否则行
+    一没就再也定位不到那些文件 —— 那是永久泄漏。
+    """
     db = await _db(request)
     async with db.conn.execute(
         "SELECT id FROM libraries WHERE id = ?",
@@ -1415,7 +1421,14 @@ async def delete_library(request: Request, library_id: str) -> None:
         raise HTTPException(status_code=404, detail="Library not found")
 
     async with db.conn.execute(
-        "DELETE FROM libraries WHERE id = ?", (library_id,),
+        "SELECT id FROM photos WHERE library_id = ?",
+        (library_id,),
+    ) as cur:
+        photo_ids = [str(photo["id"]) for photo in await cur.fetchall()]
+
+    async with db.conn.execute(
+        "DELETE FROM libraries WHERE id = ?",
+        (library_id,),
     ) as cur:
         deleted = cur.rowcount or 0
     await db.conn.commit()
@@ -1424,8 +1437,25 @@ async def delete_library(request: Request, library_id: str) -> None:
         # 缺 CASCADE / 触发器拦下等)。返回 500 而非静默成功 — 用户可能看到删除
         # 按钮按了无反应,需要排查。
         raise HTTPException(status_code=500, detail="Library deletion failed (constraint)")
+
+    settings = getattr(request.app.state, "settings", None)
+    if settings is None:
+        from engine.core.config import settings as app_settings
+
+        settings = app_settings
+    removed_thumbnails = await asyncio.to_thread(
+        delete_thumbnails_for_photos,
+        photo_ids,
+        thumbnail_cache_root(settings.data_dir),
+    )
+
     archive_cache.invalidate()
-    await logger.ainfo("Library deleted", library_id=library_id)
+    await logger.ainfo(
+        "Library deleted",
+        library_id=library_id,
+        photos=len(photo_ids),
+        thumbnails_removed=removed_thumbnails,
+    )
 
 
 @router.post("/{library_id}/thumbnails", status_code=200)
