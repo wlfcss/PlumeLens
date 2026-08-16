@@ -92,7 +92,10 @@
       "failed": "检查失败：{{error}}",
       "latestMeta": "最新 Release：{{version}} · {{date}}",
       "checkNow": "检查更新",
-      "openRelease": "查看 Release"
+      "openRelease": "查看 Release",
+      "rateLimited": "GitHub 接口调用已达每小时上限，请稍后再试。",
+      "rateLimitedUntil": "GitHub 接口调用已达每小时上限，请在 {{time}} 后重试。",
+      "notFound": "GitHub 上还没有发布任何版本。"
     },
     "models": {
       "title": "模型版本",

@@ -50,7 +50,12 @@ export type UpdateCheckResult =
   | {
       ok: false
       currentVersion: string
-      reason: 'network' | 'invalid_response'
+      /**
+       * rate_limited: GitHub 未认证接口 60 次/小时/IP 用尽,此时 message 是配额
+       *   重置时刻的毫秒时间戳字符串(拿不到则为空串)。
+       * not_found: 仓库还没有任何 Release。
+       */
+      reason: 'network' | 'invalid_response' | 'rate_limited' | 'not_found'
       message: string
     }
 

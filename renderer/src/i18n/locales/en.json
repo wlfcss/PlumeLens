@@ -92,7 +92,10 @@
       "failed": "Update check failed: {{error}}",
       "latestMeta": "Latest release: {{version}} · {{date}}",
       "checkNow": "Check",
-      "openRelease": "Open Release"
+      "openRelease": "Open Release",
+      "rateLimited": "GitHub's hourly API limit has been reached. Please try again later.",
+      "rateLimitedUntil": "GitHub's hourly API limit has been reached. Try again after {{time}}.",
+      "notFound": "No releases have been published on GitHub yet."
     },
     "models": {
       "title": "Model versions",

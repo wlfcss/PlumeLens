@@ -79,6 +79,29 @@ function formatDate(value: string | null): string {
   return date.toLocaleString()
 }
 
+/**
+ * 更新检查失败 → 用户能看懂的一句话。
+ *
+ * 裸抛 "检查失败：403" 说明不了任何事:403 在这里绝大多数时候是 GitHub 未认证
+ * 接口的每小时 60 次配额用尽,等一会儿就恢复,和"网络不通"该给的建议完全不同。
+ */
+function describeUpdateFailure(
+  result: Extract<UpdateCheckResult, { ok: false }>,
+  t: ReturnType<typeof useTranslation>['t'],
+): string {
+  if (result.reason === 'rate_limited') {
+    const resetAt = Number(result.message)
+    if (Number.isFinite(resetAt) && resetAt > 0) {
+      return t('settings.update.rateLimitedUntil', {
+        time: new Date(resetAt).toLocaleTimeString(),
+      })
+    }
+    return t('settings.update.rateLimited')
+  }
+  if (result.reason === 'not_found') return t('settings.update.notFound')
+  return t('settings.update.failed', { error: result.message })
+}
+
 function clearHistorySummary(result: ClearHistoryResponse): string {
   return [
     result.libraries_deleted,
@@ -382,7 +405,7 @@ export function SettingsModal(): ReactElement | null {
                           })
                         : t('settings.update.upToDate')
                       : updateCheck
-                        ? t('settings.update.failed', { error: updateCheck.message })
+                        ? describeUpdateFailure(updateCheck, t)
                         : t('settings.update.idle')}
                 </p>
                 {updateCheck?.ok ? (

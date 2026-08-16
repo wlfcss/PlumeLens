@@ -161,7 +161,8 @@ type UpdateCheckResult =
   | {
       ok: false
       currentVersion: string
-      reason: 'network' | 'invalid_response'
+      /** rate_limited 时 message 是配额重置时刻的毫秒时间戳字符串(拿不到则为空串)。 */
+      reason: 'network' | 'invalid_response' | 'rate_limited' | 'not_found'
       message: string
     }
 
@@ -175,6 +176,27 @@ async function checkForUpdates(): Promise<UpdateCheckResult> {
       },
     })
     if (!response.ok) {
+      // GitHub 未认证接口是 60 次/小时/IP,超限返回 403 或 429 并带
+      // x-ratelimit-remaining: 0。这跟"网络不通"完全是两回事(等一会儿就好),
+      // 直接把 "403" 抛给用户看什么也说明不了。
+      const remaining = response.headers.get('x-ratelimit-remaining')
+      if ((response.status === 403 || response.status === 429) && remaining === '0') {
+        const resetEpoch = Number(response.headers.get('x-ratelimit-reset') ?? '')
+        return {
+          ok: false,
+          currentVersion,
+          reason: 'rate_limited',
+          message: Number.isFinite(resetEpoch) && resetEpoch > 0 ? String(resetEpoch * 1000) : '',
+        }
+      }
+      if (response.status === 404) {
+        return {
+          ok: false,
+          currentVersion,
+          reason: 'not_found',
+          message: `${response.status} ${response.statusText}`,
+        }
+      }
       return {
         ok: false,
         currentVersion,

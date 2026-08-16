@@ -58,7 +58,8 @@ export type UpdateCheckResult =
   | {
       ok: false
       currentVersion: string
-      reason: 'network' | 'invalid_response'
+      /** rate_limited 时 message 是配额重置时刻的毫秒时间戳字符串(拿不到则为空串)。 */
+      reason: 'network' | 'invalid_response' | 'rate_limited' | 'not_found'
       message: string
     }
 
