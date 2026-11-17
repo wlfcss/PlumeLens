@@ -1,4 +1,5 @@
 import { logger } from '@/lib/logger'
+import { engineRequestTimeout } from '../../../shared/engine-request-timeout'
 
 /**
  * API client for PlumeLens backend.
@@ -93,7 +94,6 @@ export interface SelectionQueryResult {
 
 // 默认 60s 超时 — 大库 detail/SSE setup 可能需要 30s+,留足余量。
 // 调用方传入的 init.signal 会被合并到 timeout signal,任一触发都中断。
-const REQUEST_TIMEOUT_MS = 60_000
 
 function _bodyAsString(body: BodyInit | null | undefined): string | null {
   if (body == null) return null
@@ -119,6 +119,7 @@ function _normalizeHeaders(input: HeadersInit | undefined): Record<string, strin
 }
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const timeoutMs = engineRequestTimeout(path)
   // Preferred path: preload's engineRequest — token 永远在 isolated context,
   // 不进 renderer JS。当 renderer 跑在 vite-only(无 preload)时 fallback 直连。
   const bodyStr = _bodyAsString(init.body as BodyInit | null | undefined)
@@ -131,7 +132,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
         method: init.method,
         body: bodyStr,
         headers,
-        timeoutMs: REQUEST_TIMEOUT_MS,
+        timeoutMs,
       })
     } catch (err) {
       // 网络层失败(engine 重启 / 超时 / 偏移端口) — 包成 ApiError 让上层 banner 处理。
@@ -160,7 +161,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     fallbackHeaders.set('Content-Type', 'application/json')
   }
   const timeoutCtrl = new AbortController()
-  const timer = setTimeout(() => timeoutCtrl.abort(), REQUEST_TIMEOUT_MS)
+  const timer = setTimeout(() => timeoutCtrl.abort(), timeoutMs)
   const callerSignal = init.signal
   const onCallerAbort = (): void => timeoutCtrl.abort(callerSignal?.reason)
   if (callerSignal) {

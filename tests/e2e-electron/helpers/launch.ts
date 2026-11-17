@@ -16,15 +16,18 @@ const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
 
 export const REPO_ROOT = join(__dirname, '..', '..', '..')
-export const APP_PATH = join(
-  REPO_ROOT,
-  'release',
-  'mac-arm64',
-  'PlumeLens.app',
-  'Contents',
-  'MacOS',
-  'PlumeLens',
-)
+export const APP_PATH =
+  process.env.PLUMELENS_E2E_DEV === '1'
+    ? join(
+        REPO_ROOT,
+        'node_modules',
+        'electron',
+        'dist',
+        process.platform === 'win32' ? 'electron.exe' : 'electron',
+      )
+    : process.platform === 'win32'
+      ? join(REPO_ROOT, 'release', 'win-unpacked', 'PlumeLens.exe')
+      : join(REPO_ROOT, 'release', 'mac-arm64', 'PlumeLens.app', 'Contents', 'MacOS', 'PlumeLens')
 export const FIXTURE_PHOTOS_DIR = join(
   REPO_ROOT,
   'tests',
@@ -41,6 +44,7 @@ export interface LaunchHandle {
 
 export interface LaunchOptions {
   disableCloseConfirm?: boolean
+  extraArgs?: string[]
 }
 
 /**
@@ -75,7 +79,13 @@ export async function launchApp(
   const disableCloseConfirm = options.disableCloseConfirm ?? true
   const app = await _electron.launch({
     executablePath: APP_PATH,
-    args: [`--user-data-dir=${dataDir}`],
+    args: [
+      ...(process.env.PLUMELENS_E2E_DEV === '1'
+        ? [join(REPO_ROOT, 'out', 'main', 'index.js')]
+        : []),
+      `--user-data-dir=${dataDir}`,
+      ...(options.extraArgs ?? []),
+    ],
     env: {
       ...process.env,
       // 防止 engine lifespan 的 _kill_orphan_engines 通过 pgrep -f 误杀用户正在跑
@@ -122,7 +132,8 @@ function engineDiagnostics(dataDir?: string): string {
   }
   try {
     const files = readdirSync(logsDir).filter(
-      (name) => name.startsWith('engine.stderr') || name === 'engine.jsonl' || name === 'electron.log',
+      (name) =>
+        name.startsWith('engine.stderr') || name === 'engine.jsonl' || name === 'electron.log',
     )
     if (files.length === 0) return `(logs dir ${logsDir} is empty)`
     return files
@@ -178,7 +189,12 @@ export async function callEngine(
         }
       }
       if (!w.plumelens?.engineRequest) throw new Error('preload engineRequest not available')
-      return w.plumelens.engineRequest(path, init)
+      try {
+        return await w.plumelens.engineRequest(path, init)
+      } catch (error) {
+        const detail = error as { name?: string; message?: string }
+        throw new Error(`${path}: ${detail.name ?? ''} ${detail.message ?? JSON.stringify(error)}`)
+      }
     },
     { path, init },
   )

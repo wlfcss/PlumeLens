@@ -121,6 +121,10 @@ class TestListAndInvalidate:
         for v in ("v1-a", "v1-b", "v1-c"):
             await store_result(db, "photo-1", _make_result(v))
 
+        # Windows clocks may assign the same timestamp to consecutive writes.
+        await db.conn.execute("UPDATE analysis_results SET created_at='2026-11-18T00:00:00Z'")
+        await db.conn.commit()
+
         versions = await list_versions(db, "photo-1")
         assert [v["pipeline_version"] for v in versions] == ["v1-c", "v1-b", "v1-a"]
         # 只有最新的是 active

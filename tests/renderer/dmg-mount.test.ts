@@ -185,7 +185,7 @@ describe('task-owned DMG mounts', () => {
     const real = join(f.root, 'real')
     const alias = join(f.root, 'alias')
     mkdirSync(real)
-    symlinkSync(real, alias)
+    symlinkSync(real, alias, process.platform === 'win32' ? 'junction' : 'dir')
     const entity = { 'dev-entry': '/dev/disk42s2', 'mount-point': join(real, 'mount') }
     let attached = false
     const run = vi.fn((_command: string, args: string[]) => {
@@ -247,12 +247,16 @@ describe('task-owned DMG mounts', () => {
           module,
           exports: module.exports,
           __dirname: '/repo/scripts',
-          process: { arch: 'arm64', env: { CUSTOM_DMGBUILD_PATH: '/tools/dmgbuild' } },
+          process: {
+            platform: 'darwin',
+            arch: 'arm64',
+            env: { CUSTOM_DMGBUILD_PATH: '/tools/dmgbuild' },
+          },
           console: { log: vi.fn(), error: vi.fn() },
           require: (name: string) => {
             if (name === 'child_process') return { execFileSync: run }
             if (name === 'app-builder-lib/out/binDownload') return {}
-            if (name === 'path') return load('node:path')
+            if (name === 'path') return load('node:path').posix
             if (name === './dmg-mount.cjs') {
               return {
                 createDmgMount: createMount,
@@ -263,6 +267,7 @@ describe('task-owned DMG mounts', () => {
             if (name === 'fs') {
               return {
                 existsSync: () => true,
+                statSync: () => ({ size: 200 * 1024 * 1024 }),
                 readFileSync: () => '{"version":"0.7.7"}',
                 mkdtempSync: () => '/release/.plumelens-dmg-test',
                 realpathSync: (file: string) => file,

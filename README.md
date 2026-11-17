@@ -12,11 +12,15 @@
   <a href="https://github.com/wlfcss/PlumeLens/actions/workflows/mac-build.yml"><img alt="构建状态" src="https://github.com/wlfcss/PlumeLens/actions/workflows/mac-build.yml/badge.svg"></a>
   <img alt="版本 0.7.7" src="https://img.shields.io/badge/version-0.7.7-white">
   <img alt="macOS arm64" src="https://img.shields.io/badge/platform-macOS%20arm64-111111">
+  <a href="https://github.com/wlfcss/PlumeLens/actions/workflows/windows-build.yml"><img alt="Windows 构建状态" src="https://github.com/wlfcss/PlumeLens/actions/workflows/windows-build.yml/badge.svg"></a>
+  <img alt="Windows x64" src="https://img.shields.io/badge/platform-Windows%20x64-111111">
   <img alt="本地分析" src="https://img.shields.io/badge/inference-local-74F69C">
   <a href="LICENSE"><img alt="GPL-3.0 许可证" src="https://img.shields.io/badge/license-GPL--3.0-FFD45A"></a>
 </p>
 
 ![鸟种筛选界面](assets/readme/species-filter.png)
+
+Windows 安装使用、AMD 加速与实机验证见 [Windows 指南](WINDOWS.md)。
 
 ## 主要功能
 
@@ -40,6 +44,8 @@
 截图来自使用随附授权图片构建的演示图库，鸟种与评级已人工确认。图片作者及许可见[第三方图片归因](resources/species-artwork/THIRD_PARTY_ATTRIBUTIONS.md)。
 
 ## 0.7.7 更新
+
+Windows 适配正在主分支更新：改善中文字体与标题栏，增加 AMD 加速、按硬件配置的处理并发和 Windows 自动构建。详细记录见 [更新日志](CHANGELOG.md)。
 
 - 新增可搜索的鸟种多选，支持待审与未识别鸟；组合飞版条件时匹配同一只鸟。
 - 当前筛选可直接导出，启动任务时固定照片范围；文件校验后再生成最终文件。
@@ -89,7 +95,7 @@
 
 ## 开发与构建
 
-开发环境使用 Node.js 24、Python 3.11+ 和 [uv](https://docs.astral.sh/uv/)，CI 固定使用 Python 3.11。当前打包平台为 macOS arm64。
+开发环境使用 Node.js 24、Python 3.11+ 和 [uv](https://docs.astral.sh/uv/)。macOS CI 使用 Python 3.11，Windows CI 使用 Python 3.12；提供 macOS arm64 DMG 与 Windows x64 便携包。
 
 ```bash
 git clone https://github.com/wlfcss/PlumeLens.git
@@ -121,7 +127,17 @@ macOS 打包：
 npm run dist:mac
 ```
 
-产物位于 `release/`。PR 执行质量检查，主分支和版本标签触发 macOS 构建；模型包来源与发布配置见[构建工作流](.github/workflows/mac-build.yml)。
+Windows AMD 开发与打包（PowerShell）：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/setup-windows-amd.ps1
+$env:PLUMELENS_PYTHON = "$pwd\.venv-amd\Scripts\python.exe"
+npm run dist:win
+```
+
+Windows 发行包解压后运行 `PlumeLens.exe`；首次启用原生 AMD 检测可先运行随包的 `prepare-windows-gpu.cmd`。应用会根据 CPU、内存和可用 GPU 后端设置并发，并在内存紧张时减少新任务。AMD 依赖版本、设备目标与手动覆盖见 [Windows 指南](WINDOWS.md)。
+
+产物位于 `release/`。PR 执行质量检查；主分支、版本标签和手动操作触发相应平台构建。工作流完成模型 SHA-256 校验、后端冻结、打包及启动验证，通过后上传产物；版本标签还会上传到对应 Release。配置见 [macOS 构建](.github/workflows/mac-build.yml)与 [Windows 构建](.github/workflows/windows-build.yml)。
 
 ## 许可证
 

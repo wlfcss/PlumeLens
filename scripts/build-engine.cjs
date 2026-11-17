@@ -10,7 +10,12 @@ const fs = require('fs')
 const path = require('path')
 
 const repoRoot = path.resolve(__dirname, '..')
-const engineBin = path.join(repoRoot, 'dist', 'plumelens-engine', 'plumelens-engine')
+const engineBin = path.join(
+  repoRoot,
+  'dist',
+  'plumelens-engine',
+  process.platform === 'win32' ? 'plumelens-engine.exe' : 'plumelens-engine',
+)
 const specFile = path.join(repoRoot, 'scripts', 'plumelens-engine.spec')
 
 function walkFiles(dir, predicate, out = []) {
@@ -31,6 +36,7 @@ function sourceFiles() {
   return [
     ...walkFiles(path.join(repoRoot, 'engine'), (file) => file.endsWith('.py')),
     specFile,
+    path.join(repoRoot, 'scripts', 'windows_runtime_policy.py'),
     path.join(repoRoot, 'pyproject.toml'),
     path.join(repoRoot, 'uv.lock'),
   ].filter((file) => fs.existsSync(file))
@@ -42,10 +48,16 @@ function latestSourceMtime() {
 
 function buildEngine() {
   console.log('[build-engine] rebuilding PyInstaller backend...')
-  execFileSync('uv', ['run', 'pyinstaller', 'scripts/plumelens-engine.spec', '--clean', '--noconfirm'], {
-    cwd: repoRoot,
-    stdio: 'inherit',
-  })
+  execFileSync(
+    process.env.PLUMELENS_PYTHON || 'uv',
+    process.env.PLUMELENS_PYTHON
+      ? ['-m', 'PyInstaller', 'scripts/plumelens-engine.spec', '--clean', '--noconfirm']
+      : ['run', 'pyinstaller', 'scripts/plumelens-engine.spec', '--clean', '--noconfirm'],
+    {
+      cwd: repoRoot,
+      stdio: 'inherit',
+    },
+  )
   if (!fs.existsSync(engineBin)) {
     throw new Error(`PyInstaller did not create ${engineBin}`)
   }

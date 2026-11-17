@@ -18,6 +18,7 @@
     }
   },
   "include": [
+    "shared/**/*.ts",
     "renderer/src/**/*.ts",
     "renderer/src/**/*.tsx",
     "renderer/src/**/*.json"

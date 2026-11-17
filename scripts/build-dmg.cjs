@@ -95,6 +95,7 @@ function verifyDmgLayout(pythonPath, mountPoint, bgFileName) {
 }
 
 exports.default = async function (context) {
+  if (process.platform !== 'darwin') return []
   if (!context.outDir) return
   const macDir = path.join(context.outDir, 'mac-arm64')
   const appPath = path.join(macDir, APP_NAME)

@@ -36,6 +36,7 @@ interface ThumbnailImageProps {
   loading?: 'eager' | 'lazy'
   onStatusChange?: (photoId: string, status: ThumbnailLoadStatus) => void
   photoId?: string
+  highResSrc?: string | null
   src: string | null | undefined
 }
 
@@ -54,6 +55,7 @@ export function ThumbnailImage({
   loading = 'eager',
   onStatusChange,
   photoId,
+  highResSrc,
   src,
 }: ThumbnailImageProps) {
   const [attempt, setAttempt] = useState(0)
@@ -145,10 +147,16 @@ export function ThumbnailImage({
           retryTimerRef.current = null
         }
         setLoaded(true)
-        if (src) loadedSrcCache.add(src)  // 记入跨 mount cache,后续 remount 跳渐变帧
+        if (src) loadedSrcCache.add(src) // 记入跨 mount cache,后续 remount 跳渐变帧
         if (photoId) onStatusChangeRef.current?.(photoId, 'loaded')
       }}
       src={displaySrc}
+      srcSet={
+        highResSrc
+          ? `${displaySrc} 384w, ${highResSrc}${highResSrc.includes('?') ? '&' : '?'}retry=${attempt} 1920w`
+          : undefined
+      }
+      sizes={highResSrc ? '(max-width: 1460px) 320px, 360px' : undefined}
       style={{ opacity: loaded ? 1 : 0 }}
     />
   )

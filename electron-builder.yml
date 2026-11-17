@@ -1,12 +1,19 @@
 appId: com.plumelens.app
 productName: PlumeLens
+toolsets:
+  # The legacy cross-platform archive contains macOS symlinks that require
+  # elevated privileges to extract on Windows. Use the Windows-specific tools.
+  winCodeSign: '1.1.0'
 directories:
   buildResources: build
   output: release
 files:
   - out/**/*
-  - "!out/**/*.tsbuildinfo"
-  - "!out/**/*.map"
+  - '!out/**/*.tsbuildinfo'
+  - '!out/**/*.map'
+  # Frontend dependencies are already bundled; main/preload use Electron and
+  # Node built-ins. Avoid shipping a second copy of ECharts and the fonts.
+  - '!node_modules/**/*'
   # renderer 与 main/preload 均已 bundle；交付包不带开发期 node_modules。
 
 # Mac dmg 内部布局：
@@ -35,32 +42,39 @@ extraResources:
   - from: dist/plumelens-engine
     to: plumelens-engine
     filter:
-      - "**/*"
-      - "!**/.DS_Store"
-      - "!**/__pycache__/**"
-      - "!**/*.pyc"
+      - '**/*'
+      - '!**/.DS_Store'
+      - '!**/__pycache__/**'
+      - '!**/*.pyc'
   - from: engine/models
     to: models
     filter:
-      - "*.onnx"
-      - "*.parquet"
-      - "*.json"
+      - '*.onnx'
+      - '*.parquet'
+      - '*.json'
   # species v4 的子目录（safetensors backbone + LoRA adapter + parquet/json）单独捞。
   # **/* 是全包，因此显式排除开发期临时产物，避免 .bak/缓存文件意外进 DMG。
   - from: engine/models/species
     to: models/species
     filter:
-      - "**/*"
-      - "!**/.DS_Store"
-      - "!**/__pycache__/**"
-      - "!**/*.bak"
-      - "!**/*.tmp"
+      - '**/*'
+      - '!**/.DS_Store'
+      - '!**/__pycache__/**'
+      - '!**/*.bak'
+      - '!**/*.tmp'
   - from: resources/species-artwork
     to: species-artwork
     filter:
-      - "*.webp"
-      - "manifest.json"
-      - "THIRD_PARTY_ATTRIBUTIONS.md"
+      - '*.webp'
+      - 'manifest.json'
+      - 'THIRD_PARTY_ATTRIBUTIONS.md'
+extraFiles:
+  - from: prepare-windows-gpu.cmd
+    to: prepare-windows-gpu.cmd
+  - from: WINDOWS.md
+    to: WINDOWS.md
+  - from: LICENSE
+    to: LICENSE
 mac:
   # target 用 dir：electron-builder 的 dmg-builder 在打包时**丢失 Electron Framework
   # binary**（157MB 的核心库），导致从 dmg 装机后启动 dyld 报 Library missing。
@@ -72,11 +86,17 @@ mac:
   gatekeeperAssess: false
   identity: null
 beforePack: scripts/build-engine.cjs
-afterPack: scripts/codesign-mac.cjs
+afterPack: scripts/after-pack.cjs
 afterAllArtifactBuild: scripts/build-dmg.cjs
 win:
-  target: nsis
+  # AMD runtime + model archive exceeds NSIS's 2 GiB embedded-data limit.
+  # ZIP64 supports the complete offline runtime and needs no installation.
+  target: zip
+  artifactName: '${productName}-${version}-Windows-${arch}.${ext}'
   icon: build/icon.ico
+  # Branding is applied in after-pack without the legacy privileged archive.
+  # This local build is unsigned; release signing can run after resource editing.
+  signAndEditExecutable: false
 nsis:
   oneClick: false
   allowToChangeInstallationDirectory: true

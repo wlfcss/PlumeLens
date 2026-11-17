@@ -12,7 +12,9 @@ Run from repo root:
     uv run pyinstaller scripts/plumelens-engine.spec --clean --noconfirm
 """
 from pathlib import Path
+from importlib.metadata import distributions
 import shutil
+import sys
 
 from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, collect_submodules
 
@@ -21,6 +23,8 @@ block_cipher = None
 # PyInstaller 从 spec 所在目录运行；计算项目根
 HERE = Path.cwd()
 ENGINE_ROOT = HERE / "engine"
+sys.path.insert(0, str(HERE))
+from scripts.windows_runtime_policy import include_rocm_runtime_file
 
 # uvicorn 的 http/websocket protocol 实现通过运行时动态 import 加载
 hidden_imports: list[str] = [
@@ -72,6 +76,10 @@ binaries: list[tuple[str, str]] = [
     *collect_dynamic_libs("torchvision"),
 ]
 
+if sys.platform == "win32":
+    hidden_imports.extend(["windowsml", "windowsml._bindings"])
+    binaries.extend(collect_dynamic_libs("windowsml"))
+
 # Non-Python data files。模型权重不打包到 engine 内（容易 700+MB），由 electron-builder
 # extraResources 放到 app bundle 的 Resources/ 下，引擎启动时从 env 读路径。
 # 但 transformers 内置的 model registry / tokenizer config 需要 collect_data_files 兜底。
@@ -89,6 +97,25 @@ datas: list[tuple[str, str]] = [
     # 168K 条城市/区县,自动从 services/geocoder.py 通过 _MEIPASS 加载)
     (str(ENGINE_ROOT / "data" / "cities1000.npz"), "engine/data"),
 ]
+
+# ROCm Windows wheels put GPU plugins under torch/ and SDK assets in separate
+# distributions. Preserve their installed layout and metadata (entry-point
+# discovery is used at import time), including RTC compiler resources.
+for distribution in distributions():
+    distribution_name = distribution.metadata.get('Name', '').lower()
+    if not distribution_name.startswith(('rocm', 'amd-torch')):
+        continue
+    for relative in distribution.files or []:
+        if '..' in relative.parts or '__pycache__' in relative.parts:
+            continue
+        source = Path(distribution.locate_file(relative))
+        if sys.platform == 'win32' and not include_rocm_runtime_file(str(relative)):
+            continue
+        if source.is_file() and source.suffix != '.pyc':
+            datas.append((str(source), str(relative.parent)))
+    for module in ('rocm_sdk', 'rocm_bootstrap', 'rocm_sdk_core', 'rocm_sdk_libraries'):
+        if any(str(file).startswith(module + '/') for file in distribution.files or []):
+            hidden_imports.extend(collect_submodules(module))
 
 a = Analysis(
     [str(ENGINE_ROOT / "__main__.py")],
@@ -119,6 +146,8 @@ a = Analysis(
 def _keep_runtime_toc_item(item) -> bool:
     """Drop dependency test payloads that PyInstaller hooks may collect implicitly."""
     text = "/".join(str(part) for part in item).replace("\\", "/").lower()
+    if sys.platform == 'win32' and not include_rocm_runtime_file(str(item[0])):
+        return False
     if "numpy._pytesttester" in text or "numpy/_pytesttester.py" in text:
         return True
     if "torch.testing" in text or "torch/testing/" in text:

@@ -234,6 +234,14 @@ export function pipelineRuntimeFromProvider(provider?: string | null): PipelineR
     }
   }
 
+  if (normalized.includes('dml') || normalized.includes('rocm') || normalized.includes('amdgpu')) {
+    return {
+      device: 'gpu',
+      deviceLabelKey: 'start.device.gpu',
+      providerLabel: normalized.includes('rocm') ? 'ROCm' : normalized.includes('amdgpu') ? 'AMD GPU' : 'DirectML',
+    }
+  }
+
   if (normalized.includes('coreml')) {
     return {
       device: 'gpu',

@@ -20,15 +20,29 @@ afterEach(() => {
 })
 
 describe('engine shutdown coordination', () => {
+  it('requests graceful Windows shutdown over stdin without signalling the process', async () => {
+    const child = new FakeChild()
+    const stdin = { writable: true, end: vi.fn() }
+    Object.assign(child, { stdin })
+    const signal = vi.spyOn(process, 'kill').mockReturnValue(true)
+    const pending = terminateEngine(child as unknown as ChildProcess, vi.fn(), 1_000, 'win32')
+    expect(stdin.end).toHaveBeenCalledWith('PLUMELENS_SHUTDOWN\n')
+    expect(signal).not.toHaveBeenCalled()
+    child.exitCode = 0
+    child.emit('exit', 0, null)
+    await pending
+  })
   it('waits for the actual exit and cancels the force timer', async () => {
     vi.useFakeTimers()
     const child = new FakeChild()
     const signal = vi.spyOn(process, 'kill').mockReturnValue(true)
     const forced = vi.fn()
     let done = false
-    const pending = terminateEngine(child as unknown as ChildProcess, forced, 1_000).then(() => {
-      done = true
-    })
+    const pending = terminateEngine(child as unknown as ChildProcess, forced, 1_000, 'darwin').then(
+      () => {
+        done = true
+      },
+    )
     await vi.advanceTimersByTimeAsync(500)
     expect(done).toBe(false)
     child.exitCode = 0
@@ -51,7 +65,7 @@ describe('engine shutdown coordination', () => {
       return true
     })
     const forced = vi.fn()
-    const pending = terminateEngine(child as unknown as ChildProcess, forced, 1_000)
+    const pending = terminateEngine(child as unknown as ChildProcess, forced, 1_000, 'darwin')
     await vi.advanceTimersByTimeAsync(1_000)
     await pending
     expect(forced).toHaveBeenCalledOnce()
@@ -64,7 +78,7 @@ describe('engine shutdown coordination', () => {
     vi.spyOn(process, 'kill').mockImplementation(() => {
       throw new Error('no group')
     })
-    const pending = terminateEngine(child as unknown as ChildProcess, vi.fn(), 1_000)
+    const pending = terminateEngine(child as unknown as ChildProcess, vi.fn(), 1_000, 'darwin')
     await vi.advanceTimersByTimeAsync(3_000)
     await pending
     expect(child.kill.mock.calls.map((args) => args[0])).toEqual(['SIGTERM', 'SIGKILL'])

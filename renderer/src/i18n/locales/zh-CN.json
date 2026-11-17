@@ -243,7 +243,7 @@
     },
     "folderMenu": {
       "label": "文件夹操作",
-      "openInFinder": "在 Finder 中打开",
+      "openInFinder": "在文件管理器中打开",
       "remove": "移除文件夹"
     },
     "sourceMissing": {
@@ -788,7 +788,7 @@
     },
     "result": {
       "output": "输出目录",
-      "openFolder": "在 Finder 中打开",
+      "openFolder": "在文件管理器中打开",
       "openFailed": "无法打开输出目录，请检查目录是否仍然存在",
       "reset": "新建导出",
       "stats": "已导出 {{exported}} 张，附带 {{companions}} 个同伴文件，写入 {{xmp}} 条 XMP 元数据，失败 {{failed}} 张",

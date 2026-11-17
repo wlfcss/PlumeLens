@@ -201,7 +201,7 @@ class TestListAndDetail:
 
         detail = (await client.get(f"/library/{lib_id}")).json()
         assert detail["library"]["status"] == "path_missing"
-        assert detail["photos"][0]["file_path"].endswith("lib_missing_root/p.jpg")
+        assert Path(detail["photos"][0]["file_path"]).parts[-2:] == ("lib_missing_root", "p.jpg")
 
     async def test_relink_moved_library_preserves_photo_identity(self, real_client) -> None:
         client, tmp = real_client

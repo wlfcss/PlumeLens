@@ -60,6 +60,7 @@ export type UpdateCheckResult =
     }
 
 interface PlumeLensAPI {
+  readonly platform?: string
   getBackendUrl(): Promise<string | null>
   /** Engine API 请求 — 在 preload 内完成 fetch,token 不进 renderer JS(H5)。
    *  vite-only / 单元测试可能没有这个 method;调用方 ?. 后 fallback 直连。 */

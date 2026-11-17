@@ -64,7 +64,7 @@ async def test_auto_coreml_uses_verified_digest_loads_fallback_and_releases_it(
     )
     sessions = []
 
-    def create_session(path, providers):
+    def create_session(path, providers, **_options):
         session = MagicMock()
         session.get_providers.return_value = providers
         session.get_provider_options.return_value = {

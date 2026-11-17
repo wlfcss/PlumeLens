@@ -8,7 +8,9 @@ import hashlib
 import json
 import os
 import shutil
+import sys
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -107,7 +109,7 @@ def test_changed_input_is_not_copied_under_old_snapshot(tmp_path: Path) -> None:
     assert result.failed_count == 1
     assert result.exported_count == 0
     assert not list(Path(result.output_dir).glob("*.jpg"))
-    report = json.loads(Path(result.manifest.json_path or "").read_text())
+    report = json.loads(Path(result.manifest.json_path or "").read_text(encoding="utf-8"))
     assert report["导出摘要"]["任务状态"] == "部分失败"
     assert "发生变化" in report["照片清单"][0]["错误原因"]
 
@@ -289,7 +291,7 @@ async def test_raw_export_records_and_checks_the_actual_inference_hash(analyzed_
     assert result.failed_count == 0
     assert result.companion_count == 1
     assert next(Path(result.output_dir).rglob("*.CR3")).read_bytes() == raw.read_bytes()
-    manifest = json.loads(Path(result.manifest.json_path or "").read_text())
+    manifest = json.loads(Path(result.manifest.json_path or "").read_text(encoding="utf-8"))
     assert manifest["导出摘要"]["输入快照"][0]["推理源哈希"] == expected_hash
     assert manifest["导出摘要"]["输入快照"][0]["推理源"] == "同伴文件"
 
@@ -343,6 +345,10 @@ def test_companion_replacement_preserving_mtime_is_not_accepted_mid_job(tmp_path
     photo.companion_path = str(raw)
     exporter._freeze_file_inputs([photo])
     original_stat = raw.stat()
+    if sys.platform == "win32":
+        # A seven-byte fixture can be rewritten within one NTFS clock tick.
+        # Ensure this models a distinct physical revision, as a real RAW write does.
+        time.sleep(0.03)
     raw.write_bytes(b"new-raw")
     os.utime(raw, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
     result = exporter._run_export(

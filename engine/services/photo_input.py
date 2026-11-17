@@ -8,6 +8,7 @@ from pathlib import Path
 import aiosqlite
 
 from engine.core.database import Database
+from engine.core.file_identity import file_change_time_ns
 
 
 class StalePhotoInputError(RuntimeError):
@@ -28,7 +29,13 @@ def source_fingerprint(primary: Path, companion: Path | None = None) -> str:
         try:
             stat = path.stat()
             values.append(
-                (str(path), stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_ino)
+                (
+                    str(path),
+                    stat.st_size,
+                    stat.st_mtime_ns,
+                    file_change_time_ns(path, stat),
+                    stat.st_ino,
+                )
             )
         except FileNotFoundError:
             values.append((str(path), None))

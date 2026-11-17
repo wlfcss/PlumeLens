@@ -243,7 +243,7 @@
     },
     "folderMenu": {
       "label": "Folder actions",
-      "openInFinder": "Open in Finder",
+      "openInFinder": "Open in file manager",
       "remove": "Remove folder"
     },
     "sourceMissing": {
@@ -788,7 +788,7 @@
     },
     "result": {
       "output": "Output folder",
-      "openFolder": "Open in Finder",
+      "openFolder": "Open in file manager",
       "openFailed": "Cannot open the output folder. Make sure it still exists.",
       "reset": "New export",
       "stats": "{{exported}} exported, {{companions}} companion files, {{xmp}} XMP metadata writes, {{failed}} failed",

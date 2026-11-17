@@ -218,7 +218,7 @@ async def list_versions(db: Database, photo_id: str) -> list[dict]:
     async with db.conn.execute(
         "SELECT id, pipeline_version, quality_score, grade, bird_count, "
         "created_at, is_active FROM analysis_results "
-        "WHERE photo_id = ? ORDER BY created_at DESC",
+        "WHERE photo_id = ? ORDER BY created_at DESC, rowid DESC",
         (photo_id,),
     ) as cur:
         rows = await cur.fetchall()

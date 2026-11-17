@@ -19,10 +19,10 @@ async def test_health_returns_ok(client: AsyncClient) -> None:
 
 def _release_versions() -> set[str]:
     root = Path(__file__).resolve().parents[3]
-    package = json.loads((root / "package.json").read_text())
-    npm_lock = json.loads((root / "package-lock.json").read_text())
-    project = tomllib.loads((root / "pyproject.toml").read_text())
-    uv_lock = tomllib.loads((root / "uv.lock").read_text())
+    package = json.loads((root / "package.json").read_text(encoding="utf-8"))
+    npm_lock = json.loads((root / "package-lock.json").read_text(encoding="utf-8"))
+    project = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    uv_lock = tomllib.loads((root / "uv.lock").read_text(encoding="utf-8"))
     engine_package = next(item for item in uv_lock["package"] if item["name"] == "plumelens-engine")
     return {
         package["version"],

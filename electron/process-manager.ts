@@ -195,6 +195,13 @@ export class ProcessManager extends EventEmitter {
     const env: NodeJS.ProcessEnv = {
       ...process.env,
       PYTHONUNBUFFERED: '1',
+      PYTHONUTF8: '1',
+      ...(process.platform === 'win32'
+        ? {
+            OMP_NUM_THREADS: process.env.OMP_NUM_THREADS ?? '4',
+            MKL_NUM_THREADS: process.env.MKL_NUM_THREADS ?? '4',
+          }
+        : {}),
       PLUMELENS_PORT: '0', // kernel 分配空闲端口
       // 让 engine 的数据库/缩略图目录和主进程 plumelens://thumb 协议读的目录一致。
       // 之前 dev 模式 engine 默认写 ~/.plumelens，而 Electron 协议读 userData，
@@ -224,12 +231,16 @@ export class ProcessManager extends EventEmitter {
     }
 
     if (isDev) {
-      command = 'uv'
-      args = ['run', 'python', '-m', 'engine']
+      command = process.env.PLUMELENS_PYTHON || 'uv'
+      args = process.env.PLUMELENS_PYTHON ? ['-m', 'engine'] : ['run', 'python', '-m', 'engine']
       cwd = join(__dirname, '../../')
     } else {
       // PyInstaller frozen binary: Resources/plumelens-engine/plumelens-engine
-      command = join(process.resourcesPath, 'plumelens-engine', 'plumelens-engine')
+      command = join(
+        process.resourcesPath,
+        'plumelens-engine',
+        process.platform === 'win32' ? 'plumelens-engine.exe' : 'plumelens-engine',
+      )
       args = []
       cwd = join(process.resourcesPath, 'plumelens-engine')
       // Production：模型文件由 electron-builder extraResources 放在 Resources/models/
@@ -254,6 +265,7 @@ export class ProcessManager extends EventEmitter {
       env,
       stdio: ['pipe', 'pipe', 'pipe'],
       detached: true,
+      windowsHide: true,
     })
     this.process = proc
     const writeStderr = (data: string | Buffer): void => {

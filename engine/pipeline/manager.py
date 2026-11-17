@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import copy
 import hashlib
 import json
@@ -34,6 +33,7 @@ from engine.pipeline.pose import (
 )
 from engine.pipeline.preprocess import crop_bbox, expand_for_iqa, load_image
 from engine.pipeline.quality import IQA_NONFINITE_FALLBACK_SCORE, QualityAssessor
+from engine.pipeline.runtime import create_session, resolve_providers
 from engine.pipeline.species import (
     BBOX_MARGIN,
     DEFAULT_IMAGE_SIZE,
@@ -76,55 +76,6 @@ _GRADE_ORDER: dict[str, int] = {
 _COREML_NO_ANE: str = "CPUAndGPU"
 
 
-def resolve_providers(
-    requested: str,
-    *,
-    coreml_compute_units: str | None = None,
-) -> list:
-    """Map config string to onnxruntime execution provider list.
-
-    Args:
-        requested: "cpu" / "coreml" / "cuda" / "auto"
-        coreml_compute_units: CoreML EP 的 MLComputeUnits 选项（可选）。
-            None → 不指定（CoreML 默认 'ALL'）
-            'CPUAndGPU' → 关 ANE，只走 Metal GPU + CPU。**YOLO 必须用这个**
-            'CPUOnly' / 'CPUAndNeuralEngine' / 'ALL' 也支持
-            如果设置了，对应的 CoreML provider 会以 (name, options) 元组形式注入。
-
-    Returns:
-        list — 可能含 str（普通 EP 名）或 tuple[str, dict]（带选项的 EP）。
-        ort.InferenceSession 接收这种混合格式。
-    """
-    import platform
-
-    coreml_entry: str | tuple[str, dict[str, str]]
-    if coreml_compute_units:
-        coreml_entry = ("CoreMLExecutionProvider", {"MLComputeUnits": coreml_compute_units})
-    else:
-        coreml_entry = "CoreMLExecutionProvider"
-
-    if requested == "cpu":
-        return ["CPUExecutionProvider"]
-    if requested == "coreml":
-        return [coreml_entry, "CPUExecutionProvider"]
-    if requested == "cuda":
-        return ["CUDAExecutionProvider", "CPUExecutionProvider"]
-
-    if requested == "auto":
-        if platform.system() == "Darwin" and platform.machine() == "arm64":
-            return [coreml_entry, "CPUExecutionProvider"]
-        try:
-            import onnxruntime as ort
-
-            if "CUDAExecutionProvider" in ort.get_available_providers():
-                return ["CUDAExecutionProvider", "CPUExecutionProvider"]
-        except ImportError:
-            pass
-        return ["CPUExecutionProvider"]
-
-    return ["CPUExecutionProvider"]
-
-
 def _file_checksum(path: Path) -> str:
     """Complete streaming SHA-256; model tails are part of inference identity."""
     h = hashlib.sha256()
@@ -146,6 +97,12 @@ class PipelineManager:
 
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
+        # One limit shared by every library: opening several libraries must not
+        # multiply the number of simultaneously decoded 45 MP RAW images.
+        from engine.core.windows_resources import MemoryBoundLimiter
+
+        self._analysis_slots = MemoryBoundLimiter(settings.analysis_concurrency)
+        self.resource_profile: dict[str, object] = {}
         self._detector: BirdDetector | None = None
         # YOLO CPU fallback：CoreML EP 偶发 GatherElements 越界（onnxruntime 1.25 残留 bug，
         # ~3% 输入触发）。预先加载一份 CPU session，单图崩了 fallback 重跑。
@@ -169,7 +126,6 @@ class PipelineManager:
 
     async def initialize(self) -> None:
         """Load ONNX models and torch species assets during FastAPI startup."""
-        import onnxruntime as ort
 
         models_dir = self._settings.models_dir
 
@@ -201,9 +157,21 @@ class PipelineManager:
                 self._settings.yolo_provider,
                 coreml_compute_units=_COREML_NO_ANE,
             )
+            # The shipped 1280px detector is slower with DirectML graph
+            # partitioning on RX 7900 XTX. Keep auto detection on CPU; the
+            # pose/flight/IQA models still use DirectML, and users can force
+            # directml explicitly when benchmarking a different model/GPU.
+            if self._settings.yolo_provider == "auto" and providers[0] == "DmlExecutionProvider":
+                from engine.pipeline.windows_gpu import verified_model
+
+                providers = (
+                    ["AMDGPUExecutionProvider", "CPUExecutionProvider"]
+                    if verified_model(str(yolo_path))
+                    else ["CPUExecutionProvider"]
+                )
             await logger.ainfo("Loading YOLO detector", path=str(yolo_path))
             try:
-                sess = ort.InferenceSession(str(yolo_path), providers=providers)
+                sess = create_session(str(yolo_path), providers=providers)
                 self._detector = BirdDetector(
                     session=sess,
                     input_size=self._settings.yolo_input_size,
@@ -218,12 +186,12 @@ class PipelineManager:
                 await logger.aexception("Failed to load YOLO detector")
 
             # 如果主 session 是 CoreML，额外加载一份 CPU 备胎给 ~3% 崩溃图 fallback
-            if (
-                self._detector is not None
-                and self._model_providers.get("yolo") == "CoreMLExecutionProvider"
-            ):
+            if self._detector is not None and self._model_providers.get("yolo") in {
+                "CoreMLExecutionProvider",
+                "AMDGPUExecutionProvider",
+            }:
                 try:
-                    cpu_sess = ort.InferenceSession(
+                    cpu_sess = create_session(
                         str(yolo_path),
                         providers=["CPUExecutionProvider"],
                     )
@@ -252,7 +220,7 @@ class PipelineManager:
                 threshold=self._settings.flight_classifier_threshold,
             )
             try:
-                sess = ort.InferenceSession(str(flight_classifier_path), providers=providers)
+                sess = create_session(str(flight_classifier_path), providers=providers)
                 self._flight_classifier = FlightClassifier(
                     session=sess,
                     input_size=self._settings.flight_classifier_input_size,
@@ -287,7 +255,7 @@ class PipelineManager:
             )
             await logger.ainfo("Loading pose detector v2", path=str(pose_path))
             try:
-                sess = ort.InferenceSession(str(pose_path), providers=providers)
+                sess = create_session(str(pose_path), providers=providers)
                 self._pose = PoseDetector(
                     session=sess,
                     input_size=self._settings.pose_input_size,
@@ -318,7 +286,7 @@ class PipelineManager:
             providers = resolve_providers(self._settings.iqa_provider)
             await logger.ainfo("Loading CLIPIQA+", path=str(clipiqa_path))
             try:
-                clipiqa_session = ort.InferenceSession(str(clipiqa_path), providers=providers)
+                clipiqa_session = create_session(str(clipiqa_path), providers=providers)
                 self._model_status["clipiqa"] = True
                 active = clipiqa_session.get_providers()
                 self._model_providers["clipiqa"] = active[0] if active else "unknown"
@@ -336,7 +304,7 @@ class PipelineManager:
             providers = resolve_providers(self._settings.iqa_provider)
             await logger.ainfo("Loading HyperIQA", path=str(hyperiqa_path))
             try:
-                hyperiqa_session = ort.InferenceSession(str(hyperiqa_path), providers=providers)
+                hyperiqa_session = create_session(str(hyperiqa_path), providers=providers)
                 self._model_status["hyperiqa"] = True
                 active = hyperiqa_session.get_providers()
                 self._model_providers["hyperiqa"] = active[0] if active else "unknown"
@@ -409,8 +377,11 @@ class PipelineManager:
                     min_confidence=self._settings.species_min_confidence,
                 )
                 self._model_status["dinov3_species_v4"] = True
+                species_backend = self._species.device
+                if species_backend == "cuda" and import_module("torch").version.hip:
+                    species_backend = "rocm"
                 self._model_providers["dinov3_species_v4"] = (
-                    f"torch:{self._species.device}:{self._species._dtype}"
+                    f"torch:{species_backend}:{self._species._dtype}"
                 )
                 checksums["dinov3_species_v4_backbone"] = checksum_for(species_backbone_safetensors)
                 checksums["dinov3_species_v4_adapter"] = checksum_for(species_adapter)
@@ -443,6 +414,15 @@ class PipelineManager:
                 missing=missing,
             )
 
+        from engine.core.windows_resources import MemoryBoundLimiter, configure_windows
+
+        self.resource_profile = configure_windows(
+            self._settings,
+            native_gpu=self._model_providers.get("yolo") == "AMDGPUExecutionProvider",
+        )
+        self._analysis_slots = MemoryBoundLimiter(self._settings.analysis_concurrency)
+        if self.resource_profile:
+            await logger.ainfo("Configured Windows processing pipelines", **self.resource_profile)
         self._pipeline_version = self._compute_version(checksums)
         await logger.ainfo(
             "Pipeline initialized",
@@ -454,9 +434,13 @@ class PipelineManager:
         )
 
     def _record_provider(self, model_id: str, session: Any) -> None:
+        options = session.get_provider_options()
+        # A cache location changes startup performance, not model results.
+        for values in options.values():
+            values.pop("cache_dir", None)
         self._provider_details[model_id] = {
             "chain": list(session.get_providers()),
-            "options": session.get_provider_options(),
+            "options": options,
         }
 
     def _compute_version(self, checksums: dict[str, str]) -> str:
@@ -557,6 +541,8 @@ class PipelineManager:
                     "models_dir",
                     "analysis_concurrency",
                     "worker_threads",
+                    "thumbnail_concurrency",
+                    "onnx_threads",
                     "require_iqa",
                 },
             ),
@@ -619,6 +605,18 @@ class PipelineManager:
     def model_providers(self) -> dict[str, str]:
         return dict(self._model_providers)
 
+    @property
+    def resource_status(self) -> dict[str, object]:
+        from engine.core.windows_resources import memory_status
+
+        memory = memory_status()
+        return {
+            **self.resource_profile,
+            "available_memory_bytes": memory.available if memory else None,
+            "analysis_active": self._analysis_slots.active,
+            "analysis_current_limit": self._analysis_slots.target_limit,
+        }
+
     async def analyze(self, image_path: Path, photo_id: str = "") -> PipelineResult:
         """Run full pipeline on an image.
 
@@ -631,7 +629,7 @@ class PipelineManager:
         assert self._detector is not None
 
         start = time.perf_counter()
-        result = await asyncio.to_thread(self._analyze_sync, image_path, photo_id)
+        result = await self._analysis_slots.run_in_thread(self._analyze_sync, image_path, photo_id)
         result.duration_ms = (time.perf_counter() - start) * 1000
         return result
 
@@ -663,7 +661,7 @@ class PipelineManager:
         except Exception as e:
             if self._detector_cpu_fallback is not None:
                 logger.warning(
-                    "YOLO CoreML failed, falling back to CPU",
+                    "YOLO GPU failed, falling back to CPU",
                     photo_id=photo_id,
                     error=str(e)[:120],
                 )

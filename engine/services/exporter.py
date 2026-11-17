@@ -37,6 +37,7 @@ from engine.api.schemas.export import (
     ExportManifestPaths,
 )
 from engine.core.database import Database
+from engine.core.file_identity import file_change_time_ns
 from engine.pipeline.preprocess import IMAGE_EXTENSIONS, RAW_EXTENSIONS
 from engine.services.photo_input import source_fingerprint as analysis_input_fingerprint
 
@@ -699,7 +700,7 @@ class _ExportCancelled(Exception):
 
 def _fingerprint(path: Path) -> tuple[int, int, int, int, int]:
     stat = path.stat()
-    return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
+    return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, file_change_time_ns(path, stat)
 
 
 def _temporary_path(dest: Path) -> Path:
@@ -1078,7 +1079,7 @@ def _rel_to_output(path: str | None, output_dir: Path) -> str | None:
     if path is None:
         return None
     try:
-        return str(Path(path).relative_to(output_dir))
+        return Path(path).relative_to(output_dir).as_posix()
     except ValueError:
         return path
 
@@ -1087,7 +1088,7 @@ def _rel_to_source_root(path: str | None, root: Path) -> str | None:
     if path is None:
         return None
     try:
-        return str(Path(path).resolve().relative_to(root))
+        return Path(path).resolve().relative_to(root).as_posix()
     except (OSError, ValueError):
         return Path(path).name
 

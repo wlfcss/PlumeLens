@@ -36,8 +36,8 @@
 }
 
 :root {
-  --pl-window-min-width: 1360px;
-  --pl-window-min-height: 860px;
+  --pl-window-min-width: 1100px;
+  --pl-window-min-height: 700px;
   --pl-bg-0: #050505;
   --pl-bg-1: #0a0a0a;
   --pl-bg-2: #121212;
@@ -58,11 +58,15 @@
   --pl-radius-lg: 8px;
   --pl-radius-xl: 8px;
   --pl-font-cn:
-    'Geist Variable', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', system-ui, sans-serif;
+    'Geist Variable', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei UI', 'Microsoft YaHei',
+    system-ui, sans-serif;
   --pl-font-display:
-    'Geist Variable', 'Space Grotesk', 'PingFang SC', 'Hiragino Sans GB', system-ui, sans-serif;
+    'Geist Variable', 'Space Grotesk', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei UI',
+    'Microsoft YaHei', system-ui, sans-serif;
   --pl-font-dot: 'Doto', 'Space Mono', monospace;
-  --pl-font-data: 'Geist Mono Variable', 'Space Mono', 'SFMono-Regular', monospace;
+  --pl-font-data:
+    'Geist Mono Variable', 'Space Mono', 'SFMono-Regular', 'Microsoft YaHei UI', 'Microsoft YaHei',
+    monospace;
   --pl-ease: cubic-bezier(0.2, 0.8, 0.2, 1);
   --pl-ease-soft: cubic-bezier(0.16, 1, 0.3, 1);
   --pl-ease-pop: cubic-bezier(0.18, 0.89, 0.32, 1.28);
@@ -376,6 +380,31 @@ button:disabled {
 .command-bar a,
 .command-bar [role='button'] {
   -webkit-app-region: no-drag;
+}
+
+/* Keep native Windows caption buttons, Snap Layouts and dragging in one dark
+   toolbar. Reserve their actual overlay width, including per-monitor DPI. */
+:root[data-platform='win32'] .command-bar {
+  grid-template-columns: minmax(120px, 1fr) auto minmax(260px, 1fr);
+  height: 56px;
+  padding-block: 7px;
+  padding-left: 20px;
+  padding-right: max(154px, calc(100vw - env(titlebar-area-width, 100vw) + 16px));
+  background: var(--pl-bg-0);
+  backdrop-filter: none;
+  animation: none;
+}
+
+:root[data-platform='win32'] {
+  --pl-font-cn: 'Geist Variable', 'Microsoft YaHei UI', 'Microsoft YaHei', 'Segoe UI', sans-serif;
+  --pl-font-display:
+    'Geist Variable', 'Microsoft YaHei UI', 'Microsoft YaHei', 'Segoe UI', sans-serif;
+  --pl-font-data: 'Geist Mono Variable', 'Microsoft YaHei UI', 'Microsoft YaHei', monospace;
+}
+
+:root[data-platform='win32'] body {
+  font-synthesis: none;
+  text-rendering: auto;
 }
 
 .brand-mark {
@@ -1709,6 +1738,26 @@ button:disabled {
   min-height: 0;
   grid-template-columns: var(--selection-rail-width) minmax(0, 1fr) var(--selection-inspector-width);
   overflow: hidden;
+}
+
+@media (max-width: 1460px) {
+  .selection-screen {
+    --selection-rail-width: clamp(200px, 18vw, 240px);
+    --selection-inspector-width: 280px;
+  }
+
+  .selection-main .folder-topline {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 14px;
+  }
+
+  .selection-main .folder-topline h1 {
+    font-size: 30px;
+  }
+
+  .selection-main .folder-heading-main {
+    width: 100%;
+  }
 }
 
 .folder-rail,
@@ -3927,6 +3976,7 @@ button:disabled {
 
 .shooting-report {
   display: grid;
+  grid-auto-rows: max-content;
   align-content: start;
   gap: 14px;
   min-height: 0;
@@ -4058,7 +4108,14 @@ button:disabled {
   font-size: 16px;
   font-weight: 560;
   text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 1460px) {
+  .shooting-report-metric__icon {
+    display: none;
+  }
 }
 
 .shooting-report__section {

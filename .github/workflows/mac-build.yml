@@ -264,7 +264,7 @@ jobs:
             echo
             echo "- 本 Release 由 GitHub Actions 的 macOS arm64 自动构建流程生成。"
             echo "- 模型资产 SHA-256、PyInstaller 后端冻结、Electron 打包、codesign 与 packaged cold-start smoke 都在 CI 中完成。"
-            echo "- Windows 自动构建暂时停用。"
+            echo "- Windows x64 便携包由独立 Windows 工作流构建；AMD 实机验证与使用说明见仓库 WINDOWS.md。"
             echo
             echo "### DMG 校验"
             echo

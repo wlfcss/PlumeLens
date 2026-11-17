@@ -19,17 +19,23 @@ import io
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
+from weakref import WeakKeyDictionary
 
 import structlog
 from PIL import Image, ImageOps
 
+from engine.core.config import settings
 from engine.core.database import Database
 from engine.core.orientation import exif_orientation, orient_image, raw_orientation
+from engine.core.windows_resources import MemoryBoundLimiter
 from engine.pipeline.preprocess import IMAGE_EXTENSIONS, RAW_EXTENSIONS
 from engine.services.event_bus import publish_library_event
 from engine.services.photo_input import mark_source_changed, source_fingerprint
 
 logger = structlog.stdlib.get_logger()
+_decode_limits: WeakKeyDictionary[asyncio.AbstractEventLoop, MemoryBoundLimiter] = (
+    WeakKeyDictionary()
+)
 
 # 两级尺寸定义
 GRID_LONG_EDGE = 384
@@ -104,6 +110,19 @@ def _save_jpeg(img: Image.Image, out: Path, quality: int) -> None:
     rgb.save(out, "JPEG", quality=quality, optimize=True)
 
 
+def _decode_preview(image: Image.Image) -> Image.Image:
+    """Decode JPEG at the nearest useful native resolution for display only.
+
+    Pillow's JPEG decoder can discard unneeded DCT coefficients before allocating
+    full-resolution pixels. Keep the inference loader separate and lossless.
+    """
+    ratio = min(1.0, PREVIEW_LONG_EDGE / max(image.size))
+    target = (max(1, round(image.width * ratio)), max(1, round(image.height * ratio)))
+    image.draft("RGB", target)
+    image.load()
+    return image
+
+
 def _load_source_image(path: Path) -> Image.Image:
     """Load an image as PIL.Image with EXIF orientation applied.
 
@@ -116,7 +135,7 @@ def _load_source_image(path: Path) -> Image.Image:
 
     if suffix in IMAGE_EXTENSIONS:
         img = Image.open(path)
-        img.load()
+        _decode_preview(img)
         return ImageOps.exif_transpose(img) or img
 
     if suffix in RAW_EXTENSIONS:
@@ -131,14 +150,15 @@ def _load_raw_with_embedded_preview(path: Path) -> Image.Image:
     """Try embedded preview first (fast), fall back to full decode (slow but correct)."""
     import rawpy
 
+    # rawpy exports C-extension enums dynamically, outside its static module API.
+    thumb_format = getattr(rawpy, "ThumbFormat")  # noqa: B009 - dynamic C-extension export
     try:
         with rawpy.imread(str(path)) as raw:
             orientation = raw_orientation(path, int(raw.sizes.flip))
             thumb = raw.extract_thumb()
-            # rawpy.ThumbFormat 枚举值：JPEG=0, BITMAP=1（数字常量避免类型存根缺失）
-            if int(thumb.format) == 0:  # JPEG
+            if thumb.format == thumb_format.JPEG:
                 embedded = Image.open(io.BytesIO(thumb.data))
-                embedded.load()
+                _decode_preview(embedded)
                 # 不够大 → 回退完整解码（仅当 preview 级别需要时）
                 if max(embedded.size) >= MIN_EMBEDDED_FOR_PREVIEW:
                     return orient_image(embedded, exif_orientation(embedded) or orientation)
@@ -148,7 +168,7 @@ def _load_raw_with_embedded_preview(path: Path) -> Image.Image:
                     path=str(path),
                     size=embedded.size,
                 )
-            elif int(thumb.format) == 1:  # BITMAP（少见）
+            elif thumb.format == thumb_format.BITMAP:
                 import numpy as np
 
                 bitmap: np.ndarray = thumb.data
@@ -202,7 +222,14 @@ async def generate_thumbnails(
     cache_root: Path,
 ) -> ThumbnailPaths:
     """Async wrapper — runs decode + resize + save in a thread pool."""
-    return await asyncio.to_thread(_generate_pair_sync, source, photo_id, cache_root)
+    loop = asyncio.get_running_loop()
+    if loop not in _decode_limits:
+        _decode_limits[loop] = MemoryBoundLimiter(
+            settings.thumbnail_concurrency, bytes_per_worker=512 * 1024**2
+        )
+    return await _decode_limits[loop].run_in_thread(
+        _generate_pair_sync, source, photo_id, cache_root
+    )
 
 
 async def ensure_thumbnails_for_photo(
@@ -323,7 +350,7 @@ async def generate_library_thumbnails(
     library_id: str,
     cache_root: Path,
     *,
-    concurrency: int = 4,
+    concurrency: int | None = None,
     batch_size: int = 64,
 ) -> dict[str, int]:
     """Build thumbnails for all photos in a library that don't have them yet.
@@ -334,7 +361,7 @@ async def generate_library_thumbnails(
     built = 0
     skipped = 0
     failed = 0
-    sem = asyncio.Semaphore(concurrency)
+    sem = asyncio.Semaphore(concurrency or settings.thumbnail_concurrency)
 
     async def _one(
         pid: str,

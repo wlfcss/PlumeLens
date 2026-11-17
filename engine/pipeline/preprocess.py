@@ -72,7 +72,8 @@ def _load_pillow(path: Path) -> NDArray[np.float32]:
     with Image.open(path) as img:
         img = ImageOps.exif_transpose(img) or img
         img = img.convert("RGB")
-        arr: NDArray[np.float32] = np.asarray(img, dtype=np.float32) / 255.0
+        arr: NDArray[np.float32] = np.asarray(img, dtype=np.float32)
+        arr /= 255.0
     return arr
 
 
@@ -94,7 +95,11 @@ def _load_raw(path: Path) -> NDArray[np.float32]:
             user_flip=0,
         )
     oriented = orient_image(Image.fromarray(rgb), orientation)
-    return np.asarray(oriented, dtype=np.float32) / 255.0
+    pixels = np.asarray(oriented, dtype=np.float32)
+    # A 45 MP float32 RGB buffer is about 536 MB. Normalize in place instead
+    # of allocating a second buffer for each concurrent Windows RAW worker.
+    pixels /= 255.0
+    return pixels
 
 
 # YOLO 标准 letterbox 填充值：114/255 ≈ 0.447（训练时一致）

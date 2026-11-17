@@ -1,4 +1,4 @@
-# PlumeLens Model Assets
+# PlumeLens 模型资源
 
 本目录包含 PlumeLens 鸟类照片分析管线所使用的 ONNX 模型、torch species v4 资产与配套元数据。
 
@@ -6,13 +6,13 @@
 
 | 模型 | 文件 | 大小 | 用途 |
 |------|------|------|------|
-| YOLOv26l-bird-det v1.1 | `yolo26l-bird-det.onnx` | 99.9 MB (95 MiB) | 鸟类目标检测 |
-| bird_visibility v2.0 | `bird_visibility11.onnx` | 98.1 MB | 11 关键点(头 5 + 身 6) + 5 visibility + view/facing |
-| bird flight classifier v1 | `bird_flight_classifier.onnx` | 40 MB | 飞版 / 非飞版二分类，输出 P(fly) |
-| CLIPIQA+ | `clipiqa_plus.onnx` | 293 MB | 语义画质评估（含 CLIP ViT backbone） |
-| HyperIQA | `hyperiqa.onnx` | 104 MB | 技术画质评估（含 ResNet50 backbone + HyperNet forward_patch） |
-| DINOv3 species v4 backbone | `species/backbone/model.safetensors` | 578 MB | torch/transformers 鸟种特征提取（**不入 git**） |
-| DINOv3 species v4 adapter | `species/v4/seed42_adapter.pt` | 31.6 MB | LoRA + species head + reject head → 1591 类三态识别（**不入 git**） |
+| YOLOv26l-bird-det v1.1 | `yolo26l-bird-det.onnx` | 99.9 MB | 鸟类目标检测 |
+| bird_visibility v2.0 | `bird_visibility11.onnx` | 102.9 MB | 11 关键点(头 5 + 身 6) + 5 visibility + view/facing |
+| bird flight classifier v1 | `bird_flight_classifier.onnx` | 41.4 MB | 飞版 / 非飞版二分类，输出 P(fly) |
+| CLIPIQA+ | `clipiqa_plus.onnx` | 307.0 MB | 语义画质评估（含 CLIP ViT backbone） |
+| HyperIQA | `hyperiqa.onnx` | 109.4 MB | 技术画质评估（含 ResNet50 backbone + HyperNet forward_patch） |
+| DINOv3 species v4 backbone | `species/backbone/model.safetensors` | 606.3 MB | torch/transformers 鸟种特征提取（**不入 git**） |
+| DINOv3 species v4 adapter | `species/v4/seed42_adapter.pt` | 33.1 MB | LoRA + species head + reject head → 1591 类三态识别（**不入 git**） |
 
 配套元数据：
 
@@ -28,7 +28,32 @@
 
 `species_wiki.parquet` schema：`canonical_sci` (主键与 taxonomy 对齐) + `zh_title/zh_extract/zh_url` + `en_title/en_extract/en_url` + `image_url` + `updated_at`。由 [`scripts/fetch_species_wiki.py`](../../scripts/fetch_species_wiki.py) 通过 MediaWiki action API 批量爬取。
 
-**合计：~1.2 GB**
+**清单内资产合计：约 1.30 GB**，以 `manifest.json` 中的文件大小和 SHA-256 为准。
+
+## 获取与校验
+
+完整模型包位于本仓库的 `models-v4` Release。下载后在项目根目录恢复，下载包中的清单不会覆盖仓库清单：
+
+```bash
+gh release download models-v4 --repo wlfcss/PlumeLens --pattern plumelens-models-v4.tar.gz
+uv run python scripts/restore_models.py --archive plumelens-models-v4.tar.gz --trusted-manifest engine/models/manifest.json
+```
+
+也可把 `--archive` 指向已有的 Windows 便携包 ZIP，从中恢复相同资产。每项权重与元数据都必须匹配已审查清单；不要为绕过校验而重新生成清单。
+
+## Windows 推理后端
+
+Windows 使用经过验证的 ONNX Runtime Windows ML 1.30.1 与 PyTorch ROCm 7.14.1 组合。模型权重与评分规则保持一致，按模型选择后端：
+
+| 模型 | 后端 | 说明 |
+| --- | --- | --- |
+| YOLO 检测 | Windows ML AMD GPU EP | 仅在本机模型、设备与编译缓存通过校验后启用，否则使用 CPU |
+| 姿态、飞版、画质 | DirectML | 顺序执行，关闭 memory pattern；不可用时保留 CPU 路径 |
+| DINOv3 鸟种识别 | ROCm PyTorch | 支持的 AMD 设备使用 FP32、eager attention；也可显式指定 CPU |
+
+首次运行随包的 `prepare-windows-gpu.cmd` 准备检测器缓存；不要把一台机器的已验证标记直接用于另一台机器。更换模型、GPU 或后端组件后重新校验。缓存与推理不会改写模型权重。
+
+Windows 构建从已审查的 `manifest.json` 恢复模型，只复制清单内资产并逐项核对大小和 SHA-256；下载包内的清单不能替换仓库清单。发行包和压缩包还会再次校验。设备目标、依赖版本、测试范围及资源数据见 [Windows 指南](../../WINDOWS.md)。
 
 ## 管线调用顺序
 
@@ -92,7 +117,7 @@
 
 ### DINOv3 鸟种分类
 
-完整规格见 [`dinov3_species.MODEL_CARD.md`](./dinov3_species.MODEL_CARD.md)。
+模型结构、分类与校准策略如下；Windows 后端选择与依赖验证见 [Windows 指南](../../WINDOWS.md)。
 
 - **架构**：DINOv3-ViT-L/16 (frozen) + q/v LoRA adapter + species head + reject head
 - **训练数据**：photos_v4_full + GBIF + eBird/Macaulay + 多学术数据集
@@ -128,7 +153,7 @@ bbox crop → square expand(+15%, no forced min side) → Resize(short edge=384)
 
 - RoPE fp16 路径会 NaN，纯 ONNX 导出后准确率明显退化
 - CoreML EP 对 ViT 覆盖度差，且旧双尺度 ONNX 路线在 Mac 上慢
-- 当前正式路线：torch + transformers，MPS/CUDA 用 bf16，CPU 用 fp32
+- 当前正式路线：torch + transformers；MPS 与 NVIDIA CUDA 使用 bf16，Windows ROCm 与 CPU 使用 fp32。Windows ROCm 使用 eager attention。
 
 **为什么 species v4 大文件不入 git**：
 
@@ -161,6 +186,6 @@ bug 从未被发现。本次修复 (commit `3daec3f`+) 重新导出为 inline-we
 ## 版权说明
 
 - **yolo26l-bird-det.onnx** / **bird_visibility11.onnx** / **DINOv3 鸟种分类 adapter**：由 [wlfcss](https://github.com/wlfcss) 个人训练产出，他人使用需注明来源
-- **DINOv3 backbone**：Meta 的 DINOv3 LVD-1689M 预训练权重，遵循 [DINOv3 License](./dinov3_species.MODEL_CARD.md)（非商业限制，商业使用需与 Meta 确认）
+- **DINOv3 backbone**：Meta 的 DINOv3 LVD-1689M 预训练权重，遵循 [DINOv3 License](https://github.com/facebookresearch/dinov3/blob/main/LICENSE.md)；发行包附带许可原文，使用与再分发以原文条款为准。
 - **CLIPIQA+** / **HyperIQA**：基于公开 IQA 研究模型的 ONNX 导出，遵循原始论文及代码仓库的许可协议
 - **species/canonical_extended.parquet**：基于《中国鸟类名录 v12.0》整理

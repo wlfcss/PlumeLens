@@ -40,6 +40,7 @@ async def health_check(request: Request) -> dict[str, Any]:
     return {
         "status": "ok",
         "version": request.app.version,
+        "resources": getattr(pipeline, "resource_status", {}),
         "pipeline": {
             "ready": pipeline.is_ready,
             "version": pipeline.pipeline_version,

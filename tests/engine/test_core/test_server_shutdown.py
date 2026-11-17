@@ -7,15 +7,18 @@ from pytest import MonkeyPatch
 
 
 def test_entrypoint_bounds_connection_shutdown(monkeypatch: MonkeyPatch) -> None:
-    run = Mock()
+    config = Mock()
+    server = Mock()
     monkeypatch.setenv("PLUMELENS_HOST", "127.0.0.1")
     monkeypatch.setenv("PLUMELENS_PORT", "54321")
     monkeypatch.setenv("PLUMELENS_LOG_LEVEL", "info")
-    monkeypatch.setattr("uvicorn.run", run)
+    monkeypatch.delenv("PLUMELENS_PARENT_PID", raising=False)
+    monkeypatch.setattr("uvicorn.Config", config)
+    monkeypatch.setattr("uvicorn.Server", server)
 
     main()
 
-    run.assert_called_once_with(
+    config.assert_called_once_with(
         "engine.main:app",
         host="127.0.0.1",
         port=54321,
@@ -24,3 +27,5 @@ def test_entrypoint_bounds_connection_shutdown(monkeypatch: MonkeyPatch) -> None
         workers=1,
         timeout_graceful_shutdown=3,
     )
+    server.assert_called_once_with(config.return_value)
+    server.return_value.run.assert_called_once_with()

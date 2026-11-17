@@ -3,4 +3,7 @@ dist/
 release/
 node_modules/
 engine/
+.tools/
+.venv*/
+build/plumelens-engine/
 *.lock

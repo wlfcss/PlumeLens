@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron'
+import { engineRequestTimeout } from '../shared/engine-request-timeout'
 
 // 与 main.ts 的 EngineStatusPayload 对应 — 改动需同步两边。
 export type EngineStatusPayload =
@@ -146,7 +147,7 @@ async function performEngineRequest(
     headers.set('Content-Type', 'application/json')
   }
   const ctrl = new AbortController()
-  const timer = setTimeout(() => ctrl.abort(), init.timeoutMs ?? 60_000)
+  const timer = setTimeout(() => ctrl.abort(), init.timeoutMs ?? engineRequestTimeout(enginePath))
   try {
     const res = await fetch(`${url}${enginePath}`, {
       method: init.method ?? 'GET',
@@ -285,6 +286,7 @@ async function performEngineSseUrl(path: string): Promise<string> {
 }
 
 contextBridge.exposeInMainWorld('plumelens', {
+  platform: process.platform,
   getBackendUrl: (): Promise<string | null> => ipcRenderer.invoke('get-backend-url'),
   /**
    * Engine API 请求 — 在 preload 的 isolated world 内完成 fetch,token 不进

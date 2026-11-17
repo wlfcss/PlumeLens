@@ -21,6 +21,7 @@ import multiprocessing
 import os
 import socket
 import sys
+import threading
 
 
 def _find_free_port(host: str) -> int:
@@ -38,6 +39,12 @@ def main() -> None:
     # 关掉 transformers tokenizers 的并行（不需要，会 fork worker）
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
+    if "--prepare-windows-gpu" in sys.argv:
+        from engine.core.gpu_setup import main as prepare_gpu
+
+        prepare_gpu([value for value in sys.argv[1:] if value != "--prepare-windows-gpu"])
+        return
+
     host = os.environ.get("PLUMELENS_HOST", "127.0.0.1")
     # PLUMELENS_PORT=0 或未设 → 随机端口；Electron 主进程从 stdout 读
     requested = int(os.environ.get("PLUMELENS_PORT", "0"))
@@ -50,15 +57,38 @@ def main() -> None:
     # 延迟 import uvicorn — freeze_support 必须先于任何会 spawn 子进程的代码
     import uvicorn
 
-    uvicorn.run(
-        "engine.main:app",
-        host=host,
-        port=port,
-        log_level=os.environ.get("PLUMELENS_LOG_LEVEL", "info").lower(),
-        access_log=False,
-        workers=1,  # 显式单进程；Electron 子进程模型不需要多 worker
-        timeout_graceful_shutdown=3,
+    server = uvicorn.Server(
+        uvicorn.Config(
+            "engine.main:app",
+            host=host,
+            port=port,
+            log_level=os.environ.get("PLUMELENS_LOG_LEVEL", "info").lower(),
+            access_log=False,
+            workers=1,  # 显式单进程；Electron 子进程模型不需要多 worker
+            timeout_graceful_shutdown=3,
+        )
     )
+
+    # Electron owns this pipe. A shutdown message or EOF requests graceful
+    # shutdown, including queue/SQLite cleanup. Keep the blocking read out of
+    # the worker pool so executor shutdown cannot wait for stdin indefinitely.
+    def watch_stdin() -> None:
+        if sys.stdin is None:
+            return
+        pending = b""
+        while True:
+            chunk = os.read(sys.stdin.fileno(), 1024)
+            if not chunk:
+                break
+            pending = (pending + chunk)[-128:]
+            if b"PLUMELENS_SHUTDOWN" in pending:
+                break
+        server.should_exit = True
+
+    if os.environ.get("PLUMELENS_PARENT_PID") and sys.stdin is not None:
+        server.config.load()
+        threading.Thread(target=watch_stdin, name="electron-lifeline", daemon=True).start()
+    server.run()
 
 
 if __name__ == "__main__":

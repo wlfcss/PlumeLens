@@ -6,6 +6,9 @@ import { realpath } from 'fs/promises'
 import { homedir, platform as osPlatform } from 'os'
 import { join, resolve } from 'path'
 import { ProcessManager } from './process-manager'
+import { forceTerminateEngineTreeSync } from './engine-shutdown'
+import { findWindowsEditor } from './windows-editors'
+import { isWithinDirectory } from './cache-paths'
 import {
   mergeUserSettings,
   readUserSettings,
@@ -44,8 +47,8 @@ app.on('second-instance', () => {
 const windowBounds = {
   width: 1680,
   height: 1040,
-  minWidth: 1360,
-  minHeight: 860,
+  minWidth: 1100,
+  minHeight: 700,
 } as const
 
 const REALPATH_CACHE_TTL_MS = 60_000
@@ -115,12 +118,12 @@ async function serveLocalCacheFile(
   logPrefix: string,
 ): Promise<Response> {
   const resolved = resolve(filePath)
-  if (!resolved.startsWith(rootResolved + '/') && resolved !== rootResolved) {
+  if (!isWithinDirectory(rootResolved, resolved)) {
     return new Response('Forbidden (escape)', { status: 403 })
   }
   try {
     const realFile = await cachedRealpath(resolved)
-    if (!realFile.startsWith(realRoot + '/') && realFile !== realRoot) {
+    if (!isWithinDirectory(realRoot, realFile)) {
       return new Response('Forbidden (symlink escape)', { status: 403 })
     }
     return await net.fetch(pathToFileURL(realFile).toString())
@@ -313,7 +316,7 @@ function buildClosePromptHtml(content: ClosePromptContent): string {
         color: var(--fg);
         font-family:
           -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'PingFang SC',
-          'Hiragino Sans GB', system-ui, sans-serif;
+          'Hiragino Sans GB', 'Microsoft YaHei UI', 'Microsoft YaHei', system-ui, sans-serif;
         text-rendering: optimizeLegibility;
         user-select: none;
         -webkit-font-smoothing: antialiased;
@@ -577,7 +580,15 @@ function createWindow(): void {
   mainWindow = new BrowserWindow({
     ...windowBounds,
     backgroundColor: '#050505',
-    titleBarStyle: 'hiddenInset',
+    titleBarStyle:
+      process.platform === 'darwin'
+        ? 'hiddenInset'
+        : process.platform === 'win32'
+          ? 'hidden'
+          : 'default',
+    ...(process.platform === 'win32'
+      ? { titleBarOverlay: { color: '#050505', symbolColor: '#e8e8e8', height: 56 } }
+      : {}),
     ...(process.platform === 'darwin' ? { trafficLightPosition: { x: 16, y: 22 } } : {}),
     webPreferences: {
       preload: join(__dirname, '../preload/index.cjs'),
@@ -752,6 +763,18 @@ function findEditorAppPath(root: string, name: string): string | null {
 }
 
 function resolveEditors(): void {
+  if (process.platform === 'win32') {
+    for (const tool of Object.keys(EDITOR_REGISTRY) as EditorTool[]) {
+      const entry = EDITOR_REGISTRY[tool]
+      entry.appPath = findWindowsEditor(tool)
+      entry.resolved = entry.appPath
+        ? tool === 'photoshop'
+          ? 'Adobe Photoshop'
+          : 'Topaz Photo'
+        : null
+    }
+    return
+  }
   const roots = ['/Applications', join(homedir(), 'Applications')]
   for (const tool of Object.keys(EDITOR_REGISTRY) as EditorTool[]) {
     const entry = EDITOR_REGISTRY[tool]
@@ -775,6 +798,7 @@ function resolveEditors(): void {
 
 function findEditorExecutablePath(entry: EditorEntry): string | null {
   if (!entry.appPath || !entry.resolved) return null
+  if (process.platform === 'win32') return entry.appPath
   const executableNames = [entry.resolved]
   try {
     const plist = readFileSync(join(entry.appPath, 'Contents', 'Info.plist'), 'utf-8')
@@ -839,6 +863,10 @@ ipcMain.handle('open-in-editor', async (_event, args: unknown) => {
   }
   // detached + unref 让外部编辑器跟主进程脱钩,关闭鉴翎不会拖死编辑器
   try {
+    if (process.platform === 'win32' && entry.appPath) {
+      await spawnDetached(entry.appPath, [canonicalPath])
+      return { ok: true, app: entry.resolved }
+    }
     if (tool === 'topaz') {
       const executablePath = findEditorExecutablePath(entry)
       if (executablePath) {
@@ -1164,7 +1192,7 @@ app.on('before-quit', (event) => {
 process.on('exit', () => {
   for (const pid of processManager?.getEnginePids() ?? []) {
     try {
-      process.kill(-pid, 'SIGKILL')
+      forceTerminateEngineTreeSync(pid)
     } catch {
       try {
         process.kill(pid, 'SIGKILL')

@@ -17,6 +17,7 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from weakref import WeakKeyDictionary
 
 import structlog
 from PIL import ExifTags, Image
@@ -1061,7 +1062,7 @@ async def backfill_companion_for_library(db: Database, library_id: str) -> int:
     return updated
 
 
-async def backfill_hashes(db: Database, library_id: str, batch_size: int = 50) -> int:
+async def _backfill_hashes_impl(db: Database, library_id: str, batch_size: int = 50) -> int:
     """Phase 2：为 file_hash 仍为 NULL 的照片计算 SHA-256 并写回。
 
     Args:
@@ -1139,3 +1140,15 @@ async def backfill_hashes(db: Database, library_id: str, batch_size: int = 50) -
         skipped=len(skipped_ids),
     )
     return total
+
+
+# Import's background preparation and an immediate Start click share one pass.
+# Weak ownership avoids retaining closed databases from removed/test workspaces.
+_hash_backfill_locks: WeakKeyDictionary[Database, dict[str, asyncio.Lock]] = WeakKeyDictionary()
+
+
+async def backfill_hashes(db: Database, library_id: str, batch_size: int = 50) -> int:
+    locks = _hash_backfill_locks.setdefault(db, {})
+    lock = locks.setdefault(library_id, asyncio.Lock())
+    async with lock:
+        return await _backfill_hashes_impl(db, library_id, batch_size)

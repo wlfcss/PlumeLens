@@ -41,9 +41,9 @@ class Settings(BaseSettings):
     # - CLIPIQA/HyperIQA + CoreML(default)：CLIP/HyperNet 架构，无 advanced
     #   indexing，ANE 安全（diff < 0.2px），加速 7-27×。
     # - DINOv3 species v4：torch + MPS bf16 + LoRA/reject adapter，不走 ONNX 路线
-    yolo_provider: str = "coreml"
-    iqa_provider: str = "coreml"
-    pose_provider: str = "coreml"
+    yolo_provider: str = "auto"
+    iqa_provider: str = "auto"
+    pose_provider: str = "auto"
     # species v4 用 torch + transformers，"auto" 在 Mac 走 MPS bf16，
     # NVIDIA 走 CUDA bf16，否则 CPU fp32（CPU ~500ms，MPS/CUDA ~60ms）
     species_provider: str = "auto"
@@ -149,11 +149,13 @@ class Settings(BaseSettings):
     # Pipeline — concurrency
     # 每个 task 内部 ONNX 推理会 to_thread 释放 GIL，多 worker 并发 = 多张图同时跑 ONNX。
     # CoreML EP 多 session 共享 ANE/GPU 资源，并发 2 ≈ 1.5-1.8× 吞吐（不是线性）。
-    analysis_concurrency: int = 2
+    analysis_concurrency: int = Field(default=2, ge=1, le=4)
     # 全局 asyncio.to_thread 默认线程池大小。RAW probe / 缩略图 / 哈希 / 推理外围
     # 都会走这个池；显式设上限避免 Python 默认 min(32, cpu+4) 在大库导入时
     # 同时拉起过多 RAW 解码和文件 I/O。
-    worker_threads: int = 8
+    worker_threads: int = Field(default=8, ge=2, le=32)
+    thumbnail_concurrency: int = Field(default=4, ge=1, le=8)
+    onnx_threads: int = Field(default=4, ge=1, le=8)
 
     # Pipeline — strict 模式：IQA 模型缺失/加载失败时拒绝启动。
     # 默认 False 给开发期友好（模型还没下载也能跑出 detection-only 结果）；

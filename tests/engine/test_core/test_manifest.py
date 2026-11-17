@@ -139,9 +139,12 @@ def test_release_check_rejects_bundle_with_its_own_matching_manifest(tmp_path: P
     trusted = tmp_path / "checkout-manifest.json"
     _write_manifest(trusted, {asset: {"size": len(original), "sha256": _sha256(original)}})
     (models / asset).write_bytes(replaced)
-    _write_manifest(models / "manifest.json", {
-        asset: {"size": len(replaced), "sha256": _sha256(replaced)},
-    })
+    _write_manifest(
+        models / "manifest.json",
+        {
+            asset: {"size": len(replaced), "sha256": _sha256(replaced)},
+        },
+    )
     with pytest.raises(ManifestError, match="sha256 mismatch"):
         verify_manifest(models, trusted, required_assets=[asset])
 

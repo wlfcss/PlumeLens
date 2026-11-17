@@ -6,6 +6,8 @@ import './app.css'
 import App from './App'
 import { ApiError } from '@/lib/api-client'
 
+document.documentElement.dataset.platform = window.plumelens?.platform ?? 'web'
+
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {

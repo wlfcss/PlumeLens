@@ -207,6 +207,9 @@ async def _run_one_task(
     force_rerun: bool = False,
 ) -> bool:
     """Pick one task and run it. Returns True if a task was processed, False if queue empty."""
+    from engine.core.windows_resources import wait_for_memory
+
+    await wait_for_memory()
     task = await pick_next(db, library_id=library_id)
     if task is None:
         return False

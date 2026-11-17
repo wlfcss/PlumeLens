@@ -331,7 +331,7 @@ async def test_export_embeds_xmp_into_copied_jpeg_for_lightroom(
     manifest = json.loads(await AsyncPath(data["manifest"]["json"]).read_text(encoding="utf-8"))
     p2 = next(row for row in manifest["照片清单"] if row["照片ID"] == "p2")
     assert p2["已导出XMP"] == "是"
-    assert p2["XMP导出路径"].endswith("sub/b.jpg")
+    assert Path(p2["XMP导出路径"]).parts[-2:] == ("sub", "b.jpg")
 
 
 async def test_export_can_generate_xmp_only_package_without_copying_photos(
@@ -904,7 +904,7 @@ async def test_selection_export_uses_frozen_effective_identity_and_exact_members
     result = await _await_export(client, started)
     assert result["selected_count"] == result["exported_count"] == 1
     assert (tmp_path / "out").exists()
-    report = json.loads(await AsyncPath(result["manifest"]["json"]).read_text())
+    report = json.loads(await AsyncPath(result["manifest"]["json"]).read_text(encoding="utf-8"))
     assert report["导出摘要"]["导出范围"] == "当前筛选"
     row = report["照片清单"][0]
     assert row["照片ID"] == "p3"

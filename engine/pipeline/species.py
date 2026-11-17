@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import math
+import sys
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -32,6 +33,7 @@ import torch.nn as nn
 from numpy.typing import NDArray
 from PIL import Image
 
+from engine.core.gpu import WINDOWS_GPU_LOCK
 from engine.core.manifest import verify_manifest
 from engine.pipeline.models import SpeciesCandidate
 
@@ -235,7 +237,12 @@ class DINOv3LoRAReject(nn.Module):
         self.backbone = AutoModel.from_pretrained(
             str(backbone_path),
             config=config,
-            attn_implementation="sdpa",
+            # ROCm 7.14 Windows SDPA kernels reject this ViT's layout on gfx1100.
+            # Eager attention keeps every operation on the GPU and preserves
+            # the trained model, avoiding unsupported fused attention kernels.
+            attn_implementation="eager"
+            if sys.platform == "win32" and torch.version.hip
+            else "sdpa",
         )
         self.R = int(getattr(self.backbone.config, "num_register_tokens", 4))
         self.lora_modules = apply_lora(self.backbone, r=8, alpha=16.0, dropout=0.05)
@@ -355,7 +362,9 @@ class SpeciesClassifier:
         self._top_k = max(1, int(top_k))
         self._min_confidence = min_confidence
         self.device, self._dtype = self._select_device(device)
-        self._infer_lock = threading.Lock()
+        self._infer_lock = (
+            WINDOWS_GPU_LOCK if sys.platform == "win32" and torch.version.hip else threading.Lock()
+        )
 
         self._taxonomy = SpeciesTaxonomy(self.deploy_dir)
         self._trained_mask = self._taxonomy.trained_mask
@@ -444,6 +453,8 @@ class SpeciesClassifier:
             else:
                 device = "cpu"
         if device in ("cuda", "mps"):
+            if device == "cuda" and sys.platform == "win32" and torch.version.hip:
+                return device, torch.float32
             return device, torch.bfloat16
         return device, torch.float32
 

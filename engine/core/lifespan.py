@@ -310,20 +310,58 @@ def _diagnose_other_engines(my_pid: int) -> list[int]:
         return []
 
 
+def _is_process_alive(pid: int) -> bool:
+    """Check liveness without signalling the process on Windows."""
+    if sys.platform == "win32":
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        kernel32.WaitForSingleObject.restype = wintypes.DWORD
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+
+        # SYNCHRONIZE only: the handle cannot terminate or modify the process.
+        handle = kernel32.OpenProcess(0x00100000, False, pid)
+        if not handle:
+            error = ctypes.get_last_error()
+            if error == 87:  # ERROR_INVALID_PARAMETER: PID no longer exists.
+                return False
+            raise ctypes.WinError(error)
+        try:
+            status = kernel32.WaitForSingleObject(handle, 0)
+            if status == 0x00000102:  # WAIT_TIMEOUT: process is still running.
+                return True
+            if status == 0:  # WAIT_OBJECT_0: process has exited.
+                return False
+            raise ctypes.WinError(ctypes.get_last_error())
+        finally:
+            kernel32.CloseHandle(handle)
+
+    try:
+        os.kill(pid, 0)  # POSIX-only liveness probe; this terminates processes on Windows.
+    except ProcessLookupError:
+        return False
+    return True
+
+
 async def _watch_parent(parent_pid: int) -> None:
     """Exit this engine gracefully when its explicitly supplied owner disappears."""
     while True:
         await asyncio.sleep(1.0)
         try:
-            os.kill(parent_pid, 0)  # Liveness probe, never a terminating signal.
-        except ProcessLookupError:
-            await logger.awarning(
-                "Parent exited; requesting own engine shutdown", parent_pid=parent_pid
-            )
-            os.kill(os.getpid(), signal.SIGTERM)
-            return
+            if _is_process_alive(parent_pid):
+                continue
         except PermissionError:
             continue  # Cannot establish that the owner died; leave this engine alone.
+        await logger.awarning(
+            "Parent exited; requesting own engine shutdown", parent_pid=parent_pid
+        )
+        signal.raise_signal(signal.SIGTERM)
+        return
 
 
 @asynccontextmanager
@@ -349,6 +387,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
 
     await logger.ainfo("PlumeLens Engine starting", data_dir=str(settings.data_dir))
 
+    from engine.core.windows_resources import configure_windows
+
+    resource_profile = configure_windows(settings)
+    if resource_profile:
+        await logger.ainfo("Detected Windows resource profile", **resource_profile)
     worker_threads = max(1, int(settings.worker_threads))
     thread_pool = ThreadPoolExecutor(
         max_workers=worker_threads,
@@ -431,7 +474,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
 
     # Export cancellation was requested before any shutdown wait.
     await wait_for_export_jobs()
-    thread_pool.shutdown(wait=True, cancel_futures=True)
 
     close_pipeline = getattr(app.state.pipeline, "close", None)
     if callable(close_pipeline):
@@ -440,3 +482,4 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
             await close_result
     await app.state.db.close()
     await logger.ainfo("PlumeLens Engine shutting down")
+    thread_pool.shutdown(wait=True, cancel_futures=True)
