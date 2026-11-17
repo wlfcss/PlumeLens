@@ -18,8 +18,8 @@
 const { execFileSync } = require('child_process')
 const { downloadArtifact } = require('app-builder-lib/out/binDownload')
 const fs = require('fs')
-const os = require('os')
 const path = require('path')
+const { createDmgMount, cleanupDmgWorkspace } = require('./dmg-mount.cjs')
 
 // 与 scripts/build_dmg_background.py 同步:窗口逻辑大小 640x400,图标坐标。
 // electron-builder 的 contents x/y 是 1x logical points 下的图标中心坐标。
@@ -35,77 +35,6 @@ const DMG_BUILDER_CHECKSUMS = {
     'a785f2a385c8c31996a089ef8e26361904b40c772d5ea65a36001212f1fc25e0',
   'dmgbuild-bundle-x86_64-75c8a6c.tar.gz':
     '87b3bb72148b11451ee90ede79cc8d59305c9173b68b0f2b50a3bea51fc4a4e2',
-}
-
-function attachReadWrite(dmgPath) {
-  const out = execFileSync('hdiutil', [
-    'attach',
-    dmgPath,
-    '-readwrite',
-    '-noverify',
-    '-noautoopen',
-  ]).toString()
-  const m = out.match(/(\/Volumes\/[^\n]+)/)
-  if (!m) throw new Error('hdiutil attach: cannot detect mount point')
-  return m[1].trim()
-}
-
-function attachReadOnly(dmgPath) {
-  const out = execFileSync('hdiutil', [
-    'attach',
-    dmgPath,
-    '-nobrowse',
-    '-noautoopen',
-    '-readonly',
-  ]).toString()
-  const m = out.match(/(\/Volumes\/[^\n]+)/)
-  if (!m) throw new Error('hdiutil attach: cannot detect mount point')
-  return m[1].trim()
-}
-
-function detach(mountPoint) {
-  // 偶发 "Resource busy" — 重试 3 次再放弃,每次 sleep 1s 让 Finder 释放。
-  for (let i = 0; i < 3; i++) {
-    try {
-      const args =
-        i === 2 ? ['detach', mountPoint, '-force', '-quiet'] : ['detach', mountPoint, '-quiet']
-      execFileSync('hdiutil', args)
-      return
-    } catch (err) {
-      if (i === 2) throw err
-      execFileSync('sleep', ['1'])
-    }
-  }
-}
-
-/**
- * 打包前 detach 所有挂着的 "鉴翎 *" volume,避免名字冲突让 macOS 自动加数字
- * 后缀(鉴翎 0.6.0 1 / 2 / 3 ...),用户开 dmg 时 Finder 不识别 DS_Store 里的
- * layout(按 volume 名缓存),只显示默认黑底布局。
- *
- * 注意:这只清开发机器上的 stale mount,用户机器上的 mount 我们管不着;用户装
- * 新 dmg 前应该先 eject 旧的(README 应注明)。
- */
-function detachStaleVolumes() {
-  let mountOutput = ''
-  try {
-    mountOutput = execFileSync('mount').toString()
-  } catch {
-    return
-  }
-  // 匹配形如:`/dev/disk7s2 on /Volumes/鉴翎 0.6.0 (hfs, ...)`
-  const lines = mountOutput.split('\n').filter((l) => l.includes('/Volumes/鉴翎'))
-  for (const line of lines) {
-    const m = line.match(/on (\/Volumes\/鉴翎[^(]*?) \(/)
-    if (!m) continue
-    const volume = m[1].trim()
-    try {
-      execFileSync('hdiutil', ['detach', volume, '-force', '-quiet'])
-      console.log(`[build-dmg] pre-detach stale volume: ${volume}`)
-    } catch (err) {
-      console.warn(`[build-dmg] pre-detach failed for ${volume}:`, err.message)
-    }
-  }
 }
 
 async function getDmgbuildPythonPath() {
@@ -178,16 +107,6 @@ exports.default = async function (context) {
     fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'),
   ).version
   const dmgPath = path.join(context.outDir, `PlumeLens-${pkgVersion}-arm64.dmg`)
-  const tmpDmg = path.join(context.outDir, `.PlumeLens-${pkgVersion}-arm64.rw.dmg`)
-  if (fs.existsSync(dmgPath)) fs.rmSync(dmgPath)
-  if (fs.existsSync(tmpDmg)) fs.rmSync(tmpDmg)
-
-  // 防御:detach 任何挂着的同名/旧 dmg volume,避免 macOS 自动加数字后缀
-  // 让 Finder 不识别新 dmg 的 DS_Store layout。
-  detachStaleVolumes()
-
-  const stagingDir = fs.mkdtempSync(path.join(os.tmpdir(), 'plumelens-dmg-'))
-  console.log(`[build-dmg] staging in ${stagingDir}`)
   const volumeName = `鉴翎 ${pkgVersion}`
   const dmgbuildPython = await getDmgbuildPythonPath()
 
@@ -211,7 +130,21 @@ exports.default = async function (context) {
     )
   }
 
+  // Keep candidate and final image on the same filesystem for atomic publication.
+  const workspace = fs.realpathSync(fs.mkdtempSync(path.join(context.outDir, '.plumelens-dmg-')))
+  const stagingDir = path.join(workspace, 'staging')
+  const tmpDmg = path.join(workspace, 'image.rw.dmg')
+  const candidateDmg = path.join(workspace, 'release.dmg')
+  const rwMount = createDmgMount(tmpDmg, path.join(workspace, 'readwrite'))
+  const verifyMount = createDmgMount(candidateDmg, path.join(workspace, 'verify'))
+  const previousOutput = createDmgMount(dmgPath, path.join(workspace, 'previous-output'))
+  console.log(`[build-dmg] task workspace ${workspace}`)
+  let buildError
   try {
+    // A previous build or the user may still have the existing output open.
+    // Never detach it or delete its backing file, even if the version matches.
+    previousOutput.assertDetached()
+    fs.mkdirSync(stagingDir)
     // ditto 保留 ACL/xattr/签名
     execFileSync('ditto', [appPath, path.join(stagingDir, APP_NAME)], { stdio: 'inherit' })
     fs.symlinkSync('/Applications', path.join(stagingDir, 'Applications'))
@@ -238,66 +171,78 @@ exports.default = async function (context) {
     )
 
     // 2) 挂载,离线写 .DS_Store 设布局
-    const mountPoint = attachReadWrite(tmpDmg)
+    const mountPoint = rwMount.attach()
     try {
       console.log(`[build-dmg] writing Finder layout at ${mountPoint}`)
       writeDmgLayout(dmgbuildPython, mountPoint, bgDestName)
       // sync 确保 .DS_Store 落盘后再 detach,否则窗口配置丢失
       execFileSync('sync')
     } finally {
-      detach(mountPoint)
+      await rwMount.detach()
     }
 
     // 3) 转换为压缩 UDZO 发布版
-    console.log(`[build-dmg] hdiutil convert → ${dmgPath}`)
+    console.log(`[build-dmg] hdiutil convert → ${candidateDmg}`)
     execFileSync(
       'hdiutil',
-      ['convert', tmpDmg, '-format', 'UDZO', '-imagekey', 'zlib-level=9', '-o', dmgPath],
+      ['convert', tmpDmg, '-format', 'UDZO', '-imagekey', 'zlib-level=9', '-o', candidateDmg],
       { stdio: 'inherit' },
     )
-  } finally {
-    if (fs.existsSync(tmpDmg)) fs.rmSync(tmpDmg)
-    fs.rmSync(stagingDir, { recursive: true, force: true })
-  }
+    // 验证 dmg 内 Framework binary 真的在
+    console.log(`[build-dmg] verifying dmg contents...`)
+    const verifyMountPoint = verifyMount.attach(true)
+    try {
+      const fwBin = path.join(
+        verifyMountPoint,
+        APP_NAME,
+        'Contents',
+        'Frameworks',
+        'Electron Framework.framework',
+        'Versions',
+        'A',
+        'Electron Framework',
+      )
+      if (!fs.existsSync(fwBin)) {
+        throw new Error(`Electron Framework binary missing in dmg: ${fwBin}`)
+      }
+      const size = fs.statSync(fwBin).size
+      if (size < 100 * 1024 * 1024) {
+        throw new Error(`Electron Framework binary too small (${size}), likely corrupt`)
+      }
+      // 验证整个 .app 签名仍有效
+      execFileSync(
+        'codesign',
+        ['--verify', '--deep', '--strict', path.join(verifyMountPoint, APP_NAME)],
+        {
+          stdio: 'inherit',
+        },
+      )
+      // 验证背景图也在 dmg 里
+      const bgInDmg = path.join(verifyMountPoint, bgDestName)
+      if (!fs.existsSync(bgInDmg)) {
+        throw new Error(`DMG background image missing at ${bgInDmg}`)
+      }
+      verifyDmgLayout(dmgbuildPython, verifyMountPoint, bgDestName)
+      console.log(
+        `[build-dmg] verified: framework ${size} bytes, codesign valid, ` +
+          `background ${bgDestName} present, Finder layout valid`,
+      )
+    } finally {
+      await verifyMount.detach()
+    }
 
-  // 验证 dmg 内 Framework binary 真的在
-  console.log(`[build-dmg] verifying dmg contents...`)
-  const verifyMount = attachReadOnly(dmgPath)
-  try {
-    const fwBin = path.join(
-      verifyMount,
-      APP_NAME,
-      'Contents',
-      'Frameworks',
-      'Electron Framework.framework',
-      'Versions',
-      'A',
-      'Electron Framework',
-    )
-    if (!fs.existsSync(fwBin)) {
-      throw new Error(`Electron Framework binary missing in dmg: ${fwBin}`)
-    }
-    const size = fs.statSync(fwBin).size
-    if (size < 100 * 1024 * 1024) {
-      throw new Error(`Electron Framework binary too small (${size}), likely corrupt`)
-    }
-    // 验证整个 .app 签名仍有效
-    execFileSync('codesign', ['--verify', '--deep', '--strict', path.join(verifyMount, APP_NAME)], {
-      stdio: 'inherit',
-    })
-    // 验证背景图也在 dmg 里
-    const bgInDmg = path.join(verifyMount, bgDestName)
-    if (!fs.existsSync(bgInDmg)) {
-      throw new Error(`DMG background image missing at ${bgInDmg}`)
-    }
-    verifyDmgLayout(dmgbuildPython, verifyMount, bgDestName)
-    console.log(
-      `[build-dmg] verified: framework ${size} bytes, codesign valid, ` +
-        `background ${bgDestName} present, Finder layout valid`,
-    )
+    previousOutput.assertDetached()
+    fs.renameSync(candidateDmg, dmgPath)
+    return [dmgPath]
+  } catch (error) {
+    buildError = error
+    throw error
   } finally {
-    detach(verifyMount)
+    try {
+      cleanupDmgWorkspace(workspace, [rwMount, verifyMount])
+    } catch (error) {
+      console.error(`[build-dmg] retaining task workspace ${workspace}: ${error.message}`)
+      if (!buildError) throw error
+    }
   }
-
-  return [dmgPath]
 }
