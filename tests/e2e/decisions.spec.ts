@@ -345,6 +345,11 @@ async function mockBackend(
   const primaryPhotos: TestPhotoFixture[] = options.includeFailed
     ? [...primaryPhotosBase, failedPhoto]
     : primaryPhotosBase
+  const decisionStore: DecisionRecord[] = []
+  const speciesOverrides = new Map<
+    string,
+    { canonical_sci: string | null; canonical_zh: string | null; canonical_en: string | null }
+  >()
   let libraryState = {
     ...TEST_LIB,
     analyzed_count: primaryPhotos.length,
@@ -627,7 +632,7 @@ async function mockBackend(
         analysis_error: p.analysisStatus === 'failed' ? 'mock decode error' : null,
         species: p.species,
         species_latin: p.latin,
-        decision: null,
+        decision: decisionStore.find((entry) => entry.photo_id === p.id)?.decision ?? null,
         best_detection:
           p.analysisStatus === 'failed'
             ? null
@@ -693,6 +698,19 @@ async function mockBackend(
               : null,
       }
     })
+    for (const photo of photos) {
+      for (const bird of photo.detections ?? (photo.best_detection ? [photo.best_detection] : [])) {
+        const override = speciesOverrides.get(`${photo.id}:${bird.index}`)
+        if (!override?.canonical_sci) continue
+        bird.species = override.canonical_zh ?? override.canonical_sci
+        bird.species_latin = override.canonical_sci
+        bird.manual_species = true
+        if (bird.index === photo.best_detection?.index) {
+          photo.species = bird.species
+          photo.species_latin = bird.species_latin
+        }
+      }
+    }
     route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -758,6 +776,67 @@ async function mockBackend(
       body: JSON.stringify({ library: libraryState2, photos }),
     })
   })
+  await page.route('**/library/*/selection/query', (route: Route) => {
+    const libraryId = route.request().url().split('/library/')[1].split('/')[0]
+    const query = JSON.parse(route.request().postData() ?? '{}')
+    const source = libraryId === 'lib-other' ? TEST_PHOTOS_OTHER : primaryPhotos
+    const keyword = String(query.photo_query ?? '')
+      .trim()
+      .toLowerCase()
+    const base = source.filter((photo) => {
+      if (
+        keyword &&
+        ![photo.file_name, photo.species, photo.latin].some((value) =>
+          value.toLowerCase().includes(keyword),
+        )
+      )
+        return false
+      if (photo.analysisStatus === 'failed') return query.include_failed && !query.only_flying
+      if (photo.birdCount === 0) return query.include_no_bird && !query.only_flying
+      return (query.grades ?? []).includes(
+        decisionStore.find((entry) => entry.photo_id === photo.id)?.decision ?? photo.grade,
+      )
+    })
+    const selected = new Set<string>(query.species_keys ?? [])
+    const matchesBird = (photo: TestPhotoFixture, key?: string) =>
+      (!key || key === `sci:${photo.latin}`) && (!query.only_flying || photo.posture === 'flying')
+    const matched = base.filter((photo) =>
+      selected.size
+        ? photo.analysisStatus !== 'failed' && [...selected].some((key) => matchesBird(photo, key))
+        : !query.only_flying || matchesBird(photo),
+    )
+    const metadata = new Map(
+      source
+        .filter((photo) => photo.analysisStatus !== 'failed')
+        .map((photo) => [photo.latin, photo]),
+    )
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        library_id: libraryId,
+        projection_revision: 'decisions-1',
+        query,
+        matched_photo_ids: matched.map((photo) => photo.id),
+        matched_count: matched.length,
+        total_count: source.length,
+        pending_count: 0,
+        failed_count: source.filter((photo) => photo.analysisStatus === 'failed').length,
+        no_bird_count: source.filter(
+          (photo) => photo.birdCount === 0 && photo.analysisStatus !== 'failed',
+        ).length,
+        facets: [...metadata.values()].map((photo) => ({
+          key: `sci:${photo.latin}`,
+          name: photo.species,
+          latin_name: photo.latin,
+          english_name: null,
+          search_aliases: [],
+          review_photo_count: 0,
+          photo_count: base.filter((row) => matchesBird(row, `sci:${photo.latin}`)).length,
+        })),
+      }),
+    })
+  })
   // 导出是后台任务:POST 只返回 job 句柄,进度/结果走 SSE。
   await page.route('**/export/library/**', (route: Route) => {
     const libraryId = route.request().url().split('/export/library/')[1]
@@ -802,7 +881,6 @@ async function mockBackend(
     })
   })
   // /decisions 端点：内存里记录被 PUT 的 decision
-  const decisionStore: DecisionRecord[] = []
   await page.route('**/decisions/photo/**', async (route: Route) => {
     const url = route.request().url()
     const photoId = url.split('/decisions/photo/')[1]
@@ -810,6 +888,7 @@ async function mockBackend(
     if (url.includes('/species/')) {
       const [id, birdIndexRaw] = photoId.split('/species/')
       const body = JSON.parse(route.request().postData() ?? '{}')
+      speciesOverrides.set(`${id}:${birdIndexRaw}`, body)
       await route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -896,8 +975,20 @@ async function expectVirtualListHasNoLargeVisibleGap(page: Page, maxTopGap = 340
 
     return {
       maxInterGroupGap,
+      // The visible full filter header is intentional content, not a virtual-list gap.
+      // Once scrolled past it, photo-flow.top is above the viewport and this is unchanged.
       topGap:
-        groups.length > 0 ? Math.max(0, groups[0].top - scrollerRect.top) : scrollerRect.height,
+        groups.length > 0
+          ? Math.max(
+              0,
+              groups[0].top -
+                Math.max(
+                  scrollerRect.top,
+                  scroller.querySelector('.photo-flow')?.getBoundingClientRect().top ??
+                    scrollerRect.top,
+                ),
+            )
+          : scrollerRect.height,
       visibleCount: groups.length,
     }
   })
@@ -1635,7 +1726,7 @@ test.describe('Photo decision flow (mock backend)', () => {
 
   test('insufficient space error renders in full Chinese without clipping', async ({ page }) => {
     await page.unroute('**/export/library/**')
-    await page.route('**/export/library/**', (route: Route) => {
+    await page.route('**/export/library/lib-test', (route: Route) => {
       route.fulfill({
         status: 400,
         contentType: 'application/json',
@@ -1653,9 +1744,9 @@ test.describe('Photo decision flow (mock backend)', () => {
     await page.locator('.folder-actions').getByRole('button', { name: '导出' }).click()
     await page.getByRole('button', { name: '选择位置' }).click()
     await page.getByRole('button', { name: '开始导出' }).click()
-    await page.getByRole('button', { name: '展开' }).click()
-
+    // Failures now expand automatically so the error is immediately readable.
     const error = page.locator('.export-error')
+    await expect(error).toBeVisible()
     await expect(error).toContainText('目标磁盘空间不足')
     await expect(error).toContainText('还差')
     await expect(error).not.toContainText('Bad Request')
@@ -1999,9 +2090,11 @@ test.describe('Archive species panel (local wiki data)', () => {
     })
     await expect
       .poll(async () =>
-        page.locator('.collection-virtual-row').evaluateAll((rows) =>
-          Math.max(...rows.map((row) => Number(row.getAttribute('data-index') ?? 0))),
-        ),
+        page
+          .locator('.collection-virtual-row')
+          .evaluateAll((rows) =>
+            Math.max(...rows.map((row) => Number(row.getAttribute('data-index') ?? 0))),
+          ),
       )
       .toBeGreaterThan(initialMaxVirtualRow + 5)
 
@@ -2014,7 +2107,9 @@ test.describe('Archive species panel (local wiki data)', () => {
     })
     expect(visibleCardCount).toBeGreaterThan(0)
 
-    await page.getByPlaceholder('搜索文件夹、文件名或物种').fill('Alcedo atthis')
+    await page
+      .getByRole('searchbox', { name: '搜索鸟种或个人记录', exact: true })
+      .fill('Alcedo atthis')
     await expect(page.locator('.collection-card--active')).toContainText('翠鸟')
     await expect(page.locator('.archive-detail h2')).toContainText('翠鸟')
     await expect

@@ -10,7 +10,11 @@ from __future__ import annotations
 
 import asyncio
 import csv
+import errno
+import hashlib
+import io
 import json
+import os
 import re
 import shutil
 import threading
@@ -20,7 +24,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from xml.sax.saxutils import escape, quoteattr
 
 import structlog
@@ -34,6 +38,7 @@ from engine.api.schemas.export import (
 )
 from engine.core.database import Database
 from engine.pipeline.preprocess import IMAGE_EXTENSIONS, RAW_EXTENSIONS
+from engine.services.photo_input import source_fingerprint as analysis_input_fingerprint
 
 logger = structlog.stdlib.get_logger()
 
@@ -66,6 +71,15 @@ class ExportPhoto:
     quality_score: float | None
     bird_count: int | None
     species: str | None
+    file_hash: str | None = None
+    input_revision: int | None = None
+    pipeline_version: str | None = None
+    analysis_source_path: str | None = None
+    analysis_source_hash: str | None = None
+    analysis_source_fingerprint: str | None = None
+    source_fingerprint: tuple[int, int, int, int, int] | None = None
+    companion_fingerprint: tuple[int, int, int, int, int] | None = None
+    frozen: bool = False
 
 
 @dataclass
@@ -107,10 +121,8 @@ class ExportJob:
     worker 跑在 ``asyncio.to_thread`` 的线程里,SSE 生成器跑在事件循环里 ——
     两边并发读写同一份计数,所以所有可变字段都只在 ``_lock`` 下更新/快照。
 
-    ``cancel_event`` 是 worker 与外界唯一的中断通道:复制循环每张照片检查一次。
-    检查点放在照片之间而不是字节流中间 —— ``shutil.copy2`` 不可中断,让它把当前
-    这张写完(单张 RAW 最多 ~60 MB,约 1 秒)换来的是"取消后不留半截文件",
-    比留下一个大小不对的 CR3 让用户误当成完整文件要好得多。
+    ``cancel_event`` 是 worker 与外界唯一的中断通道。复制按块检查取消，先写同目录
+    临时文件，校验并同步后才原子发布最终名称；取消和故障都不会发布半截照片。
     """
 
     job_id: str
@@ -131,6 +143,9 @@ class ExportJob:
     error_code: str | None = None
     error_message: str | None = None
     error_context: dict[str, Any] = field(default_factory=dict)
+    projection_revision: str | None = None
+    scope: Literal["library", "selection"] = "library"
+    snapshot_path: Path | None = field(default=None, repr=False)
     cancel_event: threading.Event = field(default_factory=threading.Event, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
@@ -144,6 +159,7 @@ class ExportJob:
     def set_output_dir(self, path: str) -> None:
         with self._lock:
             self.output_dir = path
+        self.persist()
 
     def note_current(self, name: str | None) -> None:
         with self._lock:
@@ -172,6 +188,7 @@ class ExportJob:
                 self.missing += 1
             if failed:
                 self.failed += 1
+        self.persist()
 
     def finish(
         self,
@@ -189,12 +206,26 @@ class ExportJob:
             self.error_message = message
             self.error_context = dict(context or {})
             self.current_file = None
+        self.persist()
+
+    def persist(self) -> None:
+        """Persist a replaceable snapshot; interrupted jobs remain discoverable after restart."""
+        if self.snapshot_path is not None:
+            try:
+                _write_text_file(
+                    self.snapshot_path,
+                    json.dumps(self.snapshot(), ensure_ascii=False),
+                )
+            except OSError:
+                logger.warning("Unable to persist export job snapshot", job_id=self.job_id)
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
             return {
                 "job_id": self.job_id,
                 "library_id": self.library_id,
+                "scope": self.scope,
+                "projection_revision": self.projection_revision,
                 "status": self.status,
                 "total": self.total,
                 "processed": self.processed,
@@ -226,7 +257,100 @@ _JOBS_LOCK = threading.Lock()
 
 def get_export_job(job_id: str) -> ExportJob | None:
     with _JOBS_LOCK:
-        return _JOBS.get(job_id)
+        existing = _JOBS.get(job_id)
+    if existing is not None:
+        return existing
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", job_id):
+        return None
+    path = _job_snapshot_path(job_id)
+    try:
+        saved = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(saved, dict) or saved.get("status") not in {
+            JOB_RUNNING,
+            JOB_SUCCEEDED,
+            JOB_FAILED,
+            JOB_CANCELLED,
+        }:
+            return None
+        job = ExportJob(
+            job_id=job_id,
+            library_id=str(saved["library_id"]),
+            total=int(saved["total"]),
+            total_bytes=int(saved["total_bytes"]),
+            scope="selection" if saved.get("scope") == "selection" else "library",
+            projection_revision=saved.get("projection_revision"),
+            snapshot_path=path,
+        )
+        for name in (
+            "processed",
+            "exported",
+            "companions",
+            "xmp",
+            "missing",
+            "failed",
+            "copied_bytes",
+        ):
+            setattr(job, name, int(saved.get(name, 0)))
+        job.output_dir = saved.get("output_dir")
+        result = saved.get("result")
+        job.result = ExportLibraryResponse.model_validate(result) if result is not None else None
+        job.status = str(saved["status"])
+        saved_error = saved.get("error")
+        error = saved_error if isinstance(saved_error, dict) else {}
+        job.error_code = error.get("code")
+        job.error_message = error.get("message")
+        job.error_context = {k: v for k, v in error.items() if k not in ("code", "message")}
+        if job.status == JOB_RUNNING:
+            job.finish(
+                JOB_FAILED,
+                code="job_interrupted",
+                message="Export was interrupted by an engine restart; completed files were kept",
+            )
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    with _JOBS_LOCK:
+        return _JOBS.setdefault(job_id, job)
+
+
+def _job_snapshot_path(job_id: str) -> Path:
+    from engine.core.config import settings
+
+    return settings.data_dir / "export_jobs" / f"{job_id}.json"
+
+
+def _write_job_inputs(
+    job: ExportJob, photos: list[ExportPhoto], body: ExportLibraryRequest
+) -> None:
+    """Write immutable membership once; progress snapshots stay small even for huge folders."""
+    path = _job_snapshot_path(job.job_id).with_suffix(".inputs.json")
+    _write_text_file(
+        path,
+        json.dumps(
+            {
+                "job_id": job.job_id,
+                "library_id": job.library_id,
+                "request": body.model_dump(),
+                "photos": [
+                    {
+                        "id": p.id,
+                        "file_path": p.file_path,
+                        "file_hash": p.file_hash,
+                        "input_revision": p.input_revision,
+                        "pipeline_version": p.pipeline_version,
+                        "species": p.species,
+                        "analysis_source_path": p.analysis_source_path,
+                        "analysis_source_hash": p.analysis_source_hash,
+                        "analysis_source_fingerprint": p.analysis_source_fingerprint,
+                        "source_fingerprint": p.source_fingerprint,
+                        "companion_path": p.companion_path,
+                        "companion_fingerprint": p.companion_fingerprint,
+                    }
+                    for p in photos
+                ],
+            },
+            ensure_ascii=False,
+        ),
+    )
 
 
 def cancel_export_job(job_id: str) -> ExportJob | None:
@@ -251,13 +375,22 @@ def cancel_all_export_jobs() -> int:
     return len(running)
 
 
-def _register_job(job: ExportJob) -> None:
+def _register_job(job: ExportJob, *, check_running: bool = False) -> None:
     with _JOBS_LOCK:
+        if check_running:
+            for existing in _JOBS.values():
+                if existing.library_id == job.library_id and existing.status == JOB_RUNNING:
+                    raise ExportError(
+                        "export_already_running",
+                        "An export for this library is already running",
+                        job_id=existing.job_id,
+                    )
         finished = [jid for jid, existing in _JOBS.items() if existing.status != JOB_RUNNING]
         overflow = len(finished) - _JOB_HISTORY_LIMIT
         for jid in finished[:overflow] if overflow > 0 else []:
             _JOBS.pop(jid, None)
         _JOBS[job.job_id] = job
+    job.persist()
 
 
 def _running_job_for_library(library_id: str) -> ExportJob | None:
@@ -305,6 +438,9 @@ _ERROR_LABELS: dict[str, str] = {
     "source_missing": "源文件不存在",
     "companion_missing": "同伴文件不存在",
     "insufficient_space": "目标磁盘剩余空间不足",
+    "source_changed": "源文件在导出期间发生变化，请重新扫描后重试",
+    "copy_failed": "文件复制或元数据写入失败",
+    "permission_denied": "没有读取源文件或写入目标目录的权限",
 }
 _GRADE_RATINGS: dict[str, int] = {
     "select": 5,
@@ -465,12 +601,22 @@ def _score_percent(photo: ExportPhoto) -> float | None:
 
 def _matches_request(photo: ExportPhoto, body: ExportLibraryRequest) -> bool:
     grade = _effective_grade(photo)
-    if grade not in body.grades:
+    if body.scope == "library" and grade not in body.grades:
         return False
     score = _score_percent(photo)
-    if score is not None and body.min_score is not None and score < body.min_score:
+    if (
+        body.scope == "library"
+        and score is not None
+        and body.min_score is not None
+        and score < body.min_score
+    ):
         return False
-    if score is not None and body.max_score is not None and score > body.max_score:
+    if (
+        body.scope == "library"
+        and score is not None
+        and body.max_score is not None
+        and score > body.max_score
+    ):
         return False
     # 格式白名单只在真的复制文件时参与筛选 —— xmp_only 模式下导的是 sidecar,
     # 与源文件格式无关,不能因为"没勾 CR3"就把整张照片排除掉。
@@ -547,14 +693,77 @@ def _unique_output_dir(base: Path) -> Path:
     return candidate
 
 
-def _copy_file(source: Path, dest: Path) -> None:
+class _ExportCancelled(Exception):
+    """Internal control signal; a cancelled file is never published."""
+
+
+def _fingerprint(path: Path) -> tuple[int, int, int, int, int]:
+    stat = path.stat()
+    return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
+
+
+def _temporary_path(dest: Path) -> Path:
+    return dest.with_name(f".{dest.name}.{uuid.uuid4().hex}.plumelens-part")
+
+
+def _copy_file(
+    source: Path,
+    dest: Path,
+    *,
+    cancel_event: threading.Event | None = None,
+    expected_fingerprint: tuple[int, int, int, int, int] | None = None,
+    expected_hash: str | None = None,
+) -> None:
+    """Copy to a sibling temporary file, then publish only a complete stable input."""
     dest.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(source, dest)
+    temp = _temporary_path(dest)
+    before = _fingerprint(source)
+    if expected_fingerprint is not None and before != expected_fingerprint:
+        raise ExportError("source_changed", "Source file changed since export started")
+    digest = (
+        hashlib.sha256() if expected_hash and re.fullmatch(r"[0-9a-f]{64}", expected_hash) else None
+    )
+    try:
+        with source.open("rb") as src, temp.open("xb") as out:
+            while True:
+                if cancel_event is not None and cancel_event.is_set():
+                    raise _ExportCancelled
+                chunk = src.read(1024 * 1024)
+                if not chunk:
+                    break
+                out.write(chunk)
+                if digest is not None:
+                    digest.update(chunk)
+            out.flush()
+            os.fsync(out.fileno())
+        if _fingerprint(source) != before or temp.stat().st_size != before[2]:
+            raise ExportError("source_changed", "Source file changed while copying")
+        if digest is not None and digest.hexdigest() != expected_hash:
+            raise ExportError("source_changed", "Source file no longer matches its input hash")
+        shutil.copystat(source, temp)
+        if cancel_event is not None and cancel_event.is_set():
+            raise _ExportCancelled
+        os.replace(temp, dest)
+    finally:
+        _unlink_silent(temp)
 
 
 def _write_text_file(path: Path, body: str) -> None:
+    _write_bytes_file(path, body.encode("utf-8"))
+
+
+def _write_bytes_file(path: Path, body: bytes) -> None:
+    """Publish sidecars, reports and embedded metadata with the same atomic contract."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(body, encoding="utf-8")
+    temp = _temporary_path(path)
+    try:
+        with temp.open("xb") as out:
+            out.write(body)
+            out.flush()
+            os.fsync(out.fileno())
+        os.replace(temp, path)
+    finally:
+        _unlink_silent(temp)
 
 
 def _unlink_silent(path: Path | None) -> None:
@@ -613,6 +822,8 @@ def _case_exact_existing_path(candidate: Path, inode: tuple[int, int]) -> Path:
 
 
 def _discover_companion_path(photo: ExportPhoto, source: Path) -> Path | None:
+    if photo.frozen and photo.companion_path is None:
+        return None
     if photo.companion_path:
         return Path(photo.companion_path)
     if source.suffix.lower() not in IMAGE_EXTENSIONS:
@@ -792,7 +1003,7 @@ def _try_embed_xmp_in_jpeg(path: Path, packet: str) -> bool:
         embedded = _jpeg_with_embedded_xmp(path.read_bytes(), packet)
     except (OSError, ValueError):
         return False
-    path.write_bytes(embedded)
+    _write_bytes_file(path, embedded)
     return True
 
 
@@ -926,7 +1137,7 @@ def _write_manifests(
 ) -> tuple[Path, Path]:
     json_path = output_dir / "鉴翎导出报告.json"
     csv_path = output_dir / "鉴翎导出清单.csv"
-    with json_path.open("w", encoding="utf-8") as f:
+    with io.StringIO() as f:
         f.write("{\n")
         f.write(f'  "导出摘要": {json.dumps(summary, ensure_ascii=False, indent=2)},\n')
         f.write('  "照片清单": [\n')
@@ -940,11 +1151,13 @@ def _write_manifests(
             f.write(f"    {rendered}")
         f.write("\n  ]\n")
         f.write("}\n")
-    with csv_path.open("w", encoding="utf-8", newline="") as f:
+        _write_text_file(json_path, f.getvalue())
+    with io.StringIO(newline="") as f:
         writer = csv.DictWriter(f, fieldnames=_CHINESE_MANIFEST_FIELDNAMES)
         writer.writeheader()
         for row in rows:
             writer.writerow(_manifest_row_to_chinese(row, output_dir, root))
+        _write_text_file(csv_path, f.getvalue())
     return json_path, csv_path
 
 
@@ -977,6 +1190,103 @@ def _prepare_export(
     return selected, root, target
 
 
+def _analysis_source_slot(photo: ExportPhoto) -> int | None:
+    """Map the actual inference source even after a legitimate folder relink."""
+    if photo.analysis_source_path is None:
+        return None
+    for slot, path in enumerate((photo.file_path, photo.companion_path)):
+        if photo.analysis_source_path == path:
+            return slot
+    if photo.analysis_source_fingerprint:
+        try:
+            inputs = json.loads(photo.analysis_source_fingerprint)
+            for slot, item in enumerate(inputs):
+                if isinstance(item, list) and item and item[0] == photo.analysis_source_path:
+                    return slot
+        except (ValueError, TypeError):
+            pass
+    return None
+
+
+def _expected_copy_hash(photo: ExportPhoto, slot: int) -> str | None:
+    if _analysis_source_slot(photo) == slot and photo.analysis_source_hash:
+        return photo.analysis_source_hash
+    return photo.file_hash if slot == 0 else None
+
+
+def _hash_matches(path: Path, expected_hash: str | None) -> bool:
+    if not expected_hash or not re.fullmatch(r"[0-9a-f]{64}", expected_hash):
+        return False
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest() == expected_hash
+
+
+def _validate_analysis_inputs(photo: ExportPhoto, source: Path, companion: Path | None) -> None:
+    """Reject changed inference inputs before applying their old species/grade.
+
+    Normal inputs require only stat. A relink or a metadata-only change may
+    preserve the actual bytes; allow that case only after verifying the known
+    full hash, outside all SQL transactions. Legacy results without provenance
+    retain their existing primary-hash check during copying.
+    """
+    if not photo.analysis_source_fingerprint:
+        return
+    current = analysis_input_fingerprint(source, companion)
+    try:
+        previous_inputs = json.loads(photo.analysis_source_fingerprint)
+        current_inputs = json.loads(current)
+        if not isinstance(previous_inputs, list) or len(previous_inputs) != 2:
+            raise ValueError("Invalid inference input identity")
+        for slot, (previous, present) in enumerate(
+            zip(previous_inputs, current_inputs, strict=True)
+        ):
+            if previous == present:
+                continue
+            if (
+                isinstance(previous, list)
+                and isinstance(present, list)
+                and previous[1:] == present[1:]
+            ):
+                continue  # A renamed parent directory, with the same physical file.
+            path = source if slot == 0 else companion
+            if path is None or not _hash_matches(path, _expected_copy_hash(photo, slot)):
+                raise ExportError("source_changed", "Inference input changed; rescan before export")
+        if current != analysis_input_fingerprint(source, companion):
+            raise ExportError("source_changed", "Inference input changed while freezing export")
+        if (
+            _analysis_source_slot(photo) == 0
+            and photo.analysis_source_hash
+            and photo.file_hash
+            and photo.analysis_source_hash != photo.file_hash
+        ):
+            raise ExportError("source_changed", "Analysis no longer matches the scanned input hash")
+    except (OSError, ValueError, TypeError) as exc:
+        raise ExportError(
+            "source_changed", "Inference input cannot be verified before export"
+        ) from exc
+
+
+def _freeze_file_inputs(photos: list[ExportPhoto]) -> None:
+    """Freeze physical inputs before the job starts; discovery is never repeated mid-job."""
+    for photo in photos:
+        if photo.frozen:
+            continue
+        source = Path(photo.file_path)
+        companion = _discover_companion_path(photo, source)
+        if companion is not None:
+            photo.companion_path = str(companion)
+        _validate_analysis_inputs(photo, source, companion)
+        with suppress(OSError):
+            photo.source_fingerprint = _fingerprint(source)
+        if companion is not None:
+            with suppress(OSError):
+                photo.companion_fingerprint = _fingerprint(companion)
+        photo.frozen = True
+
+
 def _run_export(
     *,
     library_id: str,
@@ -993,6 +1303,7 @@ def _run_export(
         photos=photos,
         body=body,
     )
+    _freeze_file_inputs(selected)
 
     output_dir = _unique_output_dir(target / f"{_safe_name(library_name)}-{_now_stamp()}")
     output_dir.mkdir(parents=True, exist_ok=False)
@@ -1010,7 +1321,7 @@ def _run_export(
 
     cancelled = False
     for photo in selected:
-        # 取消检查点 — 放在每张照片开头,当前这张会完整写完再退出(见 ExportJob 注释)
+        # 每张照片和文件复制块均可取消；一张照片的任一成员失败会清理已发布成员。
         if job is not None and job.is_cancelled:
             cancelled = True
             break
@@ -1027,10 +1338,12 @@ def _run_export(
         error: str | None = None
         created_paths: list[Path] = []
         try:
-            if not source.exists():
+            if not source.exists() or photo.source_fingerprint is None:
                 missing += 1
                 error = "source_missing"
             else:
+                if _fingerprint(source) != photo.source_fingerprint:
+                    raise ExportError("source_changed", "Source file changed since export started")
                 want_main, want_companion = _plan_files(photo, body)
                 if body.copy_files and want_companion:
                     companion_source = _discover_companion_path(photo, source)
@@ -1055,7 +1368,13 @@ def _run_export(
                         body.preserve_structure,
                     )
                     dest_path = _unique_dest(output_dir, rel, used)
-                    _copy_file(source, dest_path)
+                    _copy_file(
+                        source,
+                        dest_path,
+                        cancel_event=job.cancel_event if job is not None else None,
+                        expected_fingerprint=photo.source_fingerprint,
+                        expected_hash=_expected_copy_hash(photo, 0),
+                    )
                     created_paths.append(dest_path)
                     exported_main = True
 
@@ -1075,7 +1394,15 @@ def _run_export(
                         body.preserve_structure,
                     )
                     companion_dest = _unique_dest(output_dir, comp_rel, used)
-                    _copy_file(companion_source, companion_dest)
+                    if photo.companion_fingerprint is None:
+                        raise ExportError("source_changed", "Companion appeared after snapshot")
+                    _copy_file(
+                        companion_source,
+                        companion_dest,
+                        cancel_event=job.cancel_event if job is not None else None,
+                        expected_fingerprint=photo.companion_fingerprint,
+                        expected_hash=_expected_copy_hash(photo, 1),
+                    )
                     created_paths.append(companion_dest)
                     exported_companion = True
 
@@ -1118,12 +1445,25 @@ def _run_export(
                     if exported_xmp:
                         xmp_count += 1
         except Exception as exc:
-            for path in reversed(created_paths):
+            reserved_paths = [p for p in (dest_path, companion_dest, xmp_dest) if p is not None]
+            for path in reversed(list(dict.fromkeys([*created_paths, *reserved_paths]))):
                 _unlink_silent(path)
                 _release_dest(path, output_dir, used)
                 _prune_empty_dirs(path.parent, output_dir)
+            if isinstance(exc, _ExportCancelled):
+                cancelled = True
+                break
             failed += 1
-            error = str(exc)
+            error = (
+                exc.code
+                if isinstance(exc, ExportError)
+                else "insufficient_space"
+                if isinstance(exc, OSError) and exc.errno == errno.ENOSPC
+                else "permission_denied"
+                if isinstance(exc, OSError) and exc.errno in (errno.EACCES, errno.EPERM)
+                else "copy_failed"
+            )
+            logger.warning("Photo export failed", photo_id=photo.id, code=error, error=str(exc))
             dest_path = None
             companion_dest = None
             xmp_dest = None
@@ -1180,7 +1520,38 @@ def _run_export(
             rows,
             {
                 "导出时间": datetime.now(UTC).isoformat(),
-                "任务状态": "已取消（仅含取消前已导出的部分）" if cancelled else "已完成",
+                "任务状态": (
+                    "已取消（仅含取消前已导出的部分）"
+                    if cancelled
+                    else "部分失败"
+                    if failed or missing
+                    else "已完成"
+                ),
+                "导出范围": "当前筛选" if body.scope == "selection" else "整个文件夹",
+                "筛选修订": body.projection_revision if body.scope == "selection" else None,
+                "筛选条件": (
+                    body.selection_query.model_dump()
+                    if body.scope == "selection" and body.selection_query is not None
+                    else None
+                ),
+                "输入快照": [
+                    {
+                        "照片ID": p.id,
+                        "输入修订": p.input_revision,
+                        "输入哈希": p.file_hash,
+                        "推理源哈希": p.analysis_source_hash,
+                        "推理源": (
+                            "同伴文件"
+                            if _analysis_source_slot(p) == 1
+                            else "主文件"
+                            if _analysis_source_slot(p) == 0
+                            else "历史记录未提供"
+                        ),
+                        "管线版本": p.pipeline_version,
+                        "有效物种": p.species,
+                    }
+                    for p in selected
+                ],
                 "图库ID": library_id,
                 "图库名称": library_name,
                 "源图库路径": "(已脱敏)",
@@ -1222,8 +1593,8 @@ def _run_export(
 async def _load_export_context(
     db: Database,
     library_id: str,
-) -> tuple[str, str, str, list[ExportPhoto]]:
-    """读取图库元信息 + 全部候选照片,返回 (id, 名称, 源根路径, 照片列表)。"""
+) -> None:
+    """Check source availability without holding a database transaction across file IO."""
     async with db.conn.execute(
         "SELECT id, display_name, root_path, status FROM libraries WHERE id = ?",
         (library_id,),
@@ -1235,25 +1606,32 @@ async def _load_export_context(
 
     root_path = str(library["root_path"])
     if not await asyncio.to_thread(Path(root_path).exists):
-        await db.conn.execute(
-            "UPDATE libraries SET status = 'path_missing' WHERE id = ?",
-            (library_id,),
-        )
-        await db.conn.commit()
+        async with db.transaction() as conn:
+            await conn.execute(
+                "UPDATE libraries SET status = 'path_missing' WHERE id = ?",
+                (library_id,),
+            )
         msg = "Library source path is missing; relink the folder before export"
         raise ExportError("source_path_missing", msg)
     if str(library["status"]) == "path_missing":
-        await db.conn.execute(
-            "UPDATE libraries SET status = 'ready' WHERE id = ?",
-            (library_id,),
-        )
-        await db.conn.commit()
+        async with db.transaction() as conn:
+            await conn.execute(
+                "UPDATE libraries SET status = 'ready' WHERE id = ?",
+                (library_id,),
+            )
+
+
+async def _load_export_photos(db: Database, library_id: str) -> list[ExportPhoto]:
+    """Read only database metadata; safe inside the caller's short snapshot transaction."""
 
     async with db.conn.execute(
         "SELECT p.id, p.file_path, p.file_name, p.file_mtime, p.exif_json, "
-        "p.companion_path, pd.decision, ar.grade, ar.quality_score, ar.bird_count, ar.species "
+        "p.companion_path, p.file_hash, p.input_revision, ar.pipeline_version, "
+        "ar.source_path, ar.source_hash, ar.source_fingerprint AS analysis_source_fingerprint, "
+        "pd.decision, ar.grade, ar.quality_score, ar.bird_count, ar.species "
         "FROM photos p "
         "LEFT JOIN analysis_results ar ON ar.photo_id = p.id AND ar.is_active = 1 "
+        "AND ar.input_revision = p.input_revision "
         "LEFT JOIN photo_decisions pd ON pd.photo_id = p.id "
         "WHERE p.library_id = ? "
         "ORDER BY p.file_mtime ASC",
@@ -1278,10 +1656,75 @@ async def _load_export_context(
             ),
             bird_count=(int(row["bird_count"]) if row["bird_count"] is not None else None),
             species=(str(row["species"]) if row["species"] is not None else None),
+            file_hash=(str(row["file_hash"]) if row["file_hash"] is not None else None),
+            input_revision=int(row["input_revision"]),
+            pipeline_version=(
+                str(row["pipeline_version"]) if row["pipeline_version"] is not None else None
+            ),
+            analysis_source_path=(str(row["source_path"]) if row["source_path"] else None),
+            analysis_source_hash=(str(row["source_hash"]) if row["source_hash"] else None),
+            analysis_source_fingerprint=(
+                str(row["analysis_source_fingerprint"])
+                if row["analysis_source_fingerprint"]
+                else None
+            ),
         )
         for row in rows
     ]
-    return str(library["id"]), str(library["display_name"]), root_path, photos
+    return photos
+
+
+async def _freeze_export_photos(
+    db: Database, library_id: str, body: ExportLibraryRequest
+) -> tuple[str, str, list[ExportPhoto]]:
+    """Freeze effective identities and input metadata under one transaction revision."""
+    from engine.services.library_projection import load_library_photos
+    from engine.services.selection import (
+        SelectionLibraryNotFound,
+        SelectionRevisionConflict,
+        freeze_selection,
+    )
+
+    async with db.transaction():
+        async with db.conn.execute(
+            "SELECT display_name, root_path FROM libraries WHERE id = ?", (library_id,)
+        ) as cursor:
+            library = await cursor.fetchone()
+        if library is None:
+            raise ExportError("library_not_found", "Library not found")
+        try:
+            if body.scope == "selection":
+                assert body.selection_query is not None and body.projection_revision is not None
+                snapshot = await freeze_selection(
+                    db, library_id, body.selection_query, body.projection_revision
+                )
+                projected = list(snapshot.photos)
+                ids = list(snapshot.photo_ids)
+            else:
+                projected = await load_library_photos(db, library_id)
+                ids = [p.id for p in projected]
+        except SelectionRevisionConflict as exc:
+            raise ExportError(
+                "selection_changed",
+                "Selection changed since preview; refresh the results before exporting",
+            ) from exc
+        except SelectionLibraryNotFound as exc:
+            raise ExportError("library_not_found", "Library not found") from exc
+        raw = {p.id: p for p in await _load_export_photos(db, library_id)}
+        effective = {p.id: p for p in projected}
+        photos: list[ExportPhoto] = []
+        for photo_id in ids:
+            photo = raw.get(photo_id)
+            display = effective.get(photo_id)
+            if photo is None or display is None:
+                raise ExportError("selection_changed", "Selection member no longer exists")
+            detections = display.detections or (
+                [display.best_detection] if display.best_detection is not None else []
+            )
+            names = list(dict.fromkeys(d.species for d in detections if d.species))
+            photo.species = "；".join(names) if names else display.species
+            photos.append(photo)
+    return str(library["display_name"]), str(library["root_path"]), photos
 
 
 async def list_export_formats(db: Database, library_id: str) -> list[ExportFormatStat]:
@@ -1334,6 +1777,15 @@ async def list_export_formats(db: Database, library_id: str) -> list[ExportForma
 _BACKGROUND_TASKS: set[asyncio.Task[None]] = set()
 
 
+async def wait_for_export_jobs(wait_seconds: float = 3.0) -> bool:
+    """Allow cancelled workers to publish their terminal snapshots before closing the loop."""
+    tasks = list(_BACKGROUND_TASKS)
+    if not tasks:
+        return True
+    _, pending = await asyncio.wait(tasks, timeout=wait_seconds)
+    return not pending
+
+
 async def _run_job(
     job: ExportJob,
     *,
@@ -1368,8 +1820,19 @@ async def _run_job(
         job.finish(JOB_FAILED, code="internal_error", message=str(exc))
         await logger.aexception("Export job crashed", job_id=job.job_id, library_id=library_id)
     else:
-        status = JOB_CANCELLED if job.is_cancelled else JOB_SUCCEEDED
-        job.finish(status, result=result)
+        status = (
+            JOB_CANCELLED
+            if job.is_cancelled
+            else JOB_FAILED
+            if result.failed_count > 0
+            else JOB_SUCCEEDED
+        )
+        job.finish(
+            status,
+            result=result,
+            code="partial_export" if status == JOB_FAILED else None,
+            message="Some photos could not be exported" if status == JOB_FAILED else None,
+        )
         await logger.ainfo(
             "Export job finished",
             job_id=job.job_id,
@@ -1396,13 +1859,15 @@ async def start_export_job(
     不再需要撑到导出结束(历史 bug:964 张 / 80 GB 要跑两小时,前端 60s 超时后
     UI 报"导出失败",后端却毫不知情地继续复制,用户重试又叠一个并发导出)。
     """
-    lib_id, library_name, root_path, photos = await _load_export_context(db, library_id)
+    body = body.model_copy(deep=True)
+    await _load_export_context(db, library_id)
 
     running = _running_job_for_library(library_id)
     if running is not None:
         msg = "An export for this library is already running"
         raise ExportError("export_already_running", msg, job_id=running.job_id)
 
+    library_name, root_path, photos = await _freeze_export_photos(db, library_id, body)
     selected, _, _ = await asyncio.to_thread(
         _prepare_export,
         root_path=root_path,
@@ -1410,6 +1875,7 @@ async def start_export_job(
         photos=photos,
         body=body,
     )
+    await asyncio.to_thread(_freeze_file_inputs, selected)
     total_bytes = await asyncio.to_thread(_estimate_export_bytes, selected, body)
 
     job = ExportJob(
@@ -1417,8 +1883,20 @@ async def start_export_job(
         library_id=library_id,
         total=len(selected),
         total_bytes=total_bytes,
+        scope=body.scope,
+        projection_revision=body.projection_revision if body.scope == "selection" else None,
     )
-    _register_job(job)
+    job.snapshot_path = _job_snapshot_path(job.job_id)
+    try:
+        await asyncio.to_thread(_write_job_inputs, job, selected, body)
+        _register_job(job, check_running=True)
+    except ExportError:
+        _unlink_silent(_job_snapshot_path(job.job_id).with_suffix(".inputs.json"))
+        raise
+    except OSError as exc:
+        raise ExportError(
+            "snapshot_write_failed", "Unable to record export input snapshot"
+        ) from exc
     await logger.ainfo(
         "Export job started",
         job_id=job.job_id,
@@ -1435,11 +1913,11 @@ async def start_export_job(
     task = asyncio.create_task(
         _run_job(
             job,
-            library_id=lib_id,
+            library_id=library_id,
             library_name=library_name,
             root_path=root_path,
             body=body,
-            photos=photos,
+            photos=selected,
         )
     )
     _BACKGROUND_TASKS.add(task)
@@ -1453,10 +1931,11 @@ async def export_library(
     body: ExportLibraryRequest,
 ) -> ExportLibraryResponse:
     """同步导出(等待完成) — 保留给测试与不需要进度流的调用方。"""
-    lib_id, library_name, root_path, photos = await _load_export_context(db, library_id)
+    await _load_export_context(db, library_id)
+    library_name, root_path, photos = await _freeze_export_photos(db, library_id, body)
     return await asyncio.to_thread(
         _run_export,
-        library_id=lib_id,
+        library_id=library_id,
         library_name=library_name,
         root_path=root_path,
         target_dir=body.target_dir,

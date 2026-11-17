@@ -3,7 +3,7 @@
 from pathlib import Path
 from typing import Self
 
-from pydantic import field_validator, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     # Server
     host: str = "127.0.0.1"
     port: int = 0
+    parent_pid: int | None = Field(default=None, ge=2)
     log_level: str = "INFO"
     data_dir: Path = Path.home() / ".plumelens"
     # Optional local API bearer token. Electron sets this per process launch; when unset
@@ -142,7 +143,8 @@ class Settings(BaseSettings):
     #     边角 1-2 px 系统性偏移消除,pose 在边缘鸟头/眼判定 _in_box 时不再误判 not visible
     # v10: YOLO detection dedup 阈值切到交付口径 0.5
     # v11: YOLO detection 权重切到 yolo26l-bird v1.1 fine-tune 版本
-    preprocess_version: int = 11
+    # v12: RAW 方向统一，修复 EXIF 5/7 并明确关闭 LibRaw 自动旋转避免双重处理
+    preprocess_version: int = 12
 
     # Pipeline — concurrency
     # 每个 task 内部 ONNX 推理会 to_thread 释放 GIL，多 worker 并发 = 多张图同时跑 ONNX。

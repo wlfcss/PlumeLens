@@ -24,6 +24,7 @@ import { speciesArtworkAssetUrl } from '@/lib/species-artwork'
 import { formatSpeciesPinyin } from '@/lib/species-pinyin'
 import { getSpeciesWiki, resolveSpeciesCanonicalSci } from '@/lib/species-wiki'
 import { cn } from '@/lib/utils'
+import { useModalDialog } from '@/hooks/use-modal-dialog'
 
 export type SpeciesDetailIdentity = {
   englishName?: string | null
@@ -83,6 +84,7 @@ export function SpeciesInfoPopover({
   t: ReturnType<typeof useTranslation>['t']
 }) {
   const detail = resolveSpeciesDetail(identity)
+  const dialogRef = useModalDialog()
   if (!detail) return null
 
   const wiki = detail.wiki
@@ -97,7 +99,14 @@ export function SpeciesInfoPopover({
     .filter(Boolean)
 
   return (
-    <div
+    <dialog
+      ref={dialogRef}
+      aria-label={t('speciesDetail.dialogLabel', { species: detail.name })}
+      onCancel={(event) => {
+        event.preventDefault()
+        event.stopPropagation()
+        onClose()
+      }}
       className="overlay-backdrop overlay-backdrop--species-detail"
       data-testid="species-detail-popover"
       onPointerDown={(event) => {
@@ -105,11 +114,8 @@ export function SpeciesInfoPopover({
       }}
     >
       <section
-        aria-label={t('speciesDetail.dialogLabel', { species: detail.name })}
-        aria-modal="true"
         className="species-detail-popover"
         onPointerDown={(event) => event.stopPropagation()}
-        role="dialog"
       >
         <div
           className={cn(
@@ -187,7 +193,7 @@ export function SpeciesInfoPopover({
           ) : null}
         </div>
       </section>
-    </div>
+    </dialog>
   )
 }
 

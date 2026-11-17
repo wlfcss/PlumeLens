@@ -10,7 +10,10 @@
     "archive": "Trail",
     "primary": "Primary navigation",
     "search": "Search folders, files, or species",
-    "loadingDisabled": "Available after the local engine finishes loading"
+    "loadingDisabled": "Available after the local engine finishes loading",
+    "searchSelection": "Search photos or species in this folder",
+    "searchStart": "Search workspace folders",
+    "searchArchive": "Search species or personal records"
   },
   "common": {
     "export": "Export",
@@ -18,7 +21,8 @@
     "collapse": "Collapse",
     "settings": "Settings",
     "close": "Close",
-    "cancel": "Cancel"
+    "cancel": "Cancel",
+    "retry": "Retry"
   },
   "errors": {
     "renderFailed": {
@@ -125,7 +129,8 @@
     "cpuFallback": "Switched to CPU mode (GPU inference was unstable) — species inference will be slower but reliable",
     "lastCrash": "Last: {{signal}}",
     "totalCrashes": "{{count}} crash(es) total",
-    "openLogs": "Show logs"
+    "openLogs": "Show logs",
+    "healthFailed": "The analysis engine is unavailable. Retry or open the logs."
   },
   "start": {
     "kicker": "Local bird-photo culling workstation",
@@ -208,7 +213,8 @@
       "invalid_image": "File is not a recognizable image",
       "file_missing": "Source file no longer exists",
       "timeout": "Analysis timed out (pipeline stuck)",
-      "unknown": "Analysis failed; see logs for details"
+      "unknown": "Analysis failed; see logs for details",
+      "source_changed": "Source photos changed. Update the folder before reanalysis."
     },
     "sidebar": {
       "label": "Folder navigation",
@@ -355,7 +361,8 @@
       "pendingCountTitle": "{{time}} · Pending grouping · {{count}} photos",
       "singleTitle": "Scene #{{scene}} · {{time}}",
       "countTitle": "Scene #{{scene}} · {{time}} · {{count}} photos",
-      "durationTitle": "Scene #{{scene}} · {{time}} · {{count}} photos · {{minutes}} min"
+      "durationTitle": "Scene #{{scene}} · {{time}} · {{count}} photos · {{minutes}} min",
+      "filteredTitle": "Scene {{scene}} · {{time}} · {{count}} of {{total}} photos match"
     },
     "grade": {
       "reject": "Reject",
@@ -540,7 +547,8 @@
         "nav": "Navigate/close"
       },
       "companion": "RAW companion",
-      "companionValue": "{{format}} · {{size}}"
+      "companionValue": "{{format}} · {{size}}",
+      "title": "Deep review"
     },
     "reviewReasons": {
       "no_bird": "No valid bird subject was detected in this frame, so it is better treated as a reject or a record-only frame.",
@@ -596,7 +604,44 @@
       "sourceSafe": "The source folder and your original photos are not deleted — only removed from PlumeLens.",
       "confirm": "Remove",
       "removing": "Removing…"
-    }
+    },
+    "speciesFilter": {
+      "all": "All",
+      "trigger": "Species: {{value}}",
+      "selectedCount": "{{count}} species",
+      "title": "Filter species",
+      "clearOnly": "Clear species filter",
+      "searchLabel": "Find species in this folder",
+      "searchPlaceholder": "Name, pinyin, English or scientific name",
+      "includeReview": "Include judgments awaiting review",
+      "reviewHint": "Include the current named judgment when uncertain or disputed.",
+      "optionsLabel": "Species, choose any",
+      "unidentified": "Contains unidentified birds",
+      "reviewCount": "{{count}} awaiting review",
+      "photoCount": "{{count}} photos",
+      "noOptions": "No matching species. Your selection is unchanged.",
+      "error": "Could not load filters. Try again.",
+      "updating": "Updating filters…",
+      "countHint": "Unique photos; species and flight must match the same bird.",
+      "done": "Done",
+      "remove": "Remove condition",
+      "resultCount": "Showing {{count}} of {{total}} photos",
+      "clearAll": "Clear all filters",
+      "pendingAnalysis": "{{count}} photos await analysis and cannot yet match a species.",
+      "noPhotos": "No photos match these filters",
+      "noPhotosHint": "Adjust species, grades, flight or search.",
+      "outsideSelection": "This photo no longer matches the filters. It stays open while you review; navigation follows the original order.",
+      "reviewExcluded": "Review judgments excluded",
+      "allGrades": "All except failed photos",
+      "restoreDefault": "Restore default filters"
+    },
+    "saveFailed": "Save failed. This change was not applied. Please retry.",
+    "operationFailed": "Operation failed. Check the engine and retry.",
+    "saving": "Saving…",
+    "pause": "Pause",
+    "resume": "Resume analysis",
+    "cancel": "Cancel analysis",
+    "savePhotoFailed": "{{file}}: Save failed. This change was not applied. Please retry."
   },
   "archive": {
     "label": "Long-term trail",
@@ -750,9 +795,15 @@
       "cancelledHint": "Cancelled — files finished before cancelling are kept in the output folder"
     },
     "scope": {
-      "label": "Scope",
+      "label": "Export scope",
       "reviewed": "Select, usable, record",
-      "manual": "Manual scope"
+      "manual": "Manual scope",
+      "current": "Current selection: {{count}} photos",
+      "library": "Entire folder",
+      "selectionHint": "Uses the selection filters. Return to selection to change grades or scores.",
+      "selectionSummary": "Species: {{species}} · {{flight}} · {{review}} · Grades: {{grades}}",
+      "allPostures": "All postures",
+      "confirmedOnly": "Review judgments excluded"
     },
     "scoreRange": {
       "label": "Score range",
@@ -810,7 +861,7 @@
       "current": "Copying {{name}}"
     },
     "error": {
-      "insufficientSpace": "Not enough free space on the target disk: this export needs about {{required}}, only {{free}} is available — {{shortfall}} short. Try turning off \"Also export RAW companion files\" or narrowing the score range.",
+      "insufficientSpace": "Not enough space: requires {{required}}, available {{free}}, short by {{shortfall}}. Deselect RAW formats, narrow the selection or choose another drive.",
       "targetInsideSource": "The export location cannot be inside the source library. Please choose another folder.",
       "targetContainsSource": "The export location cannot contain the source library. Please choose a folder that neither contains nor sits inside it.",
       "libraryNotFound": "Library not found. Go back to the list, refresh and try again.",
@@ -818,7 +869,14 @@
       "alreadyRunning": "An export is already running for this library. Wait for it to finish or cancel it first.",
       "jobNotFound": "That export job no longer exists — the backend may have restarted. Please start a new export.",
       "internal": "The export hit an internal error. See the logs for details.",
-      "unknown": "Export failed: {{message}}"
+      "unknown": "Export failed: {{message}}",
+      "selectionChanged": "Selection changed. Counts were refreshed; review them before restarting.",
+      "sourceChanged": "Source photos changed. Refresh the folder and retry.",
+      "partialExport": "Some files failed to export. Check the manifest and output folder.",
+      "jobInterrupted": "Export was interrupted by an engine restart. Completed files remain in the output folder.",
+      "snapshotWriteFailed": "Could not save export status. Check free space in the data directory.",
+      "formatsFailed": "Could not load photo formats. Retry before exporting files.",
+      "invalidScoreRange": "Scores must be between 0 and 100, with the minimum no greater than the maximum."
     },
     "formats": {
       "label": "Photo formats",

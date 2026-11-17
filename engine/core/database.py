@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
+from collections.abc import AsyncIterator
 from pathlib import Path
 
 import aiosqlite
@@ -10,7 +12,7 @@ import structlog
 
 logger = structlog.stdlib.get_logger()
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 13
 
 # SQL 放在模块常量里便于审阅与测试
 _SCHEMA_STATEMENTS: tuple[str, ...] = (
@@ -190,6 +192,48 @@ class Database:
     def __init__(self, db_path: Path) -> None:
         self._path = db_path
         self._conn: aiosqlite.Connection | None = None
+        self._write_lock = asyncio.Lock()
+        self._transaction_owner: asyncio.Task[object] | None = None
+        self._savepoint_counter = 0
+
+    @contextlib.asynccontextmanager
+    async def transaction(self) -> AsyncIterator[aiosqlite.Connection]:
+        """Own a short write transaction; nested calls in the same task use savepoints.
+
+        Every production writer participates in this API. Do not call commit or
+        rollback inside the scope, or await image/model/network work here. Task
+        identity (rather than a ContextVar) prevents child tasks inheriting the
+        parent's ownership and accidentally committing each other's writes.
+        """
+        task = asyncio.current_task()
+        if task is None:
+            raise RuntimeError("A database transaction requires an asyncio task")
+        conn = self.conn
+        if self._transaction_owner is task:
+            self._savepoint_counter += 1
+            savepoint = f"nested_{self._savepoint_counter}"
+            await conn.execute(f"SAVEPOINT {savepoint}")
+            try:
+                yield conn
+            except BaseException:
+                await conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+                await conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+                raise
+            else:
+                await conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+            return
+
+        async with self._write_lock:
+            self._transaction_owner = task
+            try:
+                await conn.execute("BEGIN IMMEDIATE")
+                yield conn
+                await conn.commit()
+            except BaseException:
+                await conn.rollback()
+                raise
+            finally:
+                self._transaction_owner = None
 
     @property
     def path(self) -> Path:
@@ -237,19 +281,19 @@ class Database:
 
     async def _ensure_schema(self) -> None:
         assert self._conn is not None
-        # 记录之前的 user_version（迁移用）
-        async with self._conn.execute("PRAGMA user_version;") as cur:
-            row = await cur.fetchone()
-        prior_version = int(row[0]) if row else 0
+        async with self.transaction():
+            # 记录之前的 user_version（迁移用）
+            async with self._conn.execute("PRAGMA user_version;") as cur:
+                row = await cur.fetchone()
+            prior_version = int(row[0]) if row else 0
 
-        for stmt in _SCHEMA_STATEMENTS:
-            await self._conn.execute(stmt)
+            for stmt in _SCHEMA_STATEMENTS:
+                await self._conn.execute(stmt)
 
-        await self._migrate_from(prior_version)
+            await self._migrate_from(prior_version)
 
-        # 记录 schema 版本
-        await self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION};")
-        await self._conn.commit()
+            # 记录 schema 版本
+            await self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION};")
 
     async def _migrate_from(self, prior_version: int) -> None:
         """对老库做增量列添加（CREATE TABLE IF NOT EXISTS 不会改已存在的表结构）。"""
@@ -385,14 +429,83 @@ class Database:
             # 拼成 "Lanius giganteu"(少 's')。canonical 表已修正,这里同步修
             # 用户手动鸟种修正记录里的 sci 字段,避免老 override 与新 sci 不匹配。
             await self._conn.execute(
-                "UPDATE photo_species_overrides SET canonical_sci = ? "
-                "WHERE canonical_sci = ?",
+                "UPDATE photo_species_overrides SET canonical_sci = ? WHERE canonical_sci = ?",
                 ("Lanius giganteus", "Lanius giganteu"),
             )
             await logger.ainfo(
                 "DB migrated",
                 from_version=prior_version,
                 changed="photo_species_overrides.canonical_sci typo fix",
+            )
+        if prior_version < 11:
+            for table, columns in (
+                (
+                    "photos",
+                    (("input_revision", "INTEGER NOT NULL DEFAULT 0"), ("companion_mtime", "TEXT")),
+                ),
+                (
+                    "analysis_results",
+                    (
+                        ("input_revision", "INTEGER NOT NULL DEFAULT 0"),
+                        ("input_hash", "TEXT"),
+                        ("source_path", "TEXT"),
+                        ("source_hash", "TEXT"),
+                        ("source_fingerprint", "TEXT"),
+                    ),
+                ),
+                (
+                    "task_queue",
+                    (("input_revision", "INTEGER NOT NULL DEFAULT 0"), ("run_id", "TEXT")),
+                ),
+                ("photo_species_overrides", (("input_revision", "INTEGER NOT NULL DEFAULT 0"),)),
+            ):
+                for column, definition in columns:
+                    await self._conn.execute(
+                        f"ALTER TABLE {table} ADD COLUMN {column} {definition}"
+                    )
+            await self._conn.execute(
+                "CREATE TABLE analysis_runs ("
+                "id TEXT PRIMARY KEY, library_id TEXT NOT NULL, "
+                "desired_state TEXT NOT NULL DEFAULT 'running', pipeline_version TEXT, "
+                "force_rerun INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, "
+                "FOREIGN KEY (library_id) REFERENCES libraries(id) ON DELETE CASCADE)"
+            )
+            await self._conn.execute(
+                "CREATE INDEX ix_analysis_runs_library ON analysis_runs(library_id, created_at)"
+            )
+            # A previous application could enqueue duplicates concurrently. Keep
+            # the earliest claim and retain the other rows as cancelled history.
+            await self._conn.execute(
+                "UPDATE task_queue SET status='cancelled' "
+                "WHERE status IN ('pending','processing','paused') AND rowid NOT IN ("
+                "SELECT MIN(rowid) FROM task_queue WHERE status IN "
+                "('pending','processing','paused') "
+                "GROUP BY photo_id)"
+            )
+            await self._conn.execute(
+                "CREATE UNIQUE INDEX uq_queue_active_photo ON task_queue(photo_id) "
+                "WHERE status IN ('pending','processing','paused')"
+            )
+            await self._conn.execute("CREATE INDEX ix_queue_photo ON task_queue(photo_id)")
+            # Legacy results have no recorded input hash; attach the known
+            # original identity. Future scans invalidate them on revision change.
+            await self._conn.execute(
+                "UPDATE analysis_results SET input_hash=("
+                "SELECT file_hash FROM photos WHERE id=analysis_results.photo_id)"
+            )
+        if prior_version < 12:
+            await self._conn.execute(
+                "CREATE TABLE analysis_input_history ("
+                "id TEXT PRIMARY KEY, photo_id TEXT NOT NULL, pipeline_version TEXT NOT NULL, "
+                "input_revision INTEGER NOT NULL, input_hash TEXT, source_hash TEXT, "
+                "result_json TEXT NOT NULL, snapshot_json TEXT NOT NULL, "
+                "archived_at TEXT NOT NULL, "
+                "FOREIGN KEY(photo_id) REFERENCES photos(id) ON DELETE CASCADE, "
+                "UNIQUE(photo_id,pipeline_version,input_revision,source_hash))"
+            )
+        if prior_version < 13:
+            await self._conn.execute(
+                "ALTER TABLE photos ADD COLUMN input_needs_scan INTEGER NOT NULL DEFAULT 0"
             )
 
     async def get_schema_version(self) -> int:

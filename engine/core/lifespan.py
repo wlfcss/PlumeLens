@@ -3,6 +3,7 @@
 import asyncio
 import inspect
 import os
+import signal
 import sys
 from collections.abc import AsyncGenerator
 from concurrent.futures import ThreadPoolExecutor
@@ -50,12 +51,12 @@ async def _resume_pending_workers(app: FastAPI, db: Database) -> None:
     for row in rows:
         library_id = str(row["library_id"])
         pending_count = int(row["n"])
-        await db.conn.execute(
-            "UPDATE libraries SET status = 'analyzing_partial' "
-            "WHERE id = ? AND status NOT IN ('path_missing', 'error')",
-            (library_id,),
-        )
-        await db.conn.commit()
+        async with db.transaction():
+            await db.conn.execute(
+                "UPDATE libraries SET status = 'analyzing_partial' "
+                "WHERE id = ? AND status NOT IN ('path_missing', 'error')",
+                (library_id,),
+            )
         start_library_worker(db, pipeline, library_id, settings.analysis_concurrency)
         await logger.ainfo(
             "Resumed pending queue worker",
@@ -147,12 +148,15 @@ async def _sweep_stuck_tasks(app: FastAPI, db: Database) -> None:
                 if worker is not None and not worker.done():
                     continue
                 count = int(row["n"])
-                await db.conn.execute(
-                    "UPDATE task_queue SET status='pending', started_at=NULL "
-                    "WHERE library_id=? AND status='processing'",
-                    (library_id,),
-                )
-                await db.conn.commit()
+                async with db.transaction():
+                    await db.conn.execute(
+                        "UPDATE task_queue SET status=CASE ("
+                        "SELECT desired_state FROM analysis_runs WHERE id=run_id) "
+                        "WHEN 'paused' THEN 'paused' WHEN 'cancelled' THEN 'cancelled' "
+                        "ELSE 'pending' END, started_at=NULL "
+                        "WHERE library_id=? AND status='processing'",
+                        (library_id,),
+                    )
                 await logger.awarning(
                     "Sweeper: dead worker with PROCESSING tasks — fast-reset to pending",
                     library_id=library_id,
@@ -284,33 +288,15 @@ async def _refresh_all_thumbnails(db: Database) -> None:
         logger.warning("Startup library refresh aborted", error=str(e))
 
 
-def _kill_orphan_engines(my_pid: int) -> int:
-    """启动时杀掉除自己外的所有 plumelens-engine 进程。
+def _diagnose_other_engines(my_pid: int) -> list[int]:
+    """Report unknown processes without taking ownership or signalling them.
 
-    场景:
-    - v0.1.0 时代 process-manager bug 留下了孤儿 engine(kill 不干净 + freeze_support
-      之前 spawn 的 helper 进程)
-    - 用户从 Activity Monitor 直接强杀 Electron,子进程 detached 后变孤儿
-    - dmg 升级时老进程没被 SIGTERM 干掉
-
-    旧 engine 进程占着 ~/.plumelens 数据库 + 监听其他端口 + 吃 RAM。新启动一份没
-    冲突(uvicorn 用 port 0 自分配),但用户机器上累积多个进程吃几 GB RAM。
-
-    PLUMELENS_SKIP_ORPHAN_KILL=1 旁路:e2e 测试场景下用户的 PlumeLens 可能正在
-    跑,e2e 自己的 engine 通过 --user-data-dir 隔离数据但 pgrep -f 看到的是同
-    binary 名 → 会误杀用户 app 的 engine。e2e setup 时设此 env 跳过即可。
-
-    Returns: 杀掉的进程数。
+    Another engine may belong to another data directory or a test instance.
+    Names and command lines never establish permission to terminate it.
     """
-    if os.environ.get("PLUMELENS_SKIP_ORPHAN_KILL") == "1":
-        return 0
-
-    import signal
     import subprocess
 
     try:
-        # 找所有 plumelens-engine 进程（注意：argv[0] 在 frozen binary 是
-        # /.../plumelens-engine/plumelens-engine 路径）
         result = subprocess.run(
             ["pgrep", "-f", "plumelens-engine"],
             capture_output=True,
@@ -318,25 +304,26 @@ def _kill_orphan_engines(my_pid: int) -> int:
             timeout=2,
         )
         if result.returncode != 0:
-            return 0
-        pids = [
-            int(p)
-            for p in result.stdout.strip().split()
-            if p.strip().isdigit() and int(p) != my_pid
-        ]
-        killed = 0
-        for pid in pids:
-            try:
-                # 先温和 SIGTERM；这里不等，启动流程不该被孤儿阻塞
-                os.kill(pid, signal.SIGTERM)
-                killed += 1
-            except ProcessLookupError:
-                pass  # 已退出
-            except PermissionError:
-                pass  # 不是同一用户的进程
-        return killed
-    except Exception:
-        return 0
+            return []
+        return [int(p) for p in result.stdout.split() if p.isdigit() and int(p) != my_pid]
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+
+
+async def _watch_parent(parent_pid: int) -> None:
+    """Exit this engine gracefully when its explicitly supplied owner disappears."""
+    while True:
+        await asyncio.sleep(1.0)
+        try:
+            os.kill(parent_pid, 0)  # Liveness probe, never a terminating signal.
+        except ProcessLookupError:
+            await logger.awarning(
+                "Parent exited; requesting own engine shutdown", parent_pid=parent_pid
+            )
+            os.kill(os.getpid(), signal.SIGTERM)
+            return
+        except PermissionError:
+            continue  # Cannot establish that the owner died; leave this engine alone.
 
 
 @asynccontextmanager
@@ -356,14 +343,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     # OOM)。Image.open / load_image / 缩略图 / 扫描器全链路都依赖这个全局开关。
     configure_pil_decompression_bomb_guard()
 
-    # 启动预清理：杀掉所有除自己外的 plumelens-engine 孤儿进程，避免它们
-    # 继续吃 RAM / 持有 db lock / 抢 MPS 资源。
-    orphans_killed = _kill_orphan_engines(my_pid=os.getpid())
-    if orphans_killed > 0:
-        await logger.awarning(
-            "Killed orphan plumelens-engine processes at startup",
-            count=orphans_killed,
-        )
+    other_engines = _diagnose_other_engines(my_pid=os.getpid())
+    if other_engines:
+        await logger.ainfo("Other engines detected; left untouched", process_ids=other_engines)
 
     await logger.ainfo("PlumeLens Engine starting", data_dir=str(settings.data_dir))
 
@@ -403,6 +385,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     # Background：reverse geocoding 全库 backfill(GPS → 省市区地名),
     # 羽迹三级地图聚合用。一次性后台扫,完成后该 library 所有有 GPS 的照片都填充好。
     geocode_task = asyncio.create_task(_backfill_locations(db))
+    parent_task = (
+        asyncio.create_task(_watch_parent(settings.parent_pid)) if settings.parent_pid else None
+    )
 
     # Print ready signal for Electron process manager to parse
     print("PLUMELENS_READY", file=sys.stderr, flush=True)
@@ -417,10 +402,19 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         except Exception:
             await logger.aexception("Background task failed during shutdown", task=name)
 
+    from engine.services.exporter import cancel_all_export_jobs, wait_for_export_jobs
+
+    exports_cancelled = cancel_all_export_jobs()
+    if exports_cancelled > 0:
+        await logger.ainfo("Cancelled running export jobs during shutdown", count=exports_cancelled)
+
     # Shutdown
     refresh_task.cancel()
     sweep_task.cancel()
     geocode_task.cancel()
+    if parent_task is not None:
+        parent_task.cancel()
+        await _await_cancelled_task(parent_task, "parent_liveness")
 
     await _await_cancelled_task(refresh_task, "refresh_all_thumbnails")
     await _await_cancelled_task(sweep_task, "sweep_stuck_tasks")
@@ -435,16 +429,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     if reset_count > 0:
         await logger.ainfo("Reset transient queue tasks during shutdown", count=reset_count)
 
-    # 必须在 thread_pool.shutdown(wait=True) 之前置位:导出 worker 跑在同一个池里,
-    # 一个还在复制 80 GB 的循环会让 wait=True 挂住整个 shutdown,SIGTERM 形同虚设,
-    # 外层只能 SIGKILL —— 那才会留下半截文件。置位后 worker 会在当前这张照片
-    # 写完(~1s)后自行退出。
-    from engine.services.exporter import cancel_all_export_jobs
-
-    exports_cancelled = cancel_all_export_jobs()
-    if exports_cancelled > 0:
-        await logger.ainfo("Cancelled running export jobs during shutdown", count=exports_cancelled)
-
+    # Export cancellation was requested before any shutdown wait.
+    await wait_for_export_jobs()
     thread_pool.shutdown(wait=True, cancel_futures=True)
 
     close_pipeline = getattr(app.state.pipeline, "close", None)

@@ -27,7 +27,9 @@ from engine.services.queue import (
     cancel_library,
     clear_terminal_tasks,
     enqueue_library,
+    get_library_control,
     get_stats,
+    get_task_force_rerun,
     list_tasks,
     mark_failed_with_retry,
     pause_library,
@@ -104,37 +106,43 @@ def _has_active_tasks(stats: dict[str, int]) -> bool:
 
 async def _mark_library_analyzing(db: Database, library_id: str) -> None:
     """Keep library summary/status in sync with the live analysis queue."""
-    await db.conn.execute(
-        "UPDATE libraries SET status = ? WHERE id = ? AND status NOT IN ('path_missing', 'error')",
-        ("analyzing_partial", library_id),
-    )
-    await db.conn.commit()
+    async with db.transaction():
+        await db.conn.execute(
+            "UPDATE libraries SET status = ? WHERE id = ? AND status NOT IN "
+            "('path_missing', 'error')",
+            ("analyzing_partial", library_id),
+        )
 
 
 async def _mark_library_analysis_idle(db: Database, library_id: str) -> None:
     """Mark analysis as no longer active once no pending/processing/paused tasks remain."""
-    stats = await get_stats(db, library_id)
-    if _has_active_tasks(stats):
-        return
+    async with db.transaction():
+        stats = await get_stats(db, library_id)
+        if _has_active_tasks(stats):
+            return
 
-    finished = (
-        stats.get(TaskStatus.COMPLETED.value, 0)
-        + stats.get(TaskStatus.DEAD.value, 0)
-        + stats.get(TaskStatus.CANCELLED.value, 0)
-    )
-    if finished > 0:
         await db.conn.execute(
-            "UPDATE libraries SET status = ?, last_analyzed_at = ? "
-            "WHERE id = ? AND status NOT IN ('path_missing', 'error')",
-            ("ready", _now_iso(), library_id),
+            "UPDATE analysis_runs SET desired_state='completed' WHERE library_id=? "
+            "AND desired_state='running'",
+            (library_id,),
         )
-    else:
-        await db.conn.execute(
-            "UPDATE libraries SET status = ? "
-            "WHERE id = ? AND status NOT IN ('path_missing', 'error')",
-            ("ready", library_id),
+        finished = (
+            stats.get(TaskStatus.COMPLETED.value, 0)
+            + stats.get(TaskStatus.DEAD.value, 0)
+            + stats.get(TaskStatus.CANCELLED.value, 0)
         )
-    await db.conn.commit()
+        if finished > 0:
+            await db.conn.execute(
+                "UPDATE libraries SET status = ?, last_analyzed_at = ? "
+                "WHERE id = ? AND status NOT IN ('path_missing', 'error')",
+                ("ready", _now_iso(), library_id),
+            )
+        else:
+            await db.conn.execute(
+                "UPDATE libraries SET status = ? "
+                "WHERE id = ? AND status NOT IN ('path_missing', 'error')",
+                ("ready", library_id),
+            )
 
 
 def _now_iso() -> str:
@@ -162,21 +170,21 @@ async def _ensure_library_source_available(db: Database, library_id: str) -> Non
     root_path = str(row["root_path"])
     exists = await asyncio.to_thread(Path(root_path).exists)
     if not exists:
-        await db.conn.execute(
-            "UPDATE libraries SET status = 'path_missing' WHERE id = ?",
-            (library_id,),
-        )
-        await db.conn.commit()
+        async with db.transaction() as conn:
+            await conn.execute(
+                "UPDATE libraries SET status = 'path_missing' WHERE id = ?",
+                (library_id,),
+            )
         raise HTTPException(
             status_code=409,
             detail="Library source path is missing; relink the folder before analysis",
         )
     if str(row["status"]) == "path_missing":
-        await db.conn.execute(
-            "UPDATE libraries SET status = 'ready' WHERE id = ?",
-            (library_id,),
-        )
-        await db.conn.commit()
+        async with db.transaction() as conn:
+            await conn.execute(
+                "UPDATE libraries SET status = 'ready' WHERE id = ?",
+                (library_id,),
+            )
 
 
 async def _pipeline(request: Request) -> PipelineManager:
@@ -203,7 +211,13 @@ async def _run_one_task(
     if task is None:
         return False
     try:
-        await analyze_photo(db, pipeline, task.photo_id, force_rerun=force_rerun)
+        await analyze_photo(
+            db,
+            pipeline,
+            task.photo_id,
+            force_rerun=force_rerun or await get_task_force_rerun(db, task),
+            expected_input_revision=task.input_revision,
+        )
         await transition(db, task.id, TaskStatus.COMPLETED)
         return True
     except IllegalTransitionError:
@@ -296,6 +310,20 @@ async def start_batch(
     pipeline = await _pipeline(request)
     await _ensure_library_source_available(db, body.library_id)
 
+    async with db.conn.execute(
+        "SELECT 1 FROM photos WHERE library_id=? AND input_needs_scan=1 LIMIT 1",
+        (body.library_id,),
+    ) as cur:
+        needs_scan = await cur.fetchone()
+    if needs_scan:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "source_changed",
+                "message": "Update the folder before retrying analysis",
+            },
+        )
+
     # 同步补哈希（幂等，已有哈希的 photo 直接跳过；空集时秒级返回）
     await backfill_hashes(db, body.library_id)
 
@@ -371,7 +399,11 @@ async def pause(request: Request, library_id: str) -> QueueStats:
     db = await _db(request)
     await pause_library(db, library_id)
     await _mark_library_analyzing(db, library_id)
-    return QueueStats(library_id=library_id, stats=await get_stats(db, library_id))
+    return QueueStats(
+        library_id=library_id,
+        stats=await get_stats(db, library_id),
+        **await get_library_control(db, library_id),
+    )
 
 
 @router.post("/library/{library_id}/resume", response_model=QueueStats)
@@ -383,7 +415,11 @@ async def resume(request: Request, library_id: str) -> QueueStats:
     await _mark_library_analyzing(db, library_id)
     # 重启 drain worker
     start_library_worker(db, pipeline, library_id, settings.analysis_concurrency)
-    return QueueStats(library_id=library_id, stats=await get_stats(db, library_id))
+    return QueueStats(
+        library_id=library_id,
+        stats=await get_stats(db, library_id),
+        **await get_library_control(db, library_id),
+    )
 
 
 @router.post("/library/{library_id}/cancel", response_model=QueueStats)
@@ -395,13 +431,19 @@ async def cancel(request: Request, library_id: str) -> QueueStats:
         await _mark_library_analyzing(db, library_id)
     else:
         await _mark_library_analysis_idle(db, library_id)
-    return QueueStats(library_id=library_id, stats=stats)
+    return QueueStats(
+        library_id=library_id, stats=stats, **await get_library_control(db, library_id)
+    )
 
 
 @router.get("/library/{library_id}/stats", response_model=QueueStats)
 async def stats(request: Request, library_id: str) -> QueueStats:
     db = await _db(request)
-    return QueueStats(library_id=library_id, stats=await get_stats(db, library_id))
+    return QueueStats(
+        library_id=library_id,
+        stats=await get_stats(db, library_id),
+        **await get_library_control(db, library_id),
+    )
 
 
 @router.get("/library/{library_id}/tasks", response_model=list[TaskRow])
@@ -467,6 +509,7 @@ async def _progress_stream(db: Database, library_id: str):
                 failed=failed,
                 dead=dead,
                 current_photo_id=None,
+                **await get_library_control(db, library_id),
             )
             payload = event.model_dump_json()
             if payload != last_payload:

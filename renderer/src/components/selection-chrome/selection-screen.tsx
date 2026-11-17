@@ -63,6 +63,8 @@ import type { QuickFilter, ViewMode } from '@/stores/ui-store'
 
 import { useSelectionScrollState } from './use-selection-scroll-state'
 import { logger } from '@/lib/logger'
+import { SpeciesFilter, SpeciesFilterChips, type SpeciesFilterProps } from './species-filter'
+import { AnalysisControls } from './analysis-controls'
 
 const EMPTY_GROUPS: PhotoGroupRecord[] = []
 
@@ -85,6 +87,14 @@ function quickFilterLabelKey(filter: QuickFilter) {
 }
 
 export function SelectionScreen({
+  speciesFilterProps,
+  selectionCount,
+  selectionPending,
+  onClearFilters,
+  onRestoreFilters,
+  filtersAreDefault,
+  onRefreshFolder,
+  refreshing,
   activeFolder,
   activeFolderSummary,
   activeQuickFilters,
@@ -118,6 +128,14 @@ export function SelectionScreen({
   viewMode,
   workspace,
 }: {
+  speciesFilterProps: SpeciesFilterProps
+  selectionCount: number
+  selectionPending: number
+  onClearFilters: () => void
+  onRestoreFilters: () => void
+  filtersAreDefault: boolean
+  onRefreshFolder: () => void
+  refreshing: boolean
   activeFolder: FolderRecord | null
   activeFolderSummary: FolderSummary
   activeQuickFilters: QuickFilter[]
@@ -221,12 +239,15 @@ export function SelectionScreen({
             onRelinkFolder={onRelinkFolder}
             onRenameFolder={onRenameFolder}
             onStartAnalysis={onStartAnalysis}
+            onRefreshFolder={onRefreshFolder}
+            refreshing={refreshing}
             progressEvent={progressEvent}
             relinking={relinkingFolderId === activeFolder.id}
             t={t}
           />
           <MetricStrip photos={folderPhotos} summary={activeFolderSummary} t={t} />
           <SelectionControls
+            speciesFilterProps={speciesFilterProps}
             activeQuickFilters={activeQuickFilters}
             activeSort={activeSort}
             onlyFlying={onlyFlying}
@@ -239,11 +260,57 @@ export function SelectionScreen({
           />
         </div>
 
+        <div className="selection-result-summary" aria-busy={speciesFilterProps.loading}>
+          <span role="status" aria-live="polite">
+            {t(
+              speciesFilterProps.loading
+                ? 'selection.speciesFilter.updating'
+                : 'selection.speciesFilter.resultCount',
+              { count: selectionCount, total: folderPhotos.length },
+            )}
+          </span>
+          <SpeciesFilterChips {...speciesFilterProps} />
+          {activeQuickFilters.length === 0 ? (
+            <span>{t('selection.speciesFilter.allGrades')}</span>
+          ) : null}
+          <button className="button-ghost button-compact" type="button" onClick={onClearFilters}>
+            {t('selection.speciesFilter.clearAll')}
+          </button>
+          {!filtersAreDefault ? (
+            <button
+              className="button-ghost button-compact"
+              type="button"
+              onClick={onRestoreFilters}
+            >
+              {t('selection.speciesFilter.restoreDefault')}
+            </button>
+          ) : null}
+          {speciesFilterProps.filter.keys.length > 0 && selectionPending > 0 ? (
+            <span>{t('selection.speciesFilter.pendingAnalysis', { count: selectionPending })}</span>
+          ) : null}
+        </div>
+
         <div
           className="photo-flow"
           data-testid="selection-photo-flow"
           onPointerDown={handlePhotoFlowPointerDown}
         >
+          {speciesFilterProps.error ? (
+            <div className="selection-filter-empty" role="alert">
+              <p>{t('selection.speciesFilter.error')}</p>
+              <button type="button" className="button-ghost" onClick={speciesFilterProps.onRetry}>
+                {t('common.retry')}
+              </button>
+            </div>
+          ) : !flatPhotos.length && !speciesFilterProps.loading ? (
+            <div className="selection-filter-empty">
+              <h2>{t('selection.speciesFilter.noPhotos')}</h2>
+              <p>{t('selection.speciesFilter.noPhotosHint')}</p>
+              <button type="button" className="button-ghost" onClick={onClearFilters}>
+                {t('selection.speciesFilter.clearAll')}
+              </button>
+            </div>
+          ) : null}
           {viewMode === 'grouped' ? (
             <PhotoGroupsList
               focusedPhotoId={focusedPhotoId}
@@ -269,6 +336,7 @@ export function SelectionScreen({
       </section>
 
       <SelectionCompactHeader
+        speciesFilterProps={speciesFilterProps}
         activeFolder={activeFolder}
         activeQuickFilters={activeQuickFilters}
         activeSort={activeSort}
@@ -291,6 +359,8 @@ export function SelectionScreen({
       />
 
       <button
+        tabIndex={selectionChromeState.showScrollTop ? 0 : -1}
+        aria-hidden={!selectionChromeState.showScrollTop}
         aria-label={t('selection.scrollTop')}
         className={cn(
           'selection-scroll-top',
@@ -405,6 +475,7 @@ function FolderRail({
 }
 
 function SelectionCompactHeader({
+  speciesFilterProps,
   activeFolder,
   activeQuickFilters,
   activeSort,
@@ -425,6 +496,7 @@ function SelectionCompactHeader({
   visible,
   viewMode,
 }: {
+  speciesFilterProps: SpeciesFilterProps
   activeFolder: FolderRecord
   activeQuickFilters: QuickFilter[]
   activeSort: SortMode
@@ -458,6 +530,7 @@ function SelectionCompactHeader({
   return (
     <div
       aria-hidden={!visible}
+      inert={!visible}
       className={cn('selection-compact-header', visible && 'selection-compact-header--visible')}
       data-selection-compact-header
     >
@@ -497,6 +570,7 @@ function SelectionCompactHeader({
               activeQuickFilters.includes(filter) && 'selection-compact-chip--active',
             )}
             key={filter}
+            aria-pressed={activeQuickFilters.includes(filter)}
             onClick={() => setActiveQuickFilter(filter)}
             type="button"
           >
@@ -516,9 +590,11 @@ function SelectionCompactHeader({
           <Feather className="h-3.5 w-3.5" />
           {t('selection.featureFilters.onlyFlying')}
         </button>
+        <SpeciesFilter {...speciesFilterProps} />
       </div>
 
       <div className="selection-compact-header__actions">
+        {visible ? <AnalysisControls libraryId={activeFolder.id} /> : null}
         <span className="selection-compact-status">
           <StatusDot tone={statusTone(activeFolder.status)} />
           {t(statusLabelKey(activeFolder.status))}
@@ -560,6 +636,7 @@ function SelectionCompactHeader({
                         activeQuickFilters.includes(filter) && 'selection-compact-chip--active',
                       )}
                       key={filter}
+                      aria-pressed={activeQuickFilters.includes(filter)}
                       onClick={() => setActiveQuickFilter(filter)}
                       type="button"
                     >
@@ -578,6 +655,7 @@ function SelectionCompactHeader({
                         activeQuickFilters.includes(filter) && 'selection-compact-chip--active',
                       )}
                       key={filter}
+                      aria-pressed={activeQuickFilters.includes(filter)}
                       onClick={() => setActiveQuickFilter(filter)}
                       type="button"
                     >
@@ -611,6 +689,7 @@ function SelectionCompactHeader({
                     <button
                       className={cn(activeSort === sort && 'is-active')}
                       key={sort}
+                      aria-pressed={activeSort === sort}
                       onClick={() => setActiveSort(sort)}
                       type="button"
                     >
@@ -626,6 +705,7 @@ function SelectionCompactHeader({
                     <button
                       className={cn(viewMode === mode && 'is-active')}
                       key={mode}
+                      aria-pressed={viewMode === mode}
                       onClick={() => setViewMode(mode)}
                       type="button"
                     >
@@ -656,6 +736,8 @@ function SelectionCompactHeader({
 }
 
 function FolderTopline({
+  onRefreshFolder,
+  refreshing,
   activeFolder,
   analysisStarting,
   onOpenExport,
@@ -666,6 +748,8 @@ function FolderTopline({
   relinking,
   t,
 }: {
+  onRefreshFolder: () => void
+  refreshing: boolean
   activeFolder: FolderRecord
   analysisStarting: boolean
   onOpenExport: () => void
@@ -888,15 +972,15 @@ function FolderTopline({
         </button>
         <button
           className="button-ghost button-compact"
-          disabled={sourceMissing}
+          disabled={sourceMissing || refreshing}
+          onClick={onRefreshFolder}
           title={sourceDisabledTitle}
           type="button"
         >
           <RefreshCw className="h-4 w-4" />
-          {activeFolder.status === 'ready'
-            ? t('selection.folderHeader.update')
-            : t('selection.folderHeader.resume')}
+          {t(refreshing ? 'selection.speciesFilter.updating' : 'selection.folderHeader.update')}
         </button>
+        <AnalysisControls libraryId={activeFolder.id} />
       </div>
     </header>
   )
@@ -957,6 +1041,7 @@ function MetricStrip({
 }
 
 function SelectionControls({
+  speciesFilterProps,
   activeQuickFilters,
   activeSort,
   onlyFlying,
@@ -967,6 +1052,7 @@ function SelectionControls({
   t,
   viewMode,
 }: {
+  speciesFilterProps: SpeciesFilterProps
   activeQuickFilters: QuickFilter[]
   activeSort: SortMode
   onlyFlying: boolean
@@ -985,6 +1071,7 @@ function SelectionControls({
             <button
               className={cn('chip', activeQuickFilters.includes(filter) && 'chip--active')}
               key={filter}
+              aria-pressed={activeQuickFilters.includes(filter)}
               onClick={() => setActiveQuickFilter(filter)}
               type="button"
             >
@@ -1003,6 +1090,7 @@ function SelectionControls({
           <Feather className="h-3.5 w-3.5" />
           {t('selection.featureFilters.onlyFlying')}
         </button>
+        <SpeciesFilter {...speciesFilterProps} />
       </div>
       <div className="control-row">
         <div className="mini-segment">
@@ -1010,6 +1098,7 @@ function SelectionControls({
             <button
               className={cn(activeSort === sort && 'is-active')}
               key={sort}
+              aria-pressed={activeSort === sort}
               onClick={() => setActiveSort(sort)}
               type="button"
             >
@@ -1022,6 +1111,7 @@ function SelectionControls({
             <button
               className={cn(viewMode === mode && 'is-active')}
               key={mode}
+              aria-pressed={viewMode === mode}
               onClick={() => setViewMode(mode)}
               type="button"
             >

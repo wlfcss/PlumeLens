@@ -453,6 +453,7 @@ function buildBirdDetections(row: PhotoRow): PhotoRecord['birdDetections'] {
       pose: d.pose ?? null,
       speciesName: useConsensus ? row.group_species! : d.species,
       speciesLatinName: useConsensus ? row.group_species_latin! : d.species_latin,
+      speciesEnglishName: d.species_english ?? null,
       speciesCandidates: effectiveCandidates,
       manualSpecies: d.manual_species,
       // detection-level species_source（v6 backend schema）。useConsensus 命中时

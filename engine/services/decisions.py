@@ -99,36 +99,35 @@ async def set_decision(db: Database, photo_id: str, decision: Decision | None) -
     Raises:
         RuntimeError: photo_id not in photos table.
     """
-    async with db.conn.execute(
-        "SELECT 1 FROM photos WHERE id = ?",
-        (photo_id,),
-    ) as cur:
-        if await cur.fetchone() is None:
-            msg = f"Photo not found: {photo_id}"
-            raise RuntimeError(msg)
+    async with db.transaction():
+        async with db.conn.execute(
+            "SELECT 1 FROM photos WHERE id = ?",
+            (photo_id,),
+        ) as cur:
+            if await cur.fetchone() is None:
+                msg = f"Photo not found: {photo_id}"
+                raise RuntimeError(msg)
 
-    if decision is None:
-        await db.conn.execute("DELETE FROM photo_decisions WHERE photo_id = ?", (photo_id,))
-        await db.conn.commit()
-        # 用户清除决策影响 archive 聚合(grade=NULL → 不进精选/可用/记录桶)
+        if decision is None:
+            await db.conn.execute("DELETE FROM photo_decisions WHERE photo_id = ?", (photo_id,))
+            # 用户清除决策影响 archive 聚合(grade=NULL → 不进精选/可用/记录桶)
+            archive_cache.invalidate()
+            await logger.ainfo("Decision cleared", photo_id=photo_id)
+            return None
+
+        now = _now_iso()
+        # UPSERT: INSERT ... ON CONFLICT DO UPDATE
+        await db.conn.execute(
+            "INSERT INTO photo_decisions (photo_id, decision, updated_at) "
+            "VALUES (?, ?, ?) "
+            "ON CONFLICT(photo_id) DO UPDATE SET decision = excluded.decision, "
+            "updated_at = excluded.updated_at",
+            (photo_id, decision.value, now),
+        )
+        # decision 影响 ARCHIVE_GRADES 过滤,需 invalidate 让羽迹立即反映新评级
         archive_cache.invalidate()
-        await logger.ainfo("Decision cleared", photo_id=photo_id)
-        return None
-
-    now = _now_iso()
-    # UPSERT: INSERT ... ON CONFLICT DO UPDATE
-    await db.conn.execute(
-        "INSERT INTO photo_decisions (photo_id, decision, updated_at) "
-        "VALUES (?, ?, ?) "
-        "ON CONFLICT(photo_id) DO UPDATE SET decision = excluded.decision, "
-        "updated_at = excluded.updated_at",
-        (photo_id, decision.value, now),
-    )
-    await db.conn.commit()
-    # decision 影响 ARCHIVE_GRADES 过滤,需 invalidate 让羽迹立即反映新评级
-    archive_cache.invalidate()
-    await logger.ainfo("Decision set", photo_id=photo_id, decision=decision.value)
-    return decision
+        await logger.ainfo("Decision set", photo_id=photo_id, decision=decision.value)
+        return decision
 
 
 async def set_decisions_batch(
@@ -141,30 +140,30 @@ async def set_decisions_batch(
 
     Returns: 成功写入的行数。
     """
-    if not updates:
-        return 0
-    await _ensure_photos_exist(db, [pid for pid, _ in updates])
-    now = _now_iso()
-    rows = [(pid, d.value, now) for pid, d in updates if d is not None]
-    clear_ids = [(pid,) for pid, d in updates if d is None]
-    if rows:
-        await db.conn.executemany(
-            "INSERT INTO photo_decisions (photo_id, decision, updated_at) "
-            "VALUES (?, ?, ?) "
-            "ON CONFLICT(photo_id) DO UPDATE SET decision = excluded.decision, "
-            "updated_at = excluded.updated_at",
-            rows,
-        )
-    if clear_ids:
-        await db.conn.executemany(
-            "DELETE FROM photo_decisions WHERE photo_id = ?",
-            clear_ids,
-        )
-    await db.conn.commit()
-    # 批量决策(连拍组"keep best 1")会大量翻 grade,必须 invalidate 否则
-    # 用户切到羽迹页面看到的还是 10s TTL 内的旧聚合。
-    archive_cache.invalidate()
-    return len(updates)
+    async with db.transaction():
+        if not updates:
+            return 0
+        await _ensure_photos_exist(db, [pid for pid, _ in updates])
+        now = _now_iso()
+        rows = [(pid, d.value, now) for pid, d in updates if d is not None]
+        clear_ids = [(pid,) for pid, d in updates if d is None]
+        if rows:
+            await db.conn.executemany(
+                "INSERT INTO photo_decisions (photo_id, decision, updated_at) "
+                "VALUES (?, ?, ?) "
+                "ON CONFLICT(photo_id) DO UPDATE SET decision = excluded.decision, "
+                "updated_at = excluded.updated_at",
+                rows,
+            )
+        if clear_ids:
+            await db.conn.executemany(
+                "DELETE FROM photo_decisions WHERE photo_id = ?",
+                clear_ids,
+            )
+        # 批量决策(连拍组"keep best 1")会大量翻 grade,必须 invalidate 否则
+        # 用户切到羽迹页面看到的还是 10s TTL 内的旧聚合。
+        archive_cache.invalidate()
+        return len(updates)
 
 
 async def list_decisions(
@@ -281,82 +280,84 @@ async def set_species_override(
     给了 bbox → 后端先 IoU 反查 DB 已存在的 override 行,以稳定身份 UPSERT/DELETE,
     避免 bump 后删错行 / 留 stale 行。bbox=None 兼容老调用方(v5 schema)。
     """
-    if bird_index < 0:
-        msg = f"Invalid bird index: {bird_index}"
-        raise RuntimeError(msg)
-
-    async with db.conn.execute(
-        "SELECT 1 FROM photos WHERE id = ?",
-        (photo_id,),
-    ) as cur:
-        if await cur.fetchone() is None:
-            msg = f"Photo not found: {photo_id}"
+    async with db.transaction():
+        if bird_index < 0:
+            msg = f"Invalid bird index: {bird_index}"
             raise RuntimeError(msg)
 
-    # bbox 给了就 IoU 反查 DB 行的稳定 bird_index;否则按 caller 传入的处理
-    target_bird_index = await _resolve_db_bird_index(db, photo_id, bird_index, bbox)
+        async with db.conn.execute(
+            "SELECT input_revision FROM photos WHERE id = ?",
+            (photo_id,),
+        ) as cur:
+            photo = await cur.fetchone()
+            if photo is None:
+                msg = f"Photo not found: {photo_id}"
+                raise RuntimeError(msg)
+            input_revision = int(photo["input_revision"])
 
-    if species is None:
+        # bbox 给了就 IoU 反查 DB 行的稳定 bird_index;否则按 caller 传入的处理
+        target_bird_index = await _resolve_db_bird_index(db, photo_id, bird_index, bbox)
+
+        if species is None:
+            await db.conn.execute(
+                "DELETE FROM photo_species_overrides WHERE photo_id = ? AND bird_index = ?",
+                (photo_id, target_bird_index),
+            )
+            # species 修正影响 archive 物种墙 + 三级地图聚合,清缓存让下次请求重算。
+            archive_cache.invalidate()
+            await logger.ainfo(
+                "Species override cleared",
+                photo_id=photo_id,
+                caller_bird_index=bird_index,
+                db_bird_index=target_bird_index,
+            )
+            return None
+
+        now = _now_iso()
+        bbox_x1 = bbox[0] if bbox else None
+        bbox_y1 = bbox[1] if bbox else None
+        bbox_x2 = bbox[2] if bbox else None
+        bbox_y2 = bbox[3] if bbox else None
         await db.conn.execute(
-            "DELETE FROM photo_species_overrides WHERE photo_id = ? AND bird_index = ?",
-            (photo_id, target_bird_index),
+            "INSERT INTO photo_species_overrides "
+            "(photo_id, bird_index, canonical_sci, canonical_zh, canonical_en, "
+            " bbox_x1, bbox_y1, bbox_x2, bbox_y2, updated_at, input_revision) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(photo_id, bird_index) DO UPDATE SET "
+            "canonical_sci = excluded.canonical_sci, "
+            "canonical_zh = excluded.canonical_zh, "
+            "canonical_en = excluded.canonical_en, "
+            "bbox_x1 = excluded.bbox_x1, "
+            "bbox_y1 = excluded.bbox_y1, "
+            "bbox_x2 = excluded.bbox_x2, "
+            "bbox_y2 = excluded.bbox_y2, "
+            "updated_at = excluded.updated_at, input_revision = excluded.input_revision",
+            (
+                photo_id,
+                target_bird_index,
+                species["canonical_sci"],
+                species.get("canonical_zh"),
+                species.get("canonical_en"),
+                bbox_x1,
+                bbox_y1,
+                bbox_x2,
+                bbox_y2,
+                now,
+                input_revision,
+            ),
         )
-        await db.conn.commit()
-        # species 修正影响 archive 物种墙 + 三级地图聚合,清缓存让下次请求重算。
+        # 手动鸟种修正后 archive 聚合需要 reflect — 用户改完一只鸟种后切到羽迹
+        # 应该立即看到新分类,不能等 10s TTL。
         archive_cache.invalidate()
         await logger.ainfo(
-            "Species override cleared",
+            "Species override set",
             photo_id=photo_id,
             caller_bird_index=bird_index,
             db_bird_index=target_bird_index,
+            canonical_sci=species["canonical_sci"],
+            has_bbox=bbox is not None,
         )
-        return None
-
-    now = _now_iso()
-    bbox_x1 = bbox[0] if bbox else None
-    bbox_y1 = bbox[1] if bbox else None
-    bbox_x2 = bbox[2] if bbox else None
-    bbox_y2 = bbox[3] if bbox else None
-    await db.conn.execute(
-        "INSERT INTO photo_species_overrides "
-        "(photo_id, bird_index, canonical_sci, canonical_zh, canonical_en, "
-        " bbox_x1, bbox_y1, bbox_x2, bbox_y2, updated_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
-        "ON CONFLICT(photo_id, bird_index) DO UPDATE SET "
-        "canonical_sci = excluded.canonical_sci, "
-        "canonical_zh = excluded.canonical_zh, "
-        "canonical_en = excluded.canonical_en, "
-        "bbox_x1 = excluded.bbox_x1, "
-        "bbox_y1 = excluded.bbox_y1, "
-        "bbox_x2 = excluded.bbox_x2, "
-        "bbox_y2 = excluded.bbox_y2, "
-        "updated_at = excluded.updated_at",
-        (
-            photo_id,
-            target_bird_index,
-            species["canonical_sci"],
-            species.get("canonical_zh"),
-            species.get("canonical_en"),
-            bbox_x1,
-            bbox_y1,
-            bbox_x2,
-            bbox_y2,
-            now,
-        ),
-    )
-    await db.conn.commit()
-    # 手动鸟种修正后 archive 聚合需要 reflect — 用户改完一只鸟种后切到羽迹
-    # 应该立即看到新分类,不能等 10s TTL。
-    archive_cache.invalidate()
-    await logger.ainfo(
-        "Species override set",
-        photo_id=photo_id,
-        caller_bird_index=bird_index,
-        db_bird_index=target_bird_index,
-        canonical_sci=species["canonical_sci"],
-        has_bbox=bbox is not None,
-    )
-    return species
+        return species
 
 
 async def list_species_overrides(
@@ -382,7 +383,7 @@ async def list_species_overrides(
         "pso.bbox_x1, pso.bbox_y1, pso.bbox_x2, pso.bbox_y2 "
         "FROM photo_species_overrides pso "
         "JOIN photos p ON pso.photo_id = p.id "
-        "WHERE p.library_id = ?"
+        "WHERE p.library_id = ? AND pso.input_revision=p.input_revision"
     )
 
     async def _collect(sql: str, params: tuple[object, ...]) -> None:

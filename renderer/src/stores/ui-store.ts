@@ -11,7 +11,14 @@ export type ViewMode = 'grouped' | 'flat'
 // 选片屏不展示;用户主动 toggle 才查看。
 export type QuickFilter = PhotoGrade | 'no_bird' | 'failed'
 
+export interface SelectionSpeciesFilter {
+  keys: string[]
+  includeReview: boolean
+}
+
 interface UIState {
+  selectionSpeciesByFolder: Record<string, SelectionSpeciesFilter>
+  setSelectionSpeciesFilter: (folderId: string, filter: SelectionSpeciesFilter) => void
   route: AppRoute
   archiveTab: ArchiveTab
   activeFolderId: string | null
@@ -44,6 +51,11 @@ interface UIState {
 }
 
 export const useUIStore = create<UIState>()((set) => ({
+  selectionSpeciesByFolder: {},
+  setSelectionSpeciesFilter: (folderId, filter) =>
+    set((state) => ({
+      selectionSpeciesByFolder: { ...state.selectionSpeciesByFolder, [folderId]: filter },
+    })),
   route: 'start',
   archiveTab: 'species',
   activeFolderId: null,
@@ -58,7 +70,7 @@ export const useUIStore = create<UIState>()((set) => ({
   inspectorOpen: true,
   settingsOpen: false,
   reportExpanded: false,
-  setRoute: (route) => set({ route }),
+  setRoute: (route) => set((state) => (state.route === route ? {} : { route, searchQuery: '' })),
   setArchiveTab: (archiveTab) => set({ archiveTab }),
   setActiveFolderId: (activeFolderId) =>
     set({

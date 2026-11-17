@@ -22,6 +22,7 @@ import structlog
 from PIL import ExifTags, Image
 
 from engine.core.database import Database
+from engine.core.orientation import display_dimensions, raw_orientation
 from engine.pipeline.preprocess import IMAGE_EXTENSIONS, RAW_EXTENSIONS, SUPPORTED_EXTENSIONS
 
 logger = structlog.stdlib.get_logger()
@@ -138,8 +139,12 @@ def _probe_image_meta(path: Path) -> dict[str, Any]:
             import rawpy
 
             with rawpy.imread(str(path)) as raw:
-                meta["width"] = int(raw.sizes.width)
-                meta["height"] = int(raw.sizes.height)
+                orientation = raw_orientation(path, int(raw.sizes.flip))
+                meta["width"], meta["height"] = display_dimensions(
+                    int(raw.sizes.width),
+                    int(raw.sizes.height),
+                    orientation,
+                )
             # 走 Pillow 读 EXIF（大多数 RAW 格式 Pillow 都能提 EXIF 段）
             try:
                 with Image.open(path) as img:
@@ -222,9 +227,9 @@ def _rotate_af_point_to_display(
       2 = mirror horizontal
       3 = rotate 180°
       4 = mirror vertical
-      5 = mirror horizontal + rotate 90° CW
+      5 = transpose (main diagonal)
       6 = rotate 90° CW
-      7 = mirror horizontal + rotate 90° CCW (=270° CW)
+      7 = transverse (anti-diagonal)
       8 = rotate 90° CCW
 
     Args:
@@ -680,7 +685,7 @@ async def refresh_library_exif(
     last_rowid = 0
     while True:
         async with db.conn.execute(
-            "SELECT rowid AS scan_rowid, id, file_path, exif_json "
+            "SELECT rowid AS scan_rowid, id, file_path, exif_json, input_revision "
             "FROM photos WHERE library_id = ? AND rowid > ? "
             "ORDER BY rowid LIMIT ?",
             (library_id, last_rowid, batch_size),
@@ -707,18 +712,16 @@ async def refresh_library_exif(
                 if new_exif is None:
                     failed += 1
                     continue
-                await db.conn.execute(
-                    "UPDATE photos SET exif_json = ? WHERE id = ?",
-                    (new_exif, photo_id),
-                )
+                async with db.transaction() as conn:
+                    await conn.execute(
+                        "UPDATE photos SET exif_json = ? WHERE id = ? AND input_revision = ?",
+                        (new_exif, photo_id, row["input_revision"]),
+                    )
                 refreshed += 1
                 batch_refreshed += 1
             except Exception as e:
                 logger.warning("EXIF refresh failed", photo_id=photo_id, error=str(e))
                 failed += 1
-
-        if batch_refreshed > 0:
-            await db.conn.commit()
 
     return {"refreshed": refreshed, "skipped": skipped, "failed": failed}
 
@@ -851,118 +854,123 @@ async def scan_library(
 
     不做 SHA-256 计算，保证首扫体验。分析任务需等阶段 2 写入 file_hash。
     """
+    from engine.services import archive_cache
+    from engine.services.photo_input import invalidate_derived_input
+
     report = ScanReport()
-    conn = db.conn
-
-    existing: dict[str, tuple[str, int, str, str | None]] = {}
-    async with conn.execute(
-        "SELECT id, file_path, file_size, file_mtime, companion_path "
-        "FROM photos WHERE library_id = ?",
-        (library_id,),
-    ) as cur:
-        async for row in cur:
-            existing[str(row["file_path"])] = (
-                str(row["id"]),
-                int(row["file_size"]),
-                str(row["file_mtime"]),
-                str(row["companion_path"]) if row["companion_path"] is not None else None,
-            )
-
     raw_files = await asyncio.to_thread(_walk_supported_files, root, recursive=recursive)
     files, companion_map = await asyncio.to_thread(_resolve_pairs, raw_files)
     now = _now_iso()
-
     for path in files:
-        try:
-            size, mtime = _light_fingerprint(path)
-        except Exception as e:
-            report.errors.append((str(path), f"stat failed: {e}"))
-            continue
-
         path_key = str(path)
-        prev = existing.get(path_key)
-        comp = companion_map.get(path_key)
-        comp_path = str(comp.path) if comp else None
-        comp_format = comp.format if comp else None
-        comp_size = comp.size if comp else None
-
-        if prev is None:
-            meta = await asyncio.to_thread(_probe_image_meta, path)
-            photo_id = str(uuid.uuid4())
-            try:
-                await conn.execute(
-                    "INSERT INTO photos (id, file_path, file_name, file_size, "
-                    "file_mtime, format, width, height, exif_json, "
-                    "companion_path, companion_format, companion_size, "
-                    "created_at, library_id) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        photo_id,
-                        path_key,
-                        path.name,
-                        size,
-                        mtime,
-                        _file_format(path),
-                        meta.get("width"),
-                        meta.get("height"),
-                        meta.get("exif_json"),
-                        comp_path,
-                        comp_format,
-                        comp_size,
-                        now,
-                        library_id,
-                    ),
-                )
-                report.added += 1
-            except Exception as e:
-                report.errors.append((path_key, f"insert failed: {e}"))
-        else:
-            _prev_id, prev_size, prev_mtime, prev_comp = prev
-            file_unchanged = prev_size == size and prev_mtime == mtime
-            companion_unchanged = prev_comp == comp_path
-            if file_unchanged and companion_unchanged:
+        try:
+            size, mtime = await asyncio.to_thread(_light_fingerprint, path)
+            comp = companion_map.get(path_key)
+            comp_path = str(comp.path) if comp else None
+            comp_format = comp.format if comp else None
+            comp_size, comp_mtime = (
+                await asyncio.to_thread(_light_fingerprint, comp.path) if comp else (None, None)
+            )
+            async with db.conn.execute(
+                "SELECT * FROM photos WHERE file_path=?", (path_key,)
+            ) as cur:
+                previous = await cur.fetchone()
+            unchanged = previous is not None and (
+                not previous["input_needs_scan"]
+                and int(previous["file_size"]) == size
+                and str(previous["file_mtime"]) == mtime
+            )
+            same_companion = previous is not None and (
+                previous["companion_path"] == comp_path
+                and previous["companion_size"] == comp_size
+                and previous["companion_mtime"] == comp_mtime
+            )
+            if unchanged and same_companion:
                 report.unchanged += 1
                 continue
-            # 主文件变了 → 重读 meta + 清 hash;否则只更新 companion 字段
-            if not file_unchanged:
-                meta = await asyncio.to_thread(_probe_image_meta, path)
-                try:
+            meta = await asyncio.to_thread(_probe_image_meta, path) if not unchanged else None
+            async with db.transaction() as conn:
+                if _light_fingerprint(path) != (size, mtime):
+                    raise RuntimeError("Source changed during metadata scan; retry scanning")
+                if comp and _light_fingerprint(comp.path) != (comp_size, comp_mtime):
+                    raise RuntimeError("Companion changed during metadata scan; retry scanning")
+                # Re-read under ownership: simultaneous rescans must not insert
+                # twice or bump the revision based on an outdated read.
+                async with conn.execute(
+                    "SELECT * FROM photos WHERE file_path=?", (path_key,)
+                ) as cur:
+                    current = await cur.fetchone()
+                if current is None:
+                    meta = meta or {}
                     await conn.execute(
-                        "UPDATE photos SET file_size = ?, file_mtime = ?, "
-                        "file_hash = NULL, width = ?, height = ?, exif_json = ?, "
-                        "companion_path = ?, companion_format = ?, companion_size = ? "
-                        "WHERE file_path = ?",
+                        "INSERT INTO photos (id,file_path,file_name,file_size,file_mtime,format,"
+                        "width,height,exif_json,companion_path,companion_format,companion_size,"
+                        "companion_mtime,created_at,library_id) VALUES "
+                        "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                         (
+                            str(uuid.uuid4()),
+                            path_key,
+                            path.name,
                             size,
                             mtime,
+                            _file_format(path),
                             meta.get("width"),
                             meta.get("height"),
                             meta.get("exif_json"),
                             comp_path,
                             comp_format,
                             comp_size,
-                            path_key,
+                            comp_mtime,
+                            now,
+                            library_id,
                         ),
                     )
-                    report.updated += 1
-                except Exception as e:
-                    report.errors.append((path_key, f"update failed: {e}"))
-            else:
-                # 仅 companion 变化(用户后导入 RAW / 删了 RAW)→ 不重读 meta、不清 hash
-                try:
+                    report.added += 1
+                    continue
+                primary_changed = (
+                    bool(current["input_needs_scan"])
+                    or int(current["file_size"]) != size
+                    or current["file_mtime"] != mtime
+                )
+                companion_changed = (
+                    current["companion_path"],
+                    current["companion_size"],
+                    current["companion_mtime"],
+                ) != (comp_path, comp_size, comp_mtime)
+                if not primary_changed and not companion_changed:
+                    report.unchanged += 1
+                    continue
+                # EXIF work was deliberately outside the write scope. If another
+                # scan changed the row while it ran, retry on the next scan.
+                if primary_changed and meta is None:
+                    raise RuntimeError("Photo changed during concurrent scan; retry scanning")
+                await conn.execute(
+                    "UPDATE photos SET companion_path=?,companion_format=?,companion_size=?,"
+                    "companion_mtime=?,input_revision=input_revision+1,input_needs_scan=0 "
+                    "WHERE id=?",
+                    (comp_path, comp_format, comp_size, comp_mtime, current["id"]),
+                )
+                if primary_changed:
+                    assert meta is not None
                     await conn.execute(
-                        "UPDATE photos SET companion_path = ?, companion_format = ?, "
-                        "companion_size = ? WHERE file_path = ?",
-                        (comp_path, comp_format, comp_size, path_key),
+                        "UPDATE photos SET "
+                        "file_size=?,file_mtime=?,file_hash=NULL,width=?,height=?,"
+                        "exif_json=? WHERE id=?",
+                        (
+                            size,
+                            mtime,
+                            meta.get("width"),
+                            meta.get("height"),
+                            meta.get("exif_json"),
+                            current["id"],
+                        ),
                     )
-                    report.updated += 1
-                except Exception as e:
-                    report.errors.append((path_key, f"companion update failed: {e}"))
-
-    await conn.commit()
-    # NOTE: companion 删除场景(用户刚删了 RAW)已在主循环"仅 companion 变化"分支
-    # 处理 — prev_comp=str(cr3) vs comp_path=None → companion_unchanged=False → UPDATE
-    # 走 NULL 写入。无需额外的 end-of-scan cleanup。
+                await invalidate_derived_input(conn, str(current["id"]))
+                report.updated += 1
+        except Exception as exc:
+            report.errors.append((path_key, f"scan failed: {exc}"))
+    if report.added or report.updated:
+        archive_cache.invalidate()
     await logger.ainfo(
         "Library scan completed",
         library_id=library_id,
@@ -1028,14 +1036,23 @@ async def backfill_companion_for_library(db: Database, library_id: str) -> int:
             continue
         new_format = comp.format if comp else None
         new_size = comp.size if comp else None
-        await conn.execute(
-            "UPDATE photos SET companion_path = ?, companion_format = ?, "
-            "companion_size = ? WHERE file_path = ?",
-            (new_comp_path, new_format, new_size, path_str),
+        from engine.services.photo_input import invalidate_derived_input
+
+        companion_mtime = (
+            (await asyncio.to_thread(_light_fingerprint, comp.path))[1] if comp else None
         )
+        async with db.transaction() as tx:
+            await tx.execute(
+                "UPDATE photos SET companion_path=?,companion_format=?,companion_size=?,"
+                "companion_mtime=?,input_revision=input_revision+1 WHERE file_path=?",
+                (new_comp_path, new_format, new_size, companion_mtime, path_str),
+            )
+            async with tx.execute("SELECT id FROM photos WHERE file_path=?", (path_str,)) as cur:
+                changed = await cur.fetchone()
+            if changed is not None:
+                await invalidate_derived_input(tx, str(changed["id"]))
         updated += 1
     if updated > 0:
-        await conn.commit()
         await logger.ainfo(
             "Companion backfill done",
             library_id=library_id,
@@ -1063,15 +1080,16 @@ async def backfill_hashes(db: Database, library_id: str, batch_size: int = 50) -
         if skipped_ids:
             placeholders = ",".join("?" * len(skipped_ids))
             query = (
-                "SELECT id, file_path FROM photos "
-                f"WHERE library_id = ? AND file_hash IS NULL AND id NOT IN ({placeholders}) "
+                "SELECT id, file_path, input_revision FROM photos "
+                "WHERE library_id = ? AND input_needs_scan=0 AND file_hash IS NULL "
+                f"AND id NOT IN ({placeholders}) "
                 "LIMIT ?"
             )
             params: tuple = (library_id, *skipped_ids, batch_size)
         else:
             query = (
-                "SELECT id, file_path FROM photos "
-                "WHERE library_id = ? AND file_hash IS NULL "
+                "SELECT id, file_path, input_revision FROM photos "
+                "WHERE library_id = ? AND input_needs_scan=0 AND file_hash IS NULL "
                 "LIMIT ?"
             )
             params = (library_id, batch_size)
@@ -1084,7 +1102,13 @@ async def backfill_hashes(db: Database, library_id: str, batch_size: int = 50) -
             photo_id = str(row["id"])
             file_path = Path(str(row["file_path"]))
             try:
+                from engine.services.photo_input import source_fingerprint
+
+                before = await asyncio.to_thread(source_fingerprint, file_path)
                 sha = await asyncio.to_thread(_sha256_file, file_path)
+                if before != await asyncio.to_thread(source_fingerprint, file_path):
+                    skipped_ids.add(photo_id)
+                    continue
             except FileNotFoundError:
                 skipped_ids.add(photo_id)
                 continue
@@ -1097,13 +1121,16 @@ async def backfill_hashes(db: Database, library_id: str, batch_size: int = 50) -
                 )
                 skipped_ids.add(photo_id)
                 continue
-            await conn.execute(
-                "UPDATE photos SET file_hash = ? WHERE id = ?",
-                (sha, photo_id),
-            )
-            total += 1
-
-        await conn.commit()
+            async with db.transaction() as tx:
+                if before != source_fingerprint(file_path):
+                    skipped_ids.add(photo_id)
+                    continue
+                async with tx.execute(
+                    "UPDATE photos SET file_hash=? WHERE id=? AND input_revision=? "
+                    "AND file_path=? AND file_hash IS NULL RETURNING id",
+                    (sha, photo_id, row["input_revision"], str(file_path)),
+                ) as updated:
+                    total += int(await updated.fetchone() is not None)
 
     await logger.ainfo(
         "Hash backfill completed",

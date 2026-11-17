@@ -114,6 +114,7 @@ export function useAnalysisProgress(
           lastDetailRefreshRef.current = { at: now, signature }
           qc.invalidateQueries({ queryKey: LIBRARY_DETAIL_KEY(parsed.library_id) })
           qc.invalidateQueries({ queryKey: LIBRARIES_KEY })
+          qc.invalidateQueries({ queryKey: ['selection', libraryId] })
         }
       } catch (e) {
         logger.warn('SSE malformed frame:', e)
@@ -130,6 +131,7 @@ export function useAnalysisProgress(
             if (bridgeEvent.type === 'open') {
               qc.invalidateQueries({ queryKey: LIBRARY_DETAIL_KEY(libraryId) })
               qc.invalidateQueries({ queryKey: LIBRARIES_KEY })
+              qc.invalidateQueries({ queryKey: ['selection', libraryId] })
               return
             }
             if (bridgeEvent.type === 'message') {
@@ -155,6 +157,7 @@ export function useAnalysisProgress(
           source.onopen = () => {
             qc.invalidateQueries({ queryKey: LIBRARY_DETAIL_KEY(libraryId) })
             qc.invalidateQueries({ queryKey: LIBRARIES_KEY })
+            qc.invalidateQueries({ queryKey: ['selection', libraryId] })
           }
           source.onmessage = (msg) => {
             handleProgressFrame(msg.data)

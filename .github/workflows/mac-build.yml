@@ -1,6 +1,7 @@
 name: macOS App Build
 
 on:
+  pull_request:
   push:
     branches: [main]
     tags: ['v*']
@@ -14,7 +15,34 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  quality:
+    name: Type, lint and unit checks
+    runs-on: macos-15
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: 24
+          cache: npm
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e
+        with:
+          enable-cache: true
+      - run: npm ci
+      - run: uv sync --extra dev --python 3.11
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm test
+      - run: uv run ruff check .
+      - run: uv run pyright
+      # Real model loading is exercised by the asset-gated packaged build below.
+      - run: uv run pytest --ignore=tests/engine/test_pipeline/test_integration.py
+
   build:
+    needs: quality
+    if: github.event_name != 'pull_request'
     name: Build macOS arm64 DMG
     runs-on: macos-15
     timeout-minutes: 120
@@ -32,7 +60,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
-          node-version: 20
+          node-version: 24
           cache: npm
 
       - name: Setup uv
@@ -51,6 +79,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+
+          # The reviewed checkout is the trust root, never the downloaded bundle.
+          cp engine/models/manifest.json "$RUNNER_TEMP/plumelens-trusted-manifest.json"
 
           bundle="/tmp/plumelens-models"
           extract_dir="/tmp/plumelens-models-extract"
@@ -83,11 +114,11 @@ jobs:
           esac
 
           if [[ -d "$extract_dir/engine/models" ]]; then
-            rsync -a "$extract_dir/engine/models/" engine/models/
+            rsync -a --exclude='/manifest.json' "$extract_dir/engine/models/" engine/models/
           elif [[ -d "$extract_dir/models" ]]; then
-            rsync -a "$extract_dir/models/" engine/models/
+            rsync -a --exclude='/manifest.json' "$extract_dir/models/" engine/models/
           else
-            rsync -a "$extract_dir/" engine/models/
+            rsync -a --exclude='/manifest.json' "$extract_dir/" engine/models/
           fi
 
           rm -rf "$bundle" "$extract_dir"
@@ -137,12 +168,18 @@ jobs:
         # 引擎运行时也会做同样校验(engine/core/manifest.py),CI 这一步是双保险。
         run: |
           uv run python - <<'PY'
+          import os
           from pathlib import Path
 
           from engine.core.manifest import ManifestError, verify_manifest
+          from scripts.build_model_manifest import TRACKED_ASSETS
 
           try:
-              verified = verify_manifest(Path("engine/models"))
+              verified = verify_manifest(
+                  Path("engine/models"),
+                  Path(os.environ["RUNNER_TEMP"]) / "plumelens-trusted-manifest.json",
+                  required_assets=TRACKED_ASSETS,
+              )
           except ManifestError as exc:
               raise SystemExit(f"::error::{exc}") from exc
           print(f"manifest verified: {len(verified)} entries")

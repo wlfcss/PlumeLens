@@ -27,7 +27,7 @@ import {
   Trophy,
   X,
 } from 'lucide-react'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import type { useTranslation } from 'react-i18next'
 
 import { MetricCell } from '@/components/common/metric-cell'
@@ -39,6 +39,7 @@ import {
   type ExportFormatStat,
   type ExportJobSnapshot,
   type ExportLibraryResponse,
+  type SelectionQuery,
 } from '@/lib/api-client'
 import { formatBytes } from '@/lib/format-bytes'
 import { gradeLabelKey } from '@/lib/i18n-keys'
@@ -46,6 +47,7 @@ import { logger } from '@/lib/logger'
 import type { FolderRecord, PhotoGrade, PhotoRecord } from '@/lib/workspace-types'
 import { effectivePhotoGrade, type FolderSummary } from '@/lib/photo-helpers'
 import { cn } from '@/lib/utils'
+import './export-drawer.css'
 
 export type ExportLayout = 'merged' | 'by_grade'
 export type ExportContentMode = 'files' | 'files_xmp' | 'xmp_only'
@@ -53,12 +55,20 @@ export type ExportContentMode = 'files' | 'files_xmp' | 'xmp_only'
 type ExportPhase = 'idle' | 'starting' | 'running' | 'succeeded' | 'cancelled' | 'failed'
 
 export type ExportSourceSnapshot = {
+  selection?: {
+    query: SelectionQuery
+    revision: string
+    photoIds: string[]
+    defaultSelected: boolean
+    labels: string[]
+  }
   folder: FolderRecord
   photos: PhotoRecord[]
   summary: FolderSummary
 }
 
 type ExportOptionsSnapshot = {
+  scope: 'library' | 'selection'
   grades: PhotoGrade[]
   min: number | null
   max: number | null
@@ -107,6 +117,11 @@ const ERROR_KEYS: Record<string, string> = {
   export_already_running: 'export.error.alreadyRunning',
   job_not_found: 'export.error.jobNotFound',
   internal_error: 'export.error.internal',
+  selection_changed: 'export.error.selectionChanged',
+  source_changed: 'export.error.sourceChanged',
+  partial_export: 'export.error.partialExport',
+  job_interrupted: 'export.error.jobInterrupted',
+  snapshot_write_failed: 'export.error.snapshotWriteFailed',
 }
 
 /**
@@ -145,11 +160,18 @@ export function ExportDrawer({
   t: ReturnType<typeof useTranslation>['t']
 }) {
   const [grades, setGrades] = useState<PhotoGrade[]>(['select', 'usable', 'record'])
+  const [scope, setScope] = useState<'library' | 'selection'>(
+    source.selection?.defaultSelected ? 'selection' : 'library',
+  )
+  const scopeName = useId()
+  const [selection, setSelection] = useState(source.selection)
   const [minScore, setMinScore] = useState('')
   const [maxScore, setMaxScore] = useState('')
   const [layout, setLayout] = useState<ExportLayout>('merged')
   const [contentMode, setContentMode] = useState<ExportContentMode>('files_xmp')
   const [availableFormats, setAvailableFormats] = useState<ExportFormatStat[] | null>(null)
+  const [formatError, setFormatError] = useState(false)
+  const [formatRetry, setFormatRetry] = useState(0)
   const [formats, setFormats] = useState<string[]>([])
   const [targetDir, setTargetDir] = useState('')
   const [collapsed, setCollapsed] = useState(false)
@@ -158,6 +180,7 @@ export function ExportDrawer({
   const [result, setResult] = useState<ExportLibraryResponse | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [cancelRequested, setCancelRequested] = useState(false)
+  const [streamLost, setStreamLost] = useState(false)
   const [lockedSource, setLockedSource] = useState<ExportSourceSnapshot | null>(null)
   const [lockedOptions, setLockedOptions] = useState<ExportOptionsSnapshot | null>(null)
 
@@ -173,6 +196,7 @@ export function ExportDrawer({
   const min = minScore.trim() === '' ? null : Number(minScore)
   const max = maxScore.trim() === '' ? null : Number(maxScore)
   const activeOptions = lockedOptions ?? {
+    scope,
     grades,
     min,
     max,
@@ -182,12 +206,19 @@ export function ExportDrawer({
     targetDir,
   }
   const controlsLocked = lockedOptions !== null
+  const invalidScoreRange =
+    activeOptions.scope === 'library' &&
+    ((min !== null && (!Number.isFinite(min) || min < 0 || min > 100)) ||
+      (max !== null && (!Number.isFinite(max) || max < 0 || max > 100)) ||
+      (min !== null && max !== null && min > max))
 
   // 源文件夹里实际有哪些格式 —— 面板打开时拉一次,默认全选。
   const libraryId = sourceFolder?.id
   useEffect(() => {
     if (!libraryId) return
     let cancelled = false
+    setFormatError(false)
+    setAvailableFormats(null)
     void api
       .exportFormats(libraryId)
       .then(({ formats: stats }) => {
@@ -198,24 +229,30 @@ export function ExportDrawer({
       .catch((e: unknown) => {
         if (cancelled) return
         logger.warn('拉取源文件夹格式列表失败:', e)
+        setFormatError(true)
         setAvailableFormats([])
       })
     return () => {
       cancelled = true
     }
-  }, [libraryId])
+  }, [libraryId, formatRetry])
 
   const exportPhotos = useMemo(() => {
     const activeGrades = new Set(activeOptions.grades)
     const allowedFormats = new Set(activeOptions.formats)
     const copyFiles = activeOptions.contentMode !== 'xmp_only'
+    const selectedIds = new Set((lockedSource?.selection ?? selection)?.photoIds ?? [])
     return sourcePhotos.filter((photo) => {
-      if (!activeGrades.has(effectivePhotoGrade(photo))) return false
+      if (copyFiles && availableFormats !== null && activeOptions.formats.length === 0) return false
+      if (activeOptions.scope === 'selection') {
+        if (!selectedIds.has(photo.id)) return false
+      } else if (!activeGrades.has(effectivePhotoGrade(photo))) return false
       if (allowedFormats.size > 0 && !photoMatchesFormats(photo, allowedFormats, copyFiles)) {
         return false
       }
       const score = photo.finalScore === null ? null : photo.finalScore * 100
       if (
+        activeOptions.scope !== 'selection' &&
         score !== null &&
         activeOptions.min !== null &&
         Number.isFinite(activeOptions.min) &&
@@ -224,6 +261,7 @@ export function ExportDrawer({
         return false
       }
       if (
+        activeOptions.scope !== 'selection' &&
         score !== null &&
         activeOptions.max !== null &&
         Number.isFinite(activeOptions.max) &&
@@ -239,6 +277,10 @@ export function ExportDrawer({
     activeOptions.grades,
     activeOptions.max,
     activeOptions.min,
+    activeOptions.scope,
+    availableFormats,
+    lockedSource,
+    selection,
     sourcePhotos,
   ])
 
@@ -273,6 +315,7 @@ export function ExportDrawer({
 
   const applySnapshot = useCallback(
     (snapshot: ExportJobSnapshot) => {
+      if (snapshot.job_id !== jobIdRef.current) return
       setJob(snapshot)
       if (snapshot.status === 'running') {
         setPhase('running')
@@ -288,6 +331,7 @@ export function ExportDrawer({
         setError(null)
       } else {
         setPhase('failed')
+        setCollapsed(false)
         setError(describeError(snapshot.error, t('export.status.error')))
       }
     },
@@ -314,6 +358,7 @@ export function ExportDrawer({
               return
             }
             if (bridgeEvent.type === 'error') {
+              setStreamLost(true)
               // 后端在终态帧之后主动收流,桥会以 error 事件收尾 —— 这是正常结束。
               // 无论是正常收流还是真断线,都回查一次快照对齐状态,不让 UI 永远转圈。
               void api
@@ -334,6 +379,7 @@ export function ExportDrawer({
           es.onmessage = (msg) => handleFrame(msg.data)
           es.onerror = () => {
             es.close()
+            setStreamLost(true)
             void api
               .exportJobSnapshot(jobId)
               .then(applySnapshot)
@@ -341,10 +387,48 @@ export function ExportDrawer({
           }
           unsubscribeRef.current = () => es.close()
         })
-        .catch((e: unknown) => logger.warn('导出进度流订阅失败:', e))
+        .catch((e: unknown) => {
+          setStreamLost(true)
+          logger.warn('导出进度流订阅失败:', e)
+        })
     },
     [applySnapshot, teardownStream],
   )
+
+  // Poll only after losing SSE. A single snapshot may still be running; keep
+  // recovering until a terminal snapshot, including a persisted interrupted job.
+  useEffect(() => {
+    if (!streamLost || phase !== 'running') return
+    let cancelled = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const recover = async () => {
+      const id = jobIdRef.current
+      if (!id || cancelled) return
+      try {
+        const snapshot = await api.exportJobSnapshot(id)
+        if (cancelled) return
+        applySnapshot(snapshot)
+        if (snapshot.status !== 'running') return
+      } catch (err) {
+        if (err instanceof ApiError && err.status === 404) {
+          setPhase('failed')
+          setCollapsed(false)
+          setError(t('export.error.jobInterrupted'))
+          return
+        }
+        logger.warn('Retrying export snapshot recovery:', err)
+      }
+      if (!cancelled)
+        timer = setTimeout(() => {
+          void recover()
+        }, 2_000)
+    }
+    void recover()
+    return () => {
+      cancelled = true
+      if (timer) clearTimeout(timer)
+    }
+  }, [applySnapshot, phase, streamLost, t])
 
   const toggleGrade = (grade: PhotoGrade) => {
     setGrades((current) =>
@@ -377,6 +461,7 @@ export function ExportDrawer({
       return
     }
     const exportOptions: ExportOptionsSnapshot = {
+      scope,
       grades: [...grades],
       min: min !== null && Number.isFinite(min) ? min : null,
       max: max !== null && Number.isFinite(max) ? max : null,
@@ -389,6 +474,7 @@ export function ExportDrawer({
       folder: sourceFolder,
       photos: sourcePhotos,
       summary: sourceSummary,
+      selection,
     }
     setLockedSource(exportSource)
     setLockedOptions(exportOptions)
@@ -398,8 +484,12 @@ export function ExportDrawer({
     setJob(null)
     setError(null)
     setCancelRequested(false)
+    setStreamLost(false)
     try {
       const started = await api.exportLibrary(exportSource.folder.id, {
+        scope: exportOptions.scope,
+        selection_query: exportOptions.scope === 'selection' ? selection?.query : null,
+        projection_revision: exportOptions.scope === 'selection' ? selection?.revision : null,
         target_dir: exportOptions.targetDir,
         grades: exportOptions.grades,
         min_score: exportOptions.min,
@@ -439,8 +529,25 @@ export function ExportDrawer({
       subscribe(started.job_id)
     } catch (err) {
       const fallback = err instanceof Error ? err.message : String(err)
-      setError(describeError(parseExportError(err), fallback))
+      const detail = parseExportError(err)
+      setError(describeError(detail, fallback))
       setPhase('failed')
+      setCollapsed(false)
+      if (detail?.code === 'selection_changed' && selection) {
+        try {
+          const fresh = await api.querySelection(sourceFolder.id, selection.query)
+          setSelection({
+            ...selection,
+            revision: fresh.projection_revision,
+            photoIds: fresh.matched_photo_ids,
+          })
+          setLockedOptions(null)
+          setLockedSource(null)
+          setPhase('idle')
+        } catch (refreshError) {
+          logger.warn('Failed to refresh export selection:', refreshError)
+        }
+      }
     }
   }
 
@@ -479,17 +586,21 @@ export function ExportDrawer({
     setJob(null)
     setError(null)
     setCancelRequested(false)
+    setStreamLost(false)
     setPhase('idle')
     setCollapsed(false)
   }
 
   const canStart = Boolean(
     sourceFolder &&
-      !sourceMissing &&
-      targetDir &&
-      exportPhotos.length > 0 &&
-      phase === 'idle' &&
-      !controlsLocked,
+    !sourceMissing &&
+    targetDir &&
+    exportPhotos.length > 0 &&
+    !invalidScoreRange &&
+    (activeOptions.contentMode === 'xmp_only' ||
+      (availableFormats !== null && !formatError && formats.length > 0)) &&
+    phase === 'idle' &&
+    !controlsLocked,
   )
   const statusText = running
     ? cancelRequested
@@ -610,7 +721,14 @@ export function ExportDrawer({
         </div>
 
         <div className="export-grid">
-          <ExportOption title={t('export.scope.label')} value={t('export.scope.reviewed')} />
+          <ExportOption
+            title={t('export.scope.label')}
+            value={
+              activeOptions.scope === 'selection'
+                ? t('export.scope.current', { count: selection?.photoIds.length ?? 0 })
+                : activeOptions.grades.map((grade) => t(gradeLabelKey(grade))).join(' / ')
+            }
+          />
           <ExportOption
             title={t('export.content.label')}
             value={t(`export.content.${activeOptions.contentMode}.short`)}
@@ -657,6 +775,19 @@ export function ExportDrawer({
         {/* 照片格式多选 —— 按源文件夹里实际存在的格式展示。此前同伴文件是硬编码
             的 include_companions: true,只想导 25 GB 的 JPG 会被强制搭上 56 GB 的
             CR3,预检直接判定磁盘空间不足。 */}
+        {formatError ? (
+          <div role="alert" className="export-error">
+            <p>{t('export.error.formatsFailed')}</p>
+            <button
+              type="button"
+              className="button-ghost"
+              disabled={controlsLocked}
+              onClick={() => setFormatRetry((value) => value + 1)}
+            >
+              {t('common.retry')}
+            </button>
+          </div>
+        ) : null}
         {availableFormats === null || availableFormats.length > 0 ? (
           <div className="export-control-block">
             <SectionLabel label={t('export.formats.label')} />
@@ -735,49 +866,101 @@ export function ExportDrawer({
           </div>
         </div>
 
-        <div className="export-control-block">
-          <SectionLabel label={t('export.scope.manual')} />
-          <div className="export-grade-grid">
-            {(['select', 'usable', 'record', 'reject'] as PhotoGrade[]).map((grade) => (
-              <label className="export-check" key={grade}>
-                <input
-                  checked={activeOptions.grades.includes(grade)}
-                  disabled={controlsLocked}
-                  onChange={() => toggleGrade(grade)}
-                  type="checkbox"
-                />
-                <span>{t(gradeLabelKey(grade))}</span>
-              </label>
-            ))}
+        <fieldset className="export-scope-picker" disabled={controlsLocked}>
+          <legend>{t('export.scope.label')}</legend>
+          <label>
+            <input
+              type="radio"
+              name={scopeName}
+              checked={activeOptions.scope === 'library'}
+              onChange={() => setScope('library')}
+            />
+            {t('export.scope.library')}
+          </label>
+          {selection ? (
+            <label>
+              <input
+                type="radio"
+                name={scopeName}
+                checked={activeOptions.scope === 'selection'}
+                onChange={() => setScope('selection')}
+              />
+              {t('export.scope.current', { count: selection.photoIds.length })}
+            </label>
+          ) : null}
+        </fieldset>
+        {activeOptions.scope === 'selection' && selection ? (
+          <div className="export-scope-summary">
+            <p>
+              {t('export.scope.selectionSummary', {
+                species: selection.labels.join('、') || t('selection.speciesFilter.all'),
+                flight: t(
+                  selection.query.only_flying
+                    ? 'selection.featureFilters.onlyFlying'
+                    : 'export.scope.allPostures',
+                ),
+                review: t(
+                  selection.query.include_review
+                    ? 'selection.speciesFilter.includeReview'
+                    : 'export.scope.confirmedOnly',
+                ),
+                grades: selection.query.grades.map((grade) => t(gradeLabelKey(grade))).join('、'),
+              })}
+            </p>
+            <p>{t('export.scope.selectionHint')}</p>
           </div>
-        </div>
+        ) : (
+          <>
+            <div className="export-control-block">
+              <SectionLabel label={t('export.scope.manual')} />
+              <div className="export-grade-grid">
+                {(['select', 'usable', 'record', 'reject'] as PhotoGrade[]).map((grade) => (
+                  <label className="export-check" key={grade}>
+                    <input
+                      checked={activeOptions.grades.includes(grade)}
+                      disabled={controlsLocked}
+                      onChange={() => toggleGrade(grade)}
+                      type="checkbox"
+                    />
+                    <span>{t(gradeLabelKey(grade))}</span>
+                  </label>
+                ))}
+              </div>
+            </div>
 
-        <div className="export-control-block">
-          <SectionLabel label={t('export.scoreRange.label')} />
-          <div className="export-range">
-            <input
-              inputMode="decimal"
-              disabled={controlsLocked}
-              max="100"
-              min="0"
-              onChange={(event) => setMinScore(event.target.value)}
-              placeholder={t('export.scoreRange.min')}
-              type="number"
-              value={minScore}
-            />
-            <span>–</span>
-            <input
-              inputMode="decimal"
-              disabled={controlsLocked}
-              max="100"
-              min="0"
-              onChange={(event) => setMaxScore(event.target.value)}
-              placeholder={t('export.scoreRange.max')}
-              type="number"
-              value={maxScore}
-            />
-          </div>
-        </div>
+            <div className="export-control-block">
+              <SectionLabel label={t('export.scoreRange.label')} />
+              <div className="export-range">
+                <input
+                  aria-invalid={invalidScoreRange}
+                  aria-label={t('export.scoreRange.min')}
+                  inputMode="decimal"
+                  disabled={controlsLocked}
+                  max="100"
+                  min="0"
+                  onChange={(event) => setMinScore(event.target.value)}
+                  placeholder={t('export.scoreRange.min')}
+                  type="number"
+                  value={minScore}
+                />
+                <span>–</span>
+                <input
+                  aria-invalid={invalidScoreRange}
+                  aria-label={t('export.scoreRange.max')}
+                  inputMode="decimal"
+                  disabled={controlsLocked}
+                  max="100"
+                  min="0"
+                  onChange={(event) => setMaxScore(event.target.value)}
+                  placeholder={t('export.scoreRange.max')}
+                  type="number"
+                  value={maxScore}
+                />
+              </div>
+              {invalidScoreRange ? <p role="alert">{t('export.error.invalidScoreRange')}</p> : null}
+            </div>
+          </>
+        )}
 
         <div className="metric-strip">
           <MetricCell
@@ -849,7 +1032,11 @@ export function ExportDrawer({
             {phase === 'cancelled' ? <small>{t('export.result.cancelledHint')}</small> : null}
           </div>
         ) : null}
-        {error ? <p className="export-error">{error}</p> : null}
+        {error ? (
+          <p role="alert" className="export-error">
+            {error}
+          </p>
+        ) : null}
 
         {controlsLocked && !running ? (
           <div className="export-completion-actions">

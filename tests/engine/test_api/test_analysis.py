@@ -78,12 +78,10 @@ async def client_with_lib(tmp_path: Path):
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         r = await ac.post("/library/import", json={"root_path": str(lib_root)})
         lib_id = r.json()["id"]
-        # 手工补 file_hash（否则 enqueue_library 会跳过）
-        await db.conn.execute(
-            "UPDATE photos SET file_hash = id WHERE library_id = ?",
-            (lib_id,),
-        )
-        await db.conn.commit()
+        # Exercise the actual SHA contract; arbitrary photo ids are not content hashes.
+        from engine.services.scanner import backfill_hashes
+
+        await backfill_hashes(db, lib_id)
         yield ac, lib_id, db, pipeline
 
     # Fixture teardown: 等 worker 收尾，避免 DB 关闭时还在查询

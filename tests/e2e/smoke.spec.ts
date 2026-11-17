@@ -39,13 +39,44 @@ const DEFAULT_LIB = {
 }
 
 const DEFAULT_PHOTOS = [
-  { id: 'p1', file_name: 'IMG_0001.JPG', species: '须浮鸥', latin: 'Chlidonias hybrida', grade: 'select', score: 0.91 },
-  { id: 'p2', file_name: 'IMG_0002.JPG', species: '翠鸟', latin: 'Alcedo atthis', grade: 'usable', score: 0.72 },
-  { id: 'p3', file_name: 'IMG_0003.JPG', species: '池鹭', latin: 'Ardeola bacchus', grade: 'record', score: 0.45 },
-  { id: 'p4', file_name: 'IMG_0004.JPG', species: '白鹭', latin: 'Egretta garzetta', grade: 'reject', score: 0.20 },
+  {
+    id: 'p1',
+    file_name: 'IMG_0001.JPG',
+    species: '须浮鸥',
+    latin: 'Chlidonias hybrida',
+    grade: 'select',
+    score: 0.91,
+  },
+  {
+    id: 'p2',
+    file_name: 'IMG_0002.JPG',
+    species: '翠鸟',
+    latin: 'Alcedo atthis',
+    grade: 'usable',
+    score: 0.72,
+  },
+  {
+    id: 'p3',
+    file_name: 'IMG_0003.JPG',
+    species: '池鹭',
+    latin: 'Ardeola bacchus',
+    grade: 'record',
+    score: 0.45,
+  },
+  {
+    id: 'p4',
+    file_name: 'IMG_0004.JPG',
+    species: '白鹭',
+    latin: 'Egretta garzetta',
+    grade: 'reject',
+    score: 0.2,
+  },
 ]
 
-async function mockBackend(page: Page, state: MockState = { libraries: [DEFAULT_LIB] }): Promise<void> {
+async function mockBackend(
+  page: Page,
+  state: MockState = { libraries: [DEFAULT_LIB] },
+): Promise<void> {
   await page.route('**/health', (route: Route) =>
     route.fulfill({
       status: 200,
@@ -101,9 +132,17 @@ async function mockBackend(page: Page, state: MockState = { libraries: [DEFAULT_
           ? {
               GPSInfo: {
                 '1': 'N',
-                '2': [[31, 1], [37, 1], [idx, 1]],
+                '2': [
+                  [31, 1],
+                  [37, 1],
+                  [idx, 1],
+                ],
                 '3': 'E',
-                '4': [[121, 1], [30, 1], [idx, 1]],
+                '4': [
+                  [121, 1],
+                  [30, 1],
+                  [idx, 1],
+                ],
               },
             }
           : null,
@@ -120,6 +159,46 @@ async function mockBackend(page: Page, state: MockState = { libraries: [DEFAULT_
       status: 200,
       contentType: 'application/json',
       body: JSON.stringify({ library: state.libraries[0] ?? DEFAULT_LIB, photos }),
+    })
+  })
+
+  // The renderer now consumes authoritative membership rather than filtering detail locally.
+  await page.route('**/library/*/selection/query', (route: Route) => {
+    const query = JSON.parse(route.request().postData() ?? '{}')
+    const photos = DEFAULT_PHOTOS.filter(
+      (photo) =>
+        (query.grades ?? []).includes(photo.grade) &&
+        !query.only_flying &&
+        (!query.photo_query ||
+          [photo.file_name, photo.species, photo.latin].some((value) =>
+            value.toLowerCase().includes(String(query.photo_query).toLowerCase()),
+          )),
+    )
+    const selected = new Set<string>(query.species_keys ?? [])
+    const matched = photos.filter((photo) => !selected.size || selected.has(`sci:${photo.latin}`))
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        library_id: 'lib-test',
+        projection_revision: 'smoke-1',
+        query,
+        matched_photo_ids: matched.map((photo) => photo.id),
+        matched_count: matched.length,
+        total_count: DEFAULT_PHOTOS.length,
+        pending_count: 0,
+        failed_count: 0,
+        no_bird_count: 0,
+        facets: DEFAULT_PHOTOS.map((photo) => ({
+          key: `sci:${photo.latin}`,
+          name: photo.species,
+          latin_name: photo.latin,
+          english_name: null,
+          search_aliases: [],
+          photo_count: photos.filter((row) => row.latin === photo.latin).length,
+          review_photo_count: 0,
+        })),
+      }),
     })
   })
 
@@ -154,9 +233,7 @@ test.describe('App shell', () => {
 
   test('start screen has the primary CTA', async ({ page }) => {
     await page.goto('/')
-    await expect(
-      page.getByRole('button', { name: /选择照片文件夹/ }),
-    ).toBeVisible()
+    await expect(page.getByRole('button', { name: /选择照片文件夹/ })).toBeVisible()
   })
 })
 
@@ -211,9 +288,7 @@ test.describe('Route switcher', () => {
     await page.getByRole('button', { name: '选片', exact: true }).click()
     // 点 brand mark 回开始页
     await page.locator('.brand-mark').first().click()
-    await expect(
-      page.getByRole('button', { name: /选择照片文件夹/ }),
-    ).toBeVisible()
+    await expect(page.getByRole('button', { name: /选择照片文件夹/ })).toBeVisible()
   })
 })
 
@@ -274,13 +349,13 @@ test.describe('Visual regression', () => {
     await page.waitForTimeout(500)
     // 物种详情面板的封面走 plumelens://species-artwork 随包资源协议；
     // Chromium UI 层 E2E 无 Electron protocol handler,这里仅等待常规 img 稳定。
-    await page.waitForFunction(
-      () => Array.from(document.images).every((img) => img.complete),
-      undefined,
-      { timeout: 5000 },
-    ).catch(() => {
-      // 网络不可达时不阻塞快照（snapshot 容忍小差异）
-    })
+    await page
+      .waitForFunction(() => Array.from(document.images).every((img) => img.complete), undefined, {
+        timeout: 5000,
+      })
+      .catch(() => {
+        // 网络不可达时不阻塞快照（snapshot 容忍小差异）
+      })
     await expect(page).toHaveScreenshot('archive-screen.png', {
       fullPage: false,
       animations: 'disabled',

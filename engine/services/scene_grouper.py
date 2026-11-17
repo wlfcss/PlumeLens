@@ -164,8 +164,7 @@ def _is_same_scene(sim: SimilarityResult, gap_seconds: float | None) -> bool:
     ):
         return True
     return bool(
-        sim.color_similarity >= 0
-        and sim.color_similarity >= RAPID_COLOR_SIMILARITY_THRESHOLD
+        sim.color_similarity >= 0 and sim.color_similarity >= RAPID_COLOR_SIMILARITY_THRESHOLD
     )
 
 
@@ -193,7 +192,7 @@ async def regroup_library(
     """
     # 取所有 photo，优先按 EXIF DateTimeOriginal 排序；缺失时回退 file_mtime。
     async with db.conn.execute(
-        "SELECT id, file_name, thumb_preview, file_mtime, created_at, exif_json "
+        "SELECT id, file_name, thumb_preview, file_mtime, created_at, exif_json, input_revision "
         "FROM photos WHERE library_id = ? ",
         (library_id,),
     ) as cur:
@@ -250,12 +249,20 @@ async def regroup_library(
             prev_path = cur_path
             prev_row = row
 
-    # 批量写回 scene_id（一次事务）
-    await db.conn.executemany(
-        "UPDATE photos SET scene_id = ? WHERE id = ?",
-        updates,
-    )
-    await db.conn.commit()
+    # Publish only if none of the scene inputs changed during the CPU work.
+    async with db.transaction():
+        async with db.conn.execute(
+            "SELECT id,input_revision FROM photos WHERE library_id=?",
+            (library_id,),
+        ) as cur:
+            current = {str(row["id"]): int(row["input_revision"]) for row in await cur.fetchall()}
+        expected = {str(row["id"]): int(row["input_revision"]) for row in rows}
+        if current != expected:
+            return {"scanned": 0, "scenes": 0, "skipped": len(rows)}
+        await db.conn.executemany(
+            "UPDATE photos SET scene_id = ? WHERE id = ?",
+            updates,
+        )
 
     scenes = scene_id + 1
     await logger.ainfo(

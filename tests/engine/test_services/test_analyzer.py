@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -33,7 +34,15 @@ async def db(tmp_path: Path) -> Database:
     await db.conn.execute(
         "INSERT INTO photos (id, file_path, file_name, file_size, file_mtime, "
         "created_at, library_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        ("photo-1", str(photo_path), "test.jpg", 15, "2026-04-24", "2026-04-24", "lib-1"),
+        (
+            "photo-1",
+            str(photo_path),
+            "test.jpg",
+            15,
+            datetime.fromtimestamp(photo_path.stat().st_mtime, tz=UTC).isoformat(),
+            "2026-04-24",
+            "lib-1",
+        ),
     )
     await db.conn.commit()
     yield db

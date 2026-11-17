@@ -281,17 +281,14 @@ class TestMigration:
             assert await db.get_schema_version() == SCHEMA_VERSION
 
             # 验证 v8 列被加上
-            async with db.conn.execute(
-                "PRAGMA table_info(photos)"
-            ) as cur:
+            async with db.conn.execute("PRAGMA table_info(photos)") as cur:
                 cols = {row[1] for row in await cur.fetchall()}
             for required in ("country", "province", "city", "district", "place"):
                 assert required in cols, f"v8 column {required} missing after migration"
 
             # 验证索引被建上
             async with db.conn.execute(
-                "SELECT name FROM sqlite_master "
-                "WHERE type='index' AND tbl_name='photos'"
+                "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='photos'"
             ) as cur:
                 indexes = {str(r[0]) for r in await cur.fetchall()}
             assert "ix_photos_province" in indexes
@@ -409,3 +406,42 @@ class TestMigration:
             assert await db2.get_schema_version() == SCHEMA_VERSION
         finally:
             await db2.close()
+
+
+async def test_v10_migration_collapses_duplicate_active_tasks_and_keeps_history(tmp_path: Path):
+    from engine.core.database import _SCHEMA_STATEMENTS
+
+    path = tmp_path / "v10.db"
+    async with aiosqlite.connect(path) as conn:
+        for statement in _SCHEMA_STATEMENTS:
+            await conn.execute(statement)
+        await conn.execute(
+            "INSERT INTO libraries(id,display_name,parent_path,root_path,"
+            "created_at,last_opened_at) "
+            "VALUES('L','L','/p','/p/r','2026','2026')"
+        )
+        await conn.execute(
+            "INSERT INTO photos(id,file_path,file_name,file_size,file_mtime,file_hash,created_at,"
+            "library_id) VALUES('P','/p/a.jpg','a.jpg',1,'2026','abc','2026','L')"
+        )
+        for task_id in ("first", "second"):
+            await conn.execute(
+                "INSERT INTO task_queue(id,photo_id,library_id,status,created_at) "
+                "VALUES(?,'P','L','pending','2026')",
+                (task_id,),
+            )
+        await conn.execute("PRAGMA user_version=10")
+        await conn.commit()
+    db = Database(path)
+    await db.connect()
+    try:
+        async with db.conn.execute("SELECT id,status FROM task_queue ORDER BY rowid") as cur:
+            assert [tuple(row) for row in await cur.fetchall()] == [
+                ("first", "pending"),
+                ("second", "cancelled"),
+            ]
+        assert "analysis_input_history" in await db.list_tables()
+        async with db.conn.execute("PRAGMA index_list(task_queue)") as cur:
+            assert "uq_queue_active_photo" in {row[1] for row in await cur.fetchall()}
+    finally:
+        await db.close()

@@ -142,7 +142,29 @@ export function subscribeEngineStatus(): () => void {
     useEngineStore.setState({ state: 'ready', backendUrl: null })
     return () => {}
   }
-  return window.plumelens.onEngineStatus((payload) => {
+  const bridge = window.plumelens
+  let disposed = false
+  let eventGeneration = 0
+  const unsubscribe = bridge.onEngineStatus((payload) => {
+    eventGeneration += 1
     useEngineStore.getState().applyStatus(payload)
   })
+  // A renderer reload does not restart the engine, so its original ready event
+  // may already be gone. Subscribe first, then bootstrap the current URL; a
+  // later crash/fatal event always takes precedence over this async response.
+  const bootstrapGeneration = eventGeneration
+  void bridge
+    .getBackendUrl()
+    .then((url) => {
+      if (!disposed && eventGeneration === bootstrapGeneration && url) {
+        useEngineStore.getState().applyStatus({ kind: 'ready', url })
+      }
+    })
+    .catch(() => {
+      /* Health query exposes connection failure and retry. */
+    })
+  return () => {
+    disposed = true
+    unsubscribe()
+  }
 }

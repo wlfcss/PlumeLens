@@ -115,7 +115,7 @@ def _split_components(display_name: str) -> dict[str, str | None]:
             # "市"后缀)。若不在此处显式回写 city,二级地图 SQL 按 province 查 city
             # 永远 0 命中,北京/上海/天津/重庆 4 个直辖市点击后都看不到下钻数据。
             out["city"] = muni
-            s = s[len(muni):]
+            s = s[len(muni) :]
             break
     if out["province"] is None:
         for suf in province_suffixes:
@@ -124,7 +124,7 @@ def _split_components(display_name: str) -> dict[str, str | None]:
             # / "黔西南布依族苗族自治州"等。
             if 0 < idx <= 6:
                 out["province"] = s[: idx + len(suf)]
-                s = s[idx + len(suf):]
+                s = s[idx + len(suf) :]
                 # 港澳特别行政区:与直辖市一样,province == city(没有"市"分级)。
                 # 不显式回写 city → 二级地图 SQL `WHERE province=? AND city IS NOT NULL`
                 # 永远 0 命中,香港/澳门点击后看不到任何下钻数据(同直辖市 bug)。
@@ -139,7 +139,7 @@ def _split_components(display_name: str) -> dict[str, str | None]:
             # 8 字符上限覆盖 "黔西南布依族苗族自治州"(前缀 8)/"西双版纳傣族自治州"等
             if 0 < idx <= 10:
                 out["city"] = s[: idx + len(suf)]
-                s = s[idx + len(suf):]
+                s = s[idx + len(suf) :]
                 break
     # district
     district_suffixes = ["区", "县", "旗", "自治县"]
@@ -147,7 +147,7 @@ def _split_components(display_name: str) -> dict[str, str | None]:
         idx = s.find(suf)
         if 0 < idx <= 8:
             out["district"] = s[: idx + len(suf)]
-            s = s[idx + len(suf):]
+            s = s[idx + len(suf) :]
             break
     # 剩余的作 place(街道/POI)
     out["place"] = s.strip() or display_name
@@ -172,47 +172,45 @@ async def backfill_one(
     - unresolved: 有 GPS,但 provider 链路无法解析;写哨兵值避免启动期反复重试
     - skipped: 无 GPS / EXIF 不可解析
 
-    commit=False 时只 execute 不 commit — 调用方批量处理后统一 commit
-    (减少千张照片 ×千次 fsync 的 I/O 开销 + 写锁占用时间)。
+    commit 参数保留兼容；每个地理写入使用短事务，网络调用不持有写锁。
+    写回检查 EXIF 身份，避免回填期间换图后发布旧位置。
     """
     coords = _parse_gps_from_exif(exif_json)
     if coords is None:
         if _looks_like_broken_gps(exif_json):
-            await db.conn.execute(
-                "UPDATE photos SET country = ?, province = NULL, city = NULL, "
-                "district = NULL, place = NULL WHERE id = ?",
-                (UNRESOLVED_COUNTRY, photo_id),
-            )
-            if commit:
-                await db.conn.commit()
+            async with db.transaction():
+                await db.conn.execute(
+                    "UPDATE photos SET country = ?, province = NULL, city = NULL, "
+                    "district = NULL, place = NULL WHERE id = ? AND exif_json IS ?",
+                    (UNRESOLVED_COUNTRY, photo_id, exif_json),
+                )
             return "unresolved"
         return "skipped"
     lat, lon = coords
     result = await reverse(lat, lon, lang)
     if result is None:
-        await db.conn.execute(
-            "UPDATE photos SET country = ?, province = NULL, city = NULL, "
-            "district = NULL, place = NULL WHERE id = ?",
-            (UNRESOLVED_COUNTRY, photo_id),
-        )
-        if commit:
-            await db.conn.commit()
+        async with db.transaction():
+            await db.conn.execute(
+                "UPDATE photos SET country = ?, province = NULL, city = NULL, "
+                "district = NULL, place = NULL WHERE id = ? AND exif_json IS ?",
+                (UNRESOLVED_COUNTRY, photo_id, exif_json),
+            )
         return "unresolved"
     parts = _split_components(result["display_name"])
-    await db.conn.execute(
-        "UPDATE photos SET country = ?, province = ?, city = ?, district = ?, place = ? "
-        "WHERE id = ?",
-        (
-            parts["country"],
-            parts["province"],
-            parts["city"],
-            parts["district"],
-            parts["place"],
-            photo_id,
-        ),
-    )
-    if commit:
-        await db.conn.commit()
+    async with db.transaction():
+        await db.conn.execute(
+            "UPDATE photos SET country = ?, province = ?, city = ?, district = ?, place = ? "
+            "WHERE id = ? AND exif_json IS ?",
+            (
+                parts["country"],
+                parts["province"],
+                parts["city"],
+                parts["district"],
+                parts["place"],
+                photo_id,
+                exif_json,
+            ),
+        )
     return "filled"
 
 
@@ -250,8 +248,7 @@ async def backfill_library_locations(
     unresolved = 0
     total = len(rows)
     pending_writes = 0
-    # batch commit:每 batch_size 张才 commit 一次 — 减少 千次 fsync + 长时间持有写锁
-    # (WAL 模式下 writer 持锁期间 reader 可读但其他 writer 全部阻塞)。
+    # Each write owns a short transaction; progress notifications remain batched.
     for i, row in enumerate(rows):
         try:
             status = await backfill_one(db, str(row["id"]), row["exif_json"], commit=False)
@@ -269,14 +266,11 @@ async def backfill_library_locations(
         # batch commit 触发:每 batch_size 张落盘 + 进度回调
         if (i + 1) % batch_size == 0:
             if pending_writes > 0:
-                await conn.commit()
                 pending_writes = 0
             if progress_cb:
                 with contextlib.suppress(Exception):
                     await progress_cb(library_id, i + 1, total)
-    # 最终残余批 commit + 进度
-    if pending_writes > 0:
-        await conn.commit()
+    # 最终进度
     if progress_cb:
         with contextlib.suppress(Exception):
             await progress_cb(library_id, total, total)

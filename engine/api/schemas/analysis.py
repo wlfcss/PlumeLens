@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
+
+RunDesiredState = Literal["running", "paused", "cancelled", "completed"]
 
 
 class AnalysisBatchRequest(BaseModel):
@@ -28,6 +32,8 @@ class QueueStats(BaseModel):
 
     library_id: str | None = None
     stats: dict[str, int]  # {status: count}
+    run_id: str | None = None
+    desired_state: RunDesiredState | None = None
 
 
 class TaskRow(BaseModel):
@@ -56,3 +62,5 @@ class AnalysisProgressEvent(BaseModel):
     failed: int
     dead: int
     current_photo_id: str | None = None
+    run_id: str | None = None
+    desired_state: RunDesiredState | None = None

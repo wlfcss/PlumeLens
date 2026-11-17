@@ -57,6 +57,40 @@ export class ApiError extends Error {
   }
 }
 
+export interface SelectionQuery {
+  species_keys: string[]
+  include_review: boolean
+  grades: Array<'select' | 'usable' | 'record' | 'reject'>
+  include_no_bird: boolean
+  include_failed: boolean
+  only_flying: boolean
+  photo_query: string
+  sort: 'score' | 'time' | 'name'
+}
+
+export interface SelectionSpeciesFacet {
+  key: string
+  name: string
+  latin_name: string | null
+  english_name: string | null
+  search_aliases: string[]
+  photo_count: number
+  review_photo_count: number
+}
+
+export interface SelectionQueryResult {
+  library_id: string
+  projection_revision: string
+  query: SelectionQuery
+  matched_photo_ids: string[]
+  matched_count: number
+  total_count: number
+  pending_count: number
+  failed_count: number
+  no_bird_count: number
+  facets: SelectionSpeciesFacet[]
+}
+
 // 默认 60s 超时 — 大库 detail/SSE setup 可能需要 30s+,留足余量。
 // 调用方传入的 init.signal 会被合并到 timeout signal,任一触发都中断。
 const REQUEST_TIMEOUT_MS = 60_000
@@ -266,6 +300,7 @@ export interface BestDetection {
   quality: { clipiqa: number; hyperiqa: number; combined: number } | null
   species: string | null
   species_latin: string | null
+  species_english?: string | null
   manual_species: boolean
   // 每个 detection 独立的 species_source（多鸟图混合可见性的关键 — 后端 v6 schema）。
   // photo-level species_source 由 best detection 决定，但 detection-level 才是
@@ -312,6 +347,7 @@ export interface PhotoRow {
   bird_count: number | null
   species: string | null
   species_latin: string | null
+  species_english?: string | null
   manual_species: boolean
   species_source?:
     | 'none'
@@ -343,6 +379,7 @@ export interface PhotoRow {
 }
 
 export interface LibraryDetail {
+  projection_revision?: string | null
   library: LibrarySummary
   photos: PhotoRow[]
   photo_total?: number | null
@@ -391,6 +428,8 @@ export interface RelinkLibraryResponse {
 export type TaskQueueStats = Record<string, number>
 
 export interface QueueStatsResponse {
+  run_id?: string | null
+  desired_state?: 'running' | 'paused' | 'cancelled' | 'completed' | null
   library_id: string | null
   stats: TaskQueueStats
 }
@@ -402,6 +441,8 @@ export interface AnalysisBatchResponse {
 }
 
 export interface AnalysisProgressEvent {
+  run_id?: string | null
+  desired_state?: 'running' | 'paused' | 'cancelled' | 'completed' | null
   library_id: string
   completed: number
   total: number
@@ -452,6 +493,9 @@ export interface DecisionCountsResponse {
 }
 
 export interface ExportLibraryRequest {
+  scope?: 'library' | 'selection'
+  selection_query?: SelectionQuery | null
+  projection_revision?: string | null
   target_dir: string
   grades: Array<'select' | 'usable' | 'record' | 'reject'>
   min_score?: number | null
@@ -555,6 +599,12 @@ export interface SpeciesOverrideRow {
 // ---------------- Endpoints ----------------
 
 export const api = {
+  querySelection: (libraryId: string, query: SelectionQuery, signal?: AbortSignal) =>
+    request<SelectionQueryResult>(`/library/${libraryId}/selection/query`, {
+      method: 'POST',
+      body: JSON.stringify(query),
+      signal,
+    }),
   // Settings / maintenance
   modelVersions: () => request<ModelVersionsResponse>('/settings/models'),
   clearLocalHistory: () =>

@@ -8,6 +8,7 @@ import type { PhotoRecord } from '@/lib/workspace-types'
 const THUMBNAIL_REPAIR_COOLDOWN_MS = 30_000
 const THUMBNAIL_REPAIR_MAX_CONCURRENT = 4
 const THUMBNAIL_MISSING_REPAIR_DELAY_MS = 600
+const THUMBNAIL_REPAIR_MAX_ATTEMPTS = 3
 
 interface UseThumbnailRepairOptions {
   libraryId: string | null
@@ -19,12 +20,15 @@ export function useThumbnailRepair({
   photos,
 }: UseThumbnailRepairOptions): (photoId: string, status: ThumbnailLoadStatus) => void {
   const queryClient = useQueryClient()
-  const { mutate: rebuildPhotoThumbnail } = useBuildPhotoThumbnail(libraryId)
+  const { mutateAsync: rebuildPhotoThumbnail } = useBuildPhotoThumbnail(libraryId)
   const repairingRef = useRef(new Set<string>())
   const queueRef = useRef<string[]>([])
   const activeCountRef = useRef(0)
+  const activePhotoIdsRef = useRef(new Set<string>())
   const lastRepairAtRef = useRef(new Map<string, number>())
   const missingTimersRef = useRef(new Map<string, number>())
+  const failedResourcesRef = useRef(new Set<string>())
+  const attemptsRef = useRef(new Map<string, { src: string | null | undefined; count: number }>())
   const photosRef = useRef(photos)
   photosRef.current = photos
 
@@ -45,26 +49,35 @@ export function useThumbnailRepair({
       if (!nextPhotoId) return
 
       const currentPhoto = photosRef.current.find((photo) => photo.id === nextPhotoId)
-      if (currentPhoto?.thumbGridUrl || !repairingRef.current.has(nextPhotoId)) {
+      if (
+        !currentPhoto ||
+        (currentPhoto.thumbGridUrl && !failedResourcesRef.current.has(nextPhotoId)) ||
+        !repairingRef.current.has(nextPhotoId)
+      ) {
         repairingRef.current.delete(nextPhotoId)
         continue
       }
 
       activeCountRef.current += 1
-      rebuildPhotoThumbnail(nextPhotoId, {
-        onSettled: () => {
+      activePhotoIdsRef.current.add(nextPhotoId)
+      void rebuildPhotoThumbnail(nextPhotoId)
+        .catch(() => undefined)
+        .finally(() => {
+          activePhotoIdsRef.current.delete(nextPhotoId)
           activeCountRef.current = Math.max(0, activeCountRef.current - 1)
           repairingRef.current.delete(nextPhotoId)
           drainQueue()
-        },
-      })
+        })
     }
   }, [rebuildPhotoThumbnail])
 
   return useCallback(
     (photoId: string, status: ThumbnailLoadStatus) => {
       if (status === 'loaded') {
-        repairingRef.current.delete(photoId)
+        failedResourcesRef.current.delete(photoId)
+        attemptsRef.current.delete(photoId)
+        lastRepairAtRef.current.delete(photoId)
+        if (!activePhotoIdsRef.current.has(photoId)) repairingRef.current.delete(photoId)
         queueRef.current = queueRef.current.filter((queuedPhotoId) => queuedPhotoId !== photoId)
         const timer = missingTimersRef.current.get(photoId)
         if (timer !== undefined) {
@@ -74,12 +87,20 @@ export function useThumbnailRepair({
         return
       }
       if (status === 'loading') return
+      if (status === 'error') failedResourcesRef.current.add(photoId)
 
       const enqueueBackendRebuild = () => {
         if (repairingRef.current.has(photoId)) return
+        const photo = photosRef.current.find((item) => item.id === photoId)
+        if (!photo) return
+        const previous = attemptsRef.current.get(photoId)
+        const sameResource = previous?.src === photo.thumbGridUrl
+        const count = sameResource ? (previous?.count ?? 0) : 0
+        if (count >= THUMBNAIL_REPAIR_MAX_ATTEMPTS) return
         const now = Date.now()
         const lastRepairAt = lastRepairAtRef.current.get(photoId) ?? 0
-        if (now - lastRepairAt < THUMBNAIL_REPAIR_COOLDOWN_MS) return
+        if (sameResource && now - lastRepairAt < THUMBNAIL_REPAIR_COOLDOWN_MS) return
+        attemptsRef.current.set(photoId, { src: photo.thumbGridUrl, count: count + 1 })
         repairingRef.current.add(photoId)
         lastRepairAtRef.current.set(photoId, now)
         queueRef.current.push(photoId)

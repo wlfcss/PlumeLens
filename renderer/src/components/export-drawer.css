@@ -1,0 +1,35 @@
+.export-scope-picker {
+  border: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  margin-block: 12px;
+}
+.export-scope-picker legend {
+  margin-block-end: 6px;
+  color: var(--pl-fg-2);
+}
+.export-scope-picker label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-block-size: 36px;
+}
+.export-scope-summary {
+  margin-block: 12px;
+  color: var(--pl-fg-2);
+  font-size: 0.8125rem;
+}
+
+.export-scope-picker input {
+  accent-color: var(--pl-fg-0);
+  inline-size: 1.1em;
+  block-size: 1.1em;
+  flex-shrink: 0;
+}
+@media (pointer: coarse) {
+  .export-scope-picker label {
+    min-block-size: 44px;
+  }
+}

@@ -15,6 +15,8 @@ import {
 import { app } from 'electron'
 import { join } from 'path'
 import { readUserSettings } from './user-settings'
+import { EngineStartupProtocol } from './engine-startup-protocol'
+import { terminateEngine } from './engine-shutdown'
 
 /**
  * 拉起并守护 Python engine 子进程。
@@ -49,6 +51,7 @@ export class ProcessManager extends EventEmitter {
   // 关停标志：stop() 设为 true，handleCrash 与 setTimeout 都会检查，
   // 防止应用关闭中残留的 setTimeout 触发 spawn 出孤儿 engine。
   private stopped = false
+  private readonly terminating = new Map<ChildProcess, Promise<void>>()
   // 持久化日志根目录（{userData}/logs），lazy 创建
   private readonly logsDir = join(app.getPath('userData'), 'logs')
 
@@ -78,6 +81,18 @@ export class ProcessManager extends EventEmitter {
    * 事件循环已停的场景下,异步 setTimeout 兜底不会 fire,只能同步杀。 */
   getEnginePid(): number | undefined {
     return this.process?.pid
+  }
+
+  getEnginePids(): number[] {
+    return [
+      ...new Set(
+        [this.process, ...this.terminating.keys()].flatMap((proc) =>
+          proc?.pid !== undefined && proc.exitCode === null && proc.signalCode === null
+            ? [proc.pid]
+            : [],
+        ),
+      ),
+    ]
   }
 
   /** 确保 logs/ 目录存在；返回 true 表示可以写文件日志。失败不阻断启动。 */
@@ -147,6 +162,9 @@ export class ProcessManager extends EventEmitter {
     const path = join(this.logsDir, `engine.stderr.${ts}.log`)
     try {
       const stream = createWriteStream(path, { flags: 'a', encoding: 'utf-8' })
+      stream.on('error', (err) =>
+        this.writeElectronLog(`engine stderr log unavailable: ${err.message}`),
+      )
       stream.write(`# === engine spawn @ ${new Date().toISOString()} ===\n`)
       return stream
     } catch (err) {
@@ -183,6 +201,7 @@ export class ProcessManager extends EventEmitter {
       // DB 里有 thumb 路径但文件在另一个根目录，选片页就会频繁显示空缩略图。
       PLUMELENS_DATA_DIR: app.getPath('userData'),
       PLUMELENS_API_TOKEN: this.authToken,
+      PLUMELENS_PARENT_PID: String(process.pid),
     }
 
     // graceful degrade: 已经决定切 CPU 后,后续每次 spawn 都强制传这个 env。
@@ -237,6 +256,14 @@ export class ProcessManager extends EventEmitter {
       detached: true,
     })
     this.process = proc
+    const writeStderr = (data: string | Buffer): void => {
+      if (stderrStream && !stderrStream.writableEnded && !stderrStream.destroyed)
+        stderrStream.write(data)
+    }
+    // 'exit' can precede trailing stdout/stderr. Close the log only after both pipes close.
+    proc.once('close', () => {
+      if (stderrStream && !stderrStream.writableEnded && !stderrStream.destroyed) stderrStream.end()
+    })
 
     let pendingUrl: string | null = null
     const readyTimer = setTimeout(() => {
@@ -246,7 +273,7 @@ export class ProcessManager extends EventEmitter {
       this.writeElectronLog(
         `engine startup timeout waiting for PLUMELENS_READY pendingUrl=${pendingUrl ?? 'none'}`,
       )
-      stderrStream?.write(
+      writeStderr(
         `\n# === startup timeout @ ${new Date().toISOString()} pendingUrl=${pendingUrl ?? 'none'} ===\n`,
       )
       this.killCurrentProcess('startup timeout')
@@ -255,52 +282,30 @@ export class ProcessManager extends EventEmitter {
     }, ENGINE_READY_TIMEOUT_MS)
     this.readyTimer = { proc, timer: readyTimer }
     const clearReadyTimer = (): void => this.clearReadyTimer(proc)
-    const handleChunk = (data: Buffer): void => {
-      // 1. 完整复制到持久化文件（崩溃时唯一可查的 raw stderr / stdout）
-      stderrStream?.write(data)
-      // 2. 解析 PORT/READY 协议
-      const text = data.toString()
-      // PLUMELENS_PORT N（uvicorn.run 之前 print）：先记下 URL，但还没 listen
-      const portMatch = text.match(/PLUMELENS_PORT (\d+)/)
-      if (portMatch && !pendingUrl) {
-        pendingUrl = `http://127.0.0.1:${portMatch[1]}`
-      }
-      // PLUMELENS_READY（lifespan startup 完成、uvicorn 真 listen 后 print）：才 emit ready
-      // 避免 IPC 早一步返回 URL → renderer 立即 fetch → ECONNREFUSED 失败
-      if (text.includes('PLUMELENS_READY') && pendingUrl && !this.url) {
-        clearReadyTimer()
-        this.url = pendingUrl
-        // 启动成功 → 重置 restartCount。否则应用长时间运行后才崩溃，
-        // restartCount 已经爆 maxRestarts，不会再重启（恢复能力降为 0）。
-        this.restartCount = 0
-        this.writeElectronLog(`engine ready url=${this.url}`)
-        this.emit('ready', this.url)
-        this.startHealthCheck()
-        return
-      }
-      // Fallback：uvicorn 老 banner（同时兼具 listen 完成的语义）
-      const uvicornMatch = text.match(/Uvicorn running on (http:\/\/127\.0\.0\.1:\d+)/)
-      if (uvicornMatch && !this.url) {
-        clearReadyTimer()
-        this.url = uvicornMatch[1]
-        this.restartCount = 0
-        this.writeElectronLog(`engine ready (uvicorn fallback) url=${this.url}`)
-        this.emit('ready', this.url)
-        this.startHealthCheck()
-      }
+    const protocol = new EngineStartupProtocol((url) => {
+      if (this.process !== proc || this.url || this.stopped) return
+      pendingUrl = url
+      clearReadyTimer()
+      this.url = url
+      this.restartCount = 0
+      this.writeElectronLog(`engine ready url=${url}`)
+      this.emit('ready', url)
+      this.startHealthCheck()
+    })
+    const handleChunk = (stream: 'stdout' | 'stderr', data: Buffer): void => {
+      writeStderr(data)
+      if (this.process === proc) protocol.feed(stream, data)
     }
-
-    proc.stdout?.on('data', handleChunk)
-    proc.stderr?.on('data', handleChunk)
+    proc.stdout?.on('data', (data: Buffer) => handleChunk('stdout', data))
+    proc.stderr?.on('data', (data: Buffer) => handleChunk('stderr', data))
 
     proc.on('exit', (code, signal) => {
       clearReadyTimer()
       // 总是关掉本次 spawn 自己的 stream — 不论是不是当前 active proc
       try {
-        stderrStream?.write(
+        writeStderr(
           `\n# === engine exit @ ${new Date().toISOString()} code=${code} signal=${signal} ===\n`,
         )
-        stderrStream?.end()
       } catch {
         /* ignore */
       }
@@ -362,7 +367,7 @@ export class ProcessManager extends EventEmitter {
     })
   }
 
-  stop(): void {
+  async stop(): Promise<void> {
     this.stopped = true
     this.stopHealthCheck()
     this.clearReadyTimer()
@@ -370,8 +375,9 @@ export class ProcessManager extends EventEmitter {
       clearTimeout(this.restartTimer)
       this.restartTimer = null
     }
-    this.killCurrentProcess('app shutdown')
+    const stopped = this.killCurrentProcess('app shutdown')
     this.url = null
+    await Promise.all([stopped, ...this.terminating.values()])
   }
 
   /** 显式重启 engine — 用户改 settings(key 注入)后调,让新 env var 生效。
@@ -390,7 +396,8 @@ export class ProcessManager extends EventEmitter {
         clearTimeout(this.restartTimer)
         this.restartTimer = null
       }
-      this.killCurrentProcess('settings changed, restart')
+      await this.killCurrentProcess('settings changed, restart')
+      if (this.stopped) return
       this.url = null
       this.stopped = false
       this.restartCount = 0
@@ -407,51 +414,27 @@ export class ProcessManager extends EventEmitter {
    *
    * 行为：
    * - 已死（killed/exitCode 已设置）→ 跳过
-   * - 否则 SIGTERM；3s 后还活着 → SIGKILL（比之前的 5s 短，避免重启拖延）
+   * - 否则 SIGTERM；等退出确认，15s 后仍存活才 SIGKILL；调用方可等待清理完成。
    */
-  private killCurrentProcess(reason: string): void {
+  private killCurrentProcess(reason: string): Promise<void> {
     const proc = this.process
-    if (!proc) return
+    if (!proc) return Promise.resolve()
     this.clearReadyTimer(proc)
     this.process = null // 先解引用，防止 'exit' handler 触发 handleCrash
-    if (proc.killed || proc.exitCode !== null) return
+    if (proc.exitCode !== null || proc.signalCode !== null) return Promise.resolve()
 
     const pid = proc.pid
     const killMsg = `kill engine pgid=${pid} reason=${reason}`
     process.stderr.write(`[engine-pm] ${killMsg}\n`)
     this.writeElectronLog(killMsg)
-    // 关键：kill 进程组而不是单一 PID（pid + detached:true → engine 是 process group leader）
-    // 负数 PID 给 process.kill 表示"信号发到整个进程组"，一举杀掉 helper / spawned children。
-    try {
-      if (pid !== undefined) process.kill(-pid, 'SIGTERM')
-    } catch {
-      // 兜底：直接信号主 PID
-      try {
-        proc.kill('SIGTERM')
-      } catch {
-        /* ignore */
-      }
-    }
-    const killTimer = setTimeout(() => {
-      if (!proc.killed && proc.exitCode === null) {
-        const sigkillMsg = `engine pgid=${pid} did not exit in 3s, SIGKILL`
-        process.stderr.write(`[engine-pm] ${sigkillMsg}\n`)
-        this.writeElectronLog(sigkillMsg)
-        try {
-          if (pid !== undefined) process.kill(-pid, 'SIGKILL')
-        } catch {
-          try {
-            proc.kill('SIGKILL')
-          } catch {
-            /* ignore */
-          }
-        }
-      }
-    }, 3000)
-    // proc 在 3s 内自己优雅退了就立刻清 timer — 防止极端情况下 pid 已被 OS
-    // 回收(macOS 几乎不会 3s 内回收,但 Linux 容器场景可能)然后 SIGKILL 命中无关进程。
-    // proc.once 用单次监听,与主 'exit' handler 共存不冲突。
-    proc.once('exit', () => clearTimeout(killTimer))
+    const pending = terminateEngine(proc, () =>
+      this.writeElectronLog(`engine pgid=${pid} shutdown timed out, SIGKILL`),
+    )
+    this.terminating.set(proc, pending)
+    // Retain unreaped PIDs for the synchronous process-exit fallback.
+    proc.once('exit', () => this.terminating.delete(proc))
+    proc.once('error', () => this.terminating.delete(proc))
+    return pending
   }
 
   private handleCrash(): void {
@@ -460,7 +443,7 @@ export class ProcessManager extends EventEmitter {
 
     // ⚠ 关键修复：重启前必须先杀老进程。原代码直接 setTimeout(start) 会让
     // this.process 被新 spawn 覆盖，老进程成为孤儿继续吃 RAM。
-    this.killCurrentProcess('crash/health-failure restart')
+    const terminated = this.killCurrentProcess('crash/health-failure restart')
 
     // graceful degrade: 累计崩溃达到 cpuFallbackThreshold 后切 CPU。
     // 0.4.0 已知最常见崩溃源是 PyTorch MPS 多 worker 并发,切 CPU 后绝不再崩。
@@ -486,7 +469,9 @@ export class ProcessManager extends EventEmitter {
       this.restartTimer = setTimeout(() => {
         this.restartTimer = null
         if (this.stopped) return
-        void this.start()
+        void terminated.then(() => {
+          if (!this.stopped) return this.start()
+        })
       }, delay)
     } else {
       this.writeElectronLog(`restart limit reached (${this.maxRestarts}), giving up`)
@@ -503,16 +488,21 @@ export class ProcessManager extends EventEmitter {
     const FETCH_TIMEOUT_MS = 8000
     this.healthInterval = setInterval(async () => {
       if (!this.url) return
+      const checkedUrl = this.url
+      const checkedProcess = this.process
       const ctrl = new AbortController()
       const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS)
       try {
-        const response = await fetch(`${this.url}/health`, {
+        const response = await fetch(`${checkedUrl}/health`, {
           headers: { Authorization: `Bearer ${this.authToken}` },
           signal: ctrl.signal,
         })
+        if (this.url !== checkedUrl || this.process !== checkedProcess) return
         if (!response.ok) throw new Error(`HTTP ${response.status}`)
+        if (consecutiveFailures > 0) this.emit('ready', checkedUrl)
         consecutiveFailures = 0
       } catch (e) {
+        if (this.url !== checkedUrl || this.process !== checkedProcess) return
         consecutiveFailures += 1
         const failMsg = `health failure ${consecutiveFailures}/${FAIL_THRESHOLD}: ${(e as Error).message}`
         process.stderr.write(`[engine-health] ${failMsg}\n`)

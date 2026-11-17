@@ -9,6 +9,8 @@ import numpy as np
 from numpy.typing import NDArray
 from PIL import Image
 
+from engine.core.orientation import orient_image, raw_orientation
+
 # RAW 格式扩展名（rawpy 支持）
 RAW_EXTENSIONS: frozenset[str] = frozenset(
     {
@@ -77,50 +79,22 @@ def _load_pillow(path: Path) -> NDArray[np.float32]:
 def _load_raw(path: Path) -> NDArray[np.float32]:
     """Load RAW image via rawpy，应用 EXIF Orientation。
 
-    rawpy.postprocess 输出的是相机 sensor 像素方向（未旋转），但 PlumeLens
-    其他链路（缩略图 / scanner 存的 width/height / pose 推理）都按"显示方向"处理。
-    必须在这里也旋转，否则 RAW 拍摄的纵向片（orientation=6/8）会出现 bbox/姿态点
-    在前端偏移到错误位置（用户截图的 5deab5f → e052266 那个 bug 在 RAW 上仍然存在）。
+    禁用 rawpy 自动旋转，再由公共方向函数转换一次。
+    Pillow 无法读取 RAW EXIF 时，使用 LibRaw sizes.flip 保留相机方向。
     """
     import rawpy
 
-    # 1) 先读 EXIF Orientation（PIL 能读 RAW 的 EXIF 段，哪怕不能解码像素）
-    orientation = 1
-    try:
-        with Image.open(path) as exif_probe:
-            exif = exif_probe.getexif()
-            if exif:
-                orientation = int(exif.get(0x0112, 1))  # 0x0112 = Orientation tag
-    except Exception:
-        pass  # 读不到就当 normal（=1）
-
-    # 2) rawpy 解码为 sensor 方向
     with rawpy.imread(str(path)) as raw:
+        orientation = raw_orientation(path, int(raw.sizes.flip))
+        # Disable LibRaw auto-rotation: the common EXIF transform owns it once.
         rgb = raw.postprocess(
             use_camera_wb=True,
             output_bps=8,
             no_auto_bright=True,
+            user_flip=0,
         )
-    arr: NDArray[np.float32] = rgb.astype(np.float32) / 255.0
-
-    # 3) 按 EXIF Orientation 应用旋转/翻转，与 PIL.ImageOps.exif_transpose 对齐
-    # EXIF Orientation 编码：1=normal, 2=mirror_h, 3=180°, 4=mirror_v,
-    # 5=mirror_h+90°CW, 6=90°CW, 7=mirror_h+90°CCW, 8=90°CCW
-    if orientation == 2:
-        arr = np.fliplr(arr).copy()
-    elif orientation == 3:
-        arr = np.rot90(arr, k=2).copy()
-    elif orientation == 4:
-        arr = np.flipud(arr).copy()
-    elif orientation == 5:
-        arr = np.rot90(np.fliplr(arr), k=-1).copy()
-    elif orientation == 6:
-        arr = np.rot90(arr, k=-1).copy()
-    elif orientation == 7:
-        arr = np.rot90(np.fliplr(arr), k=1).copy()
-    elif orientation == 8:
-        arr = np.rot90(arr, k=1).copy()
-    return arr
+    oriented = orient_image(Image.fromarray(rgb), orientation)
+    return np.asarray(oriented, dtype=np.float32) / 255.0
 
 
 # YOLO 标准 letterbox 填充值：114/255 ≈ 0.447（训练时一致）

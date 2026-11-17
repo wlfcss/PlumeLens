@@ -128,3 +128,33 @@ def test_verify_rejects_empty_assets(tmp_path: Path) -> None:
     _write_manifest(tmp_path / "manifest.json", {})
     with pytest.raises(ManifestError, match="no 'assets' section"):
         verify_manifest(tmp_path)
+
+
+def test_release_check_rejects_bundle_with_its_own_matching_manifest(tmp_path: Path) -> None:
+    models = tmp_path / "downloaded"
+    models.mkdir()
+    asset = "species/v4/seed42_adapter.pt"
+    (models / asset).parent.mkdir(parents=True)
+    original, replaced = b"reviewed-weight", b"replaced-weight"
+    trusted = tmp_path / "checkout-manifest.json"
+    _write_manifest(trusted, {asset: {"size": len(original), "sha256": _sha256(original)}})
+    (models / asset).write_bytes(replaced)
+    _write_manifest(models / "manifest.json", {
+        asset: {"size": len(replaced), "sha256": _sha256(replaced)},
+    })
+    with pytest.raises(ManifestError, match="sha256 mismatch"):
+        verify_manifest(models, trusted, required_assets=[asset])
+
+
+def test_release_check_requires_coverage_even_if_an_asset_exists(tmp_path: Path) -> None:
+    (tmp_path / "a.onnx").write_bytes(b"a")
+    (tmp_path / "unlisted.pt").write_bytes(b"b")
+    trusted = tmp_path / "trusted.json"
+    _write_manifest(trusted, {"a.onnx": {"size": 1, "sha256": _sha256(b"a")}})
+    with pytest.raises(ManifestError, match="Required assets absent"):
+        verify_manifest(tmp_path, trusted, required_assets=["a.onnx", "unlisted.pt"])
+
+
+def test_release_check_requires_a_trusted_manifest_in_an_empty_environment(tmp_path: Path) -> None:
+    with pytest.raises(ManifestError, match="Trusted manifest missing"):
+        verify_manifest(tmp_path, tmp_path / "missing.json", required_assets=["a.onnx"])

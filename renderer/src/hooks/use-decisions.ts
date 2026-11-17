@@ -12,10 +12,9 @@ import {
   type SpeciesOverrideValue,
 } from '@/lib/api-client'
 
-/** 失败时也 invalidate(强制 refetch),让乐观 UI 回滚到后端真实状态。
- *
- * 历史 bug:onError 只 console.warn,前端 setWorkspace 的乐观写入不撤销 → 用户以为标
- * 成功了,实际后端没落库,直到用户手动切 folder 才纠正。 */
+/** Refresh the actual origin folder and its projections after each write.
+ * Workspace receives authoritative detail only; failed writes leave no optimistic copy.
+ */
 function invalidateLibraryQueries(
   qc: ReturnType<typeof useQueryClient>,
   libraryId: string | null | undefined,
@@ -23,24 +22,31 @@ function invalidateLibraryQueries(
 ): void {
   if (!libraryId) return
   qc.invalidateQueries({ queryKey: ['library', libraryId] })
+  qc.invalidateQueries({ queryKey: ['selection', libraryId] })
+  qc.invalidateQueries({ queryKey: ['archive'] })
   if (includeDecisions) {
     qc.invalidateQueries({ queryKey: ['decisions', libraryId] })
   }
 }
 
-/** Set one photo's decision. Optimistically invalidates library detail. */
+/** Set one photo's decision; serialize writes to preserve the user's order. */
 export function useSetDecision(libraryId: string | null | undefined) {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: ({ photoId, decision }: { photoId: string; decision: DecisionValue }) =>
-      api.setDecision(photoId, decision),
-    onSuccess: () => {
-      invalidateLibraryQueries(qc, libraryId, true)
+    scope: { id: 'manual-photo-writes' },
+    mutationFn: ({
+      photoId,
+      decision,
+    }: {
+      photoId: string
+      decision: DecisionValue
+      libraryId?: string
+    }) => api.setDecision(photoId, decision),
+    onSuccess: (_, variables) => {
+      invalidateLibraryQueries(qc, variables.libraryId ?? libraryId, true)
     },
-    onError: () => {
-      // 失败时同样 invalidate → useLibraryDetail refetch → 同步 useEffect 把后端真值
-      // 重新注入 workspace,把乐观写入回滚到正确状态。
-      invalidateLibraryQueries(qc, libraryId, true)
+    onError: (_, variables) => {
+      invalidateLibraryQueries(qc, variables.libraryId ?? libraryId, true)
     },
   })
 }
@@ -49,8 +55,8 @@ export function useSetDecision(libraryId: string | null | undefined) {
 export function useBatchSetDecisions(libraryId: string | null | undefined) {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: (updates: Array<[string, DecisionValue]>) =>
-      api.batchSetDecisions(updates),
+    scope: { id: 'manual-photo-writes' },
+    mutationFn: (updates: Array<[string, DecisionValue]>) => api.batchSetDecisions(updates),
     onSuccess: () => {
       invalidateLibraryQueries(qc, libraryId, true)
     },
@@ -67,6 +73,7 @@ export function useBatchSetDecisions(libraryId: string | null | undefined) {
 export function useSetSpeciesOverride(libraryId: string | null | undefined) {
   const qc = useQueryClient()
   return useMutation({
+    scope: { id: 'manual-photo-writes' },
     mutationFn: ({
       birdIndex,
       bbox,
@@ -77,12 +84,13 @@ export function useSetSpeciesOverride(libraryId: string | null | undefined) {
       bbox?: SpeciesOverrideBBox | null
       photoId: string
       species: SpeciesOverrideValue | null
+      libraryId?: string
     }) => api.setSpeciesOverride(photoId, birdIndex, species, bbox),
-    onSuccess: () => {
-      invalidateLibraryQueries(qc, libraryId, false)
+    onSuccess: (_, variables) => {
+      invalidateLibraryQueries(qc, variables.libraryId ?? libraryId, false)
     },
-    onError: () => {
-      invalidateLibraryQueries(qc, libraryId, false)
+    onError: (_, variables) => {
+      invalidateLibraryQueries(qc, variables.libraryId ?? libraryId, false)
     },
   })
 }

@@ -352,7 +352,7 @@ class SpeciesClassifier:
             raise FileNotFoundError(msg)
 
         self.image_size = image_size
-        self._top_k = top_k
+        self._top_k = max(1, int(top_k))
         self._min_confidence = min_confidence
         self.device, self._dtype = self._select_device(device)
         self._infer_lock = threading.Lock()
@@ -496,13 +496,16 @@ class SpeciesClassifier:
             return []
 
         probs[~self._trained_mask] = 0.0
+        ranked = np.argsort(probs)[::-1]
         k = min(self._top_k, probs.shape[0])
-        top_idx = np.argsort(probs)[-k:][::-1]
+        top_idx = ranked[:k]
         if top_idx.size == 0:
             return []
 
         top1_prob = float(probs[int(top_idx[0])])
-        top2_prob = float(probs[int(top_idx[1])]) if top_idx.size > 1 else 0.0
+        # Calibration always compares the true top two classes. top_k only
+        # controls presentation; requesting one candidate cannot improve certainty.
+        top2_prob = float(probs[int(ranked[1])]) if ranked.size > 1 else 0.0
         margin = top1_prob - top2_prob
         state = self._policy.decide(reject_score, top1_prob, margin)
         if state == "unrecognized":

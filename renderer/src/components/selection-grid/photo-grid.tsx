@@ -544,9 +544,7 @@ function PhotoSegmentGrid({
     />
   )
   const hasStackSegments = segments.some((segment) => segment.photos.length > 1)
-  const visibleSegments = hasStackSegments
-    ? segments.filter((segment) => segment.photos.length > 1)
-    : segments
+  const visibleSegments = segments
 
   return (
     <div className="photo-grid">
@@ -747,6 +745,14 @@ const PhotoTile = memo(function PhotoTile({
         className="photo-preview"
         data-selection-review-shortcut="true"
         onClick={() => onFocusPhoto(photo.id)}
+        onFocus={() => onFocusPhoto(photo.id)}
+        onKeyDown={(event) => {
+          if (event.code === 'Space' || event.key === ' ') {
+            event.preventDefault()
+            event.stopPropagation()
+            onOpenReview(photo.id)
+          }
+        }}
         onDoubleClick={() => onOpenReview(photo.id)}
         style={{ backgroundImage: photo.placeholderGradient ?? photo.previewGradient }}
         type="button"

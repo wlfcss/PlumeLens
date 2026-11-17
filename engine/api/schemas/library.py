@@ -152,6 +152,7 @@ class BestDetection(BaseModel):
     quality: dict[str, float] | None = None  # clipiqa/hyperiqa/combined
     species: str | None = None
     species_latin: str | None = None
+    species_english: str | None = None
     manual_species: bool = False
     species_candidates: list[dict[str, Any]] = Field(default_factory=_empty_species_candidates)
     # 每个 detection 独立的 species_source（多鸟图混合可见性的关键 — 见 routes/library.py
@@ -172,6 +173,8 @@ class PhotoRow(BaseModel):
     id: str
     file_path: str
     file_name: str
+    input_revision: int = 0
+    file_hash: str | None = None
     format: str | None
     width: int | None
     height: int | None
@@ -239,6 +242,9 @@ class LibraryDetail(BaseModel):
 
     library: LibrarySummary
     photos: list[PhotoRow]
+    # Full-folder projections can be compared with selection facets. A single
+    # paginated response cannot represent the whole folder and leaves this null.
+    projection_revision: str | None = None
     photo_total: int | None = None
     photo_offset: int = 0
     photo_limit: int | None = None

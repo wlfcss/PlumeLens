@@ -23,6 +23,7 @@ import { statusTone } from '@/lib/photo-display'
 import type { Tone } from '@/lib/photo-helpers'
 import { cn } from '@/lib/utils'
 import { logger } from '@/lib/logger'
+import { useModalDialog } from '@/hooks/use-modal-dialog'
 
 export type FolderContextMenuState = {
   folder: FolderRecord
@@ -142,31 +143,24 @@ export function RemoveFolderDialog({
   onConfirm: () => void
   t: ReturnType<typeof useTranslation>['t']
 }) {
-  useEffect(() => {
-    if (!folder) return
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && !busy) onCancel()
-    }
-    window.addEventListener('keydown', handleKeyDown)
-    return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [busy, folder, onCancel])
+  const dialogRef = useModalDialog(Boolean(folder))
 
   if (!folder) return null
 
   return (
-    <div
+    <dialog
+      ref={dialogRef}
+      aria-labelledby="remove-folder-title"
+      onCancel={(event) => {
+        event.preventDefault()
+        if (!busy) onCancel()
+      }}
       className="overlay-backdrop"
       onPointerDown={(event) => {
         if (event.target === event.currentTarget && !busy) onCancel()
       }}
     >
-      <div
-        aria-labelledby="remove-folder-title"
-        aria-modal="true"
-        className="remove-folder-dialog"
-        onPointerDown={(event) => event.stopPropagation()}
-        role="dialog"
-      >
+      <div className="remove-folder-dialog" onPointerDown={(event) => event.stopPropagation()}>
         <h2 id="remove-folder-title">{t('selection.removeFolder.title')}</h2>
         <p className="remove-folder-dialog__target" title={folder.rootPath}>
           {folder.displayName}
@@ -175,21 +169,22 @@ export function RemoveFolderDialog({
         <p className="remove-folder-dialog__safe">{t('selection.removeFolder.sourceSafe')}</p>
         {error ? <p className="remove-folder-dialog__error">{error}</p> : null}
         <div className="action-row">
-          <button className="button-ghost" disabled={busy} onClick={onCancel} type="button">
-            {t('common.cancel')}
-          </button>
           <button
-            className="button-danger"
+            autoFocus
+            className="button-ghost"
             disabled={busy}
-            onClick={onConfirm}
+            onClick={onCancel}
             type="button"
           >
+            {t('common.cancel')}
+          </button>
+          <button className="button-danger" disabled={busy} onClick={onConfirm} type="button">
             <Trash2 className="h-4 w-4" />
             {busy ? t('selection.removeFolder.removing') : t('selection.removeFolder.confirm')}
           </button>
         </div>
       </div>
-    </div>
+    </dialog>
   )
 }
 

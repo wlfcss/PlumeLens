@@ -165,6 +165,8 @@ class TestRealFullPipeline:
         result = await pipeline.analyze(img_path, photo_id="integration-smoke")
         assert result.photo_id == "integration-smoke"
         assert result.duration_ms > 0
-        assert result.pipeline_version.startswith("v1-")
+        assert result.pipeline_version.startswith("v2-")
+        assert pipeline.version_descriptor["schema"] == 2
+        assert all(len(digest) == 64 for digest in pipeline.version_descriptor["assets"].values())
 
         pipeline.close()

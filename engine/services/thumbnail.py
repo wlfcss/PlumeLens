@@ -24,8 +24,10 @@ import structlog
 from PIL import Image, ImageOps
 
 from engine.core.database import Database
+from engine.core.orientation import exif_orientation, orient_image, raw_orientation
 from engine.pipeline.preprocess import IMAGE_EXTENSIONS, RAW_EXTENSIONS
 from engine.services.event_bus import publish_library_event
+from engine.services.photo_input import mark_source_changed, source_fingerprint
 
 logger = structlog.stdlib.get_logger()
 
@@ -67,15 +69,17 @@ def delete_thumbnails_for_photos(photo_ids: Iterable[str], cache_root: Path) -> 
     removed = 0
     for photo_id in photo_ids:
         for kind in ("grid", "preview"):
-            path = cache_root / kind / f"{photo_id}.jpg"
-            try:
-                path.unlink()
-            except FileNotFoundError:
-                continue
-            except OSError as e:
-                logger.warning("Failed to delete thumbnail", path=str(path), error=str(e))
-                continue
-            removed += 1
+            paths = [cache_root / kind / f"{photo_id}.jpg"]
+            paths.extend((cache_root / kind).glob(f"{photo_id}-r*.jpg"))
+            for path in paths:
+                try:
+                    path.unlink()
+                except FileNotFoundError:
+                    continue
+                except OSError as e:
+                    logger.warning("Failed to delete thumbnail", path=str(path), error=str(e))
+                    continue
+                removed += 1
     return removed
 
 
@@ -116,8 +120,8 @@ def _load_source_image(path: Path) -> Image.Image:
         return ImageOps.exif_transpose(img) or img
 
     if suffix in RAW_EXTENSIONS:
-        img = _load_raw_with_embedded_preview(path)
-        return ImageOps.exif_transpose(img) or img
+        # RAW helper returns pixels already in the common display orientation.
+        return _load_raw_with_embedded_preview(path)
 
     msg = f"Unsupported image format: {suffix}"
     raise ValueError(msg)
@@ -129,6 +133,7 @@ def _load_raw_with_embedded_preview(path: Path) -> Image.Image:
 
     try:
         with rawpy.imread(str(path)) as raw:
+            orientation = raw_orientation(path, int(raw.sizes.flip))
             thumb = raw.extract_thumb()
             # rawpy.ThumbFormat 枚举值：JPEG=0, BITMAP=1（数字常量避免类型存根缺失）
             if int(thumb.format) == 0:  # JPEG
@@ -136,7 +141,7 @@ def _load_raw_with_embedded_preview(path: Path) -> Image.Image:
                 embedded.load()
                 # 不够大 → 回退完整解码（仅当 preview 级别需要时）
                 if max(embedded.size) >= MIN_EMBEDDED_FOR_PREVIEW:
-                    return embedded
+                    return orient_image(embedded, exif_orientation(embedded) or orientation)
                 # 小于阈值：继续往下走完整解码
                 logger.info(
                     "Embedded RAW preview too small, falling back to full decode",
@@ -148,7 +153,7 @@ def _load_raw_with_embedded_preview(path: Path) -> Image.Image:
 
                 bitmap: np.ndarray = thumb.data
                 if bitmap.ndim == 3 and bitmap.shape[2] == 3:
-                    return Image.fromarray(bitmap.astype("uint8"))
+                    return orient_image(Image.fromarray(bitmap.astype("uint8")), orientation)
     except Exception as e:
         logger.warning(
             "extract_thumb failed, falling back to full decode",
@@ -158,11 +163,17 @@ def _load_raw_with_embedded_preview(path: Path) -> Image.Image:
 
     # Fallback：完整 RAW 解码
     with rawpy.imread(str(path)) as raw:
-        rgb = raw.postprocess(use_camera_wb=True, output_bps=8, no_auto_bright=True)
+        orientation = raw_orientation(path, int(raw.sizes.flip))
+        rgb = raw.postprocess(
+            use_camera_wb=True,
+            output_bps=8,
+            no_auto_bright=True,
+            user_flip=0,
+        )
     import numpy as np
 
     arr: np.ndarray = rgb
-    return Image.fromarray(arr.astype("uint8"))
+    return orient_image(Image.fromarray(arr.astype("uint8")), orientation)
 
 
 def _generate_pair_sync(
@@ -217,7 +228,10 @@ async def ensure_thumbnails_for_photo(
     层之前没复用这个 fallback)。
     """
     async with db.conn.execute(
-        "SELECT file_path, companion_path, thumb_grid, thumb_preview FROM photos WHERE id = ?",
+        "SELECT p.file_path,p.companion_path,p.thumb_grid,p.thumb_preview,p.input_revision,"
+        "p.input_needs_scan,(SELECT source_fingerprint FROM analysis_results ar "
+        "WHERE ar.photo_id=p.id AND ar.is_active=1 AND ar.input_revision=p.input_revision "
+        "LIMIT 1) AS previous_fingerprint FROM photos p WHERE p.id=?",
         (photo_id,),
     ) as cur:
         row = await cur.fetchone()
@@ -228,6 +242,15 @@ async def ensure_thumbnails_for_photo(
     source = Path(str(row["file_path"]))
     companion_raw = row["companion_path"]
     companion = Path(str(companion_raw)) if companion_raw else None
+    revision = int(row["input_revision"])
+    # Revision-specific names prevent an old decode overwriting the current input.
+    thumbnail_id = photo_id if revision == 0 else f"{photo_id}-r{revision}"
+    if row["input_needs_scan"]:
+        return None
+    fingerprint = await asyncio.to_thread(source_fingerprint, source, companion)
+    if row["previous_fingerprint"] and row["previous_fingerprint"] != fingerprint:
+        await mark_source_changed(db, photo_id, revision)
+        return None
     grid_rel = row["thumb_grid"]
     preview_rel = row["thumb_preview"]
 
@@ -242,7 +265,7 @@ async def ensure_thumbnails_for_photo(
         return None
 
     try:
-        paths = await generate_thumbnails(source, photo_id, cache_root)
+        paths = await generate_thumbnails(source, thumbnail_id, cache_root)
     except (OSError, ValueError) as e:
         # 文件级损坏 → 试 companion RAW(扩展名是 RAW 才走,走的是 rawpy 的另一条路径,
         # 跟坏 JPG 完全独立)。companion 存在性已经在 ALTER TABLE 时校验过(scanner 维护)。
@@ -255,21 +278,36 @@ async def ensure_thumbnails_for_photo(
             companion=str(companion),
             error=str(e)[:120],
         )
-        paths = await generate_thumbnails(companion, photo_id, cache_root)
+        paths = await generate_thumbnails(companion, thumbnail_id, cache_root)
         await logger.ainfo(
             "Companion thumbnail fallback succeeded",
             photo_id=photo_id,
             companion=str(companion),
         )
 
-    # 存相对路径（便于 cache_root 整体迁移）
-    grid_rel_str = f"grid/{photo_id}.jpg"
-    preview_rel_str = f"preview/{photo_id}.jpg"
-    await db.conn.execute(
-        "UPDATE photos SET thumb_grid = ?, thumb_preview = ? WHERE id = ?",
-        (grid_rel_str, preview_rel_str, photo_id),
-    )
-    await db.conn.commit()
+    if fingerprint != await asyncio.to_thread(source_fingerprint, source, companion):
+        await mark_source_changed(db, photo_id, revision)
+        return None
+    grid_rel_str = f"grid/{thumbnail_id}.jpg"
+    preview_rel_str = f"preview/{thumbnail_id}.jpg"
+    async with db.transaction() as conn:
+        if fingerprint != source_fingerprint(source, companion):
+            await mark_source_changed(db, photo_id, revision)
+            return None
+        async with conn.execute(
+            "UPDATE photos SET thumb_grid=?,thumb_preview=? WHERE id=? AND input_revision=? "
+            "AND file_path=? AND companion_path IS ? RETURNING id",
+            (
+                grid_rel_str,
+                preview_rel_str,
+                photo_id,
+                revision,
+                str(source),
+                str(companion) if companion else None,
+            ),
+        ) as cur:
+            if await cur.fetchone() is None:
+                return None
 
     await logger.ainfo(
         "Thumbnails generated",

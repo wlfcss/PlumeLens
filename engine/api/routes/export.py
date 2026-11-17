@@ -42,6 +42,7 @@ SSE_INTERVAL = 0.5
 _ERROR_STATUS: dict[str, int] = {
     "library_not_found": 404,
     "export_already_running": 409,
+    "selection_changed": 409,
 }
 
 
@@ -80,6 +81,8 @@ async def export_library_route(
         library_id=job.library_id,
         total=job.total,
         total_bytes=job.total_bytes,
+        scope=job.scope,
+        projection_revision=job.projection_revision,
     )
 
 

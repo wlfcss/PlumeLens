@@ -37,6 +37,7 @@ class ModelVersionsResponse(BaseModel):
     pipeline_version: str | None
     manifest_generated_at: str | None
     models: list[ModelVersionItem]
+    pipeline_identity: dict[str, object] | None = None
 
 
 class ClearHistoryRequest(BaseModel):
@@ -183,9 +184,11 @@ async def model_versions(request: Request) -> ModelVersionsResponse:
     ordered_ids = [mid for mid in MODEL_ORDER if mid in models]
     ordered_ids.extend(mid for mid in sorted(models) if mid not in ordered_ids)
 
+    identity = getattr(pipeline, "version_descriptor", None)
     return ModelVersionsResponse(
         pipeline_version=getattr(pipeline, "pipeline_version", None),
         manifest_generated_at=manifest_generated_at,
+        pipeline_identity=identity if isinstance(identity, dict) else None,
         models=[
             ModelVersionItem(
                 id=model_id,
@@ -239,13 +242,13 @@ async def clear_local_history(request: Request, body: ClearHistoryRequest) -> Cl
         "task_queue": await _count_rows(db, "task_queue"),
     }
 
-    await db.conn.execute("DELETE FROM task_queue")
-    await db.conn.execute("DELETE FROM photo_species_overrides")
-    await db.conn.execute("DELETE FROM photo_decisions")
-    await db.conn.execute("DELETE FROM analysis_results")
-    await db.conn.execute("DELETE FROM photos")
-    await db.conn.execute("DELETE FROM libraries")
-    await db.conn.commit()
+    async with db.transaction():
+        await db.conn.execute("DELETE FROM task_queue")
+        await db.conn.execute("DELETE FROM photo_species_overrides")
+        await db.conn.execute("DELETE FROM photo_decisions")
+        await db.conn.execute("DELETE FROM analysis_results")
+        await db.conn.execute("DELETE FROM photos")
+        await db.conn.execute("DELETE FROM libraries")
     archive_cache.invalidate()
 
     cache_root = thumbnail_cache_root(settings.data_dir)

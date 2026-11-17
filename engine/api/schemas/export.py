@@ -6,6 +6,8 @@ from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from engine.api.schemas.selection import SelectionQueryRequest
+
 ExportGrade = Literal["select", "usable", "record", "reject"]
 ExportLayout = Literal["merged", "by_grade"]
 
@@ -29,7 +31,6 @@ class ExportLibraryRequest(BaseModel):
     target_dir: str = Field(..., min_length=1)
     grades: list[ExportGrade] = Field(
         default_factory=lambda: ["select", "usable", "record"],
-        min_length=1,
     )
     # 格式白名单(大写、不含点,如 ["JPG", "CR3"])。None = 不限格式。
     # 主文件与同伴文件各自判定:只选 JPG 时,JPG 主文件照导,配套 CR3 会被跳过。
@@ -42,6 +43,9 @@ class ExportLibraryRequest(BaseModel):
     layout: ExportLayout = "merged"
     preserve_structure: bool = True
     include_manifest: bool = True
+    scope: Literal["library", "selection"] = "library"
+    selection_query: SelectionQueryRequest | None = None
+    projection_revision: str | None = Field(default=None, min_length=1)
 
     @field_validator("grades")
     @classmethod
@@ -77,6 +81,13 @@ class ExportLibraryRequest(BaseModel):
         if not self.copy_files and not self.include_xmp_sidecars:
             msg = "At least one of copy_files or include_xmp_sidecars must be enabled"
             raise ValueError(msg)
+        if self.scope == "selection" and (
+            self.selection_query is None or self.projection_revision is None
+        ):
+            msg = "Current-selection export requires selection_query and projection_revision"
+            raise ValueError(msg)
+        if self.scope == "library" and not self.grades:
+            raise ValueError("Library export requires at least one grade")
         return self
 
 
@@ -90,6 +101,8 @@ class ExportJobStartResponse(BaseModel):
     library_id: str
     total: int
     total_bytes: int
+    scope: Literal["library", "selection"] = "library"
+    projection_revision: str | None = None
 
 
 class ExportJobCancelResponse(BaseModel):

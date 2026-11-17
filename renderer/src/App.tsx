@@ -7,6 +7,7 @@ import {
   useDeferredValue,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
@@ -41,8 +42,17 @@ import {
   useUpdateLibrary,
 } from '@/hooks/use-library'
 import { useThumbnailRepair } from '@/hooks/use-thumbnail-repair'
+import { useSelectionQuery } from '@/hooks/use-selection'
+import type { SpeciesFilterProps } from '@/components/selection-chrome/species-filter'
 import { useQueryClient } from '@tanstack/react-query'
-import type { DecisionValue, SpeciesOverrideBBox, SpeciesOverrideValue } from '@/lib/api-client'
+import {
+  api,
+  ApiError,
+  type DecisionValue,
+  type SelectionQuery,
+  type SpeciesOverrideBBox,
+  type SpeciesOverrideValue,
+} from '@/lib/api-client'
 
 import type {
   AppRoute,
@@ -53,7 +63,7 @@ import type {
   WorkspaceSnapshot,
 } from '@/lib/workspace-types'
 import { cn } from '@/lib/utils'
-import { useShallow, useUIStore, type QuickFilter } from '@/stores/ui-store'
+import { useShallow, useUIStore, type SelectionSpeciesFilter } from '@/stores/ui-store'
 import { subscribeEngineStatus, useEngineStore } from '@/stores/engine-store'
 import { ErrorBoundary } from '@/components/common/error-boundary'
 import { IconButton } from '@/components/common/icon-button'
@@ -83,7 +93,7 @@ import {
   sortPhotos,
 } from '@/lib/photo-grid-helpers'
 import { routeLabelKey } from '@/lib/i18n-keys'
-import { isArchiveEligiblePhoto, photoCategory } from '@/lib/photo-display'
+import { isArchiveEligiblePhoto } from '@/lib/photo-display'
 import { type FolderSummary } from '@/lib/photo-helpers'
 import {
   archivePhotoSearchParts,
@@ -111,6 +121,7 @@ const FOLDER_CONTEXT_MENU_WIDTH = 188
 const FOLDER_CONTEXT_MENU_HEIGHT = 128
 
 const EMPTY_PHOTOS: PhotoRecord[] = []
+const DEFAULT_SPECIES_FILTER: SelectionSpeciesFilter = { keys: [], includeReview: true }
 const EMPTY_SPECIES: SpeciesRecord[] = []
 const EMPTY_FOLDER_SUMMARY: FolderSummary = {
   newSpeciesCount: 0,
@@ -154,31 +165,6 @@ export function shouldIgnoreSelectionReviewShortcutTarget(target: EventTarget | 
   )
 }
 
-function filterPhotoByQuickFilters(photo: PhotoRecord, filters: QuickFilter[]): boolean {
-  // 失败照片:仅在显式包含 'failed' filter 时显示。源文件损坏 / 解码错的照片
-  // 没有有效分析结果(birdCount=0 / grade 默认),混在场景组里只会让用户困惑("为
-  // 什么这张是空的"),默认隐藏,quickFilter 切到"失败"才查看。
-  if (photo.analysisStatus === 'failed') return filters.includes('failed')
-  // 还在分析中(pending / running): 始终显示,用户能看到分析进度。
-  if (photo.analysisStatus !== 'done') return true
-  // 空 filter = "未应用任何过滤" = 显示全部(行业惯例 + 用户取消所有 chip 的直觉)。
-  // 旧实现 `return false` 让"全清 chip"变成"全部隐藏",对用户语义反转。
-  if (filters.length === 0) return true
-  return filters.includes(photoCategory(photo))
-}
-
-function photoHasFlyingPosture(photo: PhotoRecord): boolean {
-  const bestDetectionPose = photo.birdDetections?.find((detection) => detection.isBest)?.pose
-  const pose = photo.bestPose ?? bestDetectionPose ?? null
-  if (pose?.posture === 'flying') return true
-  return photo.poseTags.includes('wings_open')
-}
-
-function filterPhotoByFeatureConstraints(photo: PhotoRecord, onlyFlying: boolean): boolean {
-  if (!onlyFlying) return true
-  return photo.analysisStatus === 'done' && photoHasFlyingPosture(photo)
-}
-
 export default function App() {
   const { t } = useTranslation()
   const { data: backendData, isReady, isError } = useBackendHealth()
@@ -201,6 +187,9 @@ export default function App() {
   const [importError, setImportError] = useState<string | null>(null)
   const [pendingRemoval, setPendingRemoval] = useState<FolderRecord | null>(null)
   const [removeError, setRemoveError] = useState<string | null>(null)
+  const [operationError, setOperationError] = useState<string | null>(null)
+  const [refreshing, setRefreshing] = useState(false)
+  const [reviewOrder, setReviewOrder] = useState<string[]>([])
   const deleteLibrary = useDeleteLibrary()
 
   const {
@@ -209,6 +198,9 @@ export default function App() {
     activeFolderId,
     activeSpeciesId,
     activeQuickFilters,
+    selectionSpeciesByFolder,
+    setSelectionSpeciesFilter,
+    setActiveQuickFilters,
     onlyFlying,
     activeSort,
     viewMode,
@@ -235,6 +227,9 @@ export default function App() {
       activeFolderId: state.activeFolderId,
       activeSpeciesId: state.activeSpeciesId,
       activeQuickFilters: state.activeQuickFilters,
+      selectionSpeciesByFolder: state.selectionSpeciesByFolder,
+      setSelectionSpeciesFilter: state.setSelectionSpeciesFilter,
+      setActiveQuickFilters: state.setActiveQuickFilters,
       onlyFlying: state.onlyFlying,
       activeSort: state.activeSort,
       viewMode: state.viewMode,
@@ -276,8 +271,10 @@ export default function App() {
     }
   }, [activeFolderId, setActiveFolderId, workspace.folders])
 
-  const visibleFolders = workspace.folders.filter((folder) =>
-    matchesQuery([folder.displayName, folder.parentPath, folder.rootPath], deferredSearch),
+  const visibleFolders = workspace.folders.filter(
+    (folder) =>
+      route === 'selection' ||
+      matchesQuery([folder.displayName, folder.parentPath, folder.rootPath], deferredSearch),
   )
   const openFolderContextMenu = useCallback(
     (folder: FolderRecord, event: ReactMouseEvent<HTMLElement>) => {
@@ -354,8 +351,100 @@ export default function App() {
   const activeFolderSummary = activeFolder
     ? (summariesByFolder.get(activeFolder.id) ?? EMPTY_FOLDER_SUMMARY)
     : EMPTY_FOLDER_SUMMARY
+  const activeDetailQuery = useLibraryDetail(activeFolderId)
+  const activeDetail = activeDetailQuery.data
+  const queryClient = useQueryClient()
+  const speciesFilter =
+    (activeFolder && selectionSpeciesByFolder[activeFolder.id]) ?? DEFAULT_SPECIES_FILTER
+  const selectionQuery = useMemo<SelectionQuery>(
+    () => ({
+      species_keys: speciesFilter.keys,
+      include_review: speciesFilter.includeReview,
+      grades: activeQuickFilters.length
+        ? activeQuickFilters.filter((filter): filter is 'select' | 'usable' | 'record' | 'reject' =>
+            ['select', 'usable', 'record', 'reject'].includes(filter),
+          )
+        : ['select', 'usable', 'record', 'reject'],
+      include_no_bird: !activeQuickFilters.length || activeQuickFilters.includes('no_bird'),
+      include_failed: activeQuickFilters.includes('failed'),
+      only_flying: onlyFlying,
+      photo_query: deferredSearch,
+      sort: activeSort === 'shot_at' ? 'time' : activeSort,
+    }),
+    [activeQuickFilters, activeSort, deferredSearch, onlyFlying, speciesFilter],
+  )
+  const selectionResult = useSelectionQuery(
+    activeFolder?.id ?? null,
+    selectionQuery,
+    route === 'selection',
+  )
+  const selectionSyncing = Boolean(
+    activeDetail?.projection_revision &&
+    selectionResult.data &&
+    activeDetail.projection_revision !== selectionResult.data.projection_revision,
+  )
+  const reconciledPair = useRef<string | null>(null)
+  const revisionPair = `${activeFolder?.id}:${activeDetail?.projection_revision}:${selectionResult.data?.projection_revision}`
+  const revisionSyncFailed =
+    selectionSyncing &&
+    reconciledPair.current === revisionPair &&
+    !activeDetailQuery.isFetching &&
+    !selectionResult.isFetching
+  useEffect(() => {
+    if (!selectionSyncing) {
+      reconciledPair.current = null
+      return
+    }
+    if (
+      !activeFolder ||
+      !selectionSyncing ||
+      selectionResult.isFetching ||
+      activeDetailQuery.isFetching ||
+      selectionResult.isError ||
+      activeDetailQuery.isError
+    )
+      return
+    if (reconciledPair.current === revisionPair) return
+    reconciledPair.current = revisionPair
+    void queryClient.invalidateQueries({ queryKey: LIBRARY_DETAIL_KEY(activeFolder.id) })
+    void queryClient.invalidateQueries({ queryKey: ['selection', activeFolder.id] })
+  }, [
+    activeFolder?.id,
+    activeDetailQuery.isError,
+    activeDetailQuery.isFetching,
+    queryClient,
+    selectionResult.data?.projection_revision,
+    selectionResult.isFetching,
+    selectionResult.isError,
+    selectionSyncing,
+    revisionPair,
+  ])
+  const speciesFilterProps: SpeciesFilterProps = {
+    facets: selectionResult.data?.facets ?? [],
+    filter: speciesFilter,
+    onChange: (filter) => {
+      if (activeFolder) setSelectionSpeciesFilter(activeFolder.id, filter)
+    },
+    loading:
+      selectionResult.isFetching ||
+      (selectionSyncing && !revisionSyncFailed && !activeDetailQuery.isError),
+    error: selectionResult.isError || activeDetailQuery.isError || revisionSyncFailed,
+    onRetry: () => {
+      reconciledPair.current = null
+      void selectionResult.refetch()
+      void activeDetailQuery.refetch()
+    },
+  }
   const openExportForActiveFolder = useCallback(() => {
     if (!activeFolder || activeFolder.status === 'path_missing') return
+    if (
+      route === 'selection' &&
+      (!selectionResult.data ||
+        selectionResult.isFetching ||
+        selectionResult.isError ||
+        selectionSyncing)
+    )
+      return
     setExportSessions((current) => [
       ...current,
       {
@@ -365,10 +454,40 @@ export default function App() {
           folder: activeFolder,
           photos: activeFolderPhotos,
           summary: activeFolderSummary,
+          selection:
+            route === 'selection' &&
+            selectionResult.data &&
+            !selectionResult.isPlaceholderData &&
+            !selectionResult.isFetching &&
+            !selectionResult.isError
+              ? {
+                  query: selectionQuery,
+                  revision: selectionResult.data.projection_revision,
+                  photoIds: selectionResult.data.matched_photo_ids,
+                  defaultSelected: speciesFilter.keys.length > 0,
+                  labels: speciesFilter.keys.map(
+                    (key) =>
+                      selectionResult.data!.facets.find((facet) => facet.key === key)?.name ??
+                      key.replace(/^sci:/, ''),
+                  ),
+                }
+              : undefined,
         },
       },
     ])
-  }, [activeFolder, activeFolderPhotos, activeFolderSummary])
+  }, [
+    activeFolder,
+    activeFolderPhotos,
+    activeFolderSummary,
+    route,
+    selectionResult.data,
+    selectionResult.isPlaceholderData,
+    selectionResult.isFetching,
+    selectionResult.isError,
+    selectionQuery,
+    selectionSyncing,
+    speciesFilter.keys,
+  ])
   const closeExportSession = useCallback((sessionId: string) => {
     setExportSessions((current) => current.filter((session) => session.id !== sessionId))
   }, [])
@@ -386,23 +505,18 @@ export default function App() {
         folder,
         photos: folderPhotos,
         summary: summariesByFolder.get(session.folderId) ?? EMPTY_FOLDER_SUMMARY,
+        selection: session.initialSource.selection,
       }
     },
     [photosByFolder, summariesByFolder, workspace.folders],
   )
-  const filteredSelectionPhotos = useMemo(
-    () =>
-      sortPhotos(
-        activeFolderPhotos.filter(
-          (photo) =>
-            filterPhotoByQuickFilters(photo, activeQuickFilters) &&
-            filterPhotoByFeatureConstraints(photo, onlyFlying) &&
-            matchesQuery([photo.fileName, photo.speciesName, photo.caption], deferredSearch),
-        ),
-        activeSort,
-      ),
-    [activeFolderPhotos, activeQuickFilters, activeSort, deferredSearch, onlyFlying],
-  )
+  const filteredSelectionPhotos = useMemo(() => {
+    const ids = new Set(selectionResult.data?.matched_photo_ids ?? [])
+    return sortPhotos(
+      activeFolderPhotos.filter((photo) => ids.has(photo.id)),
+      activeSort,
+    )
+  }, [activeFolderPhotos, activeSort, selectionResult.data])
   const groupStartMs = useMemo(() => buildGroupStartMsMap(activeFolderPhotos), [activeFolderPhotos])
 
   const folderGroups = useMemo(() => {
@@ -484,9 +598,13 @@ export default function App() {
   const reviewPhotos = useMemo(() => {
     if (!reviewPhoto) return []
     const source = route === 'archive' ? archivePhotos : flatSelectionPhotos
-    if (source.some((photo) => photo.id === reviewPhoto.id)) return source
-    return [reviewPhoto, ...source.filter((photo) => photo.id !== reviewPhoto.id)]
-  }, [archivePhotos, flatSelectionPhotos, reviewPhoto, route])
+    const allowed = new Set(source.map((photo) => photo.id))
+    const order = reviewOrder.length ? reviewOrder : source.map((photo) => photo.id)
+    return order.flatMap((id) => {
+      const photo = photoById.get(id)
+      return photo && (id === reviewPhoto.id || allowed.has(id)) ? [photo] : []
+    })
+  }, [archivePhotos, flatSelectionPhotos, photoById, reviewOrder, reviewPhoto, route])
   const reviewSegmentPhotosByPhotoId = useMemo(
     () => buildReviewSegmentPhotosByPhotoId(reviewPhotos),
     [reviewPhotos],
@@ -499,13 +617,11 @@ export default function App() {
   const { data: realLibraries } = useLibraries()
   const allLibraryIds = useMemo(() => (realLibraries ?? []).map((l) => l.id), [realLibraries])
   const allDetails = useAllLibraryDetails(allLibraryIds, shouldLoadArchiveWorkspace)
-  const { data: activeDetail } = useLibraryDetail(activeFolderId)
   useLibraryEvents(activeFolderId, Boolean(activeFolderId))
   const importLibrary = useImportLibrary()
   const { mutateAsync: updateLibraryDisplayName } = useUpdateLibrary()
   const { mutateAsync: relinkLibrary } = useRelinkLibrary()
   const startBatch = useStartBatch()
-  const queryClient = useQueryClient()
   const handleThumbnailLoadStatus = useThumbnailRepair({
     libraryId: activeFolderId,
     photos: workspace.photos,
@@ -545,6 +661,7 @@ export default function App() {
     queryClient.invalidateQueries({ queryKey: ['decisions'] })
     queryClient.invalidateQueries({ queryKey: ['archive'] })
     queryClient.invalidateQueries({ queryKey: ['geocoding'] })
+    queryClient.invalidateQueries({ queryKey: ['selection'] })
   }, [engineSseKey, queryClient])
   const progressEvent = useAnalysisProgress(
     activeFolderId,
@@ -638,12 +755,44 @@ export default function App() {
 
   async function handleStartAnalysis() {
     if (!activeFolderId || activeSourceMissing) return
+    setOperationError(null)
     try {
       await startBatch.mutateAsync({ libraryId: activeFolderId })
       // bump key 让 useAnalysisProgress 重建 SSE 连接（如果上一个 idle 死了）
       setSseRestartKey((k) => k + 1)
     } catch (err) {
       logger.error('Failed to start batch analysis:', err)
+      const detail =
+        err instanceof ApiError && err.detail && typeof err.detail === 'object'
+          ? (err.detail as { code?: string; detail?: { code?: string } })
+          : null
+      setOperationError(
+        t(
+          (detail?.detail?.code ?? detail?.code) === 'source_changed'
+            ? 'selection.analysisError.source_changed'
+            : 'selection.operationFailed',
+        ),
+      )
+    }
+  }
+
+  async function handleRefreshFolder() {
+    if (!activeFolderId || activeSourceMissing || refreshing) return
+    setOperationError(null)
+    setRefreshing(true)
+    try {
+      await api.importLibrary({
+        root_path: activeFolder!.rootPath,
+        recursive: activeFolder!.recursive,
+      })
+      await queryClient.invalidateQueries({ queryKey: ['library', activeFolderId] })
+      await queryClient.invalidateQueries({ queryKey: ['selection', activeFolderId] })
+      await queryClient.invalidateQueries({ queryKey: LIBRARIES_KEY })
+    } catch (err) {
+      logger.warn('Failed to refresh folder:', err)
+      setOperationError(t('selection.operationFailed'))
+    } finally {
+      setRefreshing(false)
     }
   }
 
@@ -664,26 +813,21 @@ export default function App() {
   }
 
   function handleSetDecision(photoId: string, decision: SelectionDecision) {
-    // 乐观更新本地 state（即时反馈）
-    startTransition(() => {
-      setWorkspace((current) => ({
-        ...current,
-        photos: current.photos.map((photo) =>
-          photo.id === photoId ? { ...photo, decision } : photo,
-        ),
-      }))
-      setFocusedPhotoId(photoId)
-    })
-    // 异步落库。失败时 useSetDecision 内部会 invalidate library detail → refetch
-    // → 同步 useEffect 把后端真值重新注入 workspace,自动回滚乐观写入。
-    setDecisionMutation.mutate(
-      { photoId, decision: decision as DecisionValue },
-      {
-        onError: (err) => {
-          logger.warn('Failed to persist decision (will rollback via refetch):', err)
-        },
-      },
-    )
+    setOperationError(null)
+    // Only authoritative detail updates workspace; failures cannot leave an optimistic copy behind.
+    setFocusedPhotoId(photoId)
+    void setDecisionMutation
+      .mutateAsync({
+        photoId,
+        decision: decision as DecisionValue,
+        libraryId: photoById.get(photoId)?.folderId,
+      })
+      .catch((err: unknown) => {
+        logger.warn('Failed to persist decision:', err)
+        setOperationError(
+          t('selection.savePhotoFailed', { file: photoById.get(photoId)?.fileName ?? photoId }),
+        )
+      })
   }
 
   function handleSetSpeciesOverride(
@@ -692,55 +836,29 @@ export default function App() {
     species: SpeciesOverrideValue | null,
     bbox?: SpeciesOverrideBBox | null,
   ) {
-    const displayName =
-      species?.canonical_zh ?? species?.canonical_en ?? species?.canonical_sci ?? null
-    startTransition(() => {
-      setWorkspace((current) => ({
-        ...current,
-        photos: current.photos.map((photo) => {
-          if (photo.id !== photoId) return photo
-          const detections = (photo.birdDetections ?? []).map((bird) =>
-            bird.index === birdIndex
-              ? {
-                  ...bird,
-                  speciesName: displayName,
-                  speciesLatinName: species?.canonical_sci ?? null,
-                  speciesEnglishName: species?.canonical_en ?? null,
-                  manualSpecies: species !== null,
-                }
-              : bird,
-          )
-          const isBest = detections.find((bird) => bird.index === birdIndex)?.isBest ?? false
-          return {
-            ...photo,
-            birdDetections: detections,
-            ...(isBest
-              ? {
-                  speciesName: displayName,
-                  speciesLatinName: species?.canonical_sci ?? null,
-                  speciesEnglishName: species?.canonical_en ?? null,
-                  manualSpecies: species !== null,
-                }
-              : {}),
-          }
-        }),
-      }))
-      setFocusedPhotoId(photoId)
-    })
-
-    // 失败时 useSetSpeciesOverride 内部 invalidate → refetch → 同步 useEffect
-    // 把乐观写入回滚到后端真实状态。
-    setSpeciesOverrideMutation.mutate(
-      { photoId, birdIndex, species, bbox: bbox ?? null },
-      {
-        onError: (err) => {
-          logger.warn('Failed to persist species override (will rollback via refetch):', err)
-        },
-      },
-    )
+    setOperationError(null)
+    setFocusedPhotoId(photoId)
+    void setSpeciesOverrideMutation
+      .mutateAsync({
+        photoId,
+        birdIndex,
+        species,
+        bbox: bbox ?? null,
+        libraryId: photoById.get(photoId)?.folderId,
+      })
+      .catch((err: unknown) => {
+        logger.warn('Failed to persist species override:', err)
+        setOperationError(
+          t('selection.savePhotoFailed', { file: photoById.get(photoId)?.fileName ?? photoId }),
+        )
+      })
   }
 
   function handleOpenReview(photoId: string) {
+    if (!reviewPhotoId)
+      setReviewOrder(
+        (route === 'archive' ? archivePhotos : flatSelectionPhotos).map((photo) => photo.id),
+      )
     startTransition(() => {
       setFocusedPhotoId(photoId)
       setReviewPhotoId(photoId)
@@ -752,10 +870,19 @@ export default function App() {
     if (!focusedPhotoId || !flatSelectionPhotos.some((photo) => photo.id === focusedPhotoId)) return
 
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.defaultPrevented || !isPlainSpaceKey(event)) return
+      if (
+        event.defaultPrevented ||
+        !isPlainSpaceKey(event) ||
+        document.querySelector(':popover-open')
+      )
+        return
       if (shouldIgnoreSelectionReviewShortcutTarget(event.target)) return
       event.preventDefault()
-      handleOpenReview(focusedPhotoId)
+      const targetPhotoId =
+        event.target instanceof HTMLElement
+          ? event.target.closest<HTMLElement>('[data-photo-id]')?.dataset.photoId
+          : null
+      handleOpenReview(targetPhotoId ?? focusedPhotoId)
     }
 
     window.addEventListener('keydown', handleKeyDown)
@@ -793,10 +920,79 @@ export default function App() {
       controlsDisabled={!appInteractive}
       exportDisabled={Boolean(activeSourceMissing)}
     >
+      {isError ? (
+        <div className="engine-banner engine-banner--fatal" role="alert">
+          <span>{t('engineBanner.healthFailed')}</span>
+          <button
+            className="engine-banner__action"
+            type="button"
+            onClick={() => {
+              void queryClient.invalidateQueries({ queryKey: ['backend-health'] })
+            }}
+          >
+            {t('common.retry')}
+          </button>
+          {window.plumelens?.openLogsDir ? (
+            <button
+              className="engine-banner__action"
+              type="button"
+              onClick={() => {
+                void window.plumelens?.openLogsDir?.()
+              }}
+            >
+              {t('engineBanner.openLogs')}
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+      {operationError && !reviewPhoto ? (
+        <div className="operation-feedback" role="alert">
+          <span>{operationError}</span>
+          <button
+            type="button"
+            className="button-ghost button-compact"
+            onClick={() => setOperationError(null)}
+          >
+            {t('common.close')}
+          </button>
+        </div>
+      ) : null}
+      {!reviewPhoto && (setDecisionMutation.isPending || setSpeciesOverrideMutation.isPending) ? (
+        <div className="operation-feedback" role="status">
+          {t('selection.saving')}
+        </div>
+      ) : null}
       <ErrorBoundary resetKey={routeErrorResetKey} t={t}>
         <Suspense fallback={null}>
           {route === 'selection' ? (
             <SelectionScreen
+              speciesFilterProps={speciesFilterProps}
+              selectionCount={selectionResult.data?.matched_count ?? 0}
+              selectionPending={selectionResult.data?.pending_count ?? 0}
+              onClearFilters={() => {
+                setActiveQuickFilters([])
+                setOnlyFlying(false)
+                setSearchQuery('')
+                if (activeFolder) setSelectionSpeciesFilter(activeFolder.id, DEFAULT_SPECIES_FILTER)
+              }}
+              filtersAreDefault={
+                activeQuickFilters.length === 3 &&
+                ['select', 'usable', 'record'].every((grade) =>
+                  activeQuickFilters.includes(grade as 'select' | 'usable' | 'record'),
+                ) &&
+                !onlyFlying &&
+                !searchQuery &&
+                speciesFilter.keys.length === 0 &&
+                speciesFilter.includeReview
+              }
+              onRestoreFilters={() => {
+                setActiveQuickFilters(['select', 'usable', 'record'])
+                setOnlyFlying(false)
+                setSearchQuery('')
+                if (activeFolder) setSelectionSpeciesFilter(activeFolder.id, DEFAULT_SPECIES_FILTER)
+              }}
+              onRefreshFolder={handleRefreshFolder}
+              refreshing={refreshing}
               activeFolder={activeFolder}
               activeFolderSummary={activeFolderSummary}
               activeQuickFilters={activeQuickFilters}
@@ -873,6 +1069,13 @@ export default function App() {
               onSetSpeciesOverride={handleSetSpeciesOverride}
               onThumbnailLoadStatus={handleThumbnailLoadStatus}
               photos={reviewPhotos}
+              outsideSelection={
+                route === 'selection' &&
+                !filteredSelectionPhotos.some((photo) => photo.id === reviewPhoto.id)
+              }
+              saveError={operationError}
+              saving={setDecisionMutation.isPending || setSpeciesOverrideMutation.isPending}
+              onDismissError={() => setOperationError(null)}
               t={t}
             />
           </Suspense>
@@ -994,10 +1197,29 @@ function AppShell({
             title={disabledTitle}
           >
             <Search className="h-4 w-4" />
+            <span className="sr-only">
+              {t(
+                route === 'selection'
+                  ? 'nav.searchSelection'
+                  : route === 'archive'
+                    ? 'nav.searchArchive'
+                    : 'nav.searchStart',
+              )}
+            </span>
             <input
+              type="search"
+              name="photo-search"
+              autoComplete="off"
+              spellCheck={false}
               onChange={(event) => onSearchChange(event.target.value)}
               disabled={controlsDisabled}
-              placeholder={t('nav.search')}
+              placeholder={t(
+                route === 'selection'
+                  ? 'nav.searchSelection'
+                  : route === 'archive'
+                    ? 'nav.searchArchive'
+                    : 'nav.searchStart',
+              )}
               value={searchQuery}
             />
           </label>
@@ -1009,11 +1231,7 @@ function AppShell({
           >
             <Download className="h-4 w-4" />
           </IconButton>
-          <IconButton
-            disabled={controlsDisabled}
-            label={t('common.settings')}
-            onClick={onOpenSettings}
-          >
+          <IconButton label={t('common.settings')} onClick={onOpenSettings}>
             <Settings2 className="h-4 w-4" />
           </IconButton>
           {/* 引擎状态在左下角 status bar 已有完整展示，此处不重复 */}

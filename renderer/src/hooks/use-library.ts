@@ -140,6 +140,7 @@ export function useLibraryEvents(libraryId: string | null | undefined, enabled =
     const flushRefresh = () => {
       refreshTimerRef.current = null
       qc.invalidateQueries({ queryKey: LIBRARY_DETAIL_KEY(libraryId) })
+      qc.invalidateQueries({ queryKey: ['selection', libraryId] })
       qc.invalidateQueries({ queryKey: LIBRARIES_KEY })
     }
 
@@ -296,6 +297,7 @@ export function useBuildThumbnails() {
     mutationFn: (libraryId: string) => api.buildThumbnails(libraryId),
     onSuccess: (_data, libraryId) => {
       qc.invalidateQueries({ queryKey: LIBRARY_DETAIL_KEY(libraryId) })
+      qc.invalidateQueries({ queryKey: ['selection', libraryId] })
     },
   })
 }

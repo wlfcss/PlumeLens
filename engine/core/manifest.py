@@ -23,6 +23,7 @@ from __future__ import annotations
 import hashlib
 import json
 import threading
+from collections.abc import Collection
 from pathlib import Path
 from typing import TypedDict
 
@@ -79,6 +80,8 @@ def _load_manifest_assets(manifest_path: Path) -> dict[str, _AssetEntry]:
 def verify_manifest(
     models_dir: Path,
     manifest_path: Path | None = None,
+    *,
+    required_assets: Collection[str] | None = None,
 ) -> dict[str, str]:
     """Hash every manifest entry and compare. Raise ManifestError on mismatch.
 
@@ -100,6 +103,13 @@ def verify_manifest(
     """
     if manifest_path is None:
         manifest_path = models_dir / "manifest.json"
+    if required_assets is not None:
+        if not manifest_path.is_file():
+            raise ManifestError(f"Trusted manifest missing: {manifest_path}")
+        declared = _load_manifest_assets(manifest_path)
+        missing = sorted(set(required_assets) - declared.keys())
+        if missing:
+            raise ManifestError(f"Required assets absent from trusted manifest: {missing}")
     cache_key = (str(manifest_path.resolve()), str(models_dir.resolve()))
     with _verify_lock:
         cached = _verify_cache.get(cache_key)

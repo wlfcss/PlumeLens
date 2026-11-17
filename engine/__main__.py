@@ -57,6 +57,7 @@ def main() -> None:
         log_level=os.environ.get("PLUMELENS_LOG_LEVEL", "info").lower(),
         access_log=False,
         workers=1,  # 显式单进程；Electron 子进程模型不需要多 worker
+        timeout_graceful_shutdown=3,
     )
 
 

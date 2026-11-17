@@ -1,5 +1,9 @@
 """Health endpoint tests."""
 
+import json
+import tomllib
+from pathlib import Path
+
 import pytest
 from httpx import AsyncClient
 
@@ -11,6 +15,30 @@ async def test_health_returns_ok(client: AsyncClient) -> None:
     data = response.json()
     assert data["status"] == "ok"
     assert "version" in data
+
+
+def _release_versions() -> set[str]:
+    root = Path(__file__).resolve().parents[3]
+    package = json.loads((root / "package.json").read_text())
+    npm_lock = json.loads((root / "package-lock.json").read_text())
+    project = tomllib.loads((root / "pyproject.toml").read_text())
+    uv_lock = tomllib.loads((root / "uv.lock").read_text())
+    engine_package = next(item for item in uv_lock["package"] if item["name"] == "plumelens-engine")
+    return {
+        package["version"],
+        npm_lock["version"],
+        npm_lock["packages"][""]["version"],
+        project["project"]["version"],
+        engine_package["version"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_runtime_and_locked_package_versions_agree(client: AsyncClient) -> None:
+    response = await client.get("/health")
+
+    assert response.status_code == 200
+    assert _release_versions() == {response.json()["version"]}
 
 
 @pytest.mark.asyncio

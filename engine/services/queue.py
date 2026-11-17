@@ -34,7 +34,12 @@ _LEGAL_TRANSITIONS: dict[TaskStatus, set[TaskStatus]] = {
         TaskStatus.PAUSED,
         TaskStatus.CANCELLED,
     },
-    TaskStatus.FAILED: {TaskStatus.PENDING, TaskStatus.DEAD, TaskStatus.CANCELLED},
+    TaskStatus.FAILED: {
+        TaskStatus.PENDING,
+        TaskStatus.PAUSED,
+        TaskStatus.DEAD,
+        TaskStatus.CANCELLED,
+    },
     TaskStatus.PAUSED: {TaskStatus.PENDING, TaskStatus.CANCELLED},
     # Terminal states：不允许再转出
     TaskStatus.COMPLETED: set(),
@@ -48,6 +53,7 @@ MAX_ATTEMPTS: int = 3
 # 命中即跳过 retry 直接 DEAD,避免浪费 ~1s × MAX_ATTEMPTS 跑同一坏文件。
 # 反例:模型 abort、MPS 错误、网络 timeout — 这些可能是瞬态,该走 retry。
 _PERMANENT_FAILURE_PATTERNS: tuple[str, ...] = (
+    "source_changed:",  # Requires explicit folder update, never a transient retry.
     "broken data stream",  # PIL: JPEG 数据流损坏
     "image file is truncated",  # PIL: 文件被截断(也可能瞬态,但实测都是真坏)
     "cannot identify image file",  # PIL: UnidentifiedImageError
@@ -85,6 +91,8 @@ class Task:
     created_at: str
     started_at: str | None
     completed_at: str | None
+    run_id: str | None = None
+    input_revision: int = 0
 
 
 def _row_to_task(row) -> Task:
@@ -99,12 +107,65 @@ def _row_to_task(row) -> Task:
         created_at=str(row["created_at"]),
         started_at=(str(row["started_at"]) if row["started_at"] is not None else None),
         completed_at=(str(row["completed_at"]) if row["completed_at"] is not None else None),
+        run_id=str(row["run_id"]) if row["run_id"] else None,
+        input_revision=int(row["input_revision"]),
     )
 
 
 # ---------------------------------------------------------------------------
 # Enqueue
 # ---------------------------------------------------------------------------
+
+
+async def _attach_legacy_runs(db: Database, library_id: str | None = None) -> None:
+    """Adopt pre-migration tasks, inside the caller's write transaction."""
+    sql = "SELECT DISTINCT library_id FROM task_queue WHERE run_id IS NULL"
+    params: tuple[object, ...] = ()
+    if library_id is not None:
+        sql += " AND library_id=?"
+        params = (library_id,)
+    async with db.conn.execute(sql, params) as cur:
+        libraries = await cur.fetchall()
+    for row in libraries:
+        run_id = str(uuid.uuid4())
+        await db.conn.execute(
+            "INSERT INTO analysis_runs(id,library_id,created_at) VALUES(?,?,?)",
+            (run_id, row["library_id"], _now_iso()),
+        )
+        await db.conn.execute(
+            "UPDATE task_queue SET run_id=? WHERE library_id=? AND run_id IS NULL",
+            (run_id, row["library_id"]),
+        )
+
+
+async def get_library_control(db: Database, library_id: str) -> dict:
+    async with db.conn.execute(
+        "SELECT id,desired_state FROM analysis_runs WHERE library_id=? ORDER BY rowid DESC LIMIT 1",
+        (library_id,),
+    ) as cur:
+        row = await cur.fetchone()
+    return {
+        "run_id": str(row["id"]) if row else None,
+        "desired_state": str(row["desired_state"]) if row else None,
+    }
+
+
+async def get_task_force_rerun(db: Database, task: Task) -> bool:
+    if not task.run_id:
+        return False
+    async with db.conn.execute(
+        "SELECT force_rerun FROM analysis_runs WHERE id=?", (task.run_id,)
+    ) as cur:
+        row = await cur.fetchone()
+    return bool(row and row[0])
+
+
+async def _run_desired_state(db: Database, run_id: str | None) -> str:
+    async with db.conn.execute(
+        "SELECT desired_state FROM analysis_runs WHERE id=?", (run_id,)
+    ) as cur:
+        row = await cur.fetchone()
+    return str(row[0]) if row else "running"
 
 
 async def enqueue_photos(
@@ -116,73 +177,53 @@ async def enqueue_photos(
     current_pipeline_version: str | None = None,
     force_rerun: bool = False,
 ) -> int:
-    """Enqueue analysis tasks for the given photo_ids.
-
-    幂等性保证（去重维度）：
-    1. 跳过已有 pending/processing/paused 任务的 photo（避免分析中再点击）
-    2. 若给定 current_pipeline_version 且 force_rerun=False：跳过已经在该 version 完成分析（active）
-       的 photo（避免重复点击「开始分析」累积 task_queue）
-
-    没传 current_pipeline_version 时只做规则 1（兼容）。
-
-    Returns: 实际新入队的任务数。
-    """
+    """Atomically enqueue one active task per photo and persist the run intent."""
     if not photo_ids:
         return 0
-
-    conn = db.conn
-    placeholders = ",".join("?" * len(photo_ids))
-
-    # 规则 1：active task_queue 状态去重
-    active_states = (
-        TaskStatus.PENDING.value,
-        TaskStatus.PROCESSING.value,
-        TaskStatus.PAUSED.value,
-    )
-    active_placeholders = ",".join("?" * len(active_states))
-    query_active = (
-        f"SELECT photo_id FROM task_queue "
-        f"WHERE photo_id IN ({placeholders}) AND status IN ({active_placeholders})"
-    )
-    async with conn.execute(query_active, (*photo_ids, *active_states)) as cur:
-        skip_active = {str(r["photo_id"]) async for r in cur}
-
-    # 规则 2：当前 pipeline_version 已分析过的 photo（active=1）
-    skip_done: set[str] = set()
-    if current_pipeline_version and not force_rerun:
-        query_done = (
-            f"SELECT photo_id FROM analysis_results "
-            f"WHERE photo_id IN ({placeholders}) "
-            f"  AND pipeline_version = ? "
-            f"  AND is_active = 1"
-        )
+    async with db.transaction() as conn:
+        await _attach_legacy_runs(db, library_id)
         async with conn.execute(
-            query_done,
-            (*photo_ids, current_pipeline_version),
+            "SELECT r.id,r.desired_state FROM analysis_runs r JOIN task_queue t ON t.run_id=r.id "
+            "WHERE r.library_id=? AND r.desired_state IN ('running','paused') "
+            "AND t.status IN ('pending','processing','paused') ORDER BY r.rowid DESC LIMIT 1",
+            (library_id,),
         ) as cur:
-            skip_done = {str(r["photo_id"]) async for r in cur}
-
-    skip = skip_active | skip_done
-    inserted = 0
-    now = _now_iso()
-    for pid in photo_ids:
-        if pid in skip:
-            continue
-        await conn.execute(
-            "INSERT INTO task_queue (id, photo_id, library_id, status, priority, "
-            "attempts, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)",
-            (str(uuid.uuid4()), pid, library_id, TaskStatus.PENDING.value, priority, now),
-        )
-        inserted += 1
-    await conn.commit()
+            run = await cur.fetchone()
+        run_id = str(run["id"]) if run else str(uuid.uuid4())
+        status = "paused" if run and run["desired_state"] == "paused" else "pending"
+        if run is None:
+            await conn.execute(
+                "INSERT INTO analysis_runs(id,library_id,pipeline_version,force_rerun,created_at) "
+                "VALUES(?,?,?,?,?)",
+                (run_id, library_id, current_pipeline_version, int(force_rerun), _now_iso()),
+            )
+        inserted = 0
+        for pid in dict.fromkeys(photo_ids):
+            if current_pipeline_version and not force_rerun:
+                async with conn.execute(
+                    "SELECT 1 FROM analysis_results ar JOIN photos p ON p.id=ar.photo_id "
+                    "WHERE ar.photo_id=? AND ar.pipeline_version=? AND ar.is_active=1 "
+                    "AND ar.input_revision=p.input_revision "
+                    "AND (ar.input_hash IS p.file_hash OR ar.input_hash IS NULL)",
+                    (pid, current_pipeline_version),
+                ) as cur:
+                    if await cur.fetchone() is not None:
+                        continue
+            async with conn.execute(
+                "INSERT INTO task_queue(id,photo_id,library_id,status,priority,attempts,created_at,"
+                "run_id,input_revision) SELECT ?,id,library_id,?,?,0,?,?,input_revision "
+                "FROM photos "
+                "WHERE id=? AND library_id=? AND input_needs_scan=0 "
+                "ON CONFLICT DO NOTHING RETURNING id",
+                (str(uuid.uuid4()), status, priority, _now_iso(), run_id, pid, library_id),
+            ) as cur:
+                inserted += int(await cur.fetchone() is not None)
     await logger.ainfo(
         "Enqueued analysis tasks",
         library_id=library_id,
         requested=len(photo_ids),
-        skipped_active=len(skip_active),
-        skipped_done=len(skip_done),
-        force_rerun=force_rerun,
         inserted=inserted,
+        force_rerun=force_rerun,
     )
     return inserted
 
@@ -270,16 +311,16 @@ async def clear_terminal_tasks(db: Database, library_id: str) -> int:
     783 completed + 783 pending = 1566 total). Analysis history is preserved in
     `analysis_results`; stale terminal queue rows can be dropped safely.
     """
-    conn = db.conn
-    async with conn.execute(
-        "DELETE FROM task_queue "
-        "WHERE library_id = ? AND status IN ('completed', 'dead', 'cancelled') "
-        "RETURNING id",
-        (library_id,),
-    ) as cur:
-        rows = list(await cur.fetchall())
-    await conn.commit()
-    return len(rows)
+    async with db.transaction():
+        conn = db.conn
+        async with conn.execute(
+            "DELETE FROM task_queue "
+            "WHERE library_id = ? AND status IN ('completed', 'dead', 'cancelled') "
+            "RETURNING id",
+            (library_id,),
+        ) as cur:
+            rows = list(await cur.fetchall())
+        return len(rows)
 
 
 async def get_task(db: Database, task_id: str) -> Task | None:
@@ -302,34 +343,36 @@ async def pick_next(db: Database, library_id: str | None = None) -> Task | None:
     单条 UPDATE ... WHERE id=(SELECT ...) RETURNING 保证领取和状态切换原子。
     返回被选中的 task（已切到 PROCESSING）；无待办时返回 None。
     """
-    conn = db.conn
+    async with db.transaction():
+        conn = db.conn
+        await _attach_legacy_runs(db, library_id)
+        now = _now_iso()
+        if library_id is None:
+            sql = (
+                "UPDATE task_queue SET status = ?, started_at = ? "
+                "WHERE id = ("
+                "  SELECT id FROM task_queue WHERE status = 'pending' AND run_id IN "
+                "(SELECT id FROM analysis_runs WHERE desired_state='running') "
+                "  ORDER BY priority DESC, created_at ASC LIMIT 1"
+                ") "
+                "RETURNING *"
+            )
+            params: tuple[object, ...] = (TaskStatus.PROCESSING.value, now)
+        else:
+            sql = (
+                "UPDATE task_queue SET status = ?, started_at = ? "
+                "WHERE id = ("
+                "  SELECT id FROM task_queue WHERE status = 'pending' AND run_id IN "
+                "(SELECT id FROM analysis_runs WHERE desired_state='running') AND library_id = ? "
+                "  ORDER BY priority DESC, created_at ASC LIMIT 1"
+                ") "
+                "RETURNING *"
+            )
+            params = (TaskStatus.PROCESSING.value, now, library_id)
 
-    now = _now_iso()
-    if library_id is None:
-        sql = (
-            "UPDATE task_queue SET status = ?, started_at = ? "
-            "WHERE id = ("
-            "  SELECT id FROM task_queue WHERE status = 'pending' "
-            "  ORDER BY priority DESC, created_at ASC LIMIT 1"
-            ") "
-            "RETURNING *"
-        )
-        params: tuple[object, ...] = (TaskStatus.PROCESSING.value, now)
-    else:
-        sql = (
-            "UPDATE task_queue SET status = ?, started_at = ? "
-            "WHERE id = ("
-            "  SELECT id FROM task_queue WHERE status = 'pending' AND library_id = ? "
-            "  ORDER BY priority DESC, created_at ASC LIMIT 1"
-            ") "
-            "RETURNING *"
-        )
-        params = (TaskStatus.PROCESSING.value, now, library_id)
-
-    async with conn.execute(sql, params) as cur:
-        updated = await cur.fetchone()
-    await conn.commit()
-    return _row_to_task(updated) if updated else None
+        async with conn.execute(sql, params) as cur:
+            updated = await cur.fetchone()
+        return _row_to_task(updated) if updated else None
 
 
 async def transition(
@@ -350,59 +393,59 @@ async def transition(
         IllegalTransitionError: 不合法的转换
         RuntimeError: task 不存在
     """
-    task = await get_task(db, task_id)
-    if task is None:
-        msg = f"Task not found: {task_id}"
-        raise RuntimeError(msg)
+    async with db.transaction():
+        task = await get_task(db, task_id)
+        if task is None:
+            msg = f"Task not found: {task_id}"
+            raise RuntimeError(msg)
 
-    legal = _LEGAL_TRANSITIONS[task.status]
-    if to not in legal:
-        msg = (
-            f"Illegal transition: {task.status.value} → {to.value} "
-            f"(allowed: {sorted(s.value for s in legal)})"
-        )
-        raise IllegalTransitionError(msg)
+        legal = _LEGAL_TRANSITIONS[task.status]
+        if to not in legal:
+            msg = (
+                f"Illegal transition: {task.status.value} → {to.value} "
+                f"(allowed: {sorted(s.value for s in legal)})"
+            )
+            raise IllegalTransitionError(msg)
 
-    now = _now_iso()
-    conn = db.conn
-    params: list[object] = [to.value]
-    sets: list[str] = ["status = ?"]
+        now = _now_iso()
+        conn = db.conn
+        params: list[object] = [to.value]
+        sets: list[str] = ["status = ?"]
 
-    if to is TaskStatus.PROCESSING:
-        sets.append("started_at = COALESCE(started_at, ?)")
-        params.append(now)
-        sets.append("error_message = NULL")
-    elif to in (TaskStatus.COMPLETED, TaskStatus.DEAD, TaskStatus.CANCELLED):
-        sets.append("completed_at = ?")
-        params.append(now)
-        if to is TaskStatus.COMPLETED:
+        if to is TaskStatus.PROCESSING:
+            sets.append("started_at = COALESCE(started_at, ?)")
+            params.append(now)
             sets.append("error_message = NULL")
-    elif to is TaskStatus.FAILED:
-        sets.append("attempts = attempts + 1")
-        sets.append("error_message = ?")
-        params.append(error_message)
-        sets.append("completed_at = ?")
-        params.append(now)
-    elif to is TaskStatus.PAUSED:
-        # keep error_message as-is
-        pass
-    elif to is TaskStatus.PENDING:
-        # 重试：清 completed_at 和 started_at（下次 pick 会设）
-        sets.append("started_at = NULL")
-        sets.append("completed_at = NULL")
-        if error_message is not None:
+        elif to in (TaskStatus.COMPLETED, TaskStatus.DEAD, TaskStatus.CANCELLED):
+            sets.append("completed_at = ?")
+            params.append(now)
+            if to is TaskStatus.COMPLETED:
+                sets.append("error_message = NULL")
+        elif to is TaskStatus.FAILED:
+            sets.append("attempts = attempts + 1")
             sets.append("error_message = ?")
             params.append(error_message)
+            sets.append("completed_at = ?")
+            params.append(now)
+        elif to is TaskStatus.PAUSED:
+            # keep error_message as-is
+            pass
+        elif to is TaskStatus.PENDING:
+            # 重试：清 completed_at 和 started_at（下次 pick 会设）
+            sets.append("started_at = NULL")
+            sets.append("completed_at = NULL")
+            if error_message is not None:
+                sets.append("error_message = ?")
+                params.append(error_message)
 
-    params.append(task_id)
-    await conn.execute(
-        f"UPDATE task_queue SET {', '.join(sets)} WHERE id = ?",
-        params,
-    )
-    await conn.commit()
-    updated = await get_task(db, task_id)
-    assert updated is not None
-    return updated
+        params.append(task_id)
+        await conn.execute(
+            f"UPDATE task_queue SET {', '.join(sets)} WHERE id = ?",
+            params,
+        )
+        updated = await get_task(db, task_id)
+        assert updated is not None
+        return updated
 
 
 async def mark_failed_with_retry(
@@ -423,44 +466,50 @@ async def mark_failed_with_retry(
     task 会永久停在 FAILED 永无人接管。这里加 fallback 兜底:第二步异常时直接
     SQL 强推到目标态(跳过状态机校验,只更新仍 FAILED 的行,避免覆盖被别处改动)。
     """
-    task = await transition(db, task_id, TaskStatus.FAILED, error_message=error)
-    permanent = is_permanent_failure(error)
-    next_status = (
-        TaskStatus.DEAD if permanent or task.attempts >= MAX_ATTEMPTS else TaskStatus.PENDING
-    )
-    if permanent:
-        await logger.ainfo(
-            "Task marked DEAD on permanent failure (no retry)",
-            task_id=task_id,
-            attempts=task.attempts,
-            error=error[:120],
+    async with db.transaction():
+        task = await transition(db, task_id, TaskStatus.FAILED, error_message=error)
+        permanent = is_permanent_failure(error)
+        next_status = (
+            TaskStatus.DEAD if permanent or task.attempts >= MAX_ATTEMPTS else TaskStatus.PENDING
         )
-    try:
-        return await transition(db, task_id, next_status)
-    except Exception:
-        await logger.aexception(
-            "mark_failed_with_retry: second transition failed, falling back to direct UPDATE",
-            task_id=task_id,
-            target=next_status.value,
-        )
-        # 直接 UPDATE,只在 status 仍是 FAILED 时生效(防止覆盖别处的 transition)
-        if next_status is TaskStatus.PENDING:
-            await db.conn.execute(
-                "UPDATE task_queue SET status = ?, started_at = NULL, completed_at = NULL "
-                "WHERE id = ? AND status = ?",
-                (TaskStatus.PENDING.value, task_id, TaskStatus.FAILED.value),
+        desired_state = await _run_desired_state(db, task.run_id)
+        if desired_state == "cancelled":
+            next_status = TaskStatus.CANCELLED
+        elif desired_state == "paused" and next_status is TaskStatus.PENDING:
+            next_status = TaskStatus.PAUSED
+        if permanent:
+            await logger.ainfo(
+                "Task marked DEAD on permanent failure (no retry)",
+                task_id=task_id,
+                attempts=task.attempts,
+                error=error[:120],
             )
-        else:
-            await db.conn.execute(
-                "UPDATE task_queue SET status = ?, completed_at = ? WHERE id = ? AND status = ?",
-                (TaskStatus.DEAD.value, _now_iso(), task_id, TaskStatus.FAILED.value),
+        try:
+            return await transition(db, task_id, next_status)
+        except Exception:
+            await logger.aexception(
+                "mark_failed_with_retry: second transition failed, falling back to direct UPDATE",
+                task_id=task_id,
+                target=next_status.value,
             )
-        await db.conn.commit()
-        recovered = await get_task(db, task_id)
-        if recovered is None:
-            msg = f"Task vanished after fallback UPDATE: {task_id}"
-            raise RuntimeError(msg) from None
-        return recovered
+            # 直接 UPDATE,只在 status 仍是 FAILED 时生效(防止覆盖别处的 transition)
+            if next_status is TaskStatus.PENDING:
+                await db.conn.execute(
+                    "UPDATE task_queue SET status = ?, started_at = NULL, completed_at = NULL "
+                    "WHERE id = ? AND status = ?",
+                    (TaskStatus.PENDING.value, task_id, TaskStatus.FAILED.value),
+                )
+            else:
+                await db.conn.execute(
+                    "UPDATE task_queue SET status = ?, completed_at = ? WHERE id = ? AND "
+                    "status = ?",
+                    (next_status.value, _now_iso(), task_id, TaskStatus.FAILED.value),
+                )
+            recovered = await get_task(db, task_id)
+            if recovered is None:
+                msg = f"Task vanished after fallback UPDATE: {task_id}"
+                raise RuntimeError(msg) from None
+            return recovered
 
 
 # ---------------------------------------------------------------------------
@@ -487,20 +536,31 @@ async def reset_transient_tasks(db: Database, *, reason: str) -> int:
 
     Returns: 恢复的任务数(两类合计)。
     """
-    conn = db.conn
-    async with conn.execute(
-        "UPDATE task_queue "
-        "SET status = 'pending', started_at = NULL, completed_at = NULL, "
-        "    attempts = 0, error_message = NULL "
-        "WHERE status IN ('processing', 'failed') "
-        "RETURNING id, status",
-    ) as cur:
-        rows = list(await cur.fetchall())
-    await conn.commit()
-    recovered = len(rows)
-    if recovered > 0:
-        await logger.ainfo("Reset transient tasks", count=recovered, reason=reason)
-    return recovered
+    async with db.transaction():
+        conn = db.conn
+        await _attach_legacy_runs(db)
+        # A legacy FAILED row can coexist with a newer active retry. Never
+        # reactivate two rows for the same photo during crash recovery.
+        await conn.execute(
+            "UPDATE task_queue AS t SET status='cancelled' WHERE t.status='failed' "
+            "AND EXISTS (SELECT 1 FROM task_queue o WHERE o.photo_id=t.photo_id AND o.id!=t.id "
+            "AND (o.status IN ('pending','processing','paused') "
+            "OR (o.status='failed' AND o.rowid<t.rowid)))"
+        )
+        async with conn.execute(
+            "UPDATE task_queue "
+            "SET status = CASE (SELECT desired_state FROM analysis_runs WHERE id=run_id) "
+            "WHEN 'paused' THEN 'paused' WHEN 'cancelled' THEN 'cancelled' ELSE 'pending' END, "
+            "started_at = NULL, completed_at = NULL, "
+            "    attempts = 0, error_message = NULL "
+            "WHERE status IN ('processing', 'failed') "
+            "RETURNING id, status",
+        ) as cur:
+            rows = list(await cur.fetchall())
+        recovered = len(rows)
+        if recovered > 0:
+            await logger.ainfo("Reset transient tasks", count=recovered, reason=reason)
+        return recovered
 
 
 async def recover_on_startup(db: Database) -> int:
@@ -573,41 +633,59 @@ async def pause_library(db: Database, library_id: str) -> int:
     safely interruptible; the worker will finish the current photo, then stop
     because no PENDING tasks remain.
     """
-    conn = db.conn
-    async with conn.execute(
-        "UPDATE task_queue SET status = 'paused' "
-        "WHERE library_id = ? AND status = 'pending' "
-        "RETURNING id",
-        (library_id,),
-    ) as cur:
-        rows = list(await cur.fetchall())
-    await conn.commit()
-    return len(rows)
+    async with db.transaction():
+        conn = db.conn
+        await _attach_legacy_runs(db, library_id)
+        await conn.execute(
+            "UPDATE analysis_runs SET desired_state=? WHERE library_id=?"
+            " AND desired_state='running'",
+            ("paused", library_id),
+        )
+        async with conn.execute(
+            "UPDATE task_queue SET status = 'paused' "
+            "WHERE library_id = ? AND status = 'pending' "
+            "RETURNING id",
+            (library_id,),
+        ) as cur:
+            rows = list(await cur.fetchall())
+        return len(rows)
 
 
 async def resume_library(db: Database, library_id: str) -> int:
     """Resume all PAUSED tasks in a library → PENDING."""
-    conn = db.conn
-    async with conn.execute(
-        "UPDATE task_queue SET status = 'pending' "
-        "WHERE library_id = ? AND status = 'paused' "
-        "RETURNING id",
-        (library_id,),
-    ) as cur:
-        rows = list(await cur.fetchall())
-    await conn.commit()
-    return len(rows)
+    async with db.transaction():
+        conn = db.conn
+        await _attach_legacy_runs(db, library_id)
+        await conn.execute(
+            "UPDATE analysis_runs SET desired_state=? WHERE library_id=?"
+            " AND desired_state='paused'",
+            ("running", library_id),
+        )
+        async with conn.execute(
+            "UPDATE task_queue SET status = 'pending' "
+            "WHERE library_id = ? AND status = 'paused' "
+            "RETURNING id",
+            (library_id,),
+        ) as cur:
+            rows = list(await cur.fetchall())
+        return len(rows)
 
 
 async def cancel_library(db: Database, library_id: str) -> int:
     """Cancel queued tasks in a library, leaving in-flight work to finish."""
-    conn = db.conn
-    async with conn.execute(
-        "UPDATE task_queue SET status = 'cancelled', completed_at = ? "
-        "WHERE library_id = ? AND status IN ('pending', 'paused') "
-        "RETURNING id",
-        (_now_iso(), library_id),
-    ) as cur:
-        rows = list(await cur.fetchall())
-    await conn.commit()
-    return len(rows)
+    async with db.transaction():
+        conn = db.conn
+        await _attach_legacy_runs(db, library_id)
+        await conn.execute(
+            "UPDATE analysis_runs SET desired_state=? WHERE library_id=?"
+            " AND desired_state IN ('running','paused')",
+            ("cancelled", library_id),
+        )
+        async with conn.execute(
+            "UPDATE task_queue SET status = 'cancelled', completed_at = ? "
+            "WHERE library_id = ? AND status IN ('pending', 'paused') "
+            "RETURNING id",
+            (_now_iso(), library_id),
+        ) as cur:
+            rows = list(await cur.fetchall())
+        return len(rows)

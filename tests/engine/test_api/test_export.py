@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -20,15 +21,17 @@ def _write_file(path: Path, body: bytes = b"photo") -> None:
     path.write_bytes(body)
 
 
-async def _await_job(client: AsyncClient, job_id: str, timeout: float = 10.0) -> dict[str, Any]:
+async def _await_job(
+    client: AsyncClient, job_id: str, wait_seconds: float = 10.0
+) -> dict[str, Any]:
     """轮询 job 快照直到终态。"""
-    deadline = asyncio.get_running_loop().time() + timeout
+    deadline = asyncio.get_running_loop().time() + wait_seconds
     while asyncio.get_running_loop().time() < deadline:
         snapshot = (await client.get(f"/export/jobs/{job_id}")).json()
         if snapshot["status"] != "running":
             return snapshot
         await asyncio.sleep(0.01)
-    msg = f"export job {job_id} did not finish within {timeout}s"
+    msg = f"export job {job_id} did not finish within {wait_seconds}s"
     raise AssertionError(msg)
 
 
@@ -822,3 +825,125 @@ def test_run_export_stops_at_cancel_checkpoint_without_partial_files(
     assert copied == []
     manifest = json.loads(Path(result.manifest.json_path or "").read_text(encoding="utf-8"))
     assert manifest["导出摘要"]["任务状态"] == "已取消（仅含取消前已导出的部分）"
+
+
+async def _selection_preview(client: AsyncClient) -> dict[str, Any]:
+    """The model says egret; the effective manual identity is kingfisher in reject grade."""
+    db = client._transport.app.state.db  # type: ignore[attr-defined]
+    bird = {
+        "bbox": {"x1": 1, "y1": 2, "x2": 20, "y2": 30, "confidence": 0.9},
+        "species": "白鹭",
+        "species_latin": "Egretta garzetta",
+        "species_candidates": [
+            {"canonical_sci": "Egretta garzetta", "recognition_state": "recognized"}
+        ],
+    }
+    async with db.transaction() as conn:
+        await conn.execute(
+            "UPDATE analysis_results SET result_json = ? WHERE photo_id = 'p3'",
+            (json.dumps({"bird_count": 1, "best": bird, "detections": [bird]}),),
+        )
+        await conn.execute(
+            "INSERT INTO photo_species_overrides "
+            "(photo_id, bird_index, canonical_sci, canonical_zh, updated_at) "
+            "VALUES ('p3', 0, 'Alcedo atthis', '普通翠鸟', '2026-11-17')"
+        )
+    response = await client.post(
+        "/library/lib-export/selection/query",
+        json={"species_keys": ["sci:Alcedo atthis"], "grades": ["reject"]},
+    )
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert data["matched_photo_ids"] == ["p3"]
+    return data
+
+
+async def test_selection_export_uses_frozen_effective_identity_and_exact_members(
+    export_client: tuple[AsyncClient, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from engine.services import exporter
+
+    client, _ = export_client
+    preview = await _selection_preview(client)
+    release = threading.Event()
+    original = exporter._run_export
+
+    def delayed_export(**kwargs: Any):
+        assert release.wait(5), "test did not release export worker"
+        return original(**kwargs)
+
+    monkeypatch.setattr(exporter, "_run_export", delayed_export)
+    started = await client.post(
+        "/export/library/lib-export",
+        json={
+            "target_dir": str(tmp_path / "out"),
+            "scope": "selection",
+            "selection_query": preview["query"],
+            "projection_revision": preview["projection_revision"],
+            # A second export-panel grade must not silently replace current selection.
+            "grades": ["select"],
+            "min_score": 99,
+        },
+    )
+    assert started.status_code == 200, started.text
+    db = client._transport.app.state.db  # type: ignore[attr-defined]
+    try:
+        async with db.transaction() as conn:
+            await conn.execute(
+                "UPDATE photo_species_overrides SET canonical_sci = 'Egretta garzetta', "
+                "canonical_zh = '白鹭' WHERE photo_id = 'p3'"
+            )
+            await conn.execute(
+                "INSERT INTO photo_decisions (photo_id, decision, updated_at) "
+                "VALUES ('p3', 'select', '2026-11-17')"
+            )
+    finally:
+        release.set()
+    result = await _await_export(client, started)
+    assert result["selected_count"] == result["exported_count"] == 1
+    assert (tmp_path / "out").exists()
+    report = json.loads(await AsyncPath(result["manifest"]["json"]).read_text())
+    assert report["导出摘要"]["导出范围"] == "当前筛选"
+    row = report["照片清单"][0]
+    assert row["照片ID"] == "p3"
+    assert row["物种"] == "普通翠鸟"
+    assert row["评级"] == "淘汰"
+
+
+async def test_selection_export_rejects_changed_preview_before_creating_output(
+    export_client: tuple[AsyncClient, Path], tmp_path: Path
+) -> None:
+    client, _ = export_client
+    preview = await _selection_preview(client)
+    db = client._transport.app.state.db  # type: ignore[attr-defined]
+    async with db.transaction() as conn:
+        await conn.execute(
+            "INSERT INTO photo_decisions (photo_id, decision, updated_at) "
+            "VALUES ('p3', 'select', '2026-11-17')"
+        )
+    target = tmp_path / "out"
+    response = await client.post(
+        "/export/library/lib-export",
+        json={
+            "target_dir": str(target),
+            "scope": "selection",
+            "selection_query": preview["query"],
+            "projection_revision": preview["projection_revision"],
+        },
+    )
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "selection_changed"
+    assert not target.exists()
+
+
+async def test_selection_export_requires_explicit_preview_contract(
+    export_client: tuple[AsyncClient, Path], tmp_path: Path
+) -> None:
+    client, _ = export_client
+    response = await client.post(
+        "/export/library/lib-export",
+        json={"target_dir": str(tmp_path / "out"), "scope": "selection"},
+    )
+    assert response.status_code == 422

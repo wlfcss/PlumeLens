@@ -48,6 +48,7 @@ import {
 import { cn } from '@/lib/utils'
 import { ReviewImageStage } from './review-image-stage'
 import { SpeciesOverrideEditor } from './species-override-editor'
+import { useModalDialog } from '@/hooks/use-modal-dialog'
 
 const REVIEW_ZOOM_OPTIONS = [1.5, 2.5, 4] as const
 const DEFAULT_REVIEW_ZOOM = 2.5
@@ -75,6 +76,10 @@ const GRADE_HUD_KEY: Record<PhotoGrade, '1' | '2' | '3' | '4'> = {
 }
 
 export function ReviewModal({
+  saveError,
+  saving,
+  onDismissError,
+  outsideSelection = false,
   detail,
   groupPhotos,
   onClose,
@@ -85,6 +90,10 @@ export function ReviewModal({
   photos,
   t,
 }: {
+  saveError?: string | null
+  saving?: boolean
+  onDismissError?: () => void
+  outsideSelection?: boolean
   detail: ReviewDetail
   groupPhotos: PhotoRecord[]
   onClose: () => void
@@ -101,6 +110,7 @@ export function ReviewModal({
   t: ReturnType<typeof useTranslation>['t']
 }) {
   const { photo, group } = detail
+  const dialogRef = useModalDialog()
   // 覆盖层分工：检测框 / 对焦区域在原图上看全局位置；姿态点保留在 IQA 裁切图上看细节。
   const [showBbox, setShowBbox] = useState(true)
   const [showPose, setShowPose] = useState(false)
@@ -211,6 +221,8 @@ export function ReviewModal({
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || document.querySelector(':popover-open')) return
+      if (event.target instanceof Node && !dialogRef.current?.contains(event.target)) return
       const target = event.target
       if (
         target instanceof HTMLInputElement ||
@@ -229,11 +241,6 @@ export function ReviewModal({
         return
       }
 
-      if (event.key === 'Escape') {
-        event.preventDefault()
-        onClose()
-        return
-      }
       if (event.key === 'ArrowLeft') {
         event.preventDefault()
         selectRelativePhoto(-1)
@@ -271,13 +278,37 @@ export function ReviewModal({
   }, [bbox, imgW, imgH])
 
   return (
-    <div
+    <dialog
+      ref={dialogRef}
+      aria-label={t('selection.review.title')}
+      onCancel={(event) => {
+        event.preventDefault()
+        if (fullscreenOpen) setFullscreenOpen(false)
+        else onClose()
+      }}
       className="overlay-backdrop"
       onPointerDown={(event) => {
         if (event.target === event.currentTarget) onClose()
       }}
     >
       <div className="review-panel" onPointerDown={(event) => event.stopPropagation()}>
+        {saveError ? (
+          <div className="review-save-feedback" role="alert">
+            <span>{saveError}</span>
+            <button type="button" className="button-ghost button-compact" onClick={onDismissError}>
+              {t('common.close')}
+            </button>
+          </div>
+        ) : saving ? (
+          <div className="review-save-feedback" role="status">
+            {t('selection.saving')}
+          </div>
+        ) : null}
+        {outsideSelection ? (
+          <div className="review-scope-notice" role="status">
+            {t('selection.speciesFilter.outsideSelection')}
+          </div>
+        ) : null}
         <div className="review-stage">
           {hudFlash ? (
             <div
@@ -621,7 +652,7 @@ export function ReviewModal({
           />
         ) : null}
       </div>
-    </div>
+    </dialog>
   )
 }
 

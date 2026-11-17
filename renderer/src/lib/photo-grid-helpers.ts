@@ -335,11 +335,7 @@ export function visibleTileCountForSegments(
   segments: PhotoSegment[],
   expandedSegmentIds: Set<string>,
 ) {
-  const stackSegments = segments.filter((segment) => segment.photos.length > 1)
-  if (stackSegments.length === 0) {
-    return segments.reduce((count, segment) => count + segment.photos.length, 0)
-  }
-  return stackSegments.reduce(
+  return segments.reduce(
     (count, segment) => count + (expandedSegmentIds.has(segment.id) ? segment.photos.length : 1),
     0,
   )
@@ -381,6 +377,14 @@ export function visibleGroupTitle(
   const time = formatGroupClock(group.startAt) ?? parseGroupTitleTime(group.title) ?? '--:--'
   const originalPhotoCount = group.originalPhotoCount ?? visiblePhotoCount
   const sceneNumber = group.sceneNumber ?? parseGroupTitleScene(group.title)
+  if (visiblePhotoCount < originalPhotoCount) {
+    return t('selection.group.filteredTitle', {
+      time,
+      scene: sceneNumber ?? '—',
+      count: visiblePhotoCount,
+      total: originalPhotoCount,
+    })
+  }
 
   if (sceneNumber === null) {
     if (visiblePhotoCount === 1 && originalPhotoCount <= 1) {
@@ -448,11 +452,7 @@ export function categoryLabelKey(category: PhotoCategory) {
 /** 复核连拍照片顺序 — 内部按段落构造,堆叠段在同段内被一起展开。 */
 export function buildReviewPhotoOrderForGroup(photos: PhotoRecord[]): PhotoRecord[] {
   const segments = buildPhotoSegments(photos)
-  const hasStackSegments = segments.some((segment) => segment.photos.length > 1)
-  const visibleSegments = hasStackSegments
-    ? segments.filter((segment) => segment.photos.length > 1)
-    : segments
-  return visibleSegments.flatMap((segment) => segment.photos)
+  return segments.flatMap((segment) => segment.photos)
 }
 
 export function buildReviewPhotoOrderForGroupedEntries(

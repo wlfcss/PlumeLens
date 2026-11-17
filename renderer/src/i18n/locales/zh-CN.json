@@ -10,7 +10,10 @@
     "archive": "羽迹",
     "primary": "主导航",
     "search": "搜索文件夹、文件名或物种",
-    "loadingDisabled": "本地引擎加载完成后可用"
+    "loadingDisabled": "本地引擎加载完成后可用",
+    "searchSelection": "搜索当前文件夹的照片或鸟种",
+    "searchStart": "搜索工作集文件夹",
+    "searchArchive": "搜索鸟种或个人记录"
   },
   "common": {
     "export": "导出",
@@ -18,7 +21,8 @@
     "collapse": "收起",
     "settings": "设置",
     "close": "关闭",
-    "cancel": "取消"
+    "cancel": "取消",
+    "retry": "重试"
   },
   "errors": {
     "renderFailed": {
@@ -125,7 +129,8 @@
     "cpuFallback": "已自动切换至 CPU 模式（GPU 推理不稳定）— 物种识别速度会变慢，但更稳定",
     "lastCrash": "最近一次：{{signal}}",
     "totalCrashes": "累计崩溃 {{count}} 次",
-    "openLogs": "查看日志"
+    "openLogs": "查看日志",
+    "healthFailed": "无法连接分析引擎，请重试或查看日志。"
   },
   "start": {
     "kicker": "本地智能筛片工作台",
@@ -208,7 +213,8 @@
       "invalid_image": "无法识别为图像文件",
       "file_missing": "源文件已不存在",
       "timeout": "分析超时（管线卡住）",
-      "unknown": "分析失败，详见日志"
+      "unknown": "分析失败，详见日志",
+      "source_changed": "源照片已变化，请先更新文件夹后重新分析。"
     },
     "sidebar": {
       "label": "文件夹导航",
@@ -355,7 +361,8 @@
       "pendingCountTitle": "{{time}} · 待分组 · {{count}} 张",
       "singleTitle": "场景 #{{scene}} · {{time}}",
       "countTitle": "场景 #{{scene}} · {{time}} · {{count}} 张",
-      "durationTitle": "场景 #{{scene}} · {{time}} · {{count}} 张 · {{minutes}} 分钟"
+      "durationTitle": "场景 #{{scene}} · {{time}} · {{count}} 张 · {{minutes}} 分钟",
+      "filteredTitle": "场景 {{scene}} · {{time}} · 匹配 {{count}} / 场景 {{total}} 张"
     },
     "grade": {
       "reject": "淘汰",
@@ -540,7 +547,8 @@
         "nav": "切换/关闭"
       },
       "companion": "RAW 同伴",
-      "companionValue": "{{format}} · {{size}}"
+      "companionValue": "{{format}} · {{size}}",
+      "title": "深度复核"
     },
     "reviewReasons": {
       "no_bird": "当前帧没有检测到有效鸟主体，更适合直接淘汰或保留为空片记录",
@@ -596,7 +604,44 @@
       "sourceSafe": "源文件夹和照片原文件不会被删除，只是从鉴翎中移除。",
       "confirm": "移除",
       "removing": "正在移除…"
-    }
+    },
+    "speciesFilter": {
+      "all": "全部",
+      "trigger": "鸟种：{{value}}",
+      "selectedCount": "{{count}} 种",
+      "title": "筛选鸟种",
+      "clearOnly": "清除鸟种筛选",
+      "searchLabel": "查找当前文件夹中的鸟种",
+      "searchPlaceholder": "中文、拼音、英文或学名",
+      "includeReview": "包含待审判断",
+      "reviewHint": "选择鸟种时，包含待审或分歧的当前判断。",
+      "optionsLabel": "鸟种，可多选",
+      "unidentified": "含未识别鸟",
+      "reviewCount": "含待审 {{count}} 张",
+      "photoCount": "{{count}} 张",
+      "noOptions": "没有匹配的鸟种；已选条件保持不变。",
+      "error": "筛选加载失败，请重试。",
+      "updating": "正在更新筛选…",
+      "countHint": "按照片去重；鸟种与飞版匹配同一只鸟。",
+      "done": "完成",
+      "remove": "移除该条件",
+      "resultCount": "显示 {{count}} / 共 {{total}} 张",
+      "clearAll": "清除全部筛选",
+      "pendingAnalysis": "另有 {{count}} 张待分析，暂不参与鸟种筛选。",
+      "noPhotos": "没有符合条件的照片",
+      "noPhotosHint": "请调整鸟种、档位、飞版或搜索条件。",
+      "outsideSelection": "当前照片已不再符合筛选条件。关闭后从列表移除，下一张继续按原顺序复核。",
+      "reviewExcluded": "不含待审",
+      "allGrades": "全部（不含失败）",
+      "restoreDefault": "恢复默认筛选"
+    },
+    "saveFailed": "保存失败，未应用本次修改，请重试。",
+    "operationFailed": "操作失败，请检查引擎状态后重试。",
+    "saving": "正在保存…",
+    "pause": "暂停",
+    "resume": "继续分析",
+    "cancel": "取消分析",
+    "savePhotoFailed": "{{file}}：保存失败，未应用本次修改，请重试。"
   },
   "archive": {
     "label": "长期沉淀",
@@ -752,7 +797,13 @@
     "scope": {
       "label": "导出范围",
       "reviewed": "精选、可用、记录",
-      "manual": "手动范围"
+      "manual": "手动范围",
+      "current": "当前筛选 {{count}} 张",
+      "library": "整个文件夹",
+      "selectionHint": "范围已固定为选片条件；调整档位或分数请返回选片。",
+      "selectionSummary": "鸟种：{{species}} · {{flight}} · {{review}} · 档位：{{grades}}",
+      "allPostures": "全部姿态",
+      "confirmedOnly": "不含待审"
     },
     "scoreRange": {
       "label": "分数区间",
@@ -810,7 +861,7 @@
       "current": "正在复制 {{name}}"
     },
     "error": {
-      "insufficientSpace": "目标磁盘空间不足：本次导出约需 {{required}}，当前可用 {{free}}，还差 {{shortfall}}。可以关掉「同时导出 RAW 同伴文件」，或收窄分数区间后重试。",
+      "insufficientSpace": "目标磁盘空间不足：约需 {{required}}，可用 {{free}}，还差 {{shortfall}}。可取消勾选 RAW 格式（如 CR3）、收窄导出范围或更换目录。",
       "targetInsideSource": "导出位置不能位于源图库内部，请另选一个文件夹。",
       "targetContainsSource": "导出位置不能包含源图库，请另选一个与源图库互不包含的文件夹。",
       "libraryNotFound": "找不到该图库，请返回列表刷新后重试。",
@@ -818,7 +869,14 @@
       "alreadyRunning": "该图库已有一个导出正在进行，请等它结束或先取消。",
       "jobNotFound": "导出任务已不存在，可能是后台服务重启过，请重新发起导出。",
       "internal": "导出过程中出现内部错误，详情见日志。",
-      "unknown": "导出失败：{{message}}"
+      "unknown": "导出失败：{{message}}",
+      "selectionChanged": "筛选结果已变化，已刷新数量。请核对后重新开始。",
+      "sourceChanged": "源照片已变化，请更新文件夹后重试。",
+      "partialExport": "部分文件导出失败，请查看清单及输出目录后重试。",
+      "jobInterrupted": "引擎重启中断了导出。已完成文件保留，请检查输出目录。",
+      "snapshotWriteFailed": "无法保存导出任务状态，请检查数据目录空间后重试。",
+      "formatsFailed": "无法读取照片格式，请重试；暂不能开始文件导出。",
+      "invalidScoreRange": "分数须在 0–100 之间，最低分不能高于最高分。"
     },
     "formats": {
       "label": "照片格式",

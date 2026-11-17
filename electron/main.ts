@@ -33,6 +33,13 @@ let processManager: ProcessManager | null = null
 let allowAppQuit = false
 let allowWindowClose = false
 let closePromptOpen = false
+const hasInstanceLock = app.requestSingleInstanceLock()
+if (!hasInstanceLock) app.exit(0)
+app.on('second-instance', () => {
+  if (mainWindow?.isMinimized()) mainWindow.restore()
+  mainWindow?.show()
+  mainWindow?.focus()
+})
 
 const windowBounds = {
   width: 1680,
@@ -952,6 +959,7 @@ function lockdownUserData(userDataDir: string): void {
 
 // Lifecycle
 app.whenReady().then(async () => {
+  if (!hasInstanceLock) return
   // 在写任何文件之前先确保 userData 存在 + 锁权限,避免 settings.json / logs 等
   // 后续步骤把数据落到默认 0o755 目录上(权限收紧只对未来写入有意义,旧文件
   // 已经落盘的话需要手动 chmod 一次)。
@@ -1108,12 +1116,15 @@ app.on('window-all-closed', () => {
 })
 
 app.on('activate', () => {
+  if (allowAppQuit) return
   // macOS 隐藏/最小化后从 Dock 激活时重建窗口；正常关闭已退出进程。
   if (BrowserWindow.getAllWindows().length === 0) {
     createWindow()
   }
 })
 
+let engineShutdownComplete = false
+let engineShutdownPending: Promise<void> | null = null
 app.on('before-quit', (event) => {
   // 真正退出（cmd-Q / 关闭整个应用）才杀 engine。
   if (!allowAppQuit) {
@@ -1125,7 +1136,23 @@ app.on('before-quit', (event) => {
     })
     return
   }
-  processManager?.stop()
+  if (!engineShutdownComplete) {
+    event.preventDefault()
+    if (!engineShutdownPending) {
+      engineShutdownPending = Promise.resolve()
+        .then(async () => {
+          // Destroy this application's windows first so live SSE streams stop
+          // holding uvicorn open before its lifespan shutdown can run.
+          allowWindowClose = true
+          for (const window of BrowserWindow.getAllWindows()) window.destroy()
+          await processManager?.stop()
+        })
+        .finally(() => {
+          engineShutdownComplete = true
+          app.quit()
+        })
+    }
+  }
 })
 
 // 兜底:Node 进程意外退出(崩溃 / 被 kill)时杀 engine。
@@ -1135,8 +1162,7 @@ app.on('before-quit', (event) => {
 // 异步 SIGTERM→SIGKILL 兜底链全部失效。这里走同步 process.kill(-pid, 'SIGKILL')
 // 直接杀进程组(spawn 时 detached:true,pgid == pid)。
 process.on('exit', () => {
-  const pid = processManager?.getEnginePid()
-  if (pid !== undefined) {
+  for (const pid of processManager?.getEnginePids() ?? []) {
     try {
       process.kill(-pid, 'SIGKILL')
     } catch {

@@ -269,7 +269,7 @@ def _build_detection_detail(
                 "posture_method": str(pose_d.get("posture_method", "heuristic")),
             }
 
-    species, latin, _english, manual = _display_species(detection, override)
+    species, latin, english, manual = _display_species(detection, override)
     candidate_state = _candidate_recognition_state(detection)
     if manual:
         species_source = "manual"
@@ -293,6 +293,7 @@ def _build_detection_detail(
             "quality": detection.get("quality"),
             "species": species,
             "species_latin": latin,
+            "species_english": english,
             "manual_species": manual,
             "species_source": species_source,
             "species_candidates": detection.get("species_candidates", []),
@@ -313,10 +314,11 @@ async def _list_overrides_for_photos(
         chunk = photo_ids[start : start + chunk_size]
         placeholders = ",".join("?" for _ in chunk)
         async with db.conn.execute(
-            "SELECT photo_id, bird_index, canonical_sci, canonical_zh, canonical_en, "
-            "bbox_x1, bbox_y1, bbox_x2, bbox_y2 "
-            "FROM photo_species_overrides "
-            f"WHERE photo_id IN ({placeholders})",
+            "SELECT pso.photo_id, pso.bird_index, pso.canonical_sci, pso.canonical_zh, "
+            "pso.canonical_en, pso.bbox_x1, pso.bbox_y1, pso.bbox_x2, pso.bbox_y2 "
+            "FROM photo_species_overrides pso JOIN photos p ON p.id = pso.photo_id "
+            f"WHERE pso.photo_id IN ({placeholders}) "
+            "AND pso.input_revision = p.input_revision",
             chunk,
         ) as cur:
             async for row in cur:
@@ -423,26 +425,28 @@ async def _load_geo_photos(
     where_sql: str,
     params: tuple[object, ...] = (),
 ) -> list[_GeoPhoto]:
-    async with db.conn.execute(
-        "SELECT p.id, p.library_id, p.file_path, p.file_name, p.format, p.width, p.height, "
-        "p.thumb_grid, p.thumb_preview, p.created_at, p.file_mtime, p.exif_json, "
-        "p.scene_id, p.companion_path, p.companion_format, p.companion_size, "
-        "p.province, p.city, p.district, p.place, "
-        "ar.pipeline_version, ar.grade, ar.quality_score, ar.bird_count, ar.species, "
-        "ar.result_json, pd.decision "
-        "FROM photos p "
-        "JOIN analysis_results ar ON ar.photo_id = p.id AND ar.is_active = 1 "
-        "LEFT JOIN photo_decisions pd ON pd.photo_id = p.id "
-        f"WHERE ({where_sql}) "
-        "AND ar.pipeline_version IS NOT NULL "
-        "AND ar.bird_count > 0 "
-        "AND COALESCE(pd.decision, ar.grade) IN ('select', 'usable', 'record') "
-        "ORDER BY p.library_id, p.file_mtime ASC, p.id ASC",
-        params,
-    ) as cur:
-        rows = await cur.fetchall()
+    async with db.transaction():
+        async with db.conn.execute(
+            "SELECT p.id, p.library_id, p.file_path, p.file_name, p.format, p.width, p.height, "
+            "p.thumb_grid, p.thumb_preview, p.created_at, p.file_mtime, p.exif_json, "
+            "p.scene_id, p.companion_path, p.companion_format, p.companion_size, "
+            "p.province, p.city, p.district, p.place, "
+            "ar.pipeline_version, ar.grade, ar.quality_score, ar.bird_count, ar.species, "
+            "ar.result_json, pd.decision "
+            "FROM photos p "
+            "JOIN analysis_results ar ON ar.photo_id = p.id AND ar.is_active = 1 "
+            "AND ar.input_revision = p.input_revision "
+            "LEFT JOIN photo_decisions pd ON pd.photo_id = p.id "
+            f"WHERE ({where_sql}) "
+            "AND ar.pipeline_version IS NOT NULL "
+            "AND ar.bird_count > 0 "
+            "AND COALESCE(pd.decision, ar.grade) IN ('select', 'usable', 'record') "
+            "ORDER BY p.library_id, p.file_mtime ASC, p.id ASC",
+            params,
+        ) as cur:
+            rows = await cur.fetchall()
 
-    overrides = await _list_overrides_for_photos(db, [str(row["id"]) for row in rows])
+        overrides = await _list_overrides_for_photos(db, [str(row["id"]) for row in rows])
     photos = [
         _GeoPhoto(
             library_id=str(row["library_id"]),
@@ -516,6 +520,7 @@ def _archive_species_for_photo(photo: PhotoRow) -> list[GeoSpecies]:
             species = GeoSpecies(
                 name=detection.species or detection.species_latin or "",
                 latin_name=detection.species_latin,
+                english_name=detection.species_english,
             )
         if species is None:
             continue

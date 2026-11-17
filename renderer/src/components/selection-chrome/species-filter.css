@@ -1,0 +1,139 @@
+.species-filter {
+  display: inline-flex;
+}
+.species-filter__trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+  max-inline-size: 220px;
+}
+.species-filter__panel {
+  position: fixed;
+  inset: auto;
+  margin: 0;
+  inline-size: min(340px, calc(100vw - 16px));
+  max-block-size: min(440px, calc(100vh - 16px));
+  overflow: hidden;
+  padding: 16px;
+  border: 1px solid var(--pl-border-1);
+  border-radius: var(--pl-radius-lg);
+  background: var(--pl-bg-2);
+  color: var(--pl-fg-1);
+  font-size: 0.875rem;
+  box-shadow: 0 12px 40px #0009;
+}
+.species-filter__panel:popover-open {
+  display: flex;
+  flex-direction: column;
+}
+.species-filter__panel > * {
+  flex-shrink: 0;
+}
+.species-filter__heading,
+.species-filter__footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.species-filter__panel search {
+  display: grid;
+  gap: 6px;
+  margin-block: 12px;
+}
+.species-filter__panel input[type='search'] {
+  inline-size: 100%;
+  min-block-size: 36px;
+  border: 1px solid var(--pl-fg-3);
+  border-radius: var(--pl-radius-sm);
+  padding: 6px 10px;
+  background: var(--pl-bg-0);
+  color: var(--pl-fg-1);
+}
+.species-filter__panel input[type='checkbox'] {
+  accent-color: var(--pl-fg-0);
+  inline-size: 1.1em;
+  block-size: 1.1em;
+  flex-shrink: 0;
+}
+.species-filter__review {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-block-size: 36px;
+}
+.species-filter__hint,
+.species-filter__footer,
+.species-filter__option small {
+  color: var(--pl-fg-2);
+  font-size: 0.75rem;
+}
+.species-filter__options-scroll {
+  min-block-size: 0;
+  overflow-y: auto;
+  flex: 1 1 auto;
+  margin-block: 12px;
+}
+.species-filter__options {
+  border: 0;
+  padding: 0;
+  margin: 0;
+  min-inline-size: 0;
+}
+.species-filter__option {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-block-size: 48px;
+  padding: 8px 4px;
+  border-block-end: 1px solid var(--pl-border-1);
+}
+.species-filter__option > span:nth-child(2) {
+  flex: 1;
+  min-inline-size: 0;
+  overflow-wrap: anywhere;
+}
+.species-filter__option small {
+  display: block;
+}
+.species-filter__option:has(input:checked) {
+  background: var(--pl-bg-3);
+}
+.species-filter__option.is-empty {
+  color: var(--pl-fg-2);
+}
+.species-filter__option small.species-filter__pending {
+  color: var(--pl-warning);
+}
+.species-filter__count {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.selection-result-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  margin: 12px 24px;
+  color: var(--pl-fg-2);
+  font-size: 0.8125rem;
+}
+.selection-filter-empty {
+  padding: 48px 20px;
+  text-align: center;
+  color: var(--pl-fg-2);
+}
+.selection-filter-empty h2 {
+  color: var(--pl-fg-1);
+  font-size: 1rem;
+}
+.selection-filter-empty p {
+  margin-block: 12px;
+}
+@media (pointer: coarse) {
+  .species-filter__panel button,
+  .species-filter__review {
+    min-block-size: 44px;
+  }
+}

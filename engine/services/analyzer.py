@@ -14,6 +14,7 @@ Pipeline readiness 校验：analyzer 在 pipeline not ready 时抛 RuntimeError�
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -23,6 +24,13 @@ from engine.core.database import Database
 from engine.pipeline.manager import PipelineManager
 from engine.pipeline.models import BirdAnalysis, PipelineResult, PoseInfo
 from engine.services.cache import get_result_for_version, store_result
+from engine.services.photo_input import (
+    SourceChangedError,
+    StalePhotoInputError,
+    mark_source_changed,
+    source_fingerprint,
+)
+from engine.services.scanner import _light_fingerprint, _sha256_file
 
 logger = structlog.stdlib.get_logger()
 
@@ -41,6 +49,28 @@ async def analyze_photo(
     photo_id: str,
     *,
     force_rerun: bool = False,
+    expected_input_revision: int | None = None,
+) -> AnalysisOutcome:
+    try:
+        return await _analyze_photo(
+            db,
+            pipeline,
+            photo_id,
+            force_rerun=force_rerun,
+            expected_input_revision=expected_input_revision,
+        )
+    except SourceChangedError as exc:
+        await mark_source_changed(db, exc.photo_id, exc.input_revision)
+        raise
+
+
+async def _analyze_photo(
+    db: Database,
+    pipeline: PipelineManager,
+    photo_id: str,
+    *,
+    force_rerun: bool = False,
+    expected_input_revision: int | None = None,
 ) -> AnalysisOutcome:
     """Analyze one photo, using cache if available.
 
@@ -59,10 +89,17 @@ async def analyze_photo(
         msg = "Pipeline not ready; core models not loaded"
         raise RuntimeError(msg)
 
-    async with db.conn.execute(
-        "SELECT file_path, companion_path, width, height FROM photos WHERE id = ?",
-        (photo_id,),
-    ) as cur:
+    async with (
+        db.transaction() as conn,
+        conn.execute(
+            "SELECT p.*, (SELECT source_fingerprint FROM analysis_results ar "
+            "WHERE ar.photo_id=p.id "
+            "AND ar.is_active=1 AND ar.input_revision=p.input_revision LIMIT 1) "
+            "AS previous_fingerprint "
+            "FROM photos p WHERE p.id=?",
+            (photo_id,),
+        ) as cur,
+    ):
         row = await cur.fetchone()
     if row is None:
         msg = f"Photo not found: {photo_id}"
@@ -75,6 +112,31 @@ async def analyze_photo(
     primary_width = int(row["width"]) if row["width"] is not None else 0
     primary_height = int(row["height"]) if row["height"] is not None else 0
 
+    revision = int(row["input_revision"])
+    if row["input_needs_scan"]:
+        raise SourceChangedError(photo_id, revision, "Source requires a folder rescan")
+    if expected_input_revision is not None and revision != expected_input_revision:
+        raise StalePhotoInputError(f"Photo changed after task claim: {photo_id}")
+    before = await asyncio.to_thread(source_fingerprint, file_path, companion_path)
+    if row["previous_fingerprint"] and before != row["previous_fingerprint"]:
+        raise SourceChangedError(photo_id, revision, "Recorded source identity changed")
+    try:
+        current_size, current_mtime = await asyncio.to_thread(_light_fingerprint, file_path)
+    except FileNotFoundError:
+        pass  # Keep the existing missing-file error path.
+    else:
+        if current_size != int(row["file_size"]) or current_mtime != row["file_mtime"]:
+            raise SourceChangedError(photo_id, revision, "Source metadata changed since scanning")
+    if companion_path is not None and row["companion_size"] is not None:
+        try:
+            comp_size, comp_mtime = await asyncio.to_thread(_light_fingerprint, companion_path)
+        except FileNotFoundError:
+            raise SourceChangedError(photo_id, revision, "Companion source disappeared") from None
+        if comp_size != int(row["companion_size"]) or (
+            row["companion_mtime"] is not None and comp_mtime != row["companion_mtime"]
+        ):
+            raise SourceChangedError(photo_id, revision, "Companion source metadata changed")
+    analyzed_source = file_path
     current_version = pipeline.pipeline_version
 
     if not force_rerun:
@@ -86,7 +148,15 @@ async def analyze_photo(
                 pipeline_version=current_version,
             )
             # 命中仍需确保 active（可能被手动切换过）
-            await store_result(db, photo_id, cached)
+            if before != await asyncio.to_thread(source_fingerprint, file_path, companion_path):
+                raise SourceChangedError(photo_id, revision, "Photo changed during cache lookup")
+            await store_result(
+                db,
+                photo_id,
+                cached,
+                expected_input_revision=revision,
+                fingerprint=before,
+            )
             return AnalysisOutcome(result=cached, from_cache=True)
 
     # 同步 stat 对本地文件来说耗时可忽略，不值得额外 asyncio.to_thread 包装
@@ -120,6 +190,7 @@ async def analyze_photo(
             error=str(e),
         )
         result = await pipeline.analyze(companion_path, photo_id=photo_id)
+        analyzed_source = companion_path
         result.companion_used = True
         # bbox/keypoint 来自 RAW 像素空间(image_width/image_height = RAW 尺寸);
         # 主文件(JPG)EXIF 维度可能不同(典型差异 几px ~ 几% 边距),需缩放到主文件空间
@@ -129,10 +200,7 @@ async def analyze_photo(
             and primary_height > 0
             and result.image_width > 0
             and result.image_height > 0
-            and (
-                result.image_width != primary_width
-                or result.image_height != primary_height
-            )
+            and (result.image_width != primary_width or result.image_height != primary_height)
         ):
             sx = primary_width / result.image_width
             sy = primary_height / result.image_height
@@ -155,7 +223,18 @@ async def analyze_photo(
             companion=str(companion_path),
         )
 
-    await store_result(db, photo_id, result)
+    source_hash = await asyncio.to_thread(_sha256_file, analyzed_source)
+    if before != await asyncio.to_thread(source_fingerprint, file_path, companion_path):
+        raise SourceChangedError(photo_id, revision, "Photo changed during inference")
+    await store_result(
+        db,
+        photo_id,
+        result,
+        expected_input_revision=revision,
+        source_path=str(analyzed_source),
+        source_hash=source_hash,
+        fingerprint=before,
+    )
 
     return AnalysisOutcome(result=result, from_cache=False)
 
@@ -173,8 +252,17 @@ def _scale_detection(det: BirdAnalysis, sx: float, sy: float) -> None:
 def _scale_pose(pose: PoseInfo, sx: float, sy: float) -> None:
     """In-place scale all 11 keypoints of a PoseInfo."""
     for kp_name in (
-        "bill", "crown", "nape", "left_eye", "right_eye",
-        "belly", "breast", "back", "tail", "left_wing", "right_wing",
+        "bill",
+        "crown",
+        "nape",
+        "left_eye",
+        "right_eye",
+        "belly",
+        "breast",
+        "back",
+        "tail",
+        "left_wing",
+        "right_wing",
     ):
         kp = getattr(pose, kp_name)
         kp.x *= sx

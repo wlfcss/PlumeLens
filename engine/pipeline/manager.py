@@ -4,9 +4,15 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
+import json
 import time
+from importlib import import_module
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as package_version
 from pathlib import Path
+from typing import Any
 
 import structlog
 
@@ -120,13 +126,12 @@ def resolve_providers(
 
 
 def _file_checksum(path: Path) -> str:
-    """Compute SHA-256 of a file (first 64KB + size for speed)."""
+    """Complete streaming SHA-256; model tails are part of inference identity."""
     h = hashlib.sha256()
-    with open(path, "rb") as f:
-        h.update(f.read(65536))
-        f.seek(0, 2)
-        h.update(str(f.tell()).encode())
-    return h.hexdigest()[:16]
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 class PipelineManager:
@@ -159,6 +164,8 @@ class PipelineManager:
             "dinov3_species_v4": False,
         }
         self._model_providers: dict[str, str] = {}
+        self._provider_details: dict[str, dict] = {}
+        self._version_descriptor: dict = {}
 
     async def initialize(self) -> None:
         """Load ONNX models and torch species assets during FastAPI startup."""
@@ -178,6 +185,11 @@ class PipelineManager:
         )
 
         checksums: dict[str, str] = {}
+
+        def checksum_for(path: Path) -> str:
+            # Integrity verification already streamed the large model weights.
+            digest = verified.get(path.relative_to(models_dir).as_posix())
+            return digest if digest is not None else _file_checksum(path)
 
         # ---- YOLO detector ----
         yolo_path = models_dir / "yolo26l-bird-det.onnx"
@@ -200,12 +212,16 @@ class PipelineManager:
                 self._model_status["yolo"] = True
                 active = sess.get_providers()
                 self._model_providers["yolo"] = active[0] if active else "unknown"
-                checksums["yolo"] = _file_checksum(yolo_path)
+                self._record_provider("yolo", sess)
+                checksums["yolo"] = checksum_for(yolo_path)
             except Exception:
                 await logger.aexception("Failed to load YOLO detector")
 
             # 如果主 session 是 CoreML，额外加载一份 CPU 备胎给 ~3% 崩溃图 fallback
-            if self._detector is not None and "coreml" in self._settings.yolo_provider.lower():
+            if (
+                self._detector is not None
+                and self._model_providers.get("yolo") == "CoreMLExecutionProvider"
+            ):
                 try:
                     cpu_sess = ort.InferenceSession(
                         str(yolo_path),
@@ -244,12 +260,11 @@ class PipelineManager:
                 )
                 self._model_status["bird_flight_classifier"] = True
                 active = sess.get_providers()
-                self._model_providers["bird_flight_classifier"] = (
-                    active[0] if active else "unknown"
-                )
-                checksums["bird_flight_classifier"] = _file_checksum(flight_classifier_path)
+                self._model_providers["bird_flight_classifier"] = active[0] if active else "unknown"
+                self._record_provider("bird_flight_classifier", sess)
+                checksums["bird_flight_classifier"] = checksum_for(flight_classifier_path)
                 if flight_classifier_config_path.exists():
-                    checksums["bird_flight_classifier_config"] = _file_checksum(
+                    checksums["bird_flight_classifier_config"] = checksum_for(
                         flight_classifier_config_path
                     )
             except Exception:
@@ -289,7 +304,8 @@ class PipelineManager:
                 self._model_status["bird_visibility"] = True
                 active = sess.get_providers()
                 self._model_providers["bird_visibility"] = active[0] if active else "unknown"
-                checksums["bird_visibility"] = _file_checksum(pose_path)
+                self._record_provider("bird_visibility", sess)
+                checksums["bird_visibility"] = checksum_for(pose_path)
             except Exception:
                 await logger.aexception("Failed to load pose detector")
         else:
@@ -306,7 +322,8 @@ class PipelineManager:
                 self._model_status["clipiqa"] = True
                 active = clipiqa_session.get_providers()
                 self._model_providers["clipiqa"] = active[0] if active else "unknown"
-                checksums["clipiqa"] = _file_checksum(clipiqa_path)
+                self._record_provider("clipiqa", clipiqa_session)
+                checksums["clipiqa"] = checksum_for(clipiqa_path)
             except Exception:
                 await logger.aexception("Failed to load CLIPIQA+")
         else:
@@ -323,7 +340,8 @@ class PipelineManager:
                 self._model_status["hyperiqa"] = True
                 active = hyperiqa_session.get_providers()
                 self._model_providers["hyperiqa"] = active[0] if active else "unknown"
-                checksums["hyperiqa"] = _file_checksum(hyperiqa_path)
+                self._record_provider("hyperiqa", hyperiqa_session)
+                checksums["hyperiqa"] = checksum_for(hyperiqa_path)
             except Exception:
                 await logger.aexception("Failed to load HyperIQA")
         else:
@@ -394,12 +412,13 @@ class PipelineManager:
                 self._model_providers["dinov3_species_v4"] = (
                     f"torch:{self._species.device}:{self._species._dtype}"
                 )
-                checksums["dinov3_species_v4_backbone"] = _file_checksum(
-                    species_backbone_safetensors
-                )
-                checksums["dinov3_species_v4_adapter"] = _file_checksum(species_adapter)
-                checksums["species_canonical"] = _file_checksum(species_canonical)
-                checksums["species_policy"] = _file_checksum(species_policy)
+                checksums["dinov3_species_v4_backbone"] = checksum_for(species_backbone_safetensors)
+                checksums["dinov3_species_v4_adapter"] = checksum_for(species_adapter)
+                checksums["species_canonical"] = checksum_for(species_canonical)
+                checksums["species_policy"] = checksum_for(species_policy)
+                backbone_config = species_dir / "backbone" / "config.json"
+                if backbone_config.exists():
+                    checksums["dinov3_species_v4_config"] = checksum_for(backbone_config)
                 await logger.ainfo(
                     "Species classifier ready",
                     num_classes=self._species.num_classes,
@@ -433,6 +452,12 @@ class PipelineManager:
             version=self._pipeline_version,
             model_status=self._model_status,
         )
+
+    def _record_provider(self, model_id: str, session: Any) -> None:
+        self._provider_details[model_id] = {
+            "chain": list(session.get_providers()),
+            "options": session.get_provider_options(),
+        }
 
     def _compute_version(self, checksums: dict[str, str]) -> str:
         """Deterministic pipeline version from full input vector."""
@@ -504,15 +529,62 @@ class PipelineManager:
         # CoreML EP compute_units（"CPUAndGPU" 关 ANE）— 改这个会改推理结果
         # （ANE bug 路径 vs Metal GPU 路径），必须进 hash 让 cache 失效。
         h.update(f"cml_no_ane:{_COREML_NO_ANE}".encode())
-        return f"v1-{h.hexdigest()[:8]}"
+        runtime: dict[str, str] = {"onnxruntime": ort.__version__}
+        for package in ("torch", "transformers", "numpy", "pillow", "rawpy"):
+            try:
+                runtime[package] = package_version(package)
+            except PackageNotFoundError:
+                # Frozen bundles may omit dist-info while retaining module
+                # versions. Keep their actual runtime identity as well.
+                module_name = "PIL" if package == "pillow" else package
+                try:
+                    runtime[package] = str(import_module(module_name).__version__)
+                except (ImportError, AttributeError):
+                    runtime[package] = "not-installed"
+        self._version_descriptor = {
+            "schema": 2,
+            "assets": dict(sorted(checksums.items())),
+            "parameters": self._settings.model_dump(
+                mode="json",
+                exclude={
+                    "host",
+                    "port",
+                    "parent_pid",
+                    "log_level",
+                    "data_dir",
+                    "api_token",
+                    "require_api_token",
+                    "models_dir",
+                    "analysis_concurrency",
+                    "worker_threads",
+                    "require_iqa",
+                },
+            ),
+            "rules_digest": h.hexdigest(),
+            "runtime": runtime,
+            "providers": dict(sorted(self._model_providers.items())),
+            "provider_details": copy.deepcopy(self._provider_details),
+            "detector_cpu_fallback": self._detector_cpu_fallback is not None,
+        }
+        encoded = json.dumps(self._version_descriptor, sort_keys=True, separators=(",", ":"))
+        return f"v2-{hashlib.sha256(encoded.encode()).hexdigest()[:16]}"
 
     def close(self) -> None:
         """Release resources. Called during shutdown."""
         self._detector = None
+        self._detector_cpu_fallback = None
         self._assessor = None
         self._pose = None
         self._flight_classifier = None
         self._species = None
+        self._model_status = dict.fromkeys(self._model_status, False)
+        self._model_providers.clear()
+        self._provider_details.clear()
+
+    @property
+    def version_descriptor(self) -> dict:
+        """Inspectable, token-free input vector for explaining historical reruns."""
+        return copy.deepcopy(self._version_descriptor)
 
     @property
     def pipeline_version(self) -> str:

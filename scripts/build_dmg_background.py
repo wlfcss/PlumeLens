@@ -22,10 +22,10 @@ regenerate: ``uv run python scripts/build_dmg_background.py``
 
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 import tempfile
-import json
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFilter, ImageFont

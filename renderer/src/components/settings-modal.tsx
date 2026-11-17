@@ -12,7 +12,7 @@
  */
 import { AlertTriangle, ExternalLink, Eye, EyeOff, RefreshCw, Save, Trash2, X } from 'lucide-react'
 import { useQueryClient } from '@tanstack/react-query'
-import { useCallback, useEffect, useRef, useState, type ReactElement } from 'react'
+import { useCallback, useEffect, useId, useRef, useState, type ReactElement } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import {
@@ -23,6 +23,7 @@ import {
 } from '@/lib/api-client'
 import { useShallow, useUIStore } from '@/stores/ui-store'
 import type { UpdateCheckResult } from '@/env'
+import { useModalDialog } from '@/hooks/use-modal-dialog'
 
 interface KeyFieldProps {
   hideLabel: string
@@ -42,10 +43,13 @@ function KeyField({
   onChange,
 }: KeyFieldProps): ReactElement {
   const [show, setShow] = useState(false)
+  const id = useId()
   return (
     <div className="settings-field">
       <div className="settings-field__head">
-        <label className="settings-field__label">{label}</label>
+        <label htmlFor={id} className="settings-field__label">
+          {label}
+        </label>
         <button
           aria-label={show ? hideLabel : showLabel}
           className="settings-field__toggle"
@@ -56,6 +60,8 @@ function KeyField({
         </button>
       </div>
       <input
+        id={id}
+        name={id}
         autoComplete="off"
         className="settings-field__input"
         onChange={(e) => onChange(e.target.value)}
@@ -123,6 +129,7 @@ export function SettingsModal(): ReactElement | null {
   )
 
   const [amapKey, setAmapKey] = useState('')
+  const dialogRef = useModalDialog(open)
   const [baiduAk, setBaiduAk] = useState('')
   const [tencentKey, setTencentKey] = useState('')
   const [version, setVersion] = useState('')
@@ -211,18 +218,6 @@ export function SettingsModal(): ReactElement | null {
 
   useEffect(() => clearSavedHintTimer, [clearSavedHintTimer])
 
-  useEffect(() => {
-    if (!open) return undefined
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        event.preventDefault()
-        closeModal()
-      }
-    }
-    window.addEventListener('keydown', onKeyDown)
-    return () => window.removeEventListener('keydown', onKeyDown)
-  }, [closeModal, open])
-
   const handleSave = useCallback(async () => {
     setSaving(true)
     setSaveError(null)
@@ -283,18 +278,19 @@ export function SettingsModal(): ReactElement | null {
   const busy = saving || clearingHistory
 
   return (
-    <div
+    <dialog
+      ref={dialogRef}
+      aria-label={t('settings.title')}
+      onCancel={(event) => {
+        event.preventDefault()
+        closeModal()
+      }}
       className="overlay-backdrop"
       onPointerDown={(event) => {
         if (event.target === event.currentTarget) closeModal()
       }}
     >
-      <div
-        className="settings-panel"
-        onPointerDown={(event) => event.stopPropagation()}
-        role="dialog"
-        aria-modal="true"
-      >
+      <div className="settings-panel" onPointerDown={(event) => event.stopPropagation()}>
         <header className="settings-panel__head">
           <h2>{t('settings.title')}</h2>
           <button
@@ -563,6 +559,6 @@ export function SettingsModal(): ReactElement | null {
           </button>
         </footer>
       </div>
-    </div>
+    </dialog>
   )
 }
