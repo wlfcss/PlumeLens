@@ -10,6 +10,11 @@ on:
 permissions:
   contents: write
 
+env:
+  # Keep tests and the frozen backend on the same supported Python ABI.
+  PYTHON_VERSION: '3.11'
+  UV_LOCKED: 'true'
+
 concurrency:
   group: mac-build-${{ github.ref }}
   cancel-in-progress: true
@@ -29,9 +34,10 @@ jobs:
           cache: npm
       - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e
         with:
+          python-version: ${{ env.PYTHON_VERSION }}
           enable-cache: true
       - run: npm ci
-      - run: uv sync --extra dev --python 3.11
+      - run: uv sync --locked --extra dev
       - run: npm run typecheck
       - run: npm run lint
       - run: npm test
@@ -66,12 +72,14 @@ jobs:
       - name: Setup uv
         uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
         with:
+          python-version: ${{ env.PYTHON_VERSION }}
           enable-cache: true
 
       - name: Install dependencies
         run: |
           npm ci
-          uv sync --extra dev
+          uv sync --locked --extra dev
+          uv run python --version
           uv run pyinstaller --version
 
       - name: Restore private model assets

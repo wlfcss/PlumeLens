@@ -89,7 +89,7 @@
 
 ## 开发与构建
 
-开发环境使用 Node.js 24、Python 3.11+ 和 [uv](https://docs.astral.sh/uv/)。当前打包平台为 macOS arm64。
+开发环境使用 Node.js 24、Python 3.11+ 和 [uv](https://docs.astral.sh/uv/)，CI 固定使用 Python 3.11。当前打包平台为 macOS arm64。
 
 ```bash
 git clone https://github.com/wlfcss/PlumeLens.git
