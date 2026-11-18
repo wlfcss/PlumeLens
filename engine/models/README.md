@@ -32,7 +32,7 @@
 
 ## 获取与校验
 
-完整模型包位于本仓库的 `models-v4` Release。下载后在项目根目录恢复，下载包中的清单不会覆盖仓库清单：
+未入 Git 的大模型位于本仓库的 `models-v4` Release；其他模型与元数据随代码提供。下载后在项目根目录恢复，脚本会合并并校验两处资产，下载包中的清单不会覆盖仓库清单：
 
 ```bash
 gh release download models-v4 --repo wlfcss/PlumeLens --pattern plumelens-models-v4.tar.gz
@@ -53,7 +53,7 @@ Windows 使用经过验证的 ONNX Runtime Windows ML 1.30.1 与 PyTorch ROCm 7.
 
 首次运行随包的 `prepare-windows-gpu.cmd` 准备检测器缓存；不要把一台机器的已验证标记直接用于另一台机器。更换模型、GPU 或后端组件后重新校验。缓存与推理不会改写模型权重。
 
-Windows 构建从已审查的 `manifest.json` 恢复模型，只复制清单内资产并逐项核对大小和 SHA-256；下载包内的清单不能替换仓库清单。发行包和压缩包还会再次校验。设备目标、依赖版本、测试范围及资源数据见 [Windows 指南](../../WINDOWS.md)。
+Windows 与 macOS 构建均从已审查的 `manifest.json` 恢复模型，只复制清单内资产；下载包中的大模型与代码附带的其他资产都须逐项核对大小和 SHA-256。下载包内的清单不能替换仓库清单。Windows 发行包和压缩包还会再次校验。设备目标、依赖版本、测试范围及资源数据见 [Windows 指南](../../WINDOWS.md)。
 
 ## 管线调用顺序
 

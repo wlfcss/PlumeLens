@@ -150,7 +150,7 @@ Python 核心回归 **503 通过、1 跳过**，构建资产恢复检查 **4 通
 
 默认设备目标为本机使用的 `gfx1100`。手动运行可选择 `gfx1101`、`gfx1102`、`gfx1200` 或 `gfx1201`；目标必须与 AMD 支持矩阵和实际显卡对应，选择选项不等于该设备已完成实机验证。
 
-默认模型来源为本仓库的 `models-v4` Release、资产名 `plumelens-models-v4.tar.gz`。可用仓库变量 `PLUMELENS_MODELS_RELEASE_TAG` / `PLUMELENS_MODELS_RELEASE_ASSET` 修改，或用 Secret `PLUMELENS_MODELS_URL` 指定下载地址。清单始终取自已检出的代码，下载包不能覆盖它。
+默认模型来源为本仓库的 `models-v4` Release、资产名 `plumelens-models-v4.tar.gz`。该包仅含未入 Git 的大模型，其他模型与元数据取自已检出的代码，两处资产均按仓库清单校验。可用仓库变量 `PLUMELENS_MODELS_RELEASE_TAG` / `PLUMELENS_MODELS_RELEASE_ASSET` 修改，或用 Secret `PLUMELENS_MODELS_URL` 指定下载地址。清单始终取自已检出的代码，下载包不能覆盖它。
 
 标准 GitHub 托管运行器没有 AMD 显卡，启动测试显式使用 CPU 后端；GPU 数值、性能与驱动兼容性由前述本机测试覆盖。构建时使用 `-InstallOnly` 跳过需要真实 GPU 的依赖基准测试；这不表示 GPU 验证已经通过。冻结后清理开发环境、归档前清理已复制的模型和中间目录，控制托管运行器的磁盘峰值。
 

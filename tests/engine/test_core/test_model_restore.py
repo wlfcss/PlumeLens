@@ -69,3 +69,36 @@ def test_invalid_model_does_not_replace_an_existing_valid_file(tmp_path):
         restore_models(archive, models, manifest)
     assert (models / "model.bin").read_bytes() == b"original"
     assert not list(models.glob("*.download"))
+
+
+@pytest.mark.parametrize("checkout_payload", [b"reviewed metadata", b"modified", None])
+def test_release_bundle_uses_only_verified_checkout_assets(tmp_path, checkout_payload):
+    models = tmp_path / "models"
+    models.mkdir()
+    payloads = {"model.bin": b"reviewed weights", "config.json": b"reviewed metadata"}
+    manifest = tmp_path / "trusted.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "assets": {
+                    name: {"size": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+                    for name, data in payloads.items()
+                }
+            }
+        )
+    )
+    if checkout_payload is not None:
+        (models / "config.json").write_bytes(checkout_payload)
+    archive = tmp_path / "release.tar.gz"
+    with tarfile.open(archive, "w:gz") as output:
+        info = tarfile.TarInfo("models/model.bin")
+        info.size = len(payloads["model.bin"])
+        output.addfile(info, io.BytesIO(payloads["model.bin"]))
+    if checkout_payload == payloads["config.json"]:
+        assert restore_models(archive, models, manifest) == 2
+        assert (models / "model.bin").read_bytes() == payloads["model.bin"]
+        assert (models / "config.json").read_bytes() == checkout_payload
+    else:
+        with pytest.raises(ValueError, match="missing reviewed asset|Checkout model SHA-256"):
+            restore_models(archive, models, manifest)
+        assert not (models / "model.bin").exists()

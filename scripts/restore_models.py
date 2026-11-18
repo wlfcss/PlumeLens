@@ -37,27 +37,40 @@ def restore_models(archive: Path, models_dir: Path, trusted_manifest: Path) -> i
                     raise ValueError(f"Cannot read model asset: {name}")
                 return result
 
-        prefix = next(
-            (
-                part
-                for part in ("engine/models/", "models/", "resources/models/", "")
-                if all(part + name in members for name in assets)
-            ),
-            None,
-        )
-        if prefix is None:
-            raise ValueError("Model bundle is missing reviewed assets")
-        ordered = list(assets)
+        prefixes = ("engine/models/", "models/", "resources/models/", "")
+        prefix = max(prefixes, key=lambda part: sum(part + name in members for name in assets))
+        ordered = [name for name in assets if prefix + name in members]
+        if not ordered:
+            raise ValueError("Model bundle contains no reviewed assets")
+        # Release bundles contain only large files excluded from Git. Validate
+        # the remaining assets from the reviewed checkout before restoring them.
+        targets = {}
+        for name, expected in assets.items():
+            relative = PurePosixPath(name)
+            target = (root / relative).resolve()
+            if relative.is_absolute() or ".." in relative.parts or not target.is_relative_to(root):
+                raise ValueError(f"Invalid reviewed asset path: {name}")
+            targets[name] = target
+            if name in ordered:
+                continue
+            if not target.is_file():
+                raise ValueError(f"Model bundle and checkout are missing reviewed asset: {name}")
+            digest = hashlib.sha256()
+            with target.open("rb") as source:
+                for block in iter(lambda: source.read(4 * 1024 * 1024), b""):
+                    digest.update(block)
+            if (
+                target.stat().st_size != expected["size"]
+                or digest.hexdigest() != expected["sha256"]
+            ):
+                raise ValueError(f"Checkout model SHA-256/size mismatch: {name}")
         if not zipfile.is_zipfile(archive):
             # Gzip seeks backwards require decompression again. Restore tar
             # members in archive order instead of repeatedly rewinding gigabytes.
             ordered.sort(key=lambda name: members[prefix + name].offset_data)
         for name in ordered:
             expected = assets[name]
-            relative = PurePosixPath(name)
-            target = (root / relative).resolve()
-            if relative.is_absolute() or ".." in relative.parts or not target.is_relative_to(root):
-                raise ValueError(f"Invalid reviewed asset path: {name}")
+            target = targets[name]
             target.parent.mkdir(parents=True, exist_ok=True)
             temporary = target.with_name(target.name + ".download")
             digest, size = hashlib.sha256(), 0
