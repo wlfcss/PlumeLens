@@ -122,18 +122,6 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Windows packaging failed' }
           & $env:BUILD_PYTHON scripts/verify_windows_package.py --require-amd
           if ($LASTEXITCODE -ne 0) { throw 'Frozen package validation failed' }
-      - name: Test packaged cold start and history
-        # Hosted runners have no AMD GPU. Exercise the shipped runtime with CPU
-        # providers; real AMD output parity is validated separately on hardware.
-        env:
-          PLUMELENS_YOLO_PROVIDER: cpu
-          PLUMELENS_POSE_PROVIDER: cpu
-          PLUMELENS_IQA_PROVIDER: cpu
-          PLUMELENS_SPECIES_PROVIDER: cpu
-          PLUMELENS_ANALYSIS_CONCURRENCY: '1'
-          PLUMELENS_TEST_PHOTOS: ${{ github.workspace }}\tests\e2e-electron\fixtures\sample_photos
-          PLUMELENS_SMOKE_PROGRESS_FILE: windows-ci-smoke-progress.json
-        run: npx playwright test --config tests/e2e-electron/playwright.config.ts cold-start.spec.ts windows-smoke.spec.ts
       - name: Archive and verify portable package
         shell: pwsh
         run: |
@@ -151,10 +139,16 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: Windows-diagnostics-${{ github.sha }}
-          path: |
-            test-results/
-            build/plumelens-engine/warn-plumelens-engine.txt
+          name: Windows-build-diagnostics-${{ github.run_attempt }}-${{ github.sha }}
+          path: build/plumelens-engine/warn-plumelens-engine.txt
+          retention-days: 7
+      - name: Upload smoke test photos
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: Windows-smoke-photos-${{ github.sha }}
+          path: tests/e2e-electron/fixtures/sample_photos/*.JPG
+          if-no-files-found: error
+          overwrite: true
           retention-days: 7
       - name: Upload verified Windows package
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
@@ -165,12 +159,66 @@ jobs:
             release/PlumeLens-*-Windows-x64.zip.sha256
             release/windows-package-verification.json
           compression-level: 0
+          overwrite: true
           if-no-files-found: error
+          retention-days: 7
+
+  smoke:
+    name: Test packaged Windows app (${{ matrix.spec }})
+    needs: build
+    permissions:
+      actions: read
+      contents: read
+    runs-on: windows-2025
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        spec: [cold-start, windows-smoke]
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: Unpack the verified distribution and test photos
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GPU_TARGET: ${{ inputs.gpu_target || 'gfx1100' }}
+        run: |
+          gh run download $env:GITHUB_RUN_ID --repo $env:GITHUB_REPOSITORY --name "PlumeLens-Windows-x64-$env:GPU_TARGET-$env:GITHUB_SHA" --dir release
+          if ($LASTEXITCODE -ne 0) { throw 'Package download failed' }
+          $archive = Get-Item release/PlumeLens-*-Windows-x64.zip
+          $report = Get-Content release/windows-package-verification.json -Raw | ConvertFrom-Json
+          if ((Get-FileHash $archive.FullName).Hash -ne $report.archive_sha256) { throw 'Downloaded ZIP checksum mismatch' }
+          7z x $archive.FullName -orelease/win-unpacked -y | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'Package extraction failed' }
+          gh run download $env:GITHUB_RUN_ID --repo $env:GITHUB_REPOSITORY --name "Windows-smoke-photos-$env:GITHUB_SHA" --dir tests/e2e-electron/fixtures/sample_photos
+          if ($LASTEXITCODE -ne 0) { throw 'Fixture download failed' }
+          New-Item -ItemType Directory -Force .tools | Out-Null
+      - name: Test the extracted application on CPU
+        env:
+          PLUMELENS_YOLO_PROVIDER: cpu
+          PLUMELENS_POSE_PROVIDER: cpu
+          PLUMELENS_IQA_PROVIDER: cpu
+          PLUMELENS_SPECIES_PROVIDER: cpu
+          PLUMELENS_ANALYSIS_CONCURRENCY: '1'
+          PLUMELENS_TEST_PHOTOS: ${{ github.workspace }}\tests\e2e-electron\fixtures\sample_photos
+          PLUMELENS_SMOKE_PROGRESS_FILE: windows-ci-smoke-progress.json
+        run: npx playwright test --config tests/e2e-electron/playwright.config.ts ${{ matrix.spec }}.spec.ts
+      - name: Upload smoke test diagnostics
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: Windows-diagnostics-${{ matrix.spec }}-${{ github.run_attempt }}-${{ github.sha }}
+          path: test-results/
           retention-days: 7
 
   publish:
     name: Publish tagged Windows asset
-    needs: build
+    needs: smoke
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     timeout-minutes: 15

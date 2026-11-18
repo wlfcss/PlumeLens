@@ -22,6 +22,8 @@
 
 ### 兼容与交付
 
+- Windows 自动构建在独立运行器上解压并测试最终 ZIP，覆盖冷启动、历史恢复和分析导出。
+
 - 锁定经过 Windows 实测的 ONNX Runtime Windows ML 版本；ROCm 鸟种识别使用 FP32 与 eager attention，避免已发现的精度和驱动兼容问题。
 - 移除发行包中的 SDK 编译工具、未使用的 attention 内核归档与重复前端依赖，保留推理库、设备内核、模型和许可文件。
 - 在 Windows 11 / RX 7900 XTX 上验证 300 张 JPG、CR3 的分析、续跑和导出；补充资源采样、CPU/GPU 输出对照及 100%–150% 显示缩放测试。
