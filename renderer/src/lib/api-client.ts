@@ -1,5 +1,5 @@
 import { logger } from '@/lib/logger'
-import { engineRequestTimeout } from '../../../shared/engine-request-timeout'
+import { engineRequestTimeout, engineStartupTimeout } from '../../../shared/engine-request-timeout'
 
 /**
  * API client for PlumeLens backend.
@@ -14,23 +14,12 @@ import { engineRequestTimeout } from '../../../shared/engine-request-timeout'
  * All JSON requests carry ``Content-Type: application/json`` (FastAPI 0.132+ strict).
  */
 
-/**
- * Resolve the backend URL on every request.
- *
- * 不缓存：Electron 启动早期 engine 还没 spawn 完，IPC 返回 null。每次重新拉
- * (IPC 异步开销 <1ms)。如果 engine 没 ready，重试 200ms 间隔最多 60s,然后抛
- * ApiError(503) 让上层(useBackend / engine-status banner)能 surface 给用户操作,
- * 而不是把所有请求 / EventSource 都吊死在 await 上(看上去整个 UI 卡死)。
- *
- * 60s 是经验值:engine 冷启 + 模型加载 + manifest 校验最多 ~5s,留 12× 缓冲足以
- * 覆盖慢盘 / Rosetta / 极端机器,又不至于让用户等到怀疑应用死了才反馈。
- */
-const BACKEND_BOOT_TIMEOUT_MS = 60_000
 const BACKEND_BOOT_POLL_MS = 200
 
 async function getBackendUrl(): Promise<string> {
   if (typeof window !== 'undefined' && window.plumelens) {
-    const deadline = Date.now() + BACKEND_BOOT_TIMEOUT_MS
+    const timeoutMs = engineStartupTimeout(window.plumelens.platform)
+    const deadline = Date.now() + timeoutMs
     let attempts = 0
     while (Date.now() < deadline) {
       const url = await window.plumelens.getBackendUrl()
@@ -41,7 +30,7 @@ async function getBackendUrl(): Promise<string> {
       }
       await new Promise((resolve) => setTimeout(resolve, BACKEND_BOOT_POLL_MS))
     }
-    throw new ApiError(503, `engine backend not ready after ${BACKEND_BOOT_TIMEOUT_MS / 1000}s`)
+    throw new ApiError(503, `engine backend not ready after ${timeoutMs / 1000}s`)
   }
   // Dev / test fallback (Playwright vite-server 模式 / 单元测试)
   return 'http://127.0.0.1:8000'

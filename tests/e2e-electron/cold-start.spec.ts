@@ -15,6 +15,7 @@
  * 真实 ~/Library/Application Support/plumelens/ 隔离;app.close 后清理 tmp dir。
  */
 import { expect, test } from '@playwright/test'
+import { engineStartupTimeout } from '../../shared/engine-request-timeout.js'
 import {
   cleanupDataDir,
   importFixtureLibrary,
@@ -24,6 +25,11 @@ import {
   waitForLibraryReady,
   type LaunchHandle,
 } from './helpers/launch.js'
+
+// The close-confirmation scenario waits for two independent engine startups.
+if (process.platform === 'win32') {
+  test.describe.configure({ timeout: 2 * engineStartupTimeout(process.platform) + 60_000 })
+}
 
 test.describe('Cold start - fresh data dir (新装首次打开)', () => {
   let dataDir: string

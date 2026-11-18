@@ -11,6 +11,7 @@ import { dirname, join } from 'path'
 import { fileURLToPath } from 'url'
 import { mkdtempSync, readdirSync, readFileSync, rmSync, existsSync } from 'fs'
 import { tmpdir } from 'os'
+import { engineStartupTimeout } from '../../../shared/engine-request-timeout.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -118,15 +119,7 @@ export async function launchApp(
   return { app, page, dataDir }
 }
 
-/**
- * 等 engine 子进程 ready 的超时,对齐产品侧 `BACKEND_BOOT_TIMEOUT_MS`
- * (renderer/src/lib/api-client.ts)的 60s —— 测试不该比产品本身更严格。
- *
- * 原值 30s 的依据是本机实测(PyInstaller bundle 自解压 + 5 个模型加载约 7s),
- * 但 GitHub macos runner 磁盘/CPU 慢 4-5 倍:v0.7.6 tag 构建有 4 个用例栽在
- * 这个阈值上,而同一份 DMG 本机 6/6 通过、engine ready 只要 7.1s。
- */
-const ENGINE_READY_TIMEOUT_MS = 60_000
+const ENGINE_READY_TIMEOUT_MS = engineStartupTimeout(process.platform)
 const ENGINE_READY_POLL_MS = 500
 
 /**

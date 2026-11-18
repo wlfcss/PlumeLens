@@ -16,6 +16,7 @@ import { app } from 'electron'
 import { join } from 'path'
 import { readUserSettings } from './user-settings'
 import { EngineStartupProtocol } from './engine-startup-protocol'
+import { engineStartupTimeout } from '../shared/engine-request-timeout'
 import { terminateEngine } from './engine-shutdown'
 
 /**
@@ -37,7 +38,7 @@ import { terminateEngine } from './engine-shutdown'
 
 const MAX_STARTUP_LOGS = 10
 const ELECTRON_LOG_MAX_BYTES = 5 * 1024 * 1024
-const ENGINE_READY_TIMEOUT_MS = 90_000
+const ENGINE_READY_TIMEOUT_MS = engineStartupTimeout(process.platform)
 
 export class ProcessManager extends EventEmitter {
   private process: ChildProcess | null = null
