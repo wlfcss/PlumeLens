@@ -1,6 +1,7 @@
 import { win32, posix } from 'node:path'
 import { join } from 'node:path'
-import { mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { realpath } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { describe, expect, it } from 'vitest'
 import { isWithinDirectory, prepareCacheDirectory } from '../../electron/cache-paths'
@@ -37,9 +38,15 @@ describe('local image cache containment', () => {
       symlinkSync(parent, alias, process.platform === 'win32' ? 'junction' : 'dir')
       const cache = join(alias, 'derived', 'thumbnails')
       const canonical = await prepareCacheDirectory(cache)
-      expect(canonical).toBe(realpathSync(join(parent, 'derived', 'thumbnails')))
-      expect(isWithinDirectory(canonical, join(canonical, 'grid', 'photo.jpg'))).toBe(true)
-      expect(isWithinDirectory(canonical, join(parent, 'outside.jpg'))).toBe(false)
+      const actualCache = join(parent, 'derived', 'thumbnails')
+      expect(canonical).toBe(await realpath(actualCache))
+
+      const thumbnail = join(actualCache, 'photo.jpg')
+      const outside = join(parent, 'outside.jpg')
+      writeFileSync(thumbnail, '')
+      writeFileSync(outside, '')
+      expect(isWithinDirectory(canonical, await realpath(join(cache, 'photo.jpg')))).toBe(true)
+      expect(isWithinDirectory(canonical, await realpath(outside))).toBe(false)
     } finally {
       rmSync(workspace, { recursive: true, force: true })
     }
