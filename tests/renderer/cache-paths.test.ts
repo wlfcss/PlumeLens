@@ -1,6 +1,9 @@
 import { win32, posix } from 'node:path'
+import { join } from 'node:path'
+import { mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { describe, expect, it } from 'vitest'
-import { isWithinDirectory } from '../../electron/cache-paths'
+import { isWithinDirectory, prepareCacheDirectory } from '../../electron/cache-paths'
 
 describe('local image cache containment', () => {
   it('accepts Windows child paths, Unicode and case-insensitive drive names', () => {
@@ -24,5 +27,21 @@ describe('local image cache containment', () => {
   })
   it('keeps POSIX cache paths functional', () => {
     expect(isWithinDirectory('/cache', '/cache/grid/a.jpg', posix)).toBe(true)
+  })
+  it('canonicalizes a new cache under an aliased parent before checking real files', async () => {
+    const workspace = mkdtempSync(join(tmpdir(), 'plumelens-cache-alias-'))
+    try {
+      const parent = join(workspace, 'actual-profile')
+      const alias = join(workspace, 'profile-alias')
+      mkdirSync(parent)
+      symlinkSync(parent, alias, process.platform === 'win32' ? 'junction' : 'dir')
+      const cache = join(alias, 'derived', 'thumbnails')
+      const canonical = await prepareCacheDirectory(cache)
+      expect(canonical).toBe(realpathSync(join(parent, 'derived', 'thumbnails')))
+      expect(isWithinDirectory(canonical, join(canonical, 'grid', 'photo.jpg'))).toBe(true)
+      expect(isWithinDirectory(canonical, join(parent, 'outside.jpg'))).toBe(false)
+    } finally {
+      rmSync(workspace, { recursive: true, force: true })
+    }
   })
 })

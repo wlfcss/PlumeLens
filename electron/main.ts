@@ -8,7 +8,7 @@ import { join, resolve } from 'path'
 import { ProcessManager } from './process-manager'
 import { forceTerminateEngineTreeSync } from './engine-shutdown'
 import { findWindowsEditor } from './windows-editors'
-import { isWithinDirectory } from './cache-paths'
+import { isWithinDirectory, prepareCacheDirectory } from './cache-paths'
 import {
   mergeUserSettings,
   readUserSettings,
@@ -1005,15 +1005,13 @@ app.whenReady().then(async () => {
     : join(app.getAppPath(), 'resources', 'species-artwork')
   const thumbnailsRootResolved = resolve(thumbnailsRoot)
   const speciesArtworkRootResolved = resolve(speciesArtworkRoot)
-  // 启动期一次性算 realpath(thumbnailsRoot) — userData 目录在应用运行期间不会变,
-  // 之前每个 plumelens:// 请求都重新 realpath 这个根,大量并发缩略图加载时会让
-  // main process 的 fs worker 排队。先尝试 realpath,thumbnailsRoot 不存在时
-  // (首次启动 / 数据被清)用 rootResolved 兜底,等首次 ensure_dir 后下次启动再算对。
+  // 首次启动也先创建缓存目录再取真实路径。Windows 的 RUNNER~1 等短路径
+  // 或目录联接会在 realpath 时展开，不能拿未展开的根与真实文件路径比较。
   let realThumbnailRootCache: string = thumbnailsRootResolved
   try {
-    realThumbnailRootCache = await realpath(thumbnailsRoot)
-  } catch {
-    /* dir 不存在,后续按需 realpath 单文件时会触发创建 */
+    realThumbnailRootCache = await prepareCacheDirectory(thumbnailsRoot)
+  } catch (err) {
+    process.stderr.write(`[thumb] cache initialization failed: ${String(err)}\n`)
   }
   let realSpeciesArtworkRootCache: string = speciesArtworkRootResolved
   try {
