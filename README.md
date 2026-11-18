@@ -58,7 +58,7 @@ macOS 可在下载目录执行 `shasum -a 256 -c PlumeLens-0.7.8-arm64.dmg.sha25
 - 改善 Windows 高 DPI 显示、中文界面和短路径下的缩略图访问，延长引擎冷启动等待时间。
 - 加快 RAW 内嵌预览解码，并根据可用硬件资源调整处理并发。
 
-[0.7.8 发布说明](https://github.com/wlfcss/PlumeLens/releases/tag/v0.7.8) · [完整更新日志](CHANGELOG.md)
+[0.7.8 发布说明](docs/releases/0.7.8.md) · [完整更新日志](CHANGELOG.md) · [GitHub Release](https://github.com/wlfcss/PlumeLens/releases/tag/v0.7.8)
 
 | 历史版本 | 主要更新                                              |
 | -------- | ----------------------------------------------------- |
