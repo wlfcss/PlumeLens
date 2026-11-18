@@ -32,6 +32,9 @@ const demo = JSON.parse(readFileSync(join(demoRoot, 'manifest.json'), 'utf8')) a
     decision: string
   }[]
 }
+const { version } = JSON.parse(readFileSync(join(REPO_ROOT, 'package.json'), 'utf8')) as {
+  version: string
+}
 const imageDir = join(REPO_ROOT, 'assets', 'readme')
 
 interface DemoPhoto {
@@ -75,16 +78,16 @@ async function capture(page: Page, fileName: string): Promise<void> {
   })
 }
 
-test('capture 0.7.7 real demo workspace and species filter', async () => {
+test('capture real demo workspace and species filter', async () => {
   const dataDir = process.env.PLUMELENS_README_DATA_DIR ?? makeTmpDataDir()
   let handle: LaunchHandle | null = null
-  const report: Record<string, unknown> = { dataDir, demoRoot, version: '0.7.7', manualDemo: true }
+  const report: Record<string, unknown> = { dataDir, demoRoot, version, manualDemo: true }
   try {
     handle = await launchApp(dataDir)
     await waitForEngineReady(handle.page, dataDir)
-    expect(await handle.app.evaluate(({ app }) => app.getVersion())).toBe('0.7.7')
+    expect(await handle.app.evaluate(({ app }) => app.getVersion())).toBe(version)
     const health = await callEngine(handle.page, '/health')
-    expect(JSON.parse(health.body).version).toBe('0.7.7')
+    expect(JSON.parse(health.body).version).toBe(version)
     const library = await importFixtureLibrary(handle.page, demo.photo_dir, '春日观鸟')
     await waitForLibraryReady(handle.page, library.id)
     if (process.env.PLUMELENS_README_SKIP_ANALYSIS !== '1') {
@@ -180,7 +183,7 @@ test('capture 0.7.7 real demo workspace and species filter', async () => {
   } finally {
     if (handle) await handle.app.close().catch(() => {})
     writeFileSync(
-      '/private/tmp/plumelens-readme-capture-report-0.7.7.json',
+      `/private/tmp/plumelens-readme-capture-report-${version}.json`,
       JSON.stringify(report, null, 2) + '\n',
     )
     // Keep this task-owned isolated DB for repeatable captures/review; never use real userData.

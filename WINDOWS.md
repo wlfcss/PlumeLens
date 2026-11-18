@@ -6,7 +6,7 @@
 
 - `start-validation.cmd`：打开本次 300 张照片的图库，进入最近使用的“Windows 鸟片测试”。
 - `start-windows.cmd`：启动独立 Windows 程序。无需安装 Python、Node 或 uv；保留整个 `release/win-unpacked` 目录。
-- `release/PlumeLens-0.7.7-Windows-x64.zip`：完整便携包，解压后运行 `PlumeLens.exe`。
+- `release/PlumeLens-0.7.8-Windows-x64.zip`：完整便携包，解压后运行 `PlumeLens.exe`。
 - `prepare-windows-gpu.cmd`：关闭应用后运行，下载或启用官方 Windows ML AMD 组件，编译检测模型缓存，并与 CPU 输出比较。发行包内同样附带此脚本，调用自带后端，无需开发环境。第一次编译实测约 1–3 分钟；本机已准备完成。缓存位于 `%LOCALAPPDATA%\PlumeLens\gpu-cache`。
 - `start-local.cmd`：启动源码开发版，仅在 `.venv-amd/amd-verified.json` 存在时使用该 AMD 环境。
 

@@ -10,7 +10,7 @@
 
 <p align="center">
   <a href="https://github.com/wlfcss/PlumeLens/actions/workflows/mac-build.yml"><img alt="构建状态" src="https://github.com/wlfcss/PlumeLens/actions/workflows/mac-build.yml/badge.svg"></a>
-  <img alt="版本 0.7.7" src="https://img.shields.io/badge/version-0.7.7-white">
+  <img alt="版本 0.7.8" src="https://img.shields.io/badge/version-0.7.8-white">
   <img alt="macOS arm64" src="https://img.shields.io/badge/platform-macOS%20arm64-111111">
   <a href="https://github.com/wlfcss/PlumeLens/actions/workflows/windows-build.yml"><img alt="Windows 构建状态" src="https://github.com/wlfcss/PlumeLens/actions/workflows/windows-build.yml/badge.svg"></a>
   <img alt="Windows x64" src="https://img.shields.io/badge/platform-Windows%20x64-111111">
@@ -43,19 +43,17 @@ Windows 安装使用、AMD 加速与实机验证见 [Windows 指南](WINDOWS.md)
 
 截图来自使用随附授权图片构建的演示图库，鸟种与评级已人工确认。图片作者及许可见[第三方图片归因](resources/species-artwork/THIRD_PARTY_ATTRIBUTIONS.md)。
 
-## 0.7.7 更新
+## 0.7.8 更新
 
-Windows 适配正在主分支更新：改善中文字体与标题栏，增加 AMD 加速、按硬件配置的处理并发和 Windows 自动构建。详细记录见 [更新日志](CHANGELOG.md)。
+- Windows x64 便携包支持离线运行，在支持的 AMD 显卡上可启用硬件加速。
+- 改善 Windows 高 DPI 显示、中文界面和短路径下的缩略图访问，延长引擎冷启动等待时间。
+- 加快 RAW 内嵌预览解码，并根据可用硬件资源调整处理并发。
 
-- 新增可搜索的鸟种多选，支持待审与未识别鸟；组合飞版条件时匹配同一只鸟。
-- 当前筛选可直接导出，启动任务时固定照片范围；文件校验后再生成最终文件。
-- 修复换图后的旧结果复用、并发事务、重复任务及暂停、取消后的重试问题。
-- 改善保存反馈、键盘操作、弹窗焦点、缩略图恢复和应用关闭流程。
-
-本版更新了缓存与 RAW 方向处理规则，重新分析后生效；人工评级保留。完整变更见 [CHANGELOG](CHANGELOG.md)。
+[下载 macOS 或 Windows 版](https://github.com/wlfcss/PlumeLens/releases/tag/v0.7.8) · [完整更新日志](CHANGELOG.md)
 
 | 历史版本 | 主要更新                                              |
 | -------- | ----------------------------------------------------- |
+| 0.7.7    | 鸟种多选与筛选导出、人工复核及任务恢复                |
 | 0.7.6    | 后台导出、格式选择、工作集文件夹移除                  |
 | 0.7.5    | 前端结构整理、离线鸟种封面、安全与测试完善            |
 | 0.7.0    | DINOv3 species v4、姿态与飞版分析、复核及羽迹功能更新 |
