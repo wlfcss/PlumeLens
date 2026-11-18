@@ -101,6 +101,17 @@ export async function launchApp(
   app.process().stderr?.on('data', (d) => process.stderr.write(`[main:err] ${d}`))
 
   const page = await app.firstWindow({ timeout: 30_000 })
+  if (process.env.CI) {
+    // Hosted Windows sessions can mark the native window as occluded even
+    // during automation. Keep layout/ResizeObserver callbacks running so the
+    // virtual grid is tested as an actively viewed application.
+    await app.evaluate(({ BrowserWindow }) => {
+      const window = BrowserWindow.getAllWindows()[0]
+      window.webContents.setBackgroundThrottling(false)
+      window.show()
+      window.focus()
+    })
+  }
   await page.waitForLoadState('domcontentloaded')
   // 等 React 挂上(brand mark 出现 = React tree mounted)
   await expect(page.getByText('鉴翎').first()).toBeVisible({ timeout: 30_000 })

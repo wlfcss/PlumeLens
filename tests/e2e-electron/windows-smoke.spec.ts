@@ -286,6 +286,34 @@ test('Windows: cold start, real photo analysis, export, clean exit and history r
     handle = await launchApp(dataDir)
     await waitForEngineReady(handle.page, dataDir)
     await expect(handle.page.getByText('Windows 鸟片测试').first()).toBeVisible()
+  } catch (error) {
+    await handle.page.screenshot({ path: test.info().outputPath('windows-failure.png') }).catch(() => {})
+    const diagnostics = await handle.page
+      .evaluate(() => ({
+        text: document.body.innerText,
+        visibility: document.visibilityState,
+        viewport: { width: innerWidth, height: innerHeight },
+        images: Array.from(document.images, (image) => ({
+          src: image.src,
+          currentSrc: image.currentSrc,
+          width: image.naturalWidth,
+          complete: image.complete,
+        })),
+      }))
+      .catch(() => null)
+    writeFileSync(
+      test.info().outputPath('windows-diagnostics.json'),
+      JSON.stringify({ dataDir, diagnostics }, null, 2),
+    )
+    const logs = join(dataDir, 'logs')
+    if (existsSync(logs)) {
+      for (const name of readdirSync(logs)) {
+        if (name === 'engine.jsonl' || name.startsWith('engine.stderr.')) {
+          writeFileSync(test.info().outputPath(name), readFileSync(join(logs, name)))
+        }
+      }
+    }
+    throw error
   } finally {
     if (resourceOutput) writeFileSync(resourceOutput + '.stop', '')
     monitor?.kill()
