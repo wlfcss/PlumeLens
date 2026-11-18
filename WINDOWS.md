@@ -1,18 +1,26 @@
 # Windows 与 AMD 优化、验证记录
 
-验证日期：2026-11-18。实机：Windows 11 Pro 10.0.26300.9818，Intel i5-13490F（16 个逻辑处理器），约 32 GB 内存，AMD Radeon RX 7900 XTX（24 GB 显存），驱动 32.0.32015.7029。
+## 安装 0.7.8 便携版
 
-## 使用
+1. 将 [Windows x64 便携包](https://github.com/wlfcss/PlumeLens/releases/download/v0.7.8/PlumeLens-0.7.8-Windows-x64.zip) 和 [SHA-256 校验文件](https://github.com/wlfcss/PlumeLens/releases/download/v0.7.8/PlumeLens-0.7.8-Windows-x64.zip.sha256) 下载到同一目录。
+2. 在该目录打开 PowerShell，运行下面的命令。结果为 `True` 表示 ZIP 的 SHA-256 与发布值一致。
+3. 完整解压 ZIP，从解压目录运行 `PlumeLens.exe`。模型和运行库随包提供。
 
-- `start-validation.cmd`：打开本次 300 张照片的图库，进入最近使用的“Windows 鸟片测试”。
-- `start-windows.cmd`：启动独立 Windows 程序。无需安装 Python、Node 或 uv；保留整个 `release/win-unpacked` 目录。
-- `release/PlumeLens-0.7.8-Windows-x64.zip`：完整便携包，解压后运行 `PlumeLens.exe`。
-- `prepare-windows-gpu.cmd`：关闭应用后运行，下载或启用官方 Windows ML AMD 组件，编译检测模型缓存，并与 CPU 输出比较。发行包内同样附带此脚本，调用自带后端，无需开发环境。第一次编译实测约 1–3 分钟；本机已准备完成。缓存位于 `%LOCALAPPDATA%\PlumeLens\gpu-cache`。
-- `start-local.cmd`：启动源码开发版，仅在 `.venv-amd/amd-verified.json` 存在时使用该 AMD 环境。
+```powershell
+$zip = 'PlumeLens-0.7.8-Windows-x64.zip'
+$expected = ((Get-Content "$zip.sha256" -Raw).Trim() -split '\s+')[0]
+(Get-FileHash $zip -Algorithm SHA256).Hash -eq $expected
+```
+
+## AMD 加速
+
+首次启用原生 AMD 检测前，关闭应用并运行解压目录内的 `prepare-windows-gpu.cmd`。脚本获取或启用官方 Windows ML AMD 组件，编译检测缓存并与 CPU 输出比较。缓存位于 `%LOCALAPPDATA%\PlumeLens\gpu-cache`。
 
 缺少、损坏或与硬件/模型不符的原生 GPU 缓存不会触发应用启动时的长时间编译；检测器使用兼容的 CPU 路径，其他可用 GPU 模型继续工作。驱动、官方 AMD 组件或 GPU 更换后，可重新运行初始化脚本。
 
-## AMD 加速与依赖选择
+### 实机验证与依赖选择
+
+以下数据采自 2026-11-18 的 Windows 11 Pro 10.0.26300.9818 实机，配置为 Intel i5-13490F（16 个逻辑处理器）、约 32 GB 内存、Radeon RX 7900 XTX（24 GB 显存），驱动版本为 32.0.32015.7029。首次编译检测缓存约需 1–3 分钟。
 
 最终采用 **Windows ML 原生 AMD GPU 检测 + DirectML 小模型 + ROCm PyTorch 鸟种识别**。检测器的旧 DirectML 路径比 CPU 更慢，因此不能简单地把所有模型统一设成 DirectML。
 
@@ -136,6 +144,10 @@ Python 核心回归 **503 通过、1 跳过**，构建资产恢复检查 **4 通
 - `.tools/windows-size-final.json`、`windows-archive-verification.json`：体积、ZIP 完整性与校验和。
 
 本次实机覆盖上述 Windows 11 + RX 7900 XTX。Windows 10、其他 AMD 型号、多显卡、其他相机 RAW 格式以及未安装的外部编辑器联动没有同等实机覆盖；不能据此宣称所有 Windows 硬件零缺陷。没有逐张人工鸟种真值，本次模型输出一致性与稳定性验证不等同于识别准确率评测。
+
+## 从源码运行与打包
+
+仓库中的 `start-windows.cmd` 启动本地构建的 `release/win-unpacked`，`start-local.cmd` 启动开发版，`start-validation.cmd` 用于打开实机验证图库。
 
 源码重建：安装 Node 24/uv，运行 `npm ci`、`uv sync --frozen --extra dev`；AMD 环境运行 `powershell -ExecutionPolicy Bypass -File scripts/setup-windows-amd.ps1`。打包前将 `PLUMELENS_PYTHON` 指向已验证 AMD Python，然后运行 `npm run dist:win`。本机缓存的工具与开发环境不进入便携包。
 

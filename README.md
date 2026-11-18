@@ -20,7 +20,16 @@
 
 ![鸟种筛选界面](assets/readme/species-filter.png)
 
-Windows 安装使用、AMD 加速与实机验证见 [Windows 指南](WINDOWS.md)。
+## 下载安装
+
+0.7.8 正式版包含本地分析所需的模型。按电脑平台下载，校验文件与安装包放在同一目录。
+
+| 平台               | 下载                                                                                                                                                                                                                                   | 安装                                            |
+| ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------- |
+| macOS · Apple 芯片 | [DMG（1.54 GB）](https://github.com/wlfcss/PlumeLens/releases/download/v0.7.8/PlumeLens-0.7.8-arm64.dmg) · [SHA-256](https://github.com/wlfcss/PlumeLens/releases/download/v0.7.8/PlumeLens-0.7.8-arm64.dmg.sha256)                    | 打开镜像，将 `PlumeLens.app` 拖入「应用程序」。 |
+| Windows x64        | [ZIP 便携包（2.01 GB）](https://github.com/wlfcss/PlumeLens/releases/download/v0.7.8/PlumeLens-0.7.8-Windows-x64.zip) · [SHA-256](https://github.com/wlfcss/PlumeLens/releases/download/v0.7.8/PlumeLens-0.7.8-Windows-x64.zip.sha256) | 完整解压到独立文件夹，双击 `PlumeLens.exe`。    |
+
+macOS 可在下载目录执行 `shasum -a 256 -c PlumeLens-0.7.8-arm64.dmg.sha256`。Windows 的校验命令和 AMD 加速设置见 [Windows 指南](WINDOWS.md)。
 
 ## 主要功能
 
@@ -49,7 +58,7 @@ Windows 安装使用、AMD 加速与实机验证见 [Windows 指南](WINDOWS.md)
 - 改善 Windows 高 DPI 显示、中文界面和短路径下的缩略图访问，延长引擎冷启动等待时间。
 - 加快 RAW 内嵌预览解码，并根据可用硬件资源调整处理并发。
 
-[下载 macOS 或 Windows 版](https://github.com/wlfcss/PlumeLens/releases/tag/v0.7.8) · [完整更新日志](CHANGELOG.md)
+[0.7.8 发布说明](https://github.com/wlfcss/PlumeLens/releases/tag/v0.7.8) · [完整更新日志](CHANGELOG.md)
 
 | 历史版本 | 主要更新                                              |
 | -------- | ----------------------------------------------------- |

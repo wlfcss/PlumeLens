@@ -4,7 +4,7 @@
 
 ## 0.7.8
 
-发布日期：2026-11-19。
+2026-11-19 已发布 macOS arm64 DMG 和 Windows x64 便携包，两份安装包均提供 SHA-256 校验文件。[正式下载](https://github.com/wlfcss/PlumeLens/releases/tag/v0.7.8)
 
 ### 新增
 
