@@ -68,11 +68,6 @@ extraResources:
       - '*.webp'
       - 'manifest.json'
       - 'THIRD_PARTY_ATTRIBUTIONS.md'
-extraFiles:
-  - from: prepare-windows-gpu.cmd
-    to: prepare-windows-gpu.cmd
-  - from: WINDOWS.md
-    to: WINDOWS.md
   - from: LICENSE
     to: LICENSE
 mac:
@@ -89,6 +84,13 @@ beforePack: scripts/build-engine.cjs
 afterPack: scripts/after-pack.cjs
 afterAllArtifactBuild: scripts/build-dmg.cjs
 win:
+  extraFiles:
+    - from: prepare-windows-gpu.cmd
+      to: prepare-windows-gpu.cmd
+    - from: WINDOWS.md
+      to: WINDOWS.md
+    - from: LICENSE
+      to: LICENSE
   # AMD runtime + model archive exceeds NSIS's 2 GiB embedded-data limit.
   # ZIP64 supports the complete offline runtime and needs no installation.
   target: zip
