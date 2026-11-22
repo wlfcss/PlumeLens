@@ -18,6 +18,7 @@ from engine.api.routes.library import router as library_router
 from engine.api.routes.settings import router as settings_router
 from engine.core.config import settings
 from engine.core.lifespan import lifespan
+from engine.services.selection import SelectionProjectionCache
 
 
 def _request_token(request: Request) -> str | None:
@@ -48,6 +49,7 @@ def create_app() -> FastAPI:
         version="0.7.8",
         lifespan=lifespan,
     )
+    application.state.selection_projections = SelectionProjectionCache()
 
     async def require_local_token(
         request: Request,

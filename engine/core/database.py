@@ -173,9 +173,8 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
 class Database:
     """Async SQLite wrapper with WAL mode and schema lifecycle.
 
-    Single persistent connection — SQLite is single-writer by design, and WAL
-    mode lets readers proceed concurrently with the writer. For higher
-    concurrency we could add a read-replica connection later.
+    SQLite has one write connection and one bounded read-snapshot connection.
+    WAL lets the snapshot reader and writer proceed concurrently.
 
     Usage (typically from FastAPI lifespan):
         db = Database(path)
@@ -192,8 +191,11 @@ class Database:
     def __init__(self, db_path: Path) -> None:
         self._path = db_path
         self._conn: aiosqlite.Connection | None = None
+        self._read_conn: aiosqlite.Connection | None = None
         self._write_lock = asyncio.Lock()
+        self._read_lock = asyncio.Lock()
         self._transaction_owner: asyncio.Task[object] | None = None
+        self._read_owner: asyncio.Task[object] | None = None
         self._savepoint_counter = 0
 
     @contextlib.asynccontextmanager
@@ -235,6 +237,43 @@ class Database:
             finally:
                 self._transaction_owner = None
 
+    @contextlib.asynccontextmanager
+    async def read_snapshot(self) -> AsyncIterator[aiosqlite.Connection]:
+        """Read across queries without joining another task's write transaction."""
+        task = asyncio.current_task()
+        if task is None:
+            raise RuntimeError("A database snapshot requires an asyncio task")
+
+        # Export and similar operations must keep all reads in their own
+        # transaction, including that transaction's uncommitted writes.
+        if self._transaction_owner is task:
+            yield self.conn
+            return
+        if str(self._path) == ":memory:":
+            async with self.transaction() as conn:
+                yield conn
+            return
+
+        if self._read_owner is task:
+            assert self._read_conn is not None
+            yield self._read_conn
+            return
+
+        async with self._read_lock:
+            reader = self._read_conn
+            if reader is None:
+                raise RuntimeError("Database not connected; call connect() first")
+            self._read_owner = task
+            try:
+                # Deferred BEGIN pins the WAL snapshot on the first SELECT.
+                await reader.execute("BEGIN")
+                yield reader
+            finally:
+                try:
+                    await reader.rollback()
+                finally:
+                    self._read_owner = None
+
     @property
     def path(self) -> Path:
         return self._path
@@ -247,7 +286,7 @@ class Database:
         return self._conn
 
     async def connect(self) -> None:
-        """Open the SQLite connection, configure PRAGMAs, ensure schema.
+        """Open SQLite connections, configure PRAGMAs, ensure schema.
 
         Safe to call multiple times — subsequent calls are no-ops if connected.
         """
@@ -262,8 +301,22 @@ class Database:
         conn.row_factory = aiosqlite.Row
         self._conn = conn
 
-        await self._configure_pragmas()
-        await self._ensure_schema()
+        try:
+            await self._configure_pragmas()
+            await self._ensure_schema()
+            if str(self._path) != ":memory:":
+                uri = self._path.resolve().as_uri()
+                if not uri.startswith("file:///"):
+                    # SQLite's default URI handler expects an empty authority.
+                    # Keep the initial // of a Windows UNC path in the path itself.
+                    uri = "file:////" + uri.removeprefix("file://")
+                reader = await aiosqlite.connect(f"{uri}?mode=ro", timeout=5, uri=True)
+                reader.row_factory = aiosqlite.Row
+                self._read_conn = reader
+                await reader.execute("PRAGMA temp_store = MEMORY;")
+        except BaseException:
+            await self.close()
+            raise
 
     async def _configure_pragmas(self) -> None:
         assert self._conn is not None
@@ -516,14 +569,22 @@ class Database:
         return int(row[0]) if row else 0
 
     async def close(self) -> None:
-        """Gracefully close the connection."""
-        if self._conn is None:
-            return
-        try:
-            await self._conn.close()
-        finally:
-            self._conn = None
-            await logger.ainfo("Database closed")
+        """Close the snapshot and write connections after in-flight read scopes finish."""
+        if self._read_owner is not None and self._read_owner is asyncio.current_task():
+            raise RuntimeError("Cannot close the database from inside its read snapshot")
+        async with self._read_lock:
+            if self._conn is None:
+                return
+            try:
+                if self._read_conn is not None:
+                    await self._read_conn.close()
+            finally:
+                self._read_conn = None
+                try:
+                    await self._conn.close()
+                finally:
+                    self._conn = None
+                    await logger.ainfo("Database closed")
 
     async def list_tables(self) -> list[str]:
         """List all user tables (utility for tests/diagnostics)."""

@@ -25,12 +25,14 @@ type SpeciesOption = ReturnType<typeof listAllSpecies>[number]
 
 export function SpeciesOverrideEditor({
   activeBirdIndex,
+  detailsReady = true,
   onSetActiveBirdIndex,
   onSetSpeciesOverride,
   photo,
   t,
 }: {
   activeBirdIndex: number
+  detailsReady?: boolean
   onSetActiveBirdIndex: (index: number) => void
   onSetSpeciesOverride: (
     photoId: string,
@@ -69,7 +71,7 @@ export function SpeciesOverrideEditor({
 
   useEffect(() => {
     setQuery('')
-  }, [photo.id])
+  }, [photo.id, photo.inputRevision])
 
   const activeBird = birds.find((bird) => bird.index === activeBirdIndex) ?? birds[0] ?? null
   const modelOptions = useMemo(() => {
@@ -108,7 +110,7 @@ export function SpeciesOverrideEditor({
     return filtered.slice(0, 8)
   }, [allSpecies, modelOptions, query])
 
-  if (!activeBird) return null
+  if (!detailsReady || !activeBird) return null
 
   const currentName =
     activeBird.speciesName ??

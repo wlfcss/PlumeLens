@@ -1,5 +1,8 @@
 /// <reference types="vite/client" />
 
+import type { EngineBenchmarkTiming } from '../../shared/benchmark-trace'
+import type { BenchmarkTraceEvent } from '@/lib/benchmark-trace'
+
 // 与 electron/preload.ts 的 EngineStatusPayload 保持一致
 export type EngineStatusPayload =
   | { kind: 'ready'; url: string }
@@ -22,6 +25,7 @@ export interface EngineResponse {
   statusText: string
   body: string
   contentType: string | null
+  benchmarkTiming?: EngineBenchmarkTiming
 }
 
 export interface EngineRequestInit {
@@ -61,10 +65,15 @@ export type UpdateCheckResult =
 
 interface PlumeLensAPI {
   readonly platform?: string
+  readonly benchmarkTraceEnabled?: boolean
   getBackendUrl(): Promise<string | null>
   /** Engine API 请求 — 在 preload 内完成 fetch,token 不进 renderer JS(H5)。
    *  vite-only / 单元测试可能没有这个 method;调用方 ?. 后 fallback 直连。 */
-  engineRequest?: (path: string, init?: EngineRequestInit) => Promise<EngineResponse>
+  engineRequest?: (
+    path: string,
+    init?: EngineRequestInit,
+    receiveSummaryLine?: (line: string) => void,
+  ) => Promise<EngineResponse>
   /** 订阅 engine SSE；Electron packaged 路径下 token 留在 preload Authorization header。 */
   engineSseSubscribe?: (path: string, onEvent: (event: EngineSseBridgeEvent) => void) => () => void
   /** Legacy fallback:构造 SSE URL(可能包含 query token,native EventSource 限制)。 */
@@ -126,6 +135,7 @@ export interface UserSettings {
 declare global {
   interface Window {
     plumelens?: PlumeLensAPI
+    __PLUMELENS_BENCHMARK_TRACE__?: BenchmarkTraceEvent[]
   }
 }
 

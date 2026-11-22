@@ -3,17 +3,42 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import threading
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
+from xml.etree import ElementTree
 
 import pytest
 from anyio import Path as AsyncPath
 from httpx import ASGITransport, AsyncClient, Response
+from PIL import Image
 
 MINIMAL_JPEG = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00\xff\xd9"
+XMP_HEADER = b"http://ns.adobe.com/xap/1.0/\x00"
+XMP_NAMESPACES = {
+    "rdf": "http://www.w3.org/1999/02/22-rdf-syntax-ns#",
+    "xmp": "http://ns.adobe.com/xap/1.0/",
+    "dc": "http://purl.org/dc/elements/1.1/",
+    "lr": "http://ns.adobe.com/lightroom/1.0/",
+    "crs": "http://ns.adobe.com/camera-raw-settings/1.0/",
+    "xmpMM": "http://ns.adobe.com/xap/1.0/mm/",
+    "evt": "http://ns.adobe.com/xap/1.0/sType/ResourceEvent#",
+    "customer": "urn:customer:metadata",
+}
+
+
+def _app1(payload: bytes) -> bytes:
+    return b"\xff\xe1" + (len(payload) + 2).to_bytes(2, "big") + payload
+
+
+def _jpeg_xmp_packet(image: bytes) -> tuple[bytes, bytes]:
+    offset = image.index(XMP_HEADER)
+    length = int.from_bytes(image[offset - 2 : offset], "big")
+    end = offset + length - 2
+    return image[offset + len(XMP_HEADER) : end], image[: offset - 4] + image[end:]
 
 
 def _write_file(path: Path, body: bytes = b"photo") -> None:
@@ -332,6 +357,198 @@ async def test_export_embeds_xmp_into_copied_jpeg_for_lightroom(
     p2 = next(row for row in manifest["照片清单"] if row["照片ID"] == "p2")
     assert p2["已导出XMP"] == "是"
     assert Path(p2["XMP导出路径"]).parts[-2:] == ("sub", "b.jpg")
+
+
+@pytest.mark.parametrize("rating_form", ["attribute", "element"])
+async def test_export_merges_existing_jpeg_xmp_without_changing_other_metadata_or_pixels(
+    export_client: tuple[AsyncClient, Path], tmp_path: Path, rating_form: str
+) -> None:
+    client, root = export_client
+    rating_attribute = 'basic:Rating="2"' if rating_form == "attribute" else ""
+    rating_element = "<basic:Rating>2</basic:Rating>" if rating_form == "element" else ""
+    existing = f'''<?xpacket begin="\ufeff" id="W5M0MpCehiHzreSzNTczkc9d"?>
+<x:xmpmeta xmlns:x="adobe:ns:meta/">
+  <r:RDF xmlns:r="{XMP_NAMESPACES["rdf"]}">
+    <r:Description r:about="" xmlns:basic="{XMP_NAMESPACES["xmp"]}"
+      xmlns:crs="{XMP_NAMESPACES["crs"]}" xmlns:u="{XMP_NAMESPACES["customer"]}"
+      xmlns:alias="urn:qualified-value" u:value="alias:Name&#10;line&#9;tab&#13;return"
+      basic:CreatorTool="Original Editor" basic:Label="Review later" crs:Exposure2012="+0.75"
+      {rating_attribute}>
+      {rating_element}
+    </r:Description>
+    <r:Description r:about="" xmlns:terms="{XMP_NAMESPACES["dc"]}"
+      xmlns:layers="{XMP_NAMESPACES["lr"]}" xmlns:doc="{XMP_NAMESPACES["xmpMM"]}"
+      xmlns:event="{XMP_NAMESPACES["evt"]}">
+      <terms:description>
+        <r:Alt><r:li xml:lang="x-default">原始标题</r:li></r:Alt>
+      </terms:description>
+      <terms:subject><Bag xmlns="{XMP_NAMESPACES["rdf"]}">
+        <li>作者 &amp; 关键字</li><li>翠鸟</li><li>PlumeLens</li>
+      </Bag></terms:subject>
+      <layers:hierarchicalSubject><r:Bag><r:li>观察|河流</r:li></r:Bag></layers:hierarchicalSubject>
+      <doc:History><r:Seq><r:li r:parseType="Resource">
+        <event:action>saved</event:action>
+      </r:li></r:Seq></doc:History>
+    </r:Description>
+  </r:RDF>
+</x:xmpmeta>
+<?xpacket end="w"?>'''
+    encoded = existing.encode("utf-8" if rating_form == "attribute" else "utf-16")
+    image = io.BytesIO()
+    exif = Image.Exif()
+    exif[270] = "Original EXIF"
+    Image.new("RGB", (8, 11), (82, 116, 190)).save(
+        image, format="JPEG", progressive=True, exif=exif
+    )
+    jpeg = image.getvalue()
+    source = root / "sub" / "b.jpg"
+    source_bytes = jpeg[:2] + _app1(XMP_HEADER + encoded) + jpeg[2:]
+    _write_file(source, source_bytes)
+
+    response = await client.post(
+        "/export/library/lib-export",
+        json={
+            "target_dir": str(tmp_path / "导出 & archive"),
+            "grades": ["usable"],
+            "include_companions": False,
+            "include_xmp_sidecars": True,
+        },
+    )
+    result = await _await_export(client, response)
+    assert result["exported_count"] == result["xmp_count"] == 1
+    output = Path(result["output_dir"]) / "sub" / "b.jpg"
+    exported = output.read_bytes()
+    merged_packet, outside_packet = _jpeg_xmp_packet(exported)
+    assert not output.with_suffix(".xmp").exists()
+    assert source.read_bytes() == source_bytes
+    assert exported.count(XMP_HEADER) == 1
+    assert outside_packet == jpeg  # Includes Exif, progressive scan data and marker order.
+    assert b'xmlns:alias="urn:qualified-value"' in merged_packet
+    with Image.open(io.BytesIO(source_bytes)) as src, Image.open(output) as dst:
+        assert src.tobytes() == dst.tobytes()
+        assert dst.getexif()[270] == "Original EXIF"
+
+    ns = XMP_NAMESPACES
+    tree = ElementTree.fromstring(merged_packet)
+    descriptions = tree.findall("rdf:RDF/rdf:Description", ns)
+    rating = descriptions[0].get(f"{{{ns['xmp']}}}Rating")
+    if rating_form == "element":
+        rating = descriptions[0].findtext("xmp:Rating", namespaces=ns)
+    assert rating == "4"
+    assert descriptions[0].get(f"{{{ns['xmp']}}}CreatorTool") == "Original Editor"
+    assert descriptions[0].get(f"{{{ns['xmp']}}}Label") == "Review later"
+    assert descriptions[0].get(f"{{{ns['crs']}}}Exposure2012") == "+0.75"
+    assert descriptions[0].get(f"{{{ns['customer']}}}value") == "alias:Name\nline\ttab\rreturn"
+    assert descriptions[1].findtext("dc:description/rdf:Alt/rdf:li", namespaces=ns) == "原始标题"
+    assert descriptions[1].findtext("xmpMM:History/rdf:Seq/rdf:li/evt:action", namespaces=ns) == (
+        "saved"
+    )
+    assert [item.text for item in descriptions[1].findall("dc:subject/rdf:Bag/rdf:li", ns)] == [
+        "作者 & 关键字",
+        "翠鸟",
+        "PlumeLens",
+        "评级:可用",
+        "鸟种:翠鸟",
+        "鸟数量:1",
+    ]
+    assert [
+        item.text for item in descriptions[1].findall("lr:hierarchicalSubject/rdf:Bag/rdf:li", ns)
+    ] == ["观察|河流", "PlumeLens", "PlumeLens|可用"]
+
+
+def _unsafe_xmp_segments(case: str) -> bytes:
+    root = f'<rdf:RDF xmlns:rdf="{XMP_NAMESPACES["rdf"]}">'.encode()
+    head = root + b'<rdf:Description rdf:about="" xmlns:u="urn:customer:metadata" u:data="'
+    tail = b'"/></rdf:RDF>'
+    standard = _app1(XMP_HEADER + head + b"preserve me" + tail)
+    if case == "extended":
+        return standard + _app1(b"http://ns.adobe.com/xmp/extension/\x00" + b"x" * 120)
+    if case == "extended_reference":
+        return _app1(
+            XMP_HEADER
+            + root
+            + (
+                b'<rdf:Description rdf:about="" xmlns:n="http://ns.adobe.com/xmp/note/" '
+                b'n:HasExtendedXMP="0123456789ABCDEF0123456789ABCDEF"/></rdf:RDF>'
+            )
+        )
+    if case == "duplicate":
+        return standard + standard
+    if case == "oversized":
+        limit = 0xFFFF - 2 - len(XMP_HEADER)
+        return _app1(XMP_HEADER + head + b"x" * (limit - len(head) - len(tail)) + tail)
+    if case == "doctype":
+        packet = (
+            '<!DOCTYPE rdf:RDF [<!ENTITY entry "read me">]>'
+            + root.decode()
+            + ("<rdf:Description>&entry;</rdf:Description></rdf:RDF>")
+        )
+        return _app1(XMP_HEADER + packet.encode("utf-16"))
+    return _app1(XMP_HEADER + b"<RDF><broken>")
+
+
+@pytest.mark.parametrize(
+    "case", ["malformed", "extended", "extended_reference", "duplicate", "oversized", "doctype"]
+)
+async def test_export_preserves_unmergeable_jpeg_xmp_and_reports_skipped_metadata(
+    export_client: tuple[AsyncClient, Path], tmp_path: Path, case: str
+) -> None:
+    client, root = export_client
+    photo_path = root / "sub" / "b.jpg"
+    original = MINIMAL_JPEG[:2] + _unsafe_xmp_segments(case) + MINIMAL_JPEG[2:]
+    _write_file(photo_path, original)
+
+    response = await client.post(
+        "/export/library/lib-export",
+        json={
+            "target_dir": str(tmp_path / "exports"),
+            "grades": ["usable"],
+            "include_companions": False,
+            "include_xmp_sidecars": True,
+            "include_manifest": True,
+        },
+    )
+    assert response.status_code == 200, response.text
+    job = await _await_job(client, response.json()["job_id"])
+    assert job["status"] == "failed"
+    assert job["error"]["code"] == "partial_export"
+    result = job["result"]
+    assert result["exported_count"] == result["failed_count"] == 1
+    assert result["xmp_count"] == 0
+    output = Path(result["output_dir"]) / "sub" / "b.jpg"
+    assert output.read_bytes() == photo_path.read_bytes() == original
+    assert not output.with_suffix(".xmp").exists()
+    report = json.loads(await AsyncPath(result["manifest"]["json"]).read_text(encoding="utf-8"))
+    row = report["照片清单"][0]
+    assert row["已导出照片"] == "是"
+    assert row["已导出XMP"] == "否"
+    assert "保留原有 XMP" in row["错误原因"]
+
+
+async def test_export_with_raw_companion_keeps_existing_jpeg_xmp_intact(
+    export_client: tuple[AsyncClient, Path], tmp_path: Path
+) -> None:
+    client, root = export_client
+    # The JPEG is copied unchanged even if its packet cannot be merged. The
+    # requested metadata belongs to the exported RAW sidecar in this mode.
+    source = root / "a.jpg"
+    original = MINIMAL_JPEG[:2] + _unsafe_xmp_segments("extended") + MINIMAL_JPEG[2:]
+    _write_file(source, original)
+    response = await client.post(
+        "/export/library/lib-export",
+        json={
+            "target_dir": str(tmp_path / "exports"),
+            "grades": ["select"],
+            "include_companions": True,
+            "include_xmp_sidecars": True,
+        },
+    )
+    result = await _await_export(client, response)
+    assert result["exported_count"] == result["companion_count"] == result["xmp_count"] == 1
+    output = Path(result["output_dir"])
+    assert (output / "a.jpg").read_bytes() == source.read_bytes() == original
+    assert (output / "a.CR3").read_bytes() == b"raw-a"
+    assert 'xmp:Rating="5"' in (output / "a.xmp").read_text(encoding="utf-8")
 
 
 async def test_export_can_generate_xmp_only_package_without_copying_photos(
@@ -827,7 +1044,18 @@ def test_run_export_stops_at_cancel_checkpoint_without_partial_files(
     assert manifest["导出摘要"]["任务状态"] == "已取消（仅含取消前已导出的部分）"
 
 
-async def _selection_preview(client: AsyncClient) -> dict[str, Any]:
+@pytest.fixture(params=["buffered", "streamed", "batches"])
+def selection_summary_mode(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> str:
+    from engine.api.routes import library
+
+    mode = str(request.param)
+    if mode != "buffered":
+        monkeypatch.setattr(library, "_SUMMARY_STREAM_THRESHOLD", 1)
+        monkeypatch.setattr(library, "_SUMMARY_ROWS_PER_CHUNK", 2)
+    return mode
+
+
+async def _selection_preview(client: AsyncClient, *, mode: str) -> dict[str, Any]:
     """The model says egret; the effective manual identity is kingfisher in reject grade."""
     db = client._transport.app.state.db  # type: ignore[attr-defined]
     bird = {
@@ -848,12 +1076,32 @@ async def _selection_preview(client: AsyncClient) -> dict[str, Any]:
             "(photo_id, bird_index, canonical_sci, canonical_zh, updated_at) "
             "VALUES ('p3', 0, 'Alcedo atthis', '普通翠鸟', '2026-11-17')"
         )
-    response = await client.post(
-        "/library/lib-export/selection/query",
-        json={"species_keys": ["sci:Alcedo atthis"], "grades": ["reject"]},
+    headers = {"Accept": "application/x-ndjson"} if mode == "batches" else None
+    detail = await client.get(
+        "/library/lib-export?view=summary&include_selection_snapshot=true", headers=headers
     )
+    assert detail.status_code == 200, detail.text
+    assert ("content-length" in detail.headers) == (mode == "buffered")
+    if mode == "batches":
+        frames = [json.loads(line) for line in detail.text.splitlines()]
+        photos = [photo for batch in frames[1:-1] for photo in batch]
+        assert len(photos) == frames[-1]
+        summary = frames[0] | {"photos": photos}
+    else:
+        summary = detail.json()
+    assert next(photo["species"] for photo in summary["photos"] if photo["id"] == "p3") == (
+        "普通翠鸟"
+    )
+    query = {"species_keys": ["sci:Alcedo atthis"], "grades": ["reject"]}
+    route = "/library/lib-export/selection/query"
+    response = await client.post(
+        route, params={"projection_revision": summary["projection_revision"]}, json=query
+    )
+    live = await client.post(route, json=query)
     assert response.status_code == 200, response.text
+    assert live.status_code == 200, live.text
     data = response.json()
+    assert data == live.json()
     assert data["matched_photo_ids"] == ["p3"]
     return data
 
@@ -862,11 +1110,12 @@ async def test_selection_export_uses_frozen_effective_identity_and_exact_members
     export_client: tuple[AsyncClient, Path],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    selection_summary_mode: str,
 ) -> None:
     from engine.services import exporter
 
     client, _ = export_client
-    preview = await _selection_preview(client)
+    preview = await _selection_preview(client, mode=selection_summary_mode)
     release = threading.Event()
     original = exporter._run_export
 
@@ -903,7 +1152,10 @@ async def test_selection_export_uses_frozen_effective_identity_and_exact_members
         release.set()
     result = await _await_export(client, started)
     assert result["selected_count"] == result["exported_count"] == 1
-    assert (tmp_path / "out").exists()
+    output_dir = AsyncPath(result["output_dir"])
+    exported = [path async for path in output_dir.rglob("*.jpg")]
+    assert [path.name for path in exported] == ["reject.jpg"]
+    assert await exported[0].read_bytes() == b"jpg-reject"
     report = json.loads(await AsyncPath(result["manifest"]["json"]).read_text(encoding="utf-8"))
     assert report["导出摘要"]["导出范围"] == "当前筛选"
     row = report["照片清单"][0]
@@ -913,10 +1165,12 @@ async def test_selection_export_uses_frozen_effective_identity_and_exact_members
 
 
 async def test_selection_export_rejects_changed_preview_before_creating_output(
-    export_client: tuple[AsyncClient, Path], tmp_path: Path
+    export_client: tuple[AsyncClient, Path],
+    tmp_path: Path,
+    selection_summary_mode: str,
 ) -> None:
     client, _ = export_client
-    preview = await _selection_preview(client)
+    preview = await _selection_preview(client, mode=selection_summary_mode)
     db = client._transport.app.state.db  # type: ignore[attr-defined]
     async with db.transaction() as conn:
         await conn.execute(

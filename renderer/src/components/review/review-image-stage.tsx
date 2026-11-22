@@ -303,7 +303,7 @@ export function ReviewImageStage({
       const torsoKeys = ['belly', 'breast', 'back', 'tail', 'left_wing', 'right_wing'] as const
       for (const key of headKeys) {
         const kp = pose[key]
-        if (kp.confidence < 0.05) continue
+        if (!kp || kp.confidence < 0.05) continue
         const p = toLocalPoint(kp.x, kp.y)
         if (!p) continue
         overlays.push(

@@ -7770,6 +7770,18 @@ dialog::backdrop {
   padding: 14px 16px 10px;
 }
 
+.review-detail__notice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 0.8125rem;
+}
+
+.review-detail__notice[role='alert'] {
+  color: var(--pl-warning);
+}
+
 .review-detail__footer {
   border-top: 1px solid var(--pl-border-1);
   background:

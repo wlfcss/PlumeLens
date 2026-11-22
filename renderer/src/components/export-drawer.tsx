@@ -41,6 +41,7 @@ import {
   type ExportLibraryResponse,
   type SelectionQuery,
 } from '@/lib/api-client'
+import { buildPhotoRecordFromRow } from '@/lib/backend-adapter'
 import { formatBytes } from '@/lib/format-bytes'
 import { gradeLabelKey } from '@/lib/i18n-keys'
 import { logger } from '@/lib/logger'
@@ -59,6 +60,7 @@ export type ExportSourceSnapshot = {
     query: SelectionQuery
     revision: string
     photoIds: string[]
+    photos: PhotoRecord[]
     defaultSelected: boolean
     labels: string[]
   }
@@ -241,8 +243,11 @@ export function ExportDrawer({
     const activeGrades = new Set(activeOptions.grades)
     const allowedFormats = new Set(activeOptions.formats)
     const copyFiles = activeOptions.contentMode !== 'xmp_only'
-    const selectedIds = new Set((lockedSource?.selection ?? selection)?.photoIds ?? [])
-    return sourcePhotos.filter((photo) => {
+    const selectedSnapshot = lockedSource?.selection ?? selection
+    const selectedIds = new Set(selectedSnapshot?.photoIds ?? [])
+    const photos =
+      activeOptions.scope === 'selection' ? (selectedSnapshot?.photos ?? []) : sourcePhotos
+    return photos.filter((photo) => {
       if (copyFiles && availableFormats !== null && activeOptions.formats.length === 0) return false
       if (activeOptions.scope === 'selection') {
         if (!selectedIds.has(photo.id)) return false
@@ -530,23 +535,46 @@ export function ExportDrawer({
     } catch (err) {
       const fallback = err instanceof Error ? err.message : String(err)
       const detail = parseExportError(err)
-      setError(describeError(detail, fallback))
       setPhase('failed')
       setCollapsed(false)
       if (detail?.code === 'selection_changed' && selection) {
         try {
-          const fresh = await api.querySelection(sourceFolder.id, selection.query)
+          const latest = await api.libraryDetail(sourceFolder.id, {
+            view: 'summary',
+            includeSelectionSnapshot: true,
+          })
+          const revision = latest.projection_revision
+          if (!revision || latest.library.id !== sourceFolder.id) {
+            throw new Error('Missing export preview revision')
+          }
+          const fresh = await api.querySelection(
+            sourceFolder.id,
+            selection.query,
+            undefined,
+            revision,
+          )
+          if (fresh.library_id !== sourceFolder.id || fresh.projection_revision !== revision) {
+            throw new Error('Mismatched export preview revision')
+          }
+          const matchedIds = new Set(fresh.matched_photo_ids)
           setSelection({
             ...selection,
-            revision: fresh.projection_revision,
+            revision,
             photoIds: fresh.matched_photo_ids,
+            photos: latest.photos
+              .filter((row) => matchedIds.has(row.id))
+              .map((row) => buildPhotoRecordFromRow(row, sourceFolder.id, '', t)),
           })
+          setError(describeError(detail, fallback))
           setLockedOptions(null)
           setLockedSource(null)
           setPhase('idle')
         } catch (refreshError) {
           logger.warn('Failed to refresh export selection:', refreshError)
+          setError(t('selection.speciesFilter.error'))
         }
+      } else {
+        setError(describeError(detail, fallback))
       }
     }
   }

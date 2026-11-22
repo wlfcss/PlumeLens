@@ -49,6 +49,7 @@ import { cn } from '@/lib/utils'
 import { ReviewImageStage } from './review-image-stage'
 import { SpeciesOverrideEditor } from './species-override-editor'
 import { useModalDialog } from '@/hooks/use-modal-dialog'
+import { usePhotoReview } from '@/hooks/use-photo-review'
 
 const REVIEW_ZOOM_OPTIONS = [1.5, 2.5, 4] as const
 const DEFAULT_REVIEW_ZOOM = 2.5
@@ -109,7 +110,10 @@ export function ReviewModal({
   photos: PhotoRecord[]
   t: ReturnType<typeof useTranslation>['t']
 }) {
-  const { photo, group } = detail
+  const { group } = detail
+  const review = usePhotoReview(detail.photo, t)
+  const photo = review.photo ?? detail.photo
+  const detailsReady = Boolean(review.photo)
   const dialogRef = useModalDialog()
   // 覆盖层分工：检测框 / 对焦区域在原图上看全局位置；姿态点保留在 IQA 裁切图上看细节。
   const [showBbox, setShowBbox] = useState(true)
@@ -156,7 +160,7 @@ export function ReviewModal({
   const [activeBirdIndex, setActiveBirdIndex] = useState<number>(bestDetectionIndex)
   useEffect(() => {
     setActiveBirdIndex(bestDetectionIndex)
-  }, [photo.id, bestDetectionIndex])
+  }, [photo.id, photo.inputRevision, bestDetectionIndex])
 
   const activeBird = useMemo(
     () => (photo.birdDetections ?? []).find((d) => d.index === activeBirdIndex) ?? null,
@@ -170,7 +174,9 @@ export function ReviewModal({
   // AF 覆盖层是 photo-level（机身只写一份 EXIF AFInfo，不分鸟），切换 activeBird 不影响。
   // Canon 官方语义中，单点 / 扩展 / Zone / Whole area 的呈现不同。
   // 新数据使用结构化 af_area；旧数据退回 legacy af_point。
-  const afOverlay = photo.bestAfArea ?? legacyAfPointToOverlay(photo.bestAfPoint ?? null)
+  const afOverlay = detailsReady
+    ? (photo.bestAfArea ?? legacyAfPointToOverlay(photo.bestAfPoint ?? null))
+    : null
 
   const previewSrc = photo.thumbPreviewUrl ?? null
   const photoIndexById = useMemo(
@@ -421,6 +427,7 @@ export function ReviewModal({
                 type="checkbox"
                 checked={showPose}
                 onChange={(e) => setShowPose(e.target.checked)}
+                disabled={!detailsReady}
               />
               <span>{t('selection.review.togglePose')}</span>
             </label>
@@ -433,7 +440,7 @@ export function ReviewModal({
               />
               <span>
                 {t('selection.review.toggleAfPoint')}
-                {afOverlay === null ? t('selection.review.afPointUnknown') : ''}
+                {detailsReady && afOverlay === null ? t('selection.review.afPointUnknown') : ''}
               </span>
             </label>
           </div>
@@ -471,7 +478,7 @@ export function ReviewModal({
               imgW={imgW}
               imgH={imgH}
               bbox={null}
-              pose={showPose ? pose : null}
+              pose={detailsReady && showPose ? pose : null}
               afOverlay={null}
               photoId={photo.id}
               loupeEnabled={false}
@@ -485,6 +492,28 @@ export function ReviewModal({
 
         <aside className="review-detail review-detail--compact">
           <div className="review-detail__body">
+            {review.loading ? (
+              <div className="review-detail__notice" role="status">
+                {t('selection.review.loadingDetails')}
+              </div>
+            ) : review.error ? (
+              <div className="review-detail__notice" role="alert">
+                <span>
+                  {t(
+                    review.revisionChanged
+                      ? 'selection.review.detailsChanged'
+                      : 'selection.review.detailsFailed',
+                  )}
+                </span>
+                <button
+                  type="button"
+                  className="button-ghost button-compact"
+                  onClick={review.onRetry}
+                >
+                  {t('common.retry')}
+                </button>
+              </div>
+            ) : null}
             {/* 顶部：分数 + 物种 + 分级 */}
             <ScoreHeader
               photo={photo}
@@ -536,6 +565,7 @@ export function ReviewModal({
 
             <SpeciesOverrideEditor
               activeBirdIndex={activeBirdIndex}
+              detailsReady={detailsReady}
               onSetActiveBirdIndex={setActiveBirdIndex}
               onSetSpeciesOverride={onSetSpeciesOverride}
               photo={photo}
@@ -567,7 +597,7 @@ export function ReviewModal({
               />
             ) : null}
 
-            <ExifPanel exif={photo.exif} location={photo} t={t} />
+            {detailsReady ? <ExifPanel exif={photo.exif} location={photo} t={t} /> : null}
 
             <div className="review-shortcuts" aria-label={t('selection.review.shortcutsLabel')}>
               <span>{t('selection.review.shortcuts.grade')}</span>

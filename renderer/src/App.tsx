@@ -6,8 +6,8 @@ import {
   useCallback,
   useDeferredValue,
   useEffect,
+  useLayoutEffect,
   useMemo,
-  useRef,
   useState,
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
@@ -19,16 +19,18 @@ import { EngineStatusBanner } from '@/components/engine-status-banner'
 const ReviewModal = lazy(() =>
   import('@/components/review/review-modal').then((m) => ({ default: m.ReviewModal })),
 )
-// SettingsModal / ExportDrawer / ReviewModal / ArchiveScreen / SelectionScreen
-// 全部 lazy — 起始页只下载 StartScreen + AppShell + EngineStatusBanner 子集,
-// 主 bundle 从 4.4MB 起步显著缩水(实测见构建 stat)。
+// 选片随主界面装载，避免首次打开图库等待 Suspense 首屏提交。
+// 羽迹、设置、导出和深度复核保持按需加载。
 const SettingsModal = lazy(() =>
   import('@/components/settings-modal').then((m) => ({ default: m.SettingsModal })),
 )
 import { useAnalysisProgress, useStartBatch } from '@/hooks/use-analysis'
 import { useBackendHealth } from '@/hooks/use-backend'
 import { useSetDecision, useSetSpeciesOverride } from '@/hooks/use-decisions'
-import { useLibraryWorkspaceSync } from '@/hooks/use-library-workspace-sync'
+import {
+  useLibraryWorkspaceSync,
+  type LibraryWorkspaceSnapshot,
+} from '@/hooks/use-library-workspace-sync'
 import {
   LIBRARIES_KEY,
   LIBRARY_DETAIL_KEY,
@@ -42,8 +44,10 @@ import {
   useUpdateLibrary,
 } from '@/hooks/use-library'
 import { useThumbnailRepair } from '@/hooks/use-thumbnail-repair'
-import { useSelectionQuery } from '@/hooks/use-selection'
+import { PHOTO_REVIEW_KEY } from '@/hooks/use-photo-review'
+import { useCoherentSelection, type SelectionSnapshot } from '@/hooks/use-selection'
 import type { SpeciesFilterProps } from '@/components/selection-chrome/species-filter'
+import { SelectionScreen } from '@/components/selection-chrome/selection-screen'
 import { useQueryClient } from '@tanstack/react-query'
 import {
   api,
@@ -60,7 +64,6 @@ import type {
   PhotoRecord,
   SelectionDecision,
   SpeciesRecord,
-  WorkspaceSnapshot,
 } from '@/lib/workspace-types'
 import { cn } from '@/lib/utils'
 import { useShallow, useUIStore, type SelectionSpeciesFilter } from '@/stores/ui-store'
@@ -73,11 +76,6 @@ const ExportDrawer = lazy(() =>
 )
 const ArchiveScreen = lazy(() =>
   import('@/components/archive/archive-screen').then((m) => ({ default: m.ArchiveScreen })),
-)
-const SelectionScreen = lazy(() =>
-  import('@/components/selection-chrome/selection-screen').then((m) => ({
-    default: m.SelectionScreen,
-  })),
 )
 import {
   FolderContextMenu,
@@ -101,6 +99,7 @@ import {
   deriveSpeciesRecords,
 } from '@/lib/workspace-projection'
 import { logger } from '@/lib/logger'
+import { benchmarkTrace } from '@/lib/benchmark-trace'
 
 export {
   applyNewSpeciesMarkers,
@@ -136,6 +135,28 @@ const routeIcons: Record<AppRoute, typeof Aperture> = {
   start: Aperture,
   selection: Sparkles,
   archive: LibraryBig,
+}
+
+function SelectionCommitTrace({
+  route,
+  projectedDetail,
+  selection,
+}: {
+  route: AppRoute
+  projectedDetail: NonNullable<LibraryWorkspaceSnapshot['activeProjection']>['detail'] | undefined
+  selection: SelectionSnapshot | undefined
+}) {
+  useLayoutEffect(() => {
+    if (route === 'selection') benchmarkTrace?.mark('selection.route_commit')
+  }, [route])
+  useLayoutEffect(() => {
+    if (projectedDetail) benchmarkTrace?.markFor('workspace.commit', projectedDetail)
+  }, [projectedDetail])
+  useLayoutEffect(() => {
+    if (route === 'selection' && selection)
+      benchmarkTrace?.markFor('selection.pair_commit', selection)
+  }, [route, selection])
+  return null
 }
 
 function matchesQuery(parts: Array<string | null | undefined>, query: string): boolean {
@@ -175,7 +196,7 @@ export default function App() {
     Boolean(backendData?.pipeline.ready)
   // 起手用空 workspace，避免 useLibraries 还没 fetch 完时闪现历史 fixture 数据。
   // useLibraries effect 拿到真数据后会注入；fetch 失败的 fallback 在 handleChooseFolder 里。
-  const [workspace, setWorkspace] = useState<WorkspaceSnapshot>(() => ({
+  const [workspace, setWorkspace] = useState<LibraryWorkspaceSnapshot>(() => ({
     folders: [],
     groups: [],
     photos: [],
@@ -351,7 +372,7 @@ export default function App() {
   const activeFolderSummary = activeFolder
     ? (summariesByFolder.get(activeFolder.id) ?? EMPTY_FOLDER_SUMMARY)
     : EMPTY_FOLDER_SUMMARY
-  const activeDetailQuery = useLibraryDetail(activeFolderId)
+  const activeDetailQuery = useLibraryDetail(activeFolderId ?? activeFolder?.id)
   const activeDetail = activeDetailQuery.data
   const queryClient = useQueryClient()
   const speciesFilter =
@@ -373,78 +394,35 @@ export default function App() {
     }),
     [activeQuickFilters, activeSort, deferredSearch, onlyFlying, speciesFilter],
   )
-  const selectionResult = useSelectionQuery(
+  const coherentSelection = useCoherentSelection(
     activeFolder?.id ?? null,
     selectionQuery,
+    activeDetailQuery,
     route === 'selection',
   )
-  const selectionSyncing = Boolean(
-    activeDetail?.projection_revision &&
-    selectionResult.data &&
-    activeDetail.projection_revision !== selectionResult.data.projection_revision,
-  )
-  const reconciledPair = useRef<string | null>(null)
-  const revisionPair = `${activeFolder?.id}:${activeDetail?.projection_revision}:${selectionResult.data?.projection_revision}`
-  const revisionSyncFailed =
-    selectionSyncing &&
-    reconciledPair.current === revisionPair &&
-    !activeDetailQuery.isFetching &&
-    !selectionResult.isFetching
-  useEffect(() => {
-    if (!selectionSyncing) {
-      reconciledPair.current = null
-      return
-    }
-    if (
-      !activeFolder ||
-      !selectionSyncing ||
-      selectionResult.isFetching ||
-      activeDetailQuery.isFetching ||
-      selectionResult.isError ||
-      activeDetailQuery.isError
-    )
-      return
-    if (reconciledPair.current === revisionPair) return
-    reconciledPair.current = revisionPair
-    void queryClient.invalidateQueries({ queryKey: LIBRARY_DETAIL_KEY(activeFolder.id) })
-    void queryClient.invalidateQueries({ queryKey: ['selection', activeFolder.id] })
-  }, [
-    activeFolder?.id,
-    activeDetailQuery.isError,
-    activeDetailQuery.isFetching,
-    queryClient,
-    selectionResult.data?.projection_revision,
-    selectionResult.isFetching,
-    selectionResult.isError,
-    selectionSyncing,
-    revisionPair,
-  ])
+  const appliedSelection = workspace.activeProjection?.selection
+  const selectionSnapshot =
+    appliedSelection?.detail.library.id === activeFolder?.id ? appliedSelection : undefined
+  const selectionResult = selectionSnapshot?.selection
+  const selectionExportable = selectionSnapshot?.query === selectionQuery
   const speciesFilterProps: SpeciesFilterProps = {
-    facets: selectionResult.data?.facets ?? [],
+    facets: selectionResult?.facets ?? [],
     filter: speciesFilter,
     onChange: (filter) => {
-      if (activeFolder) setSelectionSpeciesFilter(activeFolder.id, filter)
+      if (activeFolder) {
+        benchmarkTrace?.mark('selection.filter_change')
+        setSelectionSpeciesFilter(activeFolder.id, filter)
+      }
     },
     loading:
-      selectionResult.isFetching ||
-      (selectionSyncing && !revisionSyncFailed && !activeDetailQuery.isError),
-    error: selectionResult.isError || activeDetailQuery.isError || revisionSyncFailed,
-    onRetry: () => {
-      reconciledPair.current = null
-      void selectionResult.refetch()
-      void activeDetailQuery.refetch()
-    },
+      coherentSelection.loading ||
+      (!coherentSelection.error && selectionSnapshot?.query !== selectionQuery),
+    error: coherentSelection.error,
+    onRetry: coherentSelection.onRetry,
   }
   const openExportForActiveFolder = useCallback(() => {
     if (!activeFolder || activeFolder.status === 'path_missing') return
-    if (
-      route === 'selection' &&
-      (!selectionResult.data ||
-        selectionResult.isFetching ||
-        selectionResult.isError ||
-        selectionSyncing)
-    )
-      return
+    if (route === 'selection' && !selectionExportable) return
     setExportSessions((current) => [
       ...current,
       {
@@ -455,19 +433,16 @@ export default function App() {
           photos: activeFolderPhotos,
           summary: activeFolderSummary,
           selection:
-            route === 'selection' &&
-            selectionResult.data &&
-            !selectionResult.isPlaceholderData &&
-            !selectionResult.isFetching &&
-            !selectionResult.isError
+            route === 'selection' && selectionResult
               ? {
                   query: selectionQuery,
-                  revision: selectionResult.data.projection_revision,
-                  photoIds: selectionResult.data.matched_photo_ids,
+                  revision: selectionResult.projection_revision,
+                  photoIds: selectionResult.matched_photo_ids,
+                  photos: activeFolderPhotos,
                   defaultSelected: speciesFilter.keys.length > 0,
                   labels: speciesFilter.keys.map(
                     (key) =>
-                      selectionResult.data!.facets.find((facet) => facet.key === key)?.name ??
+                      selectionResult.facets.find((facet) => facet.key === key)?.name ??
                       key.replace(/^sci:/, ''),
                   ),
                 }
@@ -480,12 +455,9 @@ export default function App() {
     activeFolderPhotos,
     activeFolderSummary,
     route,
-    selectionResult.data,
-    selectionResult.isPlaceholderData,
-    selectionResult.isFetching,
-    selectionResult.isError,
+    selectionResult,
+    selectionExportable,
     selectionQuery,
-    selectionSyncing,
     speciesFilter.keys,
   ])
   const closeExportSession = useCallback((sessionId: string) => {
@@ -511,12 +483,12 @@ export default function App() {
     [photosByFolder, summariesByFolder, workspace.folders],
   )
   const filteredSelectionPhotos = useMemo(() => {
-    const ids = new Set(selectionResult.data?.matched_photo_ids ?? [])
+    const ids = new Set(selectionResult?.matched_photo_ids ?? [])
     return sortPhotos(
       activeFolderPhotos.filter((photo) => ids.has(photo.id)),
       activeSort,
     )
-  }, [activeFolderPhotos, activeSort, selectionResult.data])
+  }, [activeFolderPhotos, activeSort, selectionResult])
   const groupStartMs = useMemo(() => buildGroupStartMsMap(activeFolderPhotos), [activeFolderPhotos])
 
   const folderGroups = useMemo(() => {
@@ -627,7 +599,8 @@ export default function App() {
     photos: workspace.photos,
   })
   useLibraryWorkspaceSync({
-    activeDetail,
+    activeDetail: route === 'selection' ? coherentSelection.displayed?.detail : activeDetail,
+    activeSelection: coherentSelection.displayed,
     allDetails,
     libraries: realLibraries,
     setWorkspace,
@@ -797,6 +770,7 @@ export default function App() {
   }
 
   function handleNavigate(nextRoute: AppRoute) {
+    if (nextRoute === 'selection') benchmarkTrace?.mark('selection.navigate')
     startTransition(() => {
       setRoute(nextRoute)
       if (nextRoute === 'selection' && activeFolder) {
@@ -806,6 +780,7 @@ export default function App() {
   }
 
   function handleSelectFolder(folderId: string) {
+    benchmarkTrace?.mark('selection.navigate')
     startTransition(() => {
       setRoute('selection')
       setActiveFolderId(folderId)
@@ -822,6 +797,7 @@ export default function App() {
         decision: decision as DecisionValue,
         libraryId: photoById.get(photoId)?.folderId,
       })
+      .then(() => refreshUnversionedReview(photoId))
       .catch((err: unknown) => {
         logger.warn('Failed to persist decision:', err)
         setOperationError(
@@ -846,12 +822,19 @@ export default function App() {
         bbox: bbox ?? null,
         libraryId: photoById.get(photoId)?.folderId,
       })
+      .then(() => refreshUnversionedReview(photoId))
       .catch((err: unknown) => {
         logger.warn('Failed to persist species override:', err)
         setOperationError(
           t('selection.savePhotoFailed', { file: photoById.get(photoId)?.fileName ?? photoId }),
         )
       })
+  }
+
+  function refreshUnversionedReview(photoId: string) {
+    if (!photoById.get(photoId)?.reviewRevision) {
+      void queryClient.invalidateQueries({ queryKey: PHOTO_REVIEW_KEY(photoId) })
+    }
   }
 
   function handleOpenReview(photoId: string) {
@@ -920,6 +903,13 @@ export default function App() {
       controlsDisabled={!appInteractive}
       exportDisabled={Boolean(activeSourceMissing)}
     >
+      {benchmarkTrace && (
+        <SelectionCommitTrace
+          route={route}
+          projectedDetail={workspace.activeProjection?.detail}
+          selection={selectionSnapshot}
+        />
+      )}
       {isError ? (
         <div className="engine-banner engine-banner--fatal" role="alert">
           <span>{t('engineBanner.healthFailed')}</span>
@@ -967,8 +957,8 @@ export default function App() {
           {route === 'selection' ? (
             <SelectionScreen
               speciesFilterProps={speciesFilterProps}
-              selectionCount={selectionResult.data?.matched_count ?? 0}
-              selectionPending={selectionResult.data?.pending_count ?? 0}
+              selectionCount={selectionResult?.matched_count ?? 0}
+              selectionPending={selectionResult?.pending_count ?? 0}
               onClearFilters={() => {
                 setActiveQuickFilters([])
                 setOnlyFlying(false)

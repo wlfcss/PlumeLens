@@ -4,13 +4,19 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useRef, useState } from 'react'
 
-import { api, type AnalysisProgressEvent, type QueueStatsResponse } from '@/lib/api-client'
+import { LIBRARIES_KEY, LIBRARY_DETAIL_KEY } from '@/hooks/use-library'
+import { SELECTION_QUERY_KEY } from '@/hooks/use-selection'
+import {
+  api,
+  type AnalysisProgressEvent,
+  type LibraryDetail,
+  type QueueStatsResponse,
+} from '@/lib/api-client'
 import { logger } from '@/lib/logger'
 
 const QUEUE_STATS_KEY = (libraryId: string) => ['queue-stats', libraryId] as const
-const LIBRARY_DETAIL_KEY = (libraryId: string) => ['library', libraryId] as const
-const LIBRARIES_KEY = ['libraries'] as const
-const DETAIL_REFRESH_THROTTLE_MS = 2_000
+const DETAIL_REFRESH_INTERVAL_MS = 15_000
+const DETAIL_IDLE_CHECK_MS = 250
 
 export function useStartBatch() {
   const qc = useQueryClient()
@@ -18,8 +24,8 @@ export function useStartBatch() {
     mutationFn: (params: { libraryId: string; forceRerun?: boolean }) =>
       api.startBatch(params.libraryId, params.forceRerun ?? false),
     onSuccess: (_, { libraryId }) => {
-      qc.invalidateQueries({ queryKey: QUEUE_STATS_KEY(libraryId) })
-      qc.invalidateQueries({ queryKey: ['library', libraryId] })
+      void qc.invalidateQueries({ queryKey: QUEUE_STATS_KEY(libraryId) })
+      void qc.invalidateQueries({ queryKey: LIBRARIES_KEY }, { cancelRefetch: false })
     },
   })
 }
@@ -72,49 +78,121 @@ export function useAnalysisProgress(
 ): AnalysisProgressEvent | null {
   const qc = useQueryClient()
   const [event, setEvent] = useState<AnalysisProgressEvent | null>(null)
-  const lastDetailRefreshRef = useRef<{ at: number; signature: string } | null>(null)
+  const lastFrame = useRef<AnalysisProgressEvent | null>(null)
 
   useEffect(() => {
     setEvent(null)
-    lastDetailRefreshRef.current = null
 
     if (!libraryId || !enabled) return undefined
+    const detailQuery = { queryKey: LIBRARY_DETAIL_KEY(libraryId), exact: true }
     let source: EventSource | null = null
     let unsubscribeBridge: (() => void) | null = null
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+    let detailTimer: ReturnType<typeof setTimeout> | null = null
+    let detailDirty = false
+    let flushImmediately = false
+    let detailInFlight = false
+    let nextDetailAt = performance.now() + DETAIL_REFRESH_INTERVAL_MS
+    let needsCatchUp = false
     let cancelled = false
+
+    const flushDetail = (): void => {
+      if (cancelled || !detailDirty || detailInFlight) return
+      if (detailTimer !== null) clearTimeout(detailTimer)
+      detailTimer = null
+
+      // Joining a request already on the wire could miss the results that made us dirty.
+      const delay = qc.isFetching(detailQuery)
+        ? DETAIL_IDLE_CHECK_MS
+        : flushImmediately
+          ? 0
+          : nextDetailAt - performance.now()
+      if (delay > 0) {
+        detailTimer = setTimeout(flushDetail, delay)
+        return
+      }
+
+      detailDirty = false
+      flushImmediately = false
+      detailInFlight = true
+      nextDetailAt = performance.now() + DETAIL_REFRESH_INTERVAL_MS
+      void qc.invalidateQueries(detailQuery, { cancelRefetch: false }).finally(() => {
+        detailInFlight = false
+        if (cancelled) return
+        const detail = qc.getQueryData<LibraryDetail>(detailQuery.queryKey)
+        if (detail && !detail.projection_revision) {
+          void qc.invalidateQueries(
+            { queryKey: SELECTION_QUERY_KEY(libraryId) },
+            { cancelRefetch: false },
+          )
+        }
+        flushDetail()
+      })
+    }
+
+    const scheduleDetail = (immediate = false): void => {
+      detailDirty = true
+      flushImmediately ||= immediate
+      if (detailTimer === null || immediate) flushDetail()
+    }
+
+    const handleOpen = (): void => {
+      if (!needsCatchUp) return
+      needsCatchUp = false
+      scheduleDetail(true)
+      void qc.invalidateQueries({ queryKey: LIBRARIES_KEY }, { cancelRefetch: false })
+    }
 
     const handleProgressFrame = (data: string): void => {
       try {
         const parsed = JSON.parse(data) as AnalysisProgressEvent
+        if (parsed.library_id !== libraryId) return
+        const previous = lastFrame.current?.library_id === libraryId ? lastFrame.current : null
+        lastFrame.current = parsed
         setEvent(parsed)
 
-        // SSE 本身只更新进度按钮；照片卡片/统计来自 library detail 查询。
-        // 分析完成数变化时节流刷新 detail/list，让识别结果持续进入 UI。
-        const signature = [
-          parsed.completed,
-          parsed.failed,
-          parsed.dead,
-          parsed.pending,
-          parsed.processing,
-          parsed.total,
-        ].join(':')
         const active = parsed.pending + parsed.processing > 0
-        const finished =
-          parsed.total > 0 &&
-          parsed.pending + parsed.processing === 0 &&
-          parsed.completed + parsed.failed + parsed.dead >= parsed.total
-        const previous = lastDetailRefreshRef.current
-        const now = Date.now()
-        const due =
-          !previous ||
-          (signature !== previous.signature &&
-            (finished || now - previous.at >= DETAIL_REFRESH_THROTTLE_MS))
-        if ((active || finished) && due) {
-          lastDetailRefreshRef.current = { at: now, signature }
-          qc.invalidateQueries({ queryKey: LIBRARY_DETAIL_KEY(parsed.library_id) })
-          qc.invalidateQueries({ queryKey: LIBRARIES_KEY })
-          qc.invalidateQueries({ queryKey: ['selection', libraryId] })
+        const resultsChanged =
+          previous?.run_id === parsed.run_id && previous
+            ? previous.completed !== parsed.completed ||
+              previous.failed !== parsed.failed ||
+              previous.dead !== parsed.dead
+            : parsed.completed + parsed.failed + parsed.dead > 0
+        const controlChanged = Boolean(
+          previous &&
+          (previous.run_id !== parsed.run_id || previous.desired_state !== parsed.desired_state),
+        )
+        const stopped =
+          controlChanged &&
+          (parsed.desired_state === 'completed' ||
+            parsed.desired_state === 'cancelled' ||
+            parsed.desired_state === 'paused')
+        const legacyFinished =
+          !parsed.desired_state && !active && previous && previous.pending + previous.processing > 0
+
+        // Task starts and queue reordering should not fetch all photos. Results can wait for
+        // the next batch, while stopping and reconnection must eventually publish the tail.
+        if (stopped || legacyFinished || (resultsChanged && (previous || active))) {
+          scheduleDetail(Boolean(stopped || legacyFinished))
+          void qc.invalidateQueries({ queryKey: LIBRARIES_KEY }, { cancelRefetch: false })
+        } else if (controlChanged) {
+          void qc.invalidateQueries({ queryKey: LIBRARIES_KEY }, { cancelRefetch: false })
+        }
+
+        if (parsed.desired_state !== undefined) {
+          qc.setQueryData<QueueStatsResponse>(QUEUE_STATS_KEY(libraryId), (current) => ({
+            library_id: libraryId,
+            run_id: parsed.run_id,
+            desired_state: parsed.desired_state,
+            stats: {
+              ...current?.stats,
+              completed: parsed.completed,
+              failed: parsed.failed,
+              dead: parsed.dead,
+              pending: parsed.pending,
+              processing: parsed.processing,
+            },
+          }))
         }
       } catch (e) {
         logger.warn('SSE malformed frame:', e)
@@ -129,9 +207,7 @@ export function useAnalysisProgress(
           (bridgeEvent) => {
             if (cancelled) return
             if (bridgeEvent.type === 'open') {
-              qc.invalidateQueries({ queryKey: LIBRARY_DETAIL_KEY(libraryId) })
-              qc.invalidateQueries({ queryKey: LIBRARIES_KEY })
-              qc.invalidateQueries({ queryKey: ['selection', libraryId] })
+              handleOpen()
               return
             }
             if (bridgeEvent.type === 'message') {
@@ -139,6 +215,7 @@ export function useAnalysisProgress(
               return
             }
             logger.warn('SSE bridge closed, retrying in 5s:', bridgeEvent.message)
+            needsCatchUp = true
             unsubscribeBridge?.()
             unsubscribeBridge = null
             reconnectTimer = setTimeout(connect, 5000)
@@ -151,14 +228,7 @@ export function useAnalysisProgress(
         .then((url) => {
           if (cancelled) return
           source = new EventSource(url)
-          // 每次连接 / 重连成功立刻 invalidate library detail + libraries 列表 —
-          // 5s backoff 期间发生的 progress 事件不会带 Last-Event-ID 重发,通过强制
-          // refetch 让 UI 同步到当前真实状态(分析卡死 / 已完成 / 物种识别更新)。
-          source.onopen = () => {
-            qc.invalidateQueries({ queryKey: LIBRARY_DETAIL_KEY(libraryId) })
-            qc.invalidateQueries({ queryKey: LIBRARIES_KEY })
-            qc.invalidateQueries({ queryKey: ['selection', libraryId] })
-          }
+          source.onopen = handleOpen
           source.onmessage = (msg) => {
             handleProgressFrame(msg.data)
           }
@@ -168,6 +238,7 @@ export function useAnalysisProgress(
           // 在重连,我们什么都不做。
           source.onerror = (e) => {
             if (cancelled || !source) return
+            needsCatchUp = true
             if (source.readyState === EventSource.CLOSED) {
               logger.warn('SSE closed (likely 4xx), retrying in 5s')
               source.close()
@@ -180,6 +251,7 @@ export function useAnalysisProgress(
         })
         .catch((e) => {
           if (cancelled) return
+          needsCatchUp = true
           logger.warn('Failed to resolve SSE URL, retrying in 5s:', e)
           reconnectTimer = setTimeout(connect, 5000)
         })
@@ -190,6 +262,7 @@ export function useAnalysisProgress(
     return () => {
       cancelled = true
       if (reconnectTimer !== null) clearTimeout(reconnectTimer)
+      if (detailTimer !== null) clearTimeout(detailTimer)
       unsubscribeBridge?.()
       unsubscribeBridge = null
       source?.close()
@@ -197,5 +270,5 @@ export function useAnalysisProgress(
     }
   }, [libraryId, enabled, qc, restartKey])
 
-  return event
+  return event?.library_id === libraryId ? event : null
 }

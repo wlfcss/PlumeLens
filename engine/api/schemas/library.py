@@ -5,7 +5,7 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr
 
 # 共用 species_source union：避免 typo 静默通过（schema audit C 修复）
 SpeciesSource = Literal[
@@ -109,7 +109,22 @@ class Keypoint(BaseModel):
     confidence: float
 
 
-class PoseDetail(BaseModel):
+class PoseSummary(BaseModel):
+    """Visibility and posture used by the library grid and filters."""
+
+    head_visible: bool
+    eye_visible: bool
+    body_visible: bool = False
+    tail_visible: bool = False
+    wings_visible: bool = False
+    view_angle: str = "unknown"
+    facing: str = "unknown"
+    posture: str = "unknown"
+    posture_confidence: float = 0.0
+    posture_method: str = "heuristic"
+
+
+class PoseDetail(PoseSummary):
     """11 keypoints (5 head + 6 body) + 5 visibility + posture fields.
 
     v2.1 schema(bird_visibility11 + flight classifier)。所有新字段都有 default,旧 v1 cache JSON
@@ -129,26 +144,13 @@ class PoseDetail(BaseModel):
     tail: Keypoint = Keypoint(x=0.0, y=0.0, confidence=0.0)
     left_wing: Keypoint = Keypoint(x=0.0, y=0.0, confidence=0.0)
     right_wing: Keypoint = Keypoint(x=0.0, y=0.0, confidence=0.0)
-    # 5 项可见性
-    head_visible: bool
-    eye_visible: bool
-    body_visible: bool = False  # v2 新增
-    tail_visible: bool = False  # v2 新增
-    wings_visible: bool = False  # v2 新增
-    # 3 项姿态(影响 grader 飞版升档)
-    view_angle: str = "unknown"  # frontal / side / back / unknown
-    facing: str = "unknown"  # left / right / unknown(仅 view=side 有效)
-    posture: str = "unknown"  # perched / flying / unknown
-    posture_confidence: float = 0.0  # P(fly),classifier 模式有效
-    posture_method: str = "heuristic"  # classifier / heuristic
 
 
-class BestDetection(BaseModel):
-    """Top bird in the photo: bbox + pose + species."""
+class DetectionIdentity(BaseModel):
+    """Effective identity and scores shared by library and review birds."""
 
     index: int = 0
     bbox: BBox
-    pose: PoseDetail | None = None
     quality: dict[str, float] | None = None  # clipiqa/hyperiqa/combined
     species: str | None = None
     species_latin: str | None = None
@@ -161,19 +163,40 @@ class BestDetection(BaseModel):
     species_source: SpeciesSource = "none"
 
 
+class DetectionSummary(DetectionIdentity):
+    pose: PoseSummary | None = None
+    candidate_confidence: float | None = None
+    candidate_recognition_state: str | None = None
+    species_candidates: list[dict[str, Any]] = Field(
+        default_factory=_empty_species_candidates, exclude=True
+    )
+
+
+class BirdDetectionSummary(DetectionSummary):
+    is_best: bool = False
+
+
+class BestDetection(DetectionIdentity):
+    """Top bird in the photo, including full pose."""
+
+    pose: PoseDetail | None = None
+
+
 class BirdDetectionDetail(BestDetection):
     """One detected bird, including model candidates and manual species override."""
 
     is_best: bool = False
 
 
-class PhotoRow(BaseModel):
-    """A single photo row (for library detail / list pages)."""
+class PhotoProjection(BaseModel):
+    """Fields shared by the library and deep review."""
 
+    _selection_revision: str | None = PrivateAttr(default=None)
     id: str
     file_path: str
     file_name: str
     input_revision: int = 0
+    review_revision: str | None = None
     file_hash: str | None = None
     format: str | None
     width: int | None
@@ -230,8 +253,19 @@ class PhotoRow(BaseModel):
     analysis_error_code: str | None = None
     # 原始 error message(英文,来自底层库如 PIL),前端 fallback 显示用。
     analysis_error: str | None = None
-    # 完整 EXIF（whitelist 字段：相机/镜头/快门/光圈/ISO/焦距/...）
     exif: dict[str, Any] | None = None
+
+
+class PhotoSummary(PhotoProjection):
+    """Photo row with compact EXIF, pose and candidate data."""
+
+    best_detection: DetectionSummary | None = None
+    detections: list[BirdDetectionSummary] | None = None
+
+
+class PhotoRow(PhotoProjection):
+    """Full photo row including deep review data."""
+
     # 最佳鸟的检测细节（深度复核要画 bbox / 关键点）
     best_detection: BestDetection | None = None
     detections: list[BirdDetectionDetail] | None = None
@@ -241,7 +275,7 @@ class LibraryDetail(BaseModel):
     """Library detail with summary + embedded photo rows."""
 
     library: LibrarySummary
-    photos: list[PhotoRow]
+    photos: list[PhotoRow] | list[PhotoSummary]
     # Full-folder projections can be compared with selection facets. A single
     # paginated response cannot represent the whole folder and leaves this null.
     projection_revision: str | None = None
@@ -249,3 +283,10 @@ class LibraryDetail(BaseModel):
     photo_offset: int = 0
     photo_limit: int | None = None
     next_offset: int | None = None
+
+
+class PhotoReview(BaseModel):
+    """Hydrated review data for one photo and its owning library."""
+
+    library_id: str
+    photo: PhotoRow

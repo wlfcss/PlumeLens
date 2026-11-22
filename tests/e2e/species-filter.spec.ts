@@ -99,6 +99,31 @@ function photo(index: number, detections: BirdDetectionDetail[], grade = 'usable
   }
 }
 
+function summarizeBird(detection: NonNullable<PhotoRow['best_detection']>) {
+  const { pose, species_candidates, ...identity } = detection
+  const keypoints = new Set([
+    'bill',
+    'crown',
+    'nape',
+    'left_eye',
+    'right_eye',
+    'belly',
+    'breast',
+    'back',
+    'tail',
+    'left_wing',
+    'right_wing',
+  ])
+  return {
+    ...identity,
+    pose: pose
+      ? Object.fromEntries(Object.entries(pose).filter(([name]) => !keypoints.has(name)))
+      : null,
+    candidate_confidence: species_candidates?.[0]?.confidence,
+    candidate_recognition_state: species_candidates?.[0]?.recognition_state,
+  }
+}
+
 function fixedPhotos(): PhotoRow[] {
   const rows = [
     photo(1, [bird('Alcedo atthis', '普通翠鸟')], 'select'),
@@ -156,6 +181,8 @@ interface MockControl {
   requests: SelectionQuery[]
   exports: Record<string, unknown>[]
   rows: PhotoRow[]
+  libraryViews: (string | null)[]
+  reviewRequests: string[]
 }
 
 /** This is an independent protocol fixture, not production selection code. */
@@ -245,8 +272,11 @@ async function installBackend(page: Page): Promise<MockControl> {
     requests: [],
     exports: [],
     rows: fixedPhotos(),
+    libraryViews: [],
+    reviewRequests: [],
   }
   const otherRows = [{ ...photo(20, [bird('Egretta garzetta', '白鹭')], 'select'), id: 'other-1' }]
+  const selectionSnapshots = new Map<string, typeof control.rows>()
   const libraries = [
     library('species-main', '鸟种测试库', 10),
     library('species-other', '另一文件夹', 1),
@@ -266,7 +296,7 @@ async function installBackend(page: Page): Promise<MockControl> {
   }, APP_VERSION)
   await page.route('http://127.0.0.1:8000/**', async (route: Route) => {
     const request = route.request()
-    const path = new URL(request.url()).pathname
+    const { pathname: path, searchParams } = new URL(request.url())
     const json = (body: unknown, status = 200) =>
       route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) })
     if (path === '/health')
@@ -284,12 +314,40 @@ async function installBackend(page: Page): Promise<MockControl> {
       })
     if (path === '/library') return json(libraries)
     const lib = path.match(/^\/library\/(species-main|species-other)$/)?.[1]
-    if (lib)
+    if (lib) {
+      const view = searchParams.get('view')
+      control.libraryViews.push(view)
+      const revision = String(control.revision)
+      const rows = lib === 'species-main' ? control.rows : otherRows
+      if (searchParams.has('include_selection_snapshot')) {
+        selectionSnapshots.set(`${lib}/${revision}`, structuredClone(rows))
+      }
       return json({
         library: libraries.find((entry) => entry.id === lib),
-        photos: lib === 'species-main' ? control.rows : otherRows,
-        projection_revision: String(control.revision),
+        photos:
+          view === 'summary'
+            ? rows.map((row) => ({
+                ...row,
+                exif: null,
+                input_revision: 0,
+                best_detection: row.best_detection ? summarizeBird(row.best_detection) : null,
+                detections: row.detections?.map(summarizeBird),
+              }))
+            : rows,
+        projection_revision: revision,
       })
+    }
+    const reviewId = path.match(/^\/library\/photo\/([^/]+)\/review$/)?.[1]
+    if (reviewId) {
+      control.reviewRequests.push(reviewId)
+      const libraryId = reviewId === 'other-1' ? 'species-other' : 'species-main'
+      const row = (libraryId === 'species-main' ? control.rows : otherRows).find(
+        (item) => item.id === reviewId,
+      )
+      return row
+        ? json({ library_id: libraryId, photo: { ...row, input_revision: 0 } })
+        : json({ detail: 'Photo not found' }, 404)
+    }
     const selectionLibrary = path.match(/^\/library\/(.+)\/selection\/query$/)?.[1]
     if (selectionLibrary) {
       const query = request.postDataJSON() as SelectionQuery
@@ -298,14 +356,14 @@ async function installBackend(page: Page): Promise<MockControl> {
         control.failQueries -= 1
         return json({ detail: 'query unavailable' }, 400)
       }
-      return json(
-        queryFixture(
-          selectionLibrary,
-          selectionLibrary === 'species-main' ? control.rows : otherRows,
-          query,
-          String(control.revision),
-        ),
-      )
+      const revision = searchParams.get('projection_revision')
+      const rows = revision
+        ? selectionSnapshots.get(`${selectionLibrary}/${revision}`)
+        : selectionLibrary === 'species-main'
+          ? control.rows
+          : otherRows
+      if (!rows) return json({ detail: 'Selection snapshot expired' }, 409)
+      return json(queryFixture(selectionLibrary, rows, query, revision ?? String(control.revision)))
     }
     const decision = path.match(/^\/decisions\/photo\/(p\d+)$/)?.[1]
     if (decision && request.method() === 'PUT') {
@@ -342,6 +400,7 @@ async function installBackend(page: Page): Promise<MockControl> {
       control.exports.push(body)
       if (control.staleExport) {
         control.staleExport = false
+        control.rows = [...control.rows, photo(11, [bird('Alcedo atthis', '普通翠鸟')], 'select')]
         control.revision += 1
         return json({ detail: { code: 'selection_changed' } }, 409)
       }
@@ -435,6 +494,23 @@ async function closeFilter(page: Page) {
 }
 
 test.describe('Selection species filter', () => {
+  test('loads per-photo EXIF only when opening deep review from a summary', async ({ page }) => {
+    const state = await installBackend(page)
+    const photo = state.rows.find((row) => row.id === 'p8')!
+    photo.exif = { Make: 'Fixture camera', Model: 'Native review' }
+    await start(page)
+    expect(state.libraryViews.length).toBeGreaterThan(0)
+    expect(state.libraryViews.every((view) => view === 'summary')).toBe(true)
+    expect(state.reviewRequests).toEqual([])
+    await page.locator('.photo-tile[data-photo-id="p8"] .photo-preview').dblclick()
+    const review = page.locator('dialog:has(> .review-panel)')
+    await expect(review).toContainText('Native review')
+    expect(state.reviewRequests).toEqual(['p8'])
+    await page.keyboard.press('Escape')
+    await expect(review).toHaveCount(0)
+    await expectCount(page, 8)
+  })
+
   test('searches aliases, pinyin and scientific names; multi-select uses a deduplicated OR', async ({
     page,
   }) => {
@@ -702,6 +778,8 @@ test.describe('Selection species filter', () => {
     await drawer.getByRole('button', { name: '选择位置' }).click()
     await drawer.getByRole('button', { name: '开始导出' }).click()
     await expect(drawer.getByText('筛选结果已变化，已刷新数量。请核对后重新开始。')).toBeVisible()
+    await expect(drawer.getByRole('radio', { name: '当前筛选 6 张' })).toBeChecked()
+    await expect(drawer.getByText('当前范围将导出 6 张')).toBeVisible()
     expect(state.exports[0]).toMatchObject({
       scope: 'selection',
       projection_revision: '1',

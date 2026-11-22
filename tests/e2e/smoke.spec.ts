@@ -115,52 +115,55 @@ async function mockBackend(
   })
 
   // /library/{id} detail：包含 4 张测试 photos
-  await page.route('**/library/lib-test', (route: Route) => {
-    const photos = DEFAULT_PHOTOS.map((p, idx) => ({
-      id: p.id,
-      file_path: `/tmp/lib-test/${p.file_name}`,
-      file_name: p.file_name,
-      format: 'jpg',
-      width: 4000,
-      height: 3000,
-      thumb_grid: null,
-      thumb_preview: null,
-      created_at: `2026-04-23T07:0${idx}:00+00:00`,
-      shot_at: `2026-04-23T07:0${idx}:00+00:00`,
-      exif:
-        idx < 2
-          ? {
-              GPSInfo: {
-                '1': 'N',
-                '2': [
-                  [31, 1],
-                  [37, 1],
-                  [idx, 1],
-                ],
-                '3': 'E',
-                '4': [
-                  [121, 1],
-                  [30, 1],
-                  [idx, 1],
-                ],
-              },
-            }
-          : null,
-      scene_id: idx,
-      pipeline_version: 'v1-mocktest',
-      grade: p.grade,
-      quality_score: p.score,
-      bird_count: 1,
-      species: p.species,
-      species_latin: p.latin,
-      decision: null,
-    }))
-    route.fulfill({
-      status: 200,
-      contentType: 'application/json',
-      body: JSON.stringify({ library: state.libraries[0] ?? DEFAULT_LIB, photos }),
-    })
-  })
+  await page.route(
+    (url) => url.pathname === '/library/lib-test',
+    (route: Route) => {
+      const photos = DEFAULT_PHOTOS.map((p, idx) => ({
+        id: p.id,
+        file_path: `/tmp/lib-test/${p.file_name}`,
+        file_name: p.file_name,
+        format: 'jpg',
+        width: 4000,
+        height: 3000,
+        thumb_grid: null,
+        thumb_preview: null,
+        created_at: `2026-04-23T07:0${idx}:00+00:00`,
+        shot_at: `2026-04-23T07:0${idx}:00+00:00`,
+        exif:
+          idx < 2
+            ? {
+                GPSInfo: {
+                  '1': 'N',
+                  '2': [
+                    [31, 1],
+                    [37, 1],
+                    [idx, 1],
+                  ],
+                  '3': 'E',
+                  '4': [
+                    [121, 1],
+                    [30, 1],
+                    [idx, 1],
+                  ],
+                },
+              }
+            : null,
+        scene_id: idx,
+        pipeline_version: 'v1-mocktest',
+        grade: p.grade,
+        quality_score: p.score,
+        bird_count: 1,
+        species: p.species,
+        species_latin: p.latin,
+        decision: null,
+      }))
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ library: state.libraries[0] ?? DEFAULT_LIB, photos }),
+      })
+    },
+  )
 
   // The renderer now consumes authoritative membership rather than filtering detail locally.
   await page.route('**/library/*/selection/query', (route: Route) => {

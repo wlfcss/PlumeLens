@@ -8,7 +8,7 @@
  *
  * 后端 PhotoRow → 前端 PhotoRecord 字段映射详见 buildPhotoRecordFromRow()。
  */
-import type { LibraryDetail, LibrarySummary, PhotoRow } from '@/lib/api-client'
+import type { BestDetection, LibraryDetail, LibrarySummary, PhotoRow } from '@/lib/api-client'
 import type {
   AfOverlay,
   FolderRecord,
@@ -110,12 +110,15 @@ function planGroups(libraryId: string, photos: PhotoRow[]): GroupPlan[] {
 
 function summarizeGroupSpecies(
   group: GroupPlan,
-  photos: PhotoRecord[],
+  photosById: ReadonlyMap<string, PhotoRecord>,
 ): { primarySpecies: string | null; isNewSpecies: boolean } {
-  const inGroup = photos.filter((p) => group.photoIds.includes(p.id))
   // 物种出现频次
   const counts = new Map<string, { n: number; bestScore: number }>()
-  for (const p of inGroup) {
+  let isNew = false
+  for (const id of group.photoIds) {
+    const p = photosById.get(id)
+    if (!p) continue
+    isNew ||= p.isNewSpecies
     if (!p.speciesName) continue
     const cur = counts.get(p.speciesName) ?? { n: 0, bestScore: -Infinity }
     cur.n += 1
@@ -132,7 +135,6 @@ function summarizeGroupSpecies(
       bestScore = bs
     }
   }
-  const isNew = inGroup.some((p) => p.isNewSpecies)
   return { primarySpecies: primary, isNewSpecies: isNew }
 }
 
@@ -216,6 +218,27 @@ function withConsensusCandidate(row: PhotoRow, candidates: SpeciesCandidate[]): 
     consensus,
     ...candidates.filter((candidate) => candidate.latinName !== consensus.latinName),
   ]
+}
+
+function buildDetectionCandidates(
+  row: PhotoRow,
+  detection: BestDetection | null,
+): SpeciesCandidate[] {
+  if (!detection?.species_candidates) return []
+  return withConsensusCandidate(
+    row,
+    detection.species_candidates
+      .map((candidate) => ({
+        name: candidate.canonical_zh ?? candidate.canonical_sci ?? '',
+        latinName: candidate.canonical_sci ?? null,
+        englishName: candidate.canonical_en ?? null,
+        confidence: candidate.confidence ?? 0,
+        recognitionState: candidate.recognition_state,
+        rejectScore: candidate.reject_score,
+        top1Top2Margin: candidate.top1_top2_margin,
+      }))
+      .filter((candidate) => candidate.name.length > 0),
+  )
 }
 
 /**
@@ -317,25 +340,15 @@ export function buildPhotoRecordFromRow(
   const grade = safeGrade(row.grade)
   const decision = safeDecision(row.decision)
   const isAnalyzed = row.pipeline_version !== null
-  const bestQuality = row.best_detection?.quality ?? null
-  const speciesCandidates = withConsensusCandidate(
-    row,
-    row.best_detection?.species_candidates
-      ?.map((candidate) => ({
-        name: candidate.canonical_zh ?? candidate.canonical_sci ?? '',
-        latinName: candidate.canonical_sci ?? null,
-        englishName: candidate.canonical_en ?? null,
-        confidence: candidate.confidence ?? 0,
-        recognitionState: candidate.recognition_state,
-        rejectScore: candidate.reject_score,
-        top1Top2Margin: candidate.top1_top2_margin,
-      }))
-      .filter((candidate) => candidate.name.length > 0) ?? [],
-  )
+  const best = row.best_detection
+  const bestQuality = best?.quality ?? null
+  const speciesCandidates = buildDetectionCandidates(row, best)
   const finalScore = bestQuality?.combined ?? row.quality_score
 
   return {
     id: row.id,
+    inputRevision: row.input_revision,
+    reviewRevision: row.review_revision ?? undefined,
     folderId,
     groupId,
     fileName: row.file_name,
@@ -345,6 +358,7 @@ export function buildPhotoRecordFromRow(
     lens: t('selection.exif.unknownLens'),
     speciesName: row.species,
     speciesLatinName: row.species_latin ?? lookupLatinName(row.species),
+    speciesEnglishName: row.species_english ?? null,
     manualSpecies: row.manual_species,
     speciesSource:
       row.species_source ?? (row.manual_species ? 'manual' : row.species ? 'model' : 'none'),
@@ -358,18 +372,12 @@ export function buildPhotoRecordFromRow(
     groupSpeciesEvidence: row.group_species_evidence ?? null,
     groupSpeciesTotal: row.group_species_total ?? null,
     speciesConflict: Boolean(row.species_conflict),
-    speciesCandidates:
-      speciesCandidates.length > 0
-        ? speciesCandidates
-        : row.species
-          ? [
-              {
-                name: row.species,
-                latinName: row.species_latin ?? lookupLatinName(row.species),
-                confidence: row.quality_score ?? 0,
-              },
-            ]
-          : [],
+    speciesCandidates,
+    candidateConfidence:
+      row.species_source === 'group_consensus'
+        ? (row.group_species_confidence ?? best?.candidate_confidence)
+        : best?.candidate_confidence,
+    candidateRecognitionState: best?.candidate_recognition_state,
     birdDetections: buildBirdDetections(row),
     // 单 library 维度的 backend-adapter 看不到全局物种历史,这里先给 false。
     // workspace-projection 的 applyNewSpeciesMarkers 在所有 library detail 注入 workspace
@@ -426,18 +434,6 @@ function buildBirdDetections(row: PhotoRow): PhotoRecord['birdDetections'] {
     detections.push({ ...row.best_detection, is_best: true })
   }
   return detections.map((d) => {
-    const candidates =
-      d.species_candidates
-        ?.map((candidate) => ({
-          name: candidate.canonical_zh ?? candidate.canonical_sci ?? '',
-          latinName: candidate.canonical_sci ?? null,
-          englishName: candidate.canonical_en ?? null,
-          confidence: candidate.confidence ?? 0,
-          recognitionState: candidate.recognition_state,
-          rejectScore: candidate.reject_score,
-          top1Top2Margin: candidate.top1_top2_margin,
-        }))
-        .filter((candidate) => candidate.name.length > 0) ?? []
     const useConsensus =
       row.species_source === 'group_consensus' &&
       d.is_best &&
@@ -445,7 +441,6 @@ function buildBirdDetections(row: PhotoRow): PhotoRecord['birdDetections'] {
       row.bird_count === 1 &&
       row.group_species &&
       row.group_species_latin
-    const effectiveCandidates = withConsensusCandidate(row, candidates)
     return {
       index: d.index,
       bbox: d.bbox,
@@ -454,7 +449,11 @@ function buildBirdDetections(row: PhotoRow): PhotoRecord['birdDetections'] {
       speciesName: useConsensus ? row.group_species! : d.species,
       speciesLatinName: useConsensus ? row.group_species_latin! : d.species_latin,
       speciesEnglishName: d.species_english ?? null,
-      speciesCandidates: effectiveCandidates,
+      speciesCandidates: buildDetectionCandidates(row, d),
+      candidateConfidence: useConsensus
+        ? (row.group_species_confidence ?? d.candidate_confidence)
+        : d.candidate_confidence,
+      candidateRecognitionState: d.candidate_recognition_state,
       manualSpecies: d.manual_species,
       // detection-level species_source（v6 backend schema）。useConsensus 命中时
       // best detection 跟随 photo-level 共识，避免旧缓存/分页上下文里 detection
@@ -598,7 +597,11 @@ export interface DetailFragment {
   photos: PhotoRecord[]
 }
 
-export function buildFragmentFromDetail(detail: LibraryDetail, t: Translate): DetailFragment {
+export function buildFragmentFromDetail(
+  detail: LibraryDetail,
+  t: Translate,
+  photoCache?: WeakMap<PhotoRow, PhotoRecord>,
+): DetailFragment {
   const folder = buildFolderRecord(detail.library)
 
   // 1. 时间窗口聚类（5min）：连拍/同场景照片自动归入一组
@@ -610,19 +613,20 @@ export function buildFragmentFromDetail(detail: LibraryDetail, t: Translate): De
   }
 
   // 2. PhotoRecord：每张照片带正确 groupId
-  const photos: PhotoRecord[] = detail.photos.map((row) =>
-    buildPhotoRecordFromRow(
-      row,
-      folder.id,
-      photoToGroup.get(row.id) ?? `group-${folder.id}-orphan`,
-      t,
-    ),
-  )
+  const photos = detail.photos.map((row) => {
+    const groupId = photoToGroup.get(row.id) ?? `group-${folder.id}-orphan`
+    const cached = photoCache?.get(row)
+    if (cached?.folderId === folder.id && cached.groupId === groupId) return cached
+    const photo = buildPhotoRecordFromRow(row, folder.id, groupId, t)
+    photoCache?.set(row, photo)
+    return photo
+  })
 
   // 3. 组内排序：由 SelectionScreen 渲染时按 quality_score 降序（在 App.tsx 已有 sortPhotos）
   // 这里只生成 group 元数据
+  const photosById = new Map(photos.map((photo) => [photo.id, photo]))
   const groups: PhotoGroupRecord[] = plans.map((plan) => {
-    const { primarySpecies, isNewSpecies } = summarizeGroupSpecies(plan, photos)
+    const { primarySpecies, isNewSpecies } = summarizeGroupSpecies(plan, photosById)
     return {
       id: plan.id,
       folderId: folder.id,

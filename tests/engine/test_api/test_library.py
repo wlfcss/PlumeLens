@@ -2,11 +2,22 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
+import shutil
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import aiosqlite
 import pytest
+from engine.api.routes import analysis as analysis_routes
+from engine.api.routes import library as library_routes
+from engine.core.database import Database
+from engine.pipeline.models import PipelineResult
+from engine.services.cache import get_active_result, store_result
+from engine.services.photo_input import mark_source_changed, source_fingerprint
 from httpx import ASGITransport, AsyncClient
 from PIL import Image
 
@@ -14,6 +25,38 @@ from PIL import Image
 def _make_jpeg(path: Path, size: tuple[int, int] = (100, 80)) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     Image.new("RGB", size, (120, 140, 160)).save(path, "JPEG")
+
+
+async def _store_relink_result(
+    db: Database, photo_id: str, primary: Path, raw: Path | None = None
+) -> None:
+    source = raw or primary
+    await store_result(
+        db,
+        photo_id,
+        PipelineResult(
+            photo_id=photo_id,
+            detections=[],
+            best=None,
+            bird_count=0,
+            pipeline_version="test-v1",
+            duration_ms=1,
+            companion_used=raw is not None,
+        ),
+        source_path=str(source),
+        source_hash=hashlib.sha256(source.read_bytes()).hexdigest(),
+        fingerprint=source_fingerprint(primary, raw),
+    )
+
+
+async def _input_rows(db: Database, library_id: str) -> dict[str, aiosqlite.Row]:
+    async with db.conn.execute(
+        "SELECT p.*,ar.is_active,ar.source_path,ar.source_hash,ar.source_fingerprint "
+        "FROM photos p LEFT JOIN analysis_results ar ON ar.photo_id=p.id "
+        "WHERE p.library_id=?",
+        (library_id,),
+    ) as cursor:
+        return {row["file_name"]: row for row in await cursor.fetchall()}
 
 
 def _make_pose(head_visible: bool, eye_visible: bool | None = None) -> dict:
@@ -41,7 +84,6 @@ async def real_client(tmp_path: Path):
     from unittest.mock import MagicMock
 
     from engine.core.config import settings
-    from engine.core.database import Database
     from engine.main import create_app
 
     # 临时目录做数据库 + cache
@@ -231,6 +273,209 @@ class TestListAndDetail:
         assert after["library"]["status"] == "ready"
         assert after["photos"][0]["id"] == photo_id
         assert after["photos"][0]["file_path"] == str(moved_root / "nested" / "p.jpg")
+
+    async def test_relink_rejects_a_replacement_with_same_name_size_and_mtime(
+        self, real_client
+    ) -> None:
+        client, tmp = real_client
+        tmp = tmp.resolve()
+        old = tmp / "旧图库"
+        photo = old / "a.jpg"
+        _make_jpeg(photo)
+        photo.write_bytes(photo.read_bytes() + b"a")
+        imported = await client.post("/library/import", json={"root_path": str(old)})
+        library_id = imported.raise_for_status().json()["id"]
+        new = tmp / "新图库 with space"
+        new.mkdir()
+        candidate = new / photo.name
+        source_stat = photo.stat()
+        candidate.write_bytes(photo.read_bytes()[:-1] + b"b")
+        os.utime(candidate, ns=(source_stat.st_atime_ns, source_stat.st_mtime_ns))
+        assert candidate.stat().st_size == source_stat.st_size
+
+        response = await client.post(f"/library/{library_id}/relink", json={"root_path": str(new)})
+
+        assert response.status_code == 400
+        detail = (await client.get(f"/library/{library_id}")).raise_for_status().json()
+        assert detail["library"]["root_path"] == str(old)
+        assert detail["photos"][0]["file_path"] == str(photo)
+
+    @pytest.mark.parametrize("companion_change", ["copy", "replace", "missing"])
+    async def test_relink_verifies_actual_raw_fallback_source(
+        self, real_client, companion_change: str
+    ) -> None:
+        client, tmp = real_client
+        tmp = tmp.resolve()
+        old = tmp / "旧 图库"
+        primary = old / "bird.jpg"
+        raw = primary.with_suffix(".CR3")
+        _make_jpeg(primary)
+        raw.write_bytes(b"original RAW")
+        imported = await client.post("/library/import", json={"root_path": str(old)})
+        library_id = imported.raise_for_status().json()["id"]
+        db = Database(tmp / "test.db")
+        await db.connect()
+        try:
+            previous = (await _input_rows(db, library_id))[primary.name]
+            photo_id = previous["id"]
+            await _store_relink_result(db, photo_id, primary, raw)
+            async with db.transaction() as conn:
+                await conn.execute(
+                    "INSERT INTO photo_decisions(photo_id,decision,updated_at) VALUES(?,?,?)",
+                    (photo_id, "select", "2026-11-19"),
+                )
+                await conn.execute(
+                    "INSERT INTO photo_species_overrides(photo_id,bird_index,canonical_sci,"
+                    "updated_at,input_revision) VALUES(?,?,?,?,?)",
+                    (photo_id, 0, "Alcedo atthis", "2026-11-19", previous["input_revision"]),
+                )
+
+            new = tmp / "新 图库"
+            new.mkdir()
+            new_primary = new / primary.name
+            new_raw = new / raw.name
+            shutil.copyfile(primary, new_primary)
+            assert not primary.samefile(new_primary)
+            if companion_change == "copy":
+                shutil.copyfile(raw, new_raw)
+            if companion_change == "replace":
+                new_raw.write_bytes(b"replaced RAW")
+                assert raw.stat().st_size == new_raw.stat().st_size
+                raw_stat = raw.stat()
+                os.utime(new_raw, ns=(raw_stat.st_atime_ns, raw_stat.st_mtime_ns))
+            # The original is unavailable, as after moving to a new drive.
+            shutil.rmtree(old)
+
+            response = await client.post(
+                f"/library/{library_id}/relink", json={"root_path": str(new)}
+            )
+
+            body = response.raise_for_status().json()
+            assert body["matched_photos"] == 1
+            assert body["relinked_companions"] == int(companion_change == "copy")
+            current = (await _input_rows(db, library_id))[primary.name]
+            assert current["id"] == photo_id
+            assert current["input_revision"] == previous["input_revision"] + 1
+            assert current["companion_path"] == str(new_raw)
+            cached = await get_active_result(db, photo_id)
+            async with db.conn.execute(
+                "SELECT input_revision FROM photo_species_overrides WHERE photo_id=?", (photo_id,)
+            ) as cur:
+                override = await cur.fetchone()
+            assert override is not None
+            async with db.conn.execute(
+                "SELECT decision FROM photo_decisions WHERE photo_id=?", (photo_id,)
+            ) as cur:
+                assert (await cur.fetchone())["decision"] == "select"
+            if companion_change == "copy":
+                assert cached is not None and cached.companion_used
+                assert current["source_path"] == str(new_raw)
+                assert current["source_fingerprint"] == source_fingerprint(new_primary, new_raw)
+                assert current["thumb_grid"] == previous["thumb_grid"]
+                assert not current["input_needs_scan"]
+                assert override["input_revision"] == current["input_revision"]
+                await mark_source_changed(db, photo_id, previous["input_revision"])
+                assert await get_active_result(db, photo_id) is not None
+
+                repeated = await client.post(
+                    f"/library/{library_id}/relink", json={"root_path": str(new)}
+                )
+                repeated.raise_for_status()
+                again = (await _input_rows(db, library_id))[primary.name]
+                assert again["input_revision"] == current["input_revision"]
+            else:
+                assert cached is None and not current["is_active"]
+                assert current["source_path"] == str(raw)  # historical provenance is unchanged
+                assert current["input_needs_scan"]
+                assert current["thumb_grid"] is None and current["thumb_preview"] is None
+                assert current["file_hash"] is None
+                assert override["input_revision"] == previous["input_revision"]
+        finally:
+            await db.close()
+
+    async def test_partial_relink_invalidates_missing_and_non_file_candidates(
+        self, real_client, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        client, tmp = real_client
+        tmp = tmp.resolve()
+        old = tmp / "old"
+        new = tmp / "new"
+        for name in ("keep.jpg", "missing.jpg", "directory.jpg", "different.jpg"):
+            _make_jpeg(old / name)
+        imported = await client.post("/library/import", json={"root_path": str(old)})
+        library_id = imported.raise_for_status().json()["id"]
+        new.mkdir()
+        shutil.copyfile(old / "keep.jpg", new / "keep.jpg")
+        (new / "directory.jpg").mkdir()  # Not a photo even on case-insensitive filesystems.
+        _make_jpeg(new / "different.jpg", size=(50, 50))
+
+        db = Database(tmp / "test.db")
+        await db.connect()
+        try:
+            previous = await _input_rows(db, library_id)
+            for name, row in previous.items():
+                await _store_relink_result(db, row["id"], old / name)
+            moved = await client.post(f"/library/{library_id}/relink", json={"root_path": str(new)})
+            body = moved.raise_for_status().json()
+            assert body["matched_photos"] == 1
+            assert body["missing_photos"] == 3
+            current = await _input_rows(db, library_id)
+            assert current["keep.jpg"]["is_active"] == 1
+            for name in ("missing.jpg", "directory.jpg", "different.jpg"):
+                row = current[name]
+                assert row["id"] == previous[name]["id"]
+                assert row["file_path"] == str(new / name)
+                assert row["input_needs_scan"] and not row["is_active"]
+                assert row["thumb_grid"] is None and row["file_hash"] is None
+
+            # A present replacement requires rescan. Out-of-catalog files or
+            # directory placeholders cannot keep the remaining photos blocked.
+            pipeline = SimpleNamespace(pipeline_version="test-v1")
+            monkeypatch.setattr(analysis_routes, "_pipeline", AsyncMock(return_value=pipeline))
+            monkeypatch.setattr(analysis_routes, "start_library_worker", lambda *_a, **_kw: None)
+            body = {"library_id": library_id}
+            unavailable = await client.post("/analysis/batch", json=body)
+            assert unavailable.status_code == 409
+            assert unavailable.json()["detail"]["code"] == "source_changed"
+            rescanned = await client.post("/library/import", json={"root_path": str(new)})
+            assert rescanned.raise_for_status().json()["id"] == library_id
+            ready = await client.post("/analysis/batch", json=body)
+            assert ready.status_code == 200
+            assert ready.json()["enqueued"] == 1
+        finally:
+            await db.close()
+
+    async def test_relink_conflicts_if_destination_changes_after_verification(
+        self, real_client, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        client, tmp = real_client
+        tmp = tmp.resolve()
+        old = tmp / "old"
+        photo = old / "a.jpg"
+        _make_jpeg(photo)
+        imported = await client.post("/library/import", json={"root_path": str(old)})
+        library_id = imported.raise_for_status().json()["id"]
+        new = tmp / "new"
+        new.mkdir()
+        destination = new / photo.name
+        shutil.copyfile(photo, destination)
+        original = library_routes._verify_relink_inputs
+
+        def verify_then_replace(*args):
+            verified = original(*args)
+            replacement = new / "replacement.tmp"
+            replacement.write_bytes(b"not the original")
+            replacement.replace(destination)
+            return verified
+
+        monkeypatch.setattr(library_routes, "_verify_relink_inputs", verify_then_replace)
+
+        response = await client.post(f"/library/{library_id}/relink", json={"root_path": str(new)})
+
+        assert response.status_code == 409
+        detail = (await client.get(f"/library/{library_id}")).raise_for_status().json()
+        assert detail["library"]["root_path"] == str(old)
+        assert detail["photos"][0]["file_path"] == str(photo)
 
     async def test_detail_applies_manual_species_override_per_bird(self, real_client) -> None:
         client, tmp = real_client

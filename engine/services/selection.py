@@ -7,9 +7,11 @@ filters or pagination never changes scene consensus. No inference runs here.
 from __future__ import annotations
 
 import asyncio
+from collections import OrderedDict
+from collections.abc import Sequence
 from dataclasses import dataclass
 
-from engine.api.schemas.library import BestDetection, PhotoRow
+from engine.api.schemas.library import BestDetection, DetectionSummary, PhotoRow
 from engine.api.schemas.selection import (
     SelectionQueryRequest,
     SelectionQueryResponse,
@@ -18,6 +20,7 @@ from engine.api.schemas.selection import (
 from engine.core.database import Database
 from engine.services.library_projection import (
     LibraryProjectionNotFound,
+    ProjectedPhoto,
     load_library_photos,
     projection_revision,
 )
@@ -43,7 +46,7 @@ class SelectionSnapshot:
     query: SelectionQueryRequest
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class BirdIdentity:
     key: str
     name: str
@@ -53,7 +56,56 @@ class BirdIdentity:
     flying: bool
 
 
-def _bird_identity(bird: BestDetection) -> BirdIdentity:
+@dataclass(frozen=True, slots=True)
+class SelectionPhoto:
+    id: str
+    file_name: str
+    shot_at: str
+    quality_score: float | None
+    analysis_status: str
+    grade: str | None
+    decision: str | None
+    bird_count: int | None
+    search_texts: tuple[str, ...]
+    birds: tuple[BirdIdentity, ...]
+    review_revision: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class SelectionProjection:
+    revision: str
+    photos: tuple[SelectionPhoto, ...]
+
+
+class SelectionProjectionCache:
+    """Keep the current and previous selection projections across detail refreshes."""
+
+    def __init__(self) -> None:
+        self._entries: OrderedDict[tuple[str, str], SelectionProjection] = OrderedDict()
+
+    def get(self, library_id: str, revision: str) -> SelectionProjection | None:
+        return self._entries.get((library_id, revision))
+
+    def latest(self, library_id: str) -> SelectionProjection | None:
+        return next(
+            (self._entries[key] for key in reversed(self._entries) if key[0] == library_id),
+            None,
+        )
+
+    def store(self, library_id: str, projection: SelectionProjection) -> None:
+        key = (library_id, projection.revision)
+        self._entries[key] = projection
+        self._entries.move_to_end(key)
+        if len(self._entries) > 2:
+            self._entries.popitem(last=False)
+
+    def discard_library(self, library_id: str) -> None:
+        for key in tuple(self._entries):
+            if key[0] == library_id:
+                del self._entries[key]
+
+
+def _bird_identity(bird: BestDetection | DetectionSummary) -> BirdIdentity:
     latin = " ".join((bird.species_latin or "").split())
     named = bool(latin) and bird.species_source in NAMED_SOURCES
     english = bird.species_english if named else None
@@ -74,7 +126,7 @@ def _bird_identity(bird: BestDetection) -> BirdIdentity:
     )
 
 
-def _photo_birds(photo: PhotoRow) -> list[BirdIdentity]:
+def _photo_birds(photo: ProjectedPhoto) -> list[BirdIdentity]:
     if photo.analysis_status != "done" or not photo.bird_count:
         return []
     if photo.detections:
@@ -92,16 +144,62 @@ def _eligible_bird(bird: BirdIdentity, query: SelectionQueryRequest) -> bool:
     return (query.include_review or not bird.review) and (not query.only_flying or bird.flying)
 
 
+def _selection_photo(photo: ProjectedPhoto) -> SelectionPhoto:
+    birds = tuple(_photo_birds(photo))
+    texts = [photo.file_name, photo.species or "", photo.species_latin or ""]
+    for bird in birds:
+        texts.extend((bird.name, bird.latin_name or "", bird.english_name or ""))
+    return SelectionPhoto(
+        id=photo.id,
+        file_name=photo.file_name,
+        shot_at=photo.shot_at,
+        quality_score=photo.quality_score,
+        analysis_status=photo.analysis_status,
+        grade=photo.grade,
+        decision=photo.decision,
+        bird_count=photo.bird_count,
+        search_texts=tuple(text.casefold() for text in texts),
+        birds=birds,
+        review_revision=photo.review_revision,
+    )
+
+
+def build_selection_projection(
+    library_id: str,
+    photos: Sequence[ProjectedPhoto],
+    previous: SelectionProjection | None = None,
+) -> SelectionProjection:
+    # The per-photo review revision covers the effective identity, source,
+    # filename, time, status and rating used by the selection projection.
+    revision = projection_revision(library_id, photos)
+    if previous is None:
+        return SelectionProjection(revision, tuple(_selection_photo(photo) for photo in photos))
+
+    previous_by_id = {photo.id: photo for photo in previous.photos}
+    projected: list[SelectionPhoto] = []
+    for photo in photos:
+        projected.append(selection_photo_for_snapshot(photo, previous_by_id))
+    return SelectionProjection(revision, tuple(projected))
+
+
+def selection_photo_for_snapshot(
+    photo: ProjectedPhoto, previous_by_id: dict[str, SelectionPhoto]
+) -> SelectionPhoto:
+    cached = previous_by_id.get(photo.id)
+    if (
+        cached is not None
+        and photo.review_revision is not None
+        and cached.review_revision == photo.review_revision
+    ):
+        return cached
+    return _selection_photo(photo)
+
+
 def _matches_photo_conditions(
-    photo: PhotoRow, birds: list[BirdIdentity], query: SelectionQueryRequest
+    photo: SelectionPhoto, query: SelectionQueryRequest, keyword: str
 ) -> bool:
-    keyword = query.photo_query.casefold()
-    if keyword:
-        texts = [photo.file_name, photo.species or "", photo.species_latin or ""]
-        for bird in birds:
-            texts.extend([bird.name, bird.latin_name or "", bird.english_name or ""])
-        if not any(keyword in text.casefold() for text in texts):
-            return False
+    if keyword and not any(keyword in text for text in photo.search_texts):
+        return False
     if photo.analysis_status == "pending":
         # A folder without a species constraint keeps its unanalysed photos
         # visible unless their manual grade excludes them. Their unknown
@@ -118,7 +216,9 @@ def _matches_photo_conditions(
     return (photo.decision or photo.grade) in query.grades
 
 
-def _sort_photos(photos: list[PhotoRow], query: SelectionQueryRequest) -> list[PhotoRow]:
+def _sort_photos(
+    photos: list[SelectionPhoto], query: SelectionQueryRequest
+) -> list[SelectionPhoto]:
     if query.sort == "name":
         return sorted(photos, key=lambda photo: (photo.file_name.casefold(), photo.id))
     if query.sort == "time":
@@ -134,25 +234,23 @@ def _sort_photos(photos: list[PhotoRow], query: SelectionQueryRequest) -> list[P
     )
 
 
-async def _query_unlocked(
-    db: Database, library_id: str, query: SelectionQueryRequest
-) -> tuple[SelectionQueryResponse, list[PhotoRow]]:
+async def _load_photos(db: Database, library_id: str) -> list[PhotoRow]:
     try:
-        photos = await load_library_photos(db, library_id)
+        return await load_library_photos(db, library_id)
     except LibraryProjectionNotFound as exc:
         raise SelectionLibraryNotFound(library_id) from exc
-    return await asyncio.to_thread(_project_selection, library_id, photos, query)
 
 
 def _project_selection(
-    library_id: str, photos: list[PhotoRow], query: SelectionQueryRequest
-) -> tuple[SelectionQueryResponse, list[PhotoRow]]:
-    identities = {photo.id: _photo_birds(photo) for photo in photos}
+    library_id: str, projection: SelectionProjection, query: SelectionQueryRequest
+) -> SelectionQueryResponse:
+    photos = projection.photos
+    keyword = query.photo_query.casefold()
     # Keep observed options even when other conditions make their counts zero.
     metadata: dict[str, BirdIdentity] = {}
     aliases: dict[str, set[str]] = {}
-    for birds in identities.values():
-        for bird in birds:
+    for photo in photos:
+        for bird in photo.birds:
             current = metadata.get(bird.key)
             if current is None or (current.english_name is None and bird.english_name):
                 metadata[bird.key] = bird
@@ -168,29 +266,26 @@ def _project_selection(
     # Species itself is deliberately absent from the facet base. Flight is
     # checked on each candidate bird rather than on a different bird in photo.
     facet_query = query.model_copy(update={"species_keys": []})
-    base = [
-        photo
-        for photo in photos
-        if _matches_photo_conditions(photo, identities[photo.id], facet_query)
-    ]
+    base = [photo for photo in photos if _matches_photo_conditions(photo, facet_query, keyword)]
     counts: dict[str, set[str]] = {key: set() for key in metadata}
     review_counts: dict[str, set[str]] = {key: set() for key in metadata}
     for photo in base:
-        for bird in identities[photo.id]:
+        for bird in photo.birds:
             if _eligible_bird(bird, query):
                 counts[bird.key].add(photo.id)
                 if bird.review:
                     review_counts[bird.key].add(photo.id)
     selected = set(query.species_keys)
-    matched: list[PhotoRow] = []
+    matched: list[SelectionPhoto] = []
     for photo in photos:
-        birds = identities[photo.id]
-        if not _matches_photo_conditions(photo, birds, query):
+        if not _matches_photo_conditions(photo, query, keyword):
             continue
         if selected:
-            if not any(bird.key in selected and _eligible_bird(bird, query) for bird in birds):
+            if not any(
+                bird.key in selected and _eligible_bird(bird, query) for bird in photo.birds
+            ):
                 continue
-        elif query.only_flying and not any(bird.flying for bird in birds):
+        elif query.only_flying and not any(bird.flying for bird in photo.birds):
             continue
         matched.append(photo)
     matched = _sort_photos(matched, query)
@@ -207,9 +302,9 @@ def _project_selection(
         for key, bird in metadata.items()
     ]
     facets.sort(key=lambda facet: (-facet.photo_count, facet.name.casefold(), facet.key))
-    response = SelectionQueryResponse(
+    return SelectionQueryResponse(
         library_id=library_id,
-        projection_revision=projection_revision(library_id, photos),
+        projection_revision=projection.revision,
         query=query,
         matched_photo_ids=[photo.id for photo in matched],
         matched_count=len(matched),
@@ -221,15 +316,29 @@ def _project_selection(
         ),
         facets=facets,
     )
-    return response, matched
+
+
+def _project_live_selection(
+    library_id: str, photos: Sequence[ProjectedPhoto], query: SelectionQueryRequest
+) -> SelectionQueryResponse:
+    return _project_selection(library_id, build_selection_projection(library_id, photos), query)
 
 
 async def query_selection(
-    db: Database, library_id: str, query: SelectionQueryRequest
+    db: Database,
+    library_id: str,
+    query: SelectionQueryRequest,
+    *,
+    projection: SelectionProjection | None = None,
 ) -> SelectionQueryResponse:
     """Return one consistent folder projection, membership and facets."""
-    response, _photos = await _query_unlocked(db, library_id, query)
-    return response
+    if projection is not None:
+        return await asyncio.to_thread(_project_selection, library_id, projection, query)
+    try:
+        photos = await load_library_photos(db, library_id, summary=True)
+    except LibraryProjectionNotFound as exc:
+        raise SelectionLibraryNotFound(library_id) from exc
+    return await asyncio.to_thread(_project_live_selection, library_id, photos, query)
 
 
 async def freeze_selection(
@@ -239,12 +348,16 @@ async def freeze_selection(
     expected_revision: str,
 ) -> SelectionSnapshot:
     """Freeze authoritative members and effective identities before file copying."""
-    response, photos = await _query_unlocked(db, library_id, query)
+    photos = await _load_photos(db, library_id)
+    response = await asyncio.to_thread(_project_live_selection, library_id, photos, query)
     if response.projection_revision != expected_revision:
         raise SelectionRevisionConflict("Selection changed; refresh before exporting")
+    photo_by_id = {photo.id: photo for photo in photos}
     return SelectionSnapshot(
         projection_revision=response.projection_revision,
         photo_ids=tuple(response.matched_photo_ids),
-        photos=tuple(photo.model_copy(deep=True) for photo in photos),
+        photos=tuple(
+            photo_by_id[photo_id].model_copy(deep=True) for photo_id in response.matched_photo_ids
+        ),
         query=query.model_copy(deep=True),
     )

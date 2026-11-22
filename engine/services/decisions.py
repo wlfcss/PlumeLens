@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import TypedDict
 
+import aiosqlite
 import structlog
 
 from engine.core.database import Database
@@ -364,11 +365,14 @@ async def list_species_overrides(
     db: Database,
     library_id: str,
     photo_ids: list[str] | None = None,
+    *,
+    connection: aiosqlite.Connection | None = None,
 ) -> dict[str, list[SpeciesOverrideRecord]]:
     """Return manual species overrides in a library, grouped by photo_id.
 
     Each record carries bird_index + bbox（v6 schema 之后写入的会有 bbox；老数据 None）。
     Caller (library.py) uses bbox 做 IoU 匹配新 detections；老数据 fallback 到 bird_index。
+    Pass a connection to read these rows in the caller's snapshot.
     """
     unique_photo_ids: list[str] | None = None
     if photo_ids is not None:
@@ -386,8 +390,10 @@ async def list_species_overrides(
         "WHERE p.library_id = ? AND pso.input_revision=p.input_revision"
     )
 
+    conn = db.conn if connection is None else connection
+
     async def _collect(sql: str, params: tuple[object, ...]) -> None:
-        async with db.conn.execute(sql, params) as cur:
+        async with conn.execute(sql, params) as cur:
             async for row in cur:
                 photo_id = str(row["photo_id"])
                 x1 = row["bbox_x1"]

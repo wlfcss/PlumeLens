@@ -11,7 +11,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import uuid
 from datetime import UTC, datetime
@@ -25,6 +24,7 @@ from PIL import ExifTags, Image
 from engine.core.database import Database
 from engine.core.orientation import display_dimensions, raw_orientation
 from engine.pipeline.preprocess import IMAGE_EXTENSIONS, RAW_EXTENSIONS, SUPPORTED_EXTENSIONS
+from engine.services.photo_input import sha256_file as _sha256_file
 
 logger = structlog.stdlib.get_logger()
 
@@ -732,15 +732,6 @@ def _light_fingerprint(path: Path) -> tuple[int, str]:
     stat = path.stat()
     mtime = datetime.fromtimestamp(stat.st_mtime, tz=UTC).isoformat()
     return stat.st_size, mtime
-
-
-def _sha256_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
-    """Compute full SHA-256 of a file (streaming, 1MB chunks)."""
-    h = hashlib.sha256()
-    with path.open("rb") as f:
-        while chunk := f.read(chunk_size):
-            h.update(chunk)
-    return h.hexdigest()
 
 
 def _walk_supported_files(root: Path, recursive: bool) -> list[Path]:

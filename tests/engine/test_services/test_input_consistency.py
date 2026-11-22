@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import shutil
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
+from xml.etree import ElementTree
 
 import pytest
+from engine.api.schemas.export import ExportLibraryRequest
 from engine.core.database import Database
+from engine.main import create_app
 from engine.pipeline.models import (
     BirdAnalysis,
     BoundingBox,
@@ -25,7 +29,8 @@ from engine.services.decisions import (
     set_decision,
     set_species_override,
 )
-from engine.services.photo_input import StalePhotoInputError
+from engine.services.exporter import export_library
+from engine.services.photo_input import StalePhotoInputError, source_fingerprint
 from engine.services.queue import (
     TaskStatus,
     cancel_library,
@@ -41,6 +46,7 @@ from engine.services.queue import (
 )
 from engine.services.scanner import backfill_hashes, scan_library
 from engine.services.thumbnail import ensure_thumbnails_for_photo
+from httpx import ASGITransport, AsyncClient
 from PIL import Image
 
 
@@ -126,6 +132,68 @@ async def test_nested_service_transaction_keeps_outer_ownership(source):
         assert await get_decision(db, pid) is Decision.SELECT
         await conn.execute("UPDATE libraries SET display_name='outer' WHERE id='L'")
     assert await get_decision(db, pid) is Decision.SELECT
+
+
+async def test_relinked_copy_can_reuse_analysis_and_export_existing_xmp(source, tmp_path: Path):
+    db, root, image, photo_id = source
+    original_xmp = b"""<x:xmpmeta xmlns:x="adobe:ns:meta/">
+      <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+        <rdf:Description rdf:about="" xmlns:edit="https://example.com/photo-edit/"
+          edit:History="original-edit-history"/>
+      </rdf:RDF>
+    </x:xmpmeta>"""
+    Image.new("RGB", (64, 48), "blue").save(image, xmp=original_xmp)
+    original_bytes = image.read_bytes()
+    await scan_library(db, "L", root)
+    await backfill_hashes(db, "L")
+    prior_result = result(photo_id)
+    await store_result(
+        db,
+        photo_id,
+        prior_result,
+        source_path=str(image),
+        source_hash=hashlib.sha256(original_bytes).hexdigest(),
+        fingerprint=source_fingerprint(image),
+    )
+    await set_decision(db, photo_id, Decision.SELECT)
+
+    moved_root = tmp_path / "迁移位置 (副本)"
+    moved_root.mkdir()
+    relocated = moved_root / image.name
+    shutil.copyfile(image, relocated)
+    image.unlink()
+    root.rmdir()
+
+    app = create_app()
+    app.state.db = db
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/library/L/relink", json={"root_path": str(moved_root)})
+    assert response.status_code == 200, response.text
+    assert response.json()["matched_photos"] == 1
+    assert await get_active_result(db, photo_id) == prior_result
+    assert await get_decision(db, photo_id) is Decision.SELECT
+
+    pipeline = MagicMock(is_ready=True, pipeline_version=prior_result.pipeline_version)
+    pipeline.analyze = AsyncMock()
+    assert (await analyze_photo(db, pipeline, photo_id)).from_cache
+    pipeline.analyze.assert_not_awaited()
+
+    exported = await export_library(
+        db,
+        "L",
+        ExportLibraryRequest(target_dir=str(tmp_path / "交付"), include_xmp_sidecars=True),
+    )
+    assert exported.exported_count == 1 and exported.xmp_count == 1
+    output = Path(exported.output_dir) / image.name
+    with Image.open(output) as copy, Image.open(relocated) as original:
+        assert copy.tobytes() == original.tobytes()
+        packet = ElementTree.fromstring(copy.info["xmp"])
+    description = packet.find(".//{http://www.w3.org/1999/02/22-rdf-syntax-ns#}Description")
+    assert description is not None
+    assert description.get("{https://example.com/photo-edit/}History") == "original-edit-history"
+    rating = "{http://ns.adobe.com/xap/1.0/}Rating"
+    assert (description.get(rating) or description.findtext(rating)) == "5"
+    assert relocated.read_bytes() == original_bytes
 
 
 async def test_cancelled_transaction_rolls_back_and_releases_owner(source):

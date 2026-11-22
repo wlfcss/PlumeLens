@@ -17,6 +17,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import threading
 import unicodedata
 import uuid
@@ -40,6 +41,7 @@ from engine.core.database import Database
 from engine.core.file_identity import file_change_time_ns
 from engine.pipeline.preprocess import IMAGE_EXTENSIONS, RAW_EXTENSIONS
 from engine.services.photo_input import source_fingerprint as analysis_input_fingerprint
+from engine.services.xmp import ExistingXmpError, merge_jpeg_xmp
 
 logger = structlog.stdlib.get_logger()
 
@@ -440,6 +442,7 @@ _ERROR_LABELS: dict[str, str] = {
     "companion_missing": "同伴文件不存在",
     "insufficient_space": "目标磁盘剩余空间不足",
     "source_changed": "源文件在导出期间发生变化，请重新扫描后重试",
+    "xmp_preserved": "已原样导出 JPEG，鉴翎评级与关键词未写入，以保留原有 XMP",
     "copy_failed": "文件复制或元数据写入失败",
     "permission_denied": "没有读取源文件或写入目标目录的权限",
 }
@@ -460,7 +463,16 @@ _JPEG_EXTENSIONS = {".jpg", ".jpeg"}
 _JPEG_SOI = b"\xff\xd8"
 _JPEG_APP1 = b"\xff\xe1"
 _JPEG_XMP_HEADER = b"http://ns.adobe.com/xap/1.0/\x00"
+_JPEG_EXTENDED_XMP_HEADER = b"http://ns.adobe.com/xmp/extension/\x00"
 _JPEG_STANDALONE_MARKERS = {*range(0xD0, 0xD8), 0x01, 0xD8, 0xD9}
+_BSD_FILE_LOCK_FLAGS = (
+    stat.UF_IMMUTABLE
+    | stat.SF_IMMUTABLE
+    | stat.UF_APPEND
+    | stat.SF_APPEND
+    | stat.UF_NOUNLINK
+    | stat.SF_NOUNLINK
+)
 
 
 def _now_stamp() -> str:
@@ -707,6 +719,15 @@ def _temporary_path(dest: Path) -> Path:
     return dest.with_name(f".{dest.name}.{uuid.uuid4().hex}.plumelens-part")
 
 
+def _clear_bsd_lock_flags(path: Path) -> None:
+    if not hasattr(os, "chflags"):
+        return
+    info = path.stat(follow_symlinks=False)
+    flags = getattr(info, "st_flags", 0)
+    if stat.S_ISREG(info.st_mode) and flags & _BSD_FILE_LOCK_FLAGS:
+        os.chflags(path, flags & ~_BSD_FILE_LOCK_FLAGS, follow_symlinks=False)
+
+
 def _copy_file(
     source: Path,
     dest: Path,
@@ -714,8 +735,9 @@ def _copy_file(
     cancel_event: threading.Event | None = None,
     expected_fingerprint: tuple[int, int, int, int, int] | None = None,
     expected_hash: str | None = None,
-) -> None:
-    """Copy to a sibling temporary file, then publish only a complete stable input."""
+    jpeg_xmp: str | None = None,
+) -> Literal["embedded", "preserved"] | None:
+    """Verify the source copy and merge optional JPEG metadata before publication."""
     dest.parent.mkdir(parents=True, exist_ok=True)
     temp = _temporary_path(dest)
     before = _fingerprint(source)
@@ -724,6 +746,7 @@ def _copy_file(
     digest = (
         hashlib.sha256() if expected_hash and re.fullmatch(r"[0-9a-f]{64}", expected_hash) else None
     )
+    xmp_status = None
     try:
         with source.open("rb") as src, temp.open("xb") as out:
             while True:
@@ -741,12 +764,34 @@ def _copy_file(
             raise ExportError("source_changed", "Source file changed while copying")
         if digest is not None and digest.hexdigest() != expected_hash:
             raise ExportError("source_changed", "Source file no longer matches its input hash")
+        if cancel_event is not None and cancel_event.is_set():
+            raise _ExportCancelled
+        if jpeg_xmp is not None:
+            try:
+                embedded = _jpeg_with_embedded_xmp(temp.read_bytes(), jpeg_xmp)
+            except ExistingXmpError as exc:
+                xmp_status = "preserved"
+                logger.warning("Preserved JPEG XMP", filename=source.name, reason=str(exc))
+            except ValueError:
+                pass  # Keep the existing sidecar fallback for a non-JPEG source.
+            else:
+                with temp.open("wb") as out:
+                    out.write(embedded)
+                    out.flush()
+                    os.fsync(out.fileno())
+                xmp_status = "embedded"
+        # Windows can refuse to replace an existing read-only file. Embed into
+        # the staging file before inheriting the source attributes and publishing.
         shutil.copystat(source, temp)
+        # Finder's Locked flag is copied by copystat on macOS. An immutable
+        # temporary file cannot be renamed or removed after a failed export.
+        _clear_bsd_lock_flags(temp)
         if cancel_event is not None and cancel_event.is_set():
             raise _ExportCancelled
         os.replace(temp, dest)
     finally:
         _unlink_silent(temp)
+    return xmp_status
 
 
 def _write_text_file(path: Path, body: str) -> None:
@@ -754,7 +799,7 @@ def _write_text_file(path: Path, body: str) -> None:
 
 
 def _write_bytes_file(path: Path, body: bytes) -> None:
-    """Publish sidecars, reports and embedded metadata with the same atomic contract."""
+    """Publish sidecars and reports atomically."""
     path.parent.mkdir(parents=True, exist_ok=True)
     temp = _temporary_path(path)
     try:
@@ -772,8 +817,19 @@ def _unlink_silent(path: Path | None) -> None:
         return
     try:
         path.unlink()
-    except FileNotFoundError:
-        pass
+    except PermissionError:
+        # Only app-owned staging/rollback files come here. Clear copied
+        # flags that may prevent removing them on Windows or macOS.
+        with suppress(OSError):
+            if os.name == "nt":
+                info = path.stat(follow_symlinks=False)
+                if stat.S_ISREG(info.st_mode) and (
+                    info.st_file_attributes & stat.FILE_ATTRIBUTE_READONLY
+                ):
+                    path.chmod(stat.S_IWRITE)
+            else:
+                _clear_bsd_lock_flags(path)
+            path.unlink()
     except OSError:
         pass
 
@@ -936,76 +992,65 @@ def _jpeg_app1_segment(payload: bytes) -> bytes:
 
 
 def _jpeg_with_embedded_xmp(data: bytes, packet: str) -> bytes:
-    """Return JPEG bytes with one standard XMP APP1 segment, preserving image data."""
+    """Merge one standard XMP segment without rewriting other JPEG bytes."""
 
     if not data.startswith(_JPEG_SOI):
         msg = "not a JPEG file"
         raise ValueError(msg)
 
-    xmp_segment = _jpeg_app1_segment(_JPEG_XMP_HEADER + packet.encode("utf-8"))
-    segments: list[bytes] = []
     offset = len(_JPEG_SOI)
-    tail_offset = offset
+    standard: tuple[int, int, bytes] | None = None
 
     while offset < len(data):
         marker_start = offset
         if data[offset] != 0xFF:
-            tail_offset = offset
-            break
+            raise ExistingXmpError("Invalid JPEG marker before the image scan")
 
         while offset < len(data) and data[offset] == 0xFF:
             offset += 1
         if offset >= len(data):
-            tail_offset = marker_start
-            break
+            raise ExistingXmpError("Truncated JPEG marker")
 
         marker = data[offset]
         offset += 1
         if marker == 0x00:
-            tail_offset = marker_start
-            break
-        if marker == 0xDA:  # Start of Scan: compressed image data follows.
-            tail_offset = marker_start
+            raise ExistingXmpError("Unexpected JPEG byte stuffing before the image scan")
+        if marker in (0xDA, 0xD9):  # Stop before the image scan or the end of image.
+            offset = marker_start
             break
         if marker in _JPEG_STANDALONE_MARKERS:
-            tail_offset = offset
-            if marker != 0xD9:
-                segments.append(data[marker_start:offset])
-                continue
-            tail_offset = marker_start
-            break
+            continue
 
         if offset + 2 > len(data):
-            msg = "truncated JPEG segment length"
-            raise ValueError(msg)
+            raise ExistingXmpError("Truncated JPEG segment length")
         segment_len = int.from_bytes(data[offset : offset + 2], "big")
         if segment_len < 2:
-            msg = "invalid JPEG segment length"
-            raise ValueError(msg)
+            raise ExistingXmpError("Invalid JPEG segment length")
         segment_end = offset + segment_len
         if segment_end > len(data):
-            msg = "truncated JPEG segment payload"
-            raise ValueError(msg)
+            raise ExistingXmpError("Truncated JPEG segment payload")
 
-        payload = data[offset + 2 : segment_end]
-        segment = data[marker_start:segment_end]
-        if marker != 0xE1 or not payload.startswith(_JPEG_XMP_HEADER):
-            segments.append(segment)
+        if marker == 0xE1:
+            payload = data[offset + 2 : segment_end]
+            if payload.startswith(_JPEG_EXTENDED_XMP_HEADER):
+                raise ExistingXmpError("JPEG uses extended XMP")
+            if payload.startswith(_JPEG_XMP_HEADER):
+                if standard is not None:
+                    raise ExistingXmpError("JPEG contains multiple standard XMP packets")
+                standard = (offset - 2, segment_end, payload[len(_JPEG_XMP_HEADER) :])
         offset = segment_end
-        tail_offset = offset
 
-    return _JPEG_SOI + b"".join(segments) + xmp_segment + data[tail_offset:]
+    if standard is None:
+        segment = _jpeg_app1_segment(_JPEG_XMP_HEADER + packet.encode("utf-8"))
+        return data[:offset] + segment + data[offset:]
 
-
-def _try_embed_xmp_in_jpeg(path: Path, packet: str) -> bool:
-    if not _is_jpeg_path(path):
-        return False
+    offset, end, existing = standard
+    merged = merge_jpeg_xmp(existing, packet)
     try:
-        embedded = _jpeg_with_embedded_xmp(path.read_bytes(), packet)
-    except (OSError, ValueError):
-        return False
-    _write_bytes_file(path, embedded)
-    return True
+        segment = _jpeg_app1_segment(_JPEG_XMP_HEADER + merged)
+    except ValueError as exc:
+        raise ExistingXmpError("Merged XMP exceeds an APP1 segment") from exc
+    return data[:offset] + segment + data[end:]
 
 
 def _estimate_export_bytes(
@@ -1336,6 +1381,8 @@ def _run_export(
         exported_main = False
         exported_companion = False
         exported_xmp = False
+        jpeg_packet: str | None = None
+        jpeg_xmp_status: Literal["embedded", "preserved"] | None = None
         error: str | None = None
         created_paths: list[Path] = []
         try:
@@ -1369,12 +1416,19 @@ def _run_export(
                         body.preserve_structure,
                     )
                     dest_path = _unique_dest(output_dir, rel, used)
-                    _copy_file(
+                    if (
+                        body.include_xmp_sidecars
+                        and companion_source is None
+                        and _is_jpeg_path(source)
+                    ):
+                        jpeg_packet = _xmp_packet(photo, source)
+                    jpeg_xmp_status = _copy_file(
                         source,
                         dest_path,
                         cancel_event=job.cancel_event if job is not None else None,
                         expected_fingerprint=photo.source_fingerprint,
                         expected_hash=_expected_copy_hash(photo, 0),
+                        jpeg_xmp=jpeg_packet,
                     )
                     created_paths.append(dest_path)
                     exported_main = True
@@ -1413,38 +1467,36 @@ def _run_export(
                         if companion_source is not None and companion_source.exists()
                         else source
                     )
-                    xmp_body = _xmp_packet(photo, xmp_source)
-                    if companion_dest is not None:
-                        xmp_dest = _xmp_dest_for(output_dir, companion_dest, used)
-                        _write_text_file(xmp_dest, xmp_body)
-                        created_paths.append(xmp_dest)
-                    elif dest_path is not None:
-                        if _try_embed_xmp_in_jpeg(dest_path, xmp_body):
-                            xmp_dest = dest_path
-                        else:
-                            xmp_dest = _xmp_dest_for(output_dir, dest_path, used)
-                            _write_text_file(xmp_dest, xmp_body)
-                            created_paths.append(xmp_dest)
+                    if jpeg_xmp_status == "embedded":
+                        xmp_dest = dest_path
+                    elif jpeg_xmp_status == "preserved":
+                        # A new sidecar could shadow the existing packet in a
+                        # metadata reader. Report the skipped write explicitly.
+                        error = "xmp_preserved"
+                        failed += 1
                     else:
-                        xmp_rel = _dest_rel(
-                            xmp_source,
-                            root,
-                            _effective_grade(photo),
-                            body.layout,
-                            body.preserve_structure,
+                        xmp_base = (
+                            companion_dest
+                            or dest_path
+                            or _dest_rel(
+                                xmp_source,
+                                root,
+                                _effective_grade(photo),
+                                body.layout,
+                                body.preserve_structure,
+                            )
                         )
-                        xmp_dest = _xmp_dest_for(output_dir, xmp_rel, used)
-                        _write_text_file(xmp_dest, xmp_body)
+                        xmp_dest = _xmp_dest_for(output_dir, xmp_base, used)
+                        _write_text_file(xmp_dest, jpeg_packet or _xmp_packet(photo, xmp_source))
                         created_paths.append(xmp_dest)
-                    exported_xmp = True
+                    exported_xmp = xmp_dest is not None
 
-                if error is None:
-                    if exported_main:
-                        exported += 1
-                    if exported_companion:
-                        companions += 1
-                    if exported_xmp:
-                        xmp_count += 1
+                if exported_main:
+                    exported += 1
+                if exported_companion:
+                    companions += 1
+                if exported_xmp:
+                    xmp_count += 1
         except Exception as exc:
             reserved_paths = [p for p in (dest_path, companion_dest, xmp_dest) if p is not None]
             for path in reversed(list(dict.fromkeys([*created_paths, *reserved_paths]))):

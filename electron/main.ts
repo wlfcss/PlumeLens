@@ -5,6 +5,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync } from 'fs'
 import { realpath } from 'fs/promises'
 import { homedir, platform as osPlatform } from 'os'
 import { join, resolve } from 'path'
+import { BENCHMARK_TRACE_ARGUMENT } from '../shared/benchmark-trace'
 import { ProcessManager } from './process-manager'
 import { forceTerminateEngineTreeSync } from './engine-shutdown'
 import { findWindowsEditor } from './windows-editors'
@@ -595,6 +596,9 @@ function createWindow(): void {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      ...(process.env['PLUMELENS_BENCHMARK_TRACE'] === '1' && {
+        additionalArguments: [BENCHMARK_TRACE_ARGUMENT],
+      }),
     },
   })
 

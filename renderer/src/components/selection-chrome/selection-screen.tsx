@@ -30,12 +30,14 @@ import {
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useState,
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
   type RefObject,
 } from 'react'
+import { benchmarkTrace } from '@/lib/benchmark-trace'
 import type { useTranslation } from 'react-i18next'
 
 import { BackgroundTaskBar } from '@/components/common/background-task-bar'
@@ -84,6 +86,11 @@ function sortLabelKey(sort: SortMode) {
 
 function quickFilterLabelKey(filter: QuickFilter) {
   return `selection.quickFilters.${filter}` as const
+}
+
+function SelectionScreenCommitTrace() {
+  useLayoutEffect(() => benchmarkTrace?.mark('selection.screen_commit'), [])
+  return null
 }
 
 export function SelectionScreen({
@@ -221,6 +228,7 @@ export function SelectionScreen({
 
   return (
     <main className="selection-screen">
+      {benchmarkTrace && <SelectionScreenCommitTrace />}
       <FolderRail
         activeFolderId={activeFolder.id}
         folders={folders}

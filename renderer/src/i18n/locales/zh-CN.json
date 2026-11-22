@@ -489,6 +489,9 @@
     },
     "review": {
       "label": "深度复核",
+      "loadingDetails": "正在加载复核详情…",
+      "detailsFailed": "无法加载复核详情。",
+      "detailsChanged": "照片信息已更新，刷新后可继续复核。",
       "scoreBreakdown": "评分拆解",
       "species": "物种候选",
       "why": "为什么是这个评级",

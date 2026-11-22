@@ -10,14 +10,21 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-from collections.abc import Mapping
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from datetime import datetime
+from itertools import islice
 from sqlite3 import Row
+from typing import Any, Literal, cast, overload
+
+import aiosqlite
 
 from engine.api.schemas.library import (
     BestDetection,
     BirdDetectionDetail,
+    BirdDetectionSummary,
+    DetectionSummary,
     PhotoRow,
+    PhotoSummary,
     SpeciesSource,
 )
 from engine.core.database import Database
@@ -27,6 +34,24 @@ from engine.services.decisions import (
     list_species_overrides,
 )
 from engine.services.geo_constants import UNRESOLVED_COUNTRY
+
+ProjectedPhoto = PhotoRow | PhotoSummary
+_SUMMARY_EXIF_KEYS = (
+    "ExposureTime",
+    "FNumber",
+    "FocalLength",
+    "ISOSpeedRatings",
+    "PhotographicSensitivity",
+    "ISO",
+)
+_GPS_KEYS = ("GPSLatitudeRef", "GPSLatitude", "GPSLongitudeRef", "GPSLongitude")
+_SUMMARY_CANDIDATE_KEYS = (
+    "canonical_sci",
+    "canonical_zh",
+    "canonical_en",
+    "confidence",
+    "recognition_state",
+)
 
 
 def _classify_analysis_error(error_msg: str) -> str:
@@ -88,6 +113,14 @@ def _candidate_display(candidate: Mapping[str, object], sci: str) -> tuple[str, 
     return str(name), str(en) if isinstance(en, str) and en else None
 
 
+def _candidate_english(candidates: Sequence[Mapping[str, object]], latin: str | None) -> str | None:
+    if latin:
+        for candidate in candidates:
+            if candidate.get("canonical_sci") == latin and candidate.get("canonical_en"):
+                return str(candidate["canonical_en"])
+    return None
+
+
 def _species_candidate_confidence(candidate: Mapping[str, object]) -> float:
     return _clamp01(candidate.get("confidence"), default=0.0)
 
@@ -118,7 +151,7 @@ def _species_candidate_can_follow_consensus(candidate: Mapping[str, object]) -> 
     return _species_candidate_state(candidate) != "unrecognized"
 
 
-def _best_candidate(photo: PhotoRow) -> tuple[str | None, str | None, float]:
+def _best_candidate(photo: ProjectedPhoto) -> tuple[str | None, str | None, float]:
     candidates = photo.best_detection.species_candidates if photo.best_detection else []
     if not candidates:
         return None, None, 0.0
@@ -133,7 +166,7 @@ def _best_candidate(photo: PhotoRow) -> tuple[str | None, str | None, float]:
 
 
 def _top_candidate_for_consensus_follow(
-    photo: PhotoRow,
+    photo: ProjectedPhoto,
 ) -> tuple[str | None, str | None, float, str | None]:
     candidates = photo.best_detection.species_candidates if photo.best_detection else []
     if not candidates:
@@ -149,7 +182,7 @@ def _top_candidate_for_consensus_follow(
     return sci, name, _species_candidate_confidence(first), state
 
 
-def _consensus_photo_weight(photo: PhotoRow) -> float:
+def _consensus_photo_weight(photo: ProjectedPhoto) -> float:
     best = photo.best_detection
     if best is None:
         return 0.0
@@ -165,7 +198,7 @@ def _consensus_photo_weight(photo: PhotoRow) -> float:
     return (0.35 + quality * 0.65) * (0.40 + bbox_conf * 0.60) * pose_weight
 
 
-def _group_span_seconds(photos: list[PhotoRow]) -> float | None:
+def _group_span_seconds(photos: Sequence[ProjectedPhoto]) -> float | None:
     values = [v for p in photos if (v := _parse_time_seconds(p.shot_at)) is not None]
     if len(values) < 2:
         return 0.0
@@ -278,7 +311,11 @@ def _match_overrides_to_detections(
 
 
 def _apply_effective_species(
-    photo: PhotoRow, name: str, sci: str, source: SpeciesSource, english_name: str | None = None
+    photo: ProjectedPhoto,
+    name: str,
+    sci: str,
+    source: SpeciesSource,
+    english_name: str | None = None,
 ) -> None:
     photo.species = name
     photo.species_latin = sci
@@ -298,7 +335,7 @@ def _apply_effective_species(
                 break
 
 
-def _apply_group_species_consensus(photos: list[PhotoRow]) -> None:
+def _apply_group_species_consensus(photos: Sequence[ProjectedPhoto]) -> None:
     """Apply a read-time group species consensus to single-bird scene groups.
 
     This deliberately does not write back to analysis_results. The raw model
@@ -306,7 +343,7 @@ def _apply_group_species_consensus(photos: list[PhotoRow]) -> None:
     effective species used by the UI can be stabilized for obvious same-subject
     bursts.
     """
-    groups: dict[int, list[PhotoRow]] = {}
+    groups: dict[int, list[ProjectedPhoto]] = {}
     for photo in photos:
         if photo.scene_id is None:
             continue
@@ -440,154 +477,349 @@ def _apply_group_species_consensus(photos: list[PhotoRow]) -> None:
             _apply_effective_species(photo, winner_name, winner_sci, "group_consensus", winner_en)
 
 
-def projection_revision(library_id: str, photos: list[PhotoRow]) -> str:
-    fields = {
-        "id",
-        "file_path",
-        "file_name",
-        "input_revision",
-        "file_hash",
-        "pipeline_version",
-        "companion_path",
-        "companion_format",
-        "companion_size",
-        "format",
-        "shot_at",
-        "scene_id",
-        "analysis_status",
-        "grade",
-        "decision",
-        "quality_score",
-        "bird_count",
-        "species",
-        "species_latin",
-        "species_source",
-        "best_detection",
-        "detections",
-    }
-    payload = [photo.model_dump(include=fields) for photo in photos]
-    encoded = json.dumps(
-        [library_id, payload], sort_keys=True, ensure_ascii=False, separators=(",", ":")
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
+_PROJECTION_REVISION_BATCH_SIZE = 256
+
+
+_PROJECTION_REVISION_FIELDS = (
+    "id",
+    "file_path",
+    "file_name",
+    "input_revision",
+    "file_hash",
+    "pipeline_version",
+    "companion_path",
+    "companion_format",
+    "companion_size",
+    "format",
+    "shot_at",
+    "scene_id",
+    "analysis_status",
+    "grade",
+    "decision",
+    "quality_score",
+    "bird_count",
+    "species",
+    "species_latin",
+    "species_source",
+    "_selection_revision",
+)
+
+
+def projection_revision_row(photo: ProjectedPhoto) -> tuple[object, ...]:
+    return tuple(getattr(photo, field) for field in _PROJECTION_REVISION_FIELDS)
+
+
+def projection_revision_from_rows(library_id: str, rows: Iterable[tuple[object, ...]]) -> str:
+    """Hash the same ordered JSON payload regardless of how scenes were processed."""
+    encode = json.JSONEncoder(ensure_ascii=False, separators=(",", ":")).encode
+    digest = hashlib.sha256()
+    digest.update(b"[" + encode(library_id).encode("utf-8") + b",[")
+    iterator = iter(rows)
+    separator = b""
+    while batch := list(islice(iterator, _PROJECTION_REVISION_BATCH_SIZE)):
+        digest.update(separator)
+        digest.update(encode(batch)[1:-1].encode("utf-8"))
+        separator = b","
+    digest.update(b"]]")
+    return digest.hexdigest()
+
+
+def projection_revision(library_id: str, photos: Sequence[ProjectedPhoto]) -> str:
+    """Hash the same source and effective selection state in both views."""
+    return projection_revision_from_rows(library_id, map(projection_revision_row, photos))
+
+
+def _stamp_photo_revisions(photo: ProjectedPhoto, row: Row) -> None:
+    """Keep selection pins independent of display-only review changes."""
+    digest = hashlib.blake2b(digest_size=16)
+
+    def _add_raw(raw: object) -> None:
+        value = str(raw).encode("utf-8") if raw is not None else b""
+        digest.update(len(value).to_bytes(8, "big"))
+        digest.update(value)
+
+    def _add_values(values: object) -> None:
+        digest.update(json.dumps(values, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+
+    _add_raw(row["result_json"])
+    _add_values(
+        [
+            (
+                bird.index,
+                bird.species,
+                bird.species_latin,
+                bird.species_english
+                or _candidate_english(bird.species_candidates, bird.species_latin),
+                bird.species_source,
+            )
+            for bird in photo.detections or ()
+        ]
+    )
+    photo._selection_revision = digest.hexdigest()
+
+    _add_raw(row["exif_json"])
+    _add_values(
+        (
+            photo.id,
+            photo.file_path,
+            photo.file_name,
+            photo.file_hash,
+            photo.input_revision,
+            photo.format,
+            photo.companion_path,
+            photo.companion_format,
+            photo.companion_size,
+            photo.width,
+            photo.height,
+            photo.thumb_grid,
+            photo.thumb_preview,
+            photo.country,
+            photo.province,
+            photo.city,
+            photo.district,
+            photo.place,
+            photo.created_at,
+            photo.shot_at,
+            photo.pipeline_version,
+            photo.grade,
+            photo.quality_score,
+            photo.bird_count,
+            photo.analysis_status,
+            photo.analysis_error,
+            photo.decision,
+            photo.scene_id,
+            photo.species,
+            photo.species_latin,
+            photo.species_source,
+            photo.group_species,
+            photo.group_species_latin,
+            photo.group_species_confidence,
+            photo.group_species_support,
+            photo.group_species_evidence,
+            photo.group_species_total,
+            photo.species_conflict,
+        )
+    )
+    photo.review_revision = digest.hexdigest()
 
 
 class LibraryProjectionNotFound(RuntimeError):
-    """The folder was removed before the projection snapshot could be read."""
+    """The requested library or photo does not exist in the snapshot."""
+
+
+_SELECT_PHOTO_PROJECTION = (
+    "SELECT p.id, p.library_id, p.file_path, p.file_name, p.format, p.width, p.height, "
+    "p.thumb_grid, p.thumb_preview, p.created_at, p.file_mtime, p.exif_json, "
+    "p.input_revision, p.file_hash, "
+    "p.scene_id, p.companion_path, p.companion_format, p.companion_size, "
+    "p.country, p.province, p.city, p.district, p.place, "
+    "ar.pipeline_version, ar.grade, ar.quality_score, ar.bird_count, ar.species, ar.result_json, "
+    "pd.decision, tq.status AS task_status, tq.error_message AS task_error "
+    "FROM photos p "
+    "LEFT JOIN analysis_results ar ON ar.photo_id = p.id AND ar.is_active = 1 "
+    "AND ar.input_revision = p.input_revision "
+    "LEFT JOIN photo_decisions pd ON pd.photo_id = p.id "
+    # A photo can have historical task rows. Only the latest gives its status.
+    "LEFT JOIN task_queue tq ON tq.rowid = ("
+    "    SELECT MAX(rowid) FROM task_queue WHERE photo_id = p.id"
+    ") "
+)
+_PHOTO_PROJECTION_ORDER = "ORDER BY p.file_mtime ASC, p.id ASC"
+
+
+async def _expand_scene_rows(
+    conn: aiosqlite.Connection, library_id: str, rows: list[Row]
+) -> list[Row]:
+    """Read each touched scene in the same order as the full library."""
+    scene_ids = sorted({int(row["scene_id"]) for row in rows if row["scene_id"] is not None})
+    if not scene_ids:
+        return rows
+    context_rows = [row for row in rows if row["scene_id"] is None]
+    # Keep the parameter count below older SQLite builds' variable limit.
+    for start in range(0, len(scene_ids), 500):
+        scenes = scene_ids[start : start + 500]
+        placeholders = ",".join("?" for _ in scenes)
+        async with conn.execute(
+            _SELECT_PHOTO_PROJECTION
+            + f"WHERE p.library_id = ? AND p.scene_id IN ({placeholders}) "
+            + _PHOTO_PROJECTION_ORDER,
+            (library_id, *scenes),
+        ) as cursor:
+            context_rows.extend(await cursor.fetchall())
+    return context_rows
+
+
+@overload
+async def load_library_photos(
+    db: Database,
+    library_id: str,
+    *,
+    limit: int | None = None,
+    offset: int = 0,
+    summary: Literal[False] = False,
+) -> list[PhotoRow]: ...
+
+
+@overload
+async def load_library_photos(
+    db: Database,
+    library_id: str,
+    *,
+    limit: int | None = None,
+    offset: int = 0,
+    summary: Literal[True],
+) -> list[PhotoSummary]: ...
+
+
+@overload
+async def load_library_photos(
+    db: Database,
+    library_id: str,
+    *,
+    limit: int | None = None,
+    offset: int = 0,
+    summary: bool,
+) -> list[PhotoRow] | list[PhotoSummary]: ...
 
 
 async def load_library_photos(
+    db: Database,
+    library_id: str,
+    *,
+    limit: int | None = None,
+    offset: int = 0,
+    summary: bool = False,
+) -> list[PhotoRow] | list[PhotoSummary]:
+    """Copy SQL inputs from one snapshot, then project off the event loop."""
+    rows, context_rows, species_overrides = await read_library_projection_inputs(
+        db, library_id, limit=limit, offset=offset
+    )
+    projected = await asyncio.to_thread(
+        project_library_photos, rows, context_rows, species_overrides, summary
+    )
+    return cast("list[PhotoRow] | list[PhotoSummary]", projected)
+
+
+async def read_library_projection_inputs(
     db: Database, library_id: str, *, limit: int | None = None, offset: int = 0
-) -> list[PhotoRow]:
-    """Copy SQL inputs consistently, then project off the event loop and write lock."""
-    async with db.transaction():
-        async with db.conn.execute("SELECT 1 FROM libraries WHERE id = ?", (library_id,)) as cur:
+) -> tuple[list[Row], list[Row], dict[str, list[SpeciesOverrideRecord]]]:
+    async with db.read_snapshot() as conn:
+        async with conn.execute("SELECT 1 FROM libraries WHERE id = ?", (library_id,)) as cur:
             if await cur.fetchone() is None:
                 raise LibraryProjectionNotFound(library_id)
-        # task_queue 一张 photo 可能存在多行(老的 dead/failed/completed + 新的 pending),
-        # 直接 LEFT JOIN 会让 photos 出现重复。挑最新一行(rowid 最大)子查询:
-        #   - photo 在 task 里没记录 → tq.* 全 NULL → analysis_status 走 done(若有 result)
-        #     或 pending(无 result)的 fallback,不影响正确性
-        #   - photo 有多行 task → 取最新那行的 status/error_message,
-        #     更准确反映"用户最近一次 batch 的结果"
-        select_from_sql = (
-            "SELECT p.id, p.file_path, p.file_name, p.format, p.width, p.height, "
-            "p.thumb_grid, p.thumb_preview, p.created_at, p.file_mtime, p.exif_json, "
-            "p.input_revision, p.file_hash, "
-            "p.scene_id, p.companion_path, p.companion_format, p.companion_size, "
-            "p.country, p.province, p.city, p.district, p.place, "
-            "ar.pipeline_version, ar.grade, ar.quality_score, ar.bird_count, ar.species, "
-            "ar.result_json, "
-            "pd.decision, "
-            "tq.status AS task_status, tq.error_message AS task_error "
-            "FROM photos p "
-            "LEFT JOIN analysis_results ar ON ar.photo_id = p.id AND ar.is_active = 1 "
-            "AND ar.input_revision = p.input_revision "
-            "LEFT JOIN photo_decisions pd ON pd.photo_id = p.id "
-            "LEFT JOIN task_queue tq ON tq.rowid = ("
-            "    SELECT MAX(rowid) FROM task_queue WHERE photo_id = p.id"
-            ") "
-        )
-        order_by_sql = "ORDER BY p.file_mtime ASC, p.id ASC"
-        sql = select_from_sql + f"WHERE p.library_id = ? {order_by_sql}"
-        params: tuple[object, ...]
+        sql = _SELECT_PHOTO_PROJECTION + f"WHERE p.library_id = ? {_PHOTO_PROJECTION_ORDER}"
+        params: tuple[object, ...] = (library_id,)
         if limit is not None:
             sql += " LIMIT ? OFFSET ?"
             params = (library_id, limit, offset)
-        else:
-            params = (library_id,)
-        async with db.conn.execute(sql, params) as cur:
+        async with conn.execute(sql, params) as cur:
             rows = list(await cur.fetchall())
 
-        context_rows = rows
-        if limit is not None:
-            # Group consensus is computed at read time and needs all photos in the
-            # same scene, otherwise a page boundary can hide the votes that should
-            # upgrade model_unconfirmed/conflict rows.  Keep pagination cheap by
-            # expanding only the scene groups touched by this page.
-            scene_ids = sorted(
-                {int(row["scene_id"]) for row in rows if row["scene_id"] is not None}
-            )
-            if scene_ids:
-                placeholders = ",".join("?" for _ in scene_ids)
-                async with db.conn.execute(
-                    select_from_sql
-                    + (f"WHERE p.library_id = ? AND p.scene_id IN ({placeholders}) {order_by_sql}"),
-                    (library_id, *scene_ids),
-                ) as cur:
-                    expanded_rows = list(await cur.fetchall())
-                seen_ids: set[str] = set()
-                merged_rows = []
-                for row in [*rows, *expanded_rows]:
-                    photo_id = str(row["id"])
-                    if photo_id in seen_ids:
-                        continue
-                    seen_ids.add(photo_id)
-                    merged_rows.append(row)
-                context_rows = merged_rows
-
+        context_rows = (
+            await _expand_scene_rows(conn, library_id, rows) if limit is not None else rows
+        )
         override_photo_ids = [str(row["id"]) for row in context_rows] if limit is not None else None
-        species_overrides = await list_species_overrides(db, library_id, override_photo_ids)
+        species_overrides = await list_species_overrides(
+            db, library_id, override_photo_ids, connection=conn
+        )
+    return rows, context_rows, species_overrides
 
-    return await asyncio.to_thread(project_library_photos, rows, context_rows, species_overrides)
+
+def project_summary_scenes(
+    rows: list[Row], overrides: dict[str, list[SpeciesOverrideRecord]], batch_size: int
+) -> Iterator[tuple[list[int], list[PhotoSummary]]]:
+    """Project complete scenes in bounded groups. Indices restore SQL order."""
+    by_scene: dict[int, list[int]] = {}
+    for index, row in enumerate(rows):
+        if (scene := row["scene_id"]) is not None:
+            by_scene.setdefault(int(scene), []).append(index)
+
+    batch: list[int] = []
+    for index, row in enumerate(rows):
+        scene = row["scene_id"]
+        if scene is None:
+            indices = [index]
+        else:
+            indices = by_scene.pop(int(scene), None)
+            if indices is None:
+                continue
+        if batch and len(batch) + len(indices) > batch_size:
+            batch_rows = [rows[position] for position in batch]
+            yield (
+                batch,
+                cast(
+                    "list[PhotoSummary]",
+                    project_library_photos(batch_rows, batch_rows, overrides, True),
+                ),
+            )
+            batch = []
+        batch.extend(indices)
+    if batch:
+        batch_rows = [rows[position] for position in batch]
+        yield (
+            batch,
+            cast(
+                "list[PhotoSummary]",
+                project_library_photos(batch_rows, batch_rows, overrides, True),
+            ),
+        )
+
+
+async def load_photo_review(db: Database, photo_id: str) -> tuple[str, PhotoRow]:
+    """Read full review data and only the selected photo's scene evidence."""
+    async with db.read_snapshot() as conn:
+        async with conn.execute(_SELECT_PHOTO_PROJECTION + "WHERE p.id = ?", (photo_id,)) as cur:
+            row = await cur.fetchone()
+        if row is None:
+            raise LibraryProjectionNotFound(photo_id)
+        library_id = str(row["library_id"])
+        context_rows = await _expand_scene_rows(conn, library_id, [row])
+        overrides = await list_species_overrides(
+            db, library_id, [str(r["id"]) for r in context_rows], connection=conn
+        )
+
+    photos = await asyncio.to_thread(
+        project_library_photos, [row], context_rows, overrides, True, full_photo_id=photo_id
+    )
+    return library_id, cast(PhotoRow, photos[0])
 
 
 def project_library_photos(
     rows: list[Row],
     context_rows: list[Row],
     species_overrides: dict[str, list[SpeciesOverrideRecord]],
-) -> list[PhotoRow]:
+    summary: bool = False,
+    *,
+    full_photo_id: str | None = None,
+) -> list[ProjectedPhoto]:
     """Pure projection; full scene evidence is fixed before any filtering."""
-    import json as _json
 
-    def _parse_exif(raw: object) -> dict | None:
+    def _parse_exif(raw: object) -> dict[str, Any] | None:
         if not raw:
             return None
         try:
-            data = _json.loads(str(raw))
+            data = json.loads(str(raw))
             return data if isinstance(data, dict) else None
-        except Exception:
+        except (ValueError, TypeError):
             return None
 
-    def _resolve_shot_at(row: object) -> str:
-        """优先级：EXIF DateTimeOriginal > file_mtime > created_at."""
-        try:
-            exif = row["exif_json"]  # type: ignore[index]
-            if exif:
-                data = _json.loads(str(exif))
-                dto = data.get("DateTimeOriginal")
-                if dto and isinstance(dto, str):
-                    iso = dto.replace(":", "-", 2).replace(" ", "T")
-                    return iso
-        except Exception:
-            pass
-        try:
-            mt = row["file_mtime"]  # type: ignore[index]
-            if mt:
-                return str(mt)
-        except Exception:
-            pass
-        return str(row["created_at"])  # type: ignore[index]
+    def _compact_exif(exif: dict[str, Any] | None) -> dict[str, Any] | None:
+        if exif is None:
+            return None
+        compact = {key: exif[key] for key in (*_SUMMARY_EXIF_KEYS, *_GPS_KEYS) if key in exif}
+        gps = exif.get("GPSInfo")
+        if isinstance(gps, dict):
+            compact["GPSInfo"] = {
+                key: gps[key] for key in (*_GPS_KEYS, "1", "2", "3", "4") if key in gps
+            }
+        return compact or None
+
+    def _resolve_shot_at(row: Row, exif: dict[str, Any] | None) -> str:
+        """Prefer captured time over file modification and import time."""
+        dto = exif.get("DateTimeOriginal") if exif else None
+        if isinstance(dto, str) and dto:
+            return dto.replace(":", "-", 2).replace(" ", "T")
+        return str(row["file_mtime"] or row["created_at"])
 
     def _display_species(
         detection: dict,
@@ -641,7 +873,8 @@ def project_library_photos(
         detection: dict,
         override: SpeciesOverride | None,
         is_best: bool,
-    ) -> BirdDetectionDetail:
+        compact: bool,
+    ) -> BirdDetectionDetail | BirdDetectionSummary:
         bbox_d = detection.get("bbox") or {}
         bbox = {
             "x1": float(bbox_d.get("x1", 0)),
@@ -653,32 +886,39 @@ def project_library_photos(
         pose: dict | None = None
         pose_d = detection.get("pose")
         if pose_d:
-
-            def _kp(name: str) -> dict | None:
-                kp = pose_d.get(name)
-                if not kp:
-                    return None
-                return {
-                    "x": float(kp.get("x", 0)),
-                    "y": float(kp.get("y", 0)),
-                    "confidence": float(kp.get("confidence", 0)),
-                }
-
-            # v2 schema:11 关键点(5 头 + 6 身) + 5 visibility + 3 posture。
-            # 历史 bug:这里只取 5 头部点 + head/eye_visible,躯干点和 posture 全丢,
-            # 前端 PoseDetail schema 用默认值(0,0,0 / false / "unknown")兜底,
-            # 导致飞版升档徽标 / 躯干 chips / 躯干关键点叠加全部失效。
             head_keys = ("bill", "crown", "nape", "left_eye", "right_eye")
             torso_keys = ("belly", "breast", "back", "tail", "left_wing", "right_wing")
-            head_kpts = {n: _kp(n) for n in head_keys}
-            if all(head_kpts.values()):
-                # 躯干点对老 v1 cache 可能缺失(数据迁移期),逐项 fallback 到默认占位。
-                # 对 v2 数据,pose_d 一定 11 项齐全 → 全部填充正确值。
-                placeholder_kp = {"x": 0.0, "y": 0.0, "confidence": 0.0}
-                torso_kpts = {n: (_kp(n) or placeholder_kp) for n in torso_keys}
+            head_points = [pose_d.get(name) for name in head_keys]
+            has_head = all(head_points)
+
+            def _point_values(kp: dict) -> tuple[float, float, float]:
+                return float(kp.get("x", 0)), float(kp.get("y", 0)), float(kp.get("confidence", 0))
+
+            # Validate points in both views so a malformed legacy result cannot
+            # acquire a species/flight identity only in summary.
+            if compact:
+                points = (
+                    (*head_points, *(pose_d.get(name) for name in torso_keys))
+                    if has_head
+                    else head_points
+                )
+                for kp in points:
+                    if kp:
+                        _point_values(kp)
+            else:
+
+                def _keypoint(kp: dict | None) -> dict[str, float] | None:
+                    if not kp:
+                        return None
+                    x, y, confidence = _point_values(kp)
+                    return {"x": x, "y": y, "confidence": confidence}
+
+                head_kpts = {
+                    name: _keypoint(kp) for name, kp in zip(head_keys, head_points, strict=True)
+                }
+
+            if has_head:
                 pose = {
-                    **head_kpts,
-                    **torso_kpts,
                     "head_visible": bool(pose_d.get("head_visible", False)),
                     "eye_visible": bool(pose_d.get("eye_visible", False)),
                     "body_visible": bool(pose_d.get("body_visible", False)),
@@ -690,14 +930,30 @@ def project_library_photos(
                     "posture_confidence": float(pose_d.get("posture_confidence", 0.0)),
                     "posture_method": str(pose_d.get("posture_method", "heuristic")),
                 }
+                if not compact:
+                    pose.update(head_kpts)
+                    # Legacy v1 results did not carry torso points.
+                    placeholder = {"x": 0.0, "y": 0.0, "confidence": 0.0}
+                    pose.update(
+                        {name: _keypoint(pose_d.get(name)) or placeholder for name in torso_keys}
+                    )
 
         species, latin, manual = _display_species(detection, override)
+        raw_candidates = detection.get("species_candidates", [])
+        if not isinstance(raw_candidates, list) or any(
+            not isinstance(candidate, dict) for candidate in raw_candidates
+        ):
+            raise ValueError("Invalid species candidates")
         english = override.get("canonical_en") if override is not None else None
-        if override is None and latin:
-            for candidate in detection.get("species_candidates") or []:
-                if candidate.get("canonical_sci") == latin and candidate.get("canonical_en"):
-                    english = str(candidate["canonical_en"])
-                    break
+        if not english:
+            english = _candidate_english(raw_candidates, latin)
+        # Scene consensus uses the first five model candidates from the best bird.
+        candidates = raw_candidates
+        if compact:
+            candidates = [
+                {key: candidate[key] for key in _SUMMARY_CANDIDATE_KEYS if key in candidate}
+                for candidate in (raw_candidates[:5] if is_best else [])
+            ]
         # Detection-level species_source（多鸟图混合可见性的关键 — 每个 detection
         # 独立判断而非按 best detection 一刀切）。
         # 优先级：manual > model > model_unconfirmed > none。
@@ -715,28 +971,34 @@ def project_library_photos(
         if detection_source == "none":
             species = None
             latin = None
-        return BirdDetectionDetail.model_validate(
-            {
-                "index": index,
-                "bbox": bbox,
-                "pose": pose,
-                "quality": detection.get("quality"),
-                "species": species,
-                "species_latin": latin,
-                "species_english": english,
-                "manual_species": manual,
-                "species_source": detection_source,
-                "species_candidates": detection.get("species_candidates", []),
-                "is_best": is_best,
-            }
-        )
+        fields = {
+            "index": index,
+            "bbox": bbox,
+            "pose": pose,
+            "quality": detection.get("quality"),
+            "species": species,
+            "species_latin": latin,
+            "species_english": english,
+            "manual_species": manual,
+            "species_source": detection_source,
+            "species_candidates": candidates,
+            "is_best": is_best,
+        }
+        if compact:
+            fields["candidate_confidence"] = (
+                _species_candidate_confidence(raw_candidates[0]) if raw_candidates else None
+            )
+            fields["candidate_recognition_state"] = candidate_state
+            return BirdDetectionSummary.model_validate(fields)
+        return BirdDetectionDetail.model_validate(fields)
 
     def _extract_detection_details(
         result_json: object,
         overrides: list[SpeciesOverrideRecord],
+        compact: bool,
     ) -> tuple[
-        list[BirdDetectionDetail] | None,
-        BestDetection | None,
+        list[BirdDetectionDetail | BirdDetectionSummary] | None,
+        BestDetection | DetectionSummary | None,
         str | None,
         str | None,
     ]:
@@ -748,7 +1010,7 @@ def project_library_photos(
         if not result_json:
             return None, None, None, None
         try:
-            data = _json.loads(str(result_json))
+            data = json.loads(str(result_json))
             detections_raw = data.get("detections") or []
             if not detections_raw:
                 return None, None, None, None
@@ -767,24 +1029,29 @@ def project_library_photos(
                     detection=d,
                     override=matched_overrides.get(i),
                     is_best=i == best_index,
+                    compact=compact,
                 )
                 for i, d in enumerate(detections_raw)
             ]
             best = detections[best_index]
+            best_model = DetectionSummary if compact else BestDetection
             return (
                 detections,
-                BestDetection.model_validate(best.model_dump()),
+                best_model.model_construct(**best.__dict__),
                 model_species,
                 model_latin,
             )
         except Exception:
             return None, None, None, None
 
-    photo_by_id: dict[str, PhotoRow] = {}
+    photo_by_id: dict[str, ProjectedPhoto] = {}
     for r in context_rows:
+        photo_id = str(r["id"])
+        compact = summary and photo_id != full_photo_id
         details, best, model_species, model_species_latin = _extract_detection_details(
             r["result_json"],
-            species_overrides.get(str(r["id"]), []),
+            species_overrides.get(photo_id, []),
+            compact,
         )
         effective_species = (
             best.species
@@ -817,8 +1084,10 @@ def project_library_photos(
         if analysis_status == "failed" and r["task_error"] is not None:
             analysis_error = str(r["task_error"])
             analysis_error_code = _classify_analysis_error(analysis_error)
-        photo = PhotoRow(
-            id=str(r["id"]),
+        exif = _parse_exif(r["exif_json"])
+        photo_model = PhotoSummary if compact else PhotoRow
+        photo = photo_model(
+            id=photo_id,
             file_path=str(r["file_path"]),
             file_name=str(r["file_name"]),
             input_revision=int(r["input_revision"]),
@@ -843,7 +1112,7 @@ def project_library_photos(
             district=(str(r["district"]) if r["district"] is not None else None),
             place=(str(r["place"]) if r["place"] is not None else None),
             created_at=str(r["created_at"]),
-            shot_at=_resolve_shot_at(r),
+            shot_at=_resolve_shot_at(r, exif),
             scene_id=(int(r["scene_id"]) if r["scene_id"] is not None else None),
             pipeline_version=(
                 str(r["pipeline_version"]) if r["pipeline_version"] is not None else None
@@ -861,14 +1130,39 @@ def project_library_photos(
             analysis_status=analysis_status,
             analysis_error_code=analysis_error_code,
             analysis_error=analysis_error,
-            exif=_parse_exif(r["exif_json"]),
-            best_detection=best,
-            detections=details,
+            exif=_compact_exif(exif) if compact else exif,
+            best_detection=best,  # type: ignore[arg-type]
+            detections=details,  # type: ignore[arg-type]
         )
         photo_by_id[photo.id] = photo
 
     _apply_group_species_consensus(list(photo_by_id.values()))
-    page_ids = [str(row["id"]) for row in rows]
-    photos = [photo_by_id[photo_id] for photo_id in page_ids if photo_id in photo_by_id]
-
+    photos: list[ProjectedPhoto] = []
+    for row in rows:
+        photo = photo_by_id[str(row["id"])]
+        best = photo.best_detection
+        if (
+            photo.species_source == "group_consensus"
+            and best is not None
+            and not best.species_english
+        ):
+            # An older consensus vote may lack the English label although
+            # a lower candidate from this photo supplies the same label.
+            candidates = best.species_candidates
+            if isinstance(photo, PhotoSummary):
+                raw_best = json.loads(str(row["result_json"]))["detections"][best.index]
+                candidates = raw_best.get("species_candidates", [])
+            english = _candidate_english(candidates, best.species_latin)
+            if english:
+                best.species_english = english
+                for detection in photo.detections or []:
+                    if detection.is_best:
+                        detection.species_english = english
+                        break
+        if isinstance(photo, PhotoSummary) and photo.best_detection is not None:
+            photo.best_detection.species_candidates = []
+            for detection in photo.detections or []:
+                detection.species_candidates = []
+        _stamp_photo_revisions(photo, row)
+        photos.append(photo)
     return photos

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import aiosqlite
@@ -77,6 +78,93 @@ class TestSchema:
             row = await cur.fetchone()
         assert row is not None
         assert int(row[0]) == 5000
+
+
+class TestReadSnapshot:
+    @staticmethod
+    async def _read_value(conn: aiosqlite.Connection) -> str:
+        async with conn.execute("SELECT value FROM snapshot_test") as cur:
+            row = await cur.fetchone()
+            assert row is not None
+            return str(row["value"])
+
+    @staticmethod
+    async def _seed(db: Database) -> None:
+        async with db.transaction() as conn:
+            await conn.execute("CREATE TABLE snapshot_test(value TEXT NOT NULL)")
+            await conn.execute("INSERT INTO snapshot_test VALUES('original')")
+
+    async def test_writer_commits_between_reads_without_changing_snapshot(
+        self, db: Database
+    ) -> None:
+        await self._seed(db)
+
+        async def change() -> None:
+            async with db.transaction() as conn:
+                await conn.execute("UPDATE snapshot_test SET value='new'")
+
+        async with db.read_snapshot() as reader:
+            assert reader is not db.conn
+            assert await self._read_value(reader) == "original"
+            await asyncio.wait_for(asyncio.create_task(change()), timeout=2)
+            async with db.read_snapshot() as nested:
+                assert nested is reader
+                assert await self._read_value(nested) == "original"
+
+        async with db.read_snapshot() as fresh:
+            assert fresh is reader
+            assert await self._read_value(fresh) == "new"
+
+    async def test_only_own_write_transaction_is_reused(self, db: Database) -> None:
+        await self._seed(db)
+
+        async def read_in_other_task() -> str:
+            async with db.read_snapshot() as reader:
+                return await self._read_value(reader)
+
+        async with db.transaction() as writer:
+            await writer.execute("UPDATE snapshot_test SET value='uncommitted'")
+            async with db.read_snapshot() as same_task:
+                assert same_task is writer
+                assert await self._read_value(same_task) == "uncommitted"
+            reader_task = asyncio.create_task(read_in_other_task())
+            assert await asyncio.wait_for(reader_task, timeout=2) == "original"
+
+        async with db.read_snapshot() as reader:
+            assert await self._read_value(reader) == "uncommitted"
+
+    async def test_readonly_connection_handles_escaped_file_uri(self, tmp_path: Path) -> None:
+        db = Database(tmp_path / "图库 #50%" / "photos #2%.db")
+        await db.connect()
+        try:
+            await self._seed(db)
+            async with db.read_snapshot() as reader:
+                assert await self._read_value(reader) == "original"
+                with pytest.raises(aiosqlite.OperationalError, match="readonly"):
+                    await reader.execute("UPDATE snapshot_test SET value='corrupted'")
+        finally:
+            await db.close()
+
+    async def test_cancelled_snapshot_releases_reader_connection(self, db: Database) -> None:
+        await self._seed(db)
+        entered = asyncio.Event()
+
+        async def cancelled_reader() -> None:
+            async with db.read_snapshot() as reader:
+                assert await self._read_value(reader) == "original"
+                entered.set()
+                await asyncio.Future[None]()
+
+        reader = asyncio.create_task(cancelled_reader())
+        await asyncio.wait_for(entered.wait(), timeout=2)
+        reader.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await reader
+
+        async with db.transaction() as writer:
+            await writer.execute("UPDATE snapshot_test SET value='new'")
+        async with db.read_snapshot() as fresh:
+            assert await self._read_value(fresh) == "new"
 
 
 class TestConstraints:

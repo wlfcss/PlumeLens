@@ -346,6 +346,7 @@ async function mockBackend(
     ? [...primaryPhotosBase, failedPhoto]
     : primaryPhotosBase
   const decisionStore: DecisionRecord[] = []
+  const reviewRows = new Map<string, { library_id: string; photo: unknown }>()
   const speciesOverrides = new Map<
     string,
     { canonical_sci: string | null; canonical_zh: string | null; canonical_en: string | null }
@@ -554,226 +555,247 @@ async function mockBackend(
       route.fallback()
     }
   })
-  await page.route('**/library/lib-test', async (route: Route) => {
-    if (route.request().method() === 'PATCH') {
-      const body = JSON.parse(route.request().postData() ?? '{}')
-      libraryState = {
-        ...libraryState,
-        display_name: String(body.display_name ?? '').trim(),
+  await page.route(
+    (url) => url.pathname === '/library/lib-test',
+    async (route: Route) => {
+      if (route.request().method() === 'PATCH') {
+        const body = JSON.parse(route.request().postData() ?? '{}')
+        libraryState = {
+          ...libraryState,
+          display_name: String(body.display_name ?? '').trim(),
+        }
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify(libraryState),
+        })
+        return
       }
-      await route.fulfill({
+      const photos = primaryPhotos.map((p, idx) => {
+        const burstSecond =
+          options.driftingStack || options.singleBurstScene
+            ? idx
+            : options.stackedBursts
+              ? idx + (idx >= 2 ? 3 : 0)
+              : idx < 2
+                ? idx
+                : idx * 20
+        const manyGroupHour = 7 + Math.floor(idx / 60)
+        const manyGroupMinute = idx % 60
+        const shotAt = p.shotAt
+          ? p.shotAt
+          : options.manyGroups
+            ? `2026-04-23T${String(manyGroupHour).padStart(2, '0')}:${String(manyGroupMinute).padStart(2, '0')}:00+00:00`
+            : options.driftingStack || options.singleBurstScene || options.stackedBursts
+              ? `2026-04-23T07:00:${String(burstSecond).padStart(2, '0')}+00:00`
+              : `2026-04-23T07:0${idx}:00+00:00`
+        const bbox = p.bbox ?? { x1: 1700, y1: 800, x2: 2200, y2: 2200, confidence: 0.93 }
+        const pose =
+          (options.manyGroups || options.realisticStacks) && p.posture ? makePose(p.posture) : null
+
+        return {
+          id: p.id,
+          file_path: `/tmp/lib-test/${p.file_name}`,
+          file_name: p.file_name,
+          format: 'jpg',
+          width: 4000,
+          height: 3000,
+          thumb_grid: null,
+          thumb_preview: `preview/${p.id}.jpg`,
+          created_at: shotAt,
+          shot_at: shotAt,
+          exif:
+            idx < 2
+              ? {
+                  GPSInfo: {
+                    '1': 'N',
+                    '2': [
+                      [31, 1],
+                      [37, 1],
+                      [idx, 1],
+                    ],
+                    '3': 'E',
+                    '4': [
+                      [121, 1],
+                      [30, 1],
+                      [idx, 1],
+                    ],
+                  },
+                }
+              : null,
+          scene_id:
+            p.sceneId ??
+            (options.driftingStack || options.singleBurstScene || options.stackedBursts
+              ? 111
+              : idx),
+          pipeline_version: 'v1-mock',
+          grade: p.grade,
+          quality_score: p.score,
+          bird_count: p.birdCount ?? 1,
+          analysis_status: p.analysisStatus ?? 'done',
+          analysis_error_code: p.analysisStatus === 'failed' ? 'decode_error' : null,
+          analysis_error: p.analysisStatus === 'failed' ? 'mock decode error' : null,
+          species: p.species,
+          species_latin: p.latin,
+          decision: decisionStore.find((entry) => entry.photo_id === p.id)?.decision ?? null,
+          best_detection:
+            p.analysisStatus === 'failed'
+              ? null
+              : {
+                  index: 0,
+                  bbox,
+                  pose,
+                  quality: { clipiqa: p.score, hyperiqa: p.score, combined: p.score },
+                  species: p.species,
+                  species_latin: p.latin,
+                  manual_species: false,
+                  species_candidates: [
+                    {
+                      canonical_sci: p.latin,
+                      canonical_zh: p.species,
+                      canonical_en: p.species === '须浮鸥' ? 'whiskered tern' : null,
+                      confidence: p.score,
+                    },
+                  ],
+                },
+          detections:
+            p.analysisStatus === 'failed'
+              ? null
+              : p.id === 'p1'
+                ? [
+                    {
+                      index: 0,
+                      is_best: true,
+                      bbox: { x1: 1700, y1: 800, x2: 2200, y2: 2200, confidence: 0.93 },
+                      pose: null,
+                      quality: { clipiqa: p.score, hyperiqa: p.score, combined: p.score },
+                      species: p.species,
+                      species_latin: p.latin,
+                      manual_species: false,
+                      species_candidates: [
+                        {
+                          canonical_sci: p.latin,
+                          canonical_zh: p.species,
+                          canonical_en: 'whiskered tern',
+                          confidence: p.score,
+                        },
+                      ],
+                    },
+                    {
+                      index: 1,
+                      is_best: false,
+                      bbox: { x1: 2300, y1: 900, x2: 2750, y2: 2100, confidence: 0.82 },
+                      pose: null,
+                      quality: { clipiqa: 0.76, hyperiqa: 0.71, combined: 0.73 },
+                      species: '翠鸟',
+                      species_latin: 'Alcedo atthis',
+                      manual_species: false,
+                      species_candidates: [
+                        {
+                          canonical_sci: 'Alcedo atthis',
+                          canonical_zh: '翠鸟',
+                          canonical_en: 'common kingfisher',
+                          confidence: 0.82,
+                        },
+                      ],
+                    },
+                  ]
+                : null,
+        }
+      })
+      for (const photo of photos) {
+        for (const bird of photo.detections ??
+          (photo.best_detection ? [photo.best_detection] : [])) {
+          const override = speciesOverrides.get(`${photo.id}:${bird.index}`)
+          if (!override?.canonical_sci) continue
+          bird.species = override.canonical_zh ?? override.canonical_sci
+          bird.species_latin = override.canonical_sci
+          bird.manual_species = true
+          if (bird.index === photo.best_detection?.index) {
+            photo.species = bird.species
+            photo.species_latin = bird.species_latin
+          }
+        }
+        reviewRows.set(photo.id, { library_id: libraryState.id, photo })
+      }
+      route.fulfill({
         status: 200,
         contentType: 'application/json',
-        body: JSON.stringify(libraryState),
+        body: JSON.stringify({ library: libraryState, photos }),
       })
-      return
-    }
-    const photos = primaryPhotos.map((p, idx) => {
-      const burstSecond =
-        options.driftingStack || options.singleBurstScene
-          ? idx
-          : options.stackedBursts
-            ? idx + (idx >= 2 ? 3 : 0)
-            : idx < 2
-              ? idx
-              : idx * 20
-      const manyGroupHour = 7 + Math.floor(idx / 60)
-      const manyGroupMinute = idx % 60
-      const shotAt = p.shotAt
-        ? p.shotAt
-        : options.manyGroups
-          ? `2026-04-23T${String(manyGroupHour).padStart(2, '0')}:${String(manyGroupMinute).padStart(2, '0')}:00+00:00`
-          : options.driftingStack || options.singleBurstScene || options.stackedBursts
-            ? `2026-04-23T07:00:${String(burstSecond).padStart(2, '0')}+00:00`
-            : `2026-04-23T07:0${idx}:00+00:00`
-      const bbox = p.bbox ?? { x1: 1700, y1: 800, x2: 2200, y2: 2200, confidence: 0.93 }
-      const pose =
-        (options.manyGroups || options.realisticStacks) && p.posture ? makePose(p.posture) : null
-
-      return {
+    },
+  )
+  await page.route(
+    (url) => url.pathname === '/library/lib-other',
+    async (route: Route) => {
+      if (route.request().method() === 'PATCH') {
+        const body = JSON.parse(route.request().postData() ?? '{}')
+        libraryState2 = {
+          ...libraryState2,
+          display_name: String(body.display_name ?? '').trim(),
+        }
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify(libraryState2),
+        })
+        return
+      }
+      const photos = TEST_PHOTOS_OTHER.map((p, idx) => ({
         id: p.id,
-        file_path: `/tmp/lib-test/${p.file_name}`,
+        file_path: `/tmp/lib-other/${p.file_name}`,
         file_name: p.file_name,
         format: 'jpg',
         width: 4000,
         height: 3000,
         thumb_grid: null,
         thumb_preview: `preview/${p.id}.jpg`,
-        created_at: shotAt,
-        shot_at: shotAt,
-        exif:
-          idx < 2
-            ? {
-                GPSInfo: {
-                  '1': 'N',
-                  '2': [
-                    [31, 1],
-                    [37, 1],
-                    [idx, 1],
-                  ],
-                  '3': 'E',
-                  '4': [
-                    [121, 1],
-                    [30, 1],
-                    [idx, 1],
-                  ],
-                },
-              }
-            : null,
-        scene_id:
-          p.sceneId ??
-          (options.driftingStack || options.singleBurstScene || options.stackedBursts ? 111 : idx),
+        created_at: `2026-04-22T07:0${idx}:00+00:00`,
+        shot_at: `2026-04-22T07:0${idx}:00+00:00`,
+        exif: null,
+        scene_id: idx,
         pipeline_version: 'v1-mock',
         grade: p.grade,
         quality_score: p.score,
-        bird_count: p.birdCount ?? 1,
-        analysis_status: p.analysisStatus ?? 'done',
-        analysis_error_code: p.analysisStatus === 'failed' ? 'decode_error' : null,
-        analysis_error: p.analysisStatus === 'failed' ? 'mock decode error' : null,
+        bird_count: 1,
         species: p.species,
         species_latin: p.latin,
-        decision: decisionStore.find((entry) => entry.photo_id === p.id)?.decision ?? null,
-        best_detection:
-          p.analysisStatus === 'failed'
-            ? null
-            : {
-                index: 0,
-                bbox,
-                pose,
-                quality: { clipiqa: p.score, hyperiqa: p.score, combined: p.score },
-                species: p.species,
-                species_latin: p.latin,
-                manual_species: false,
-                species_candidates: [
-                  {
-                    canonical_sci: p.latin,
-                    canonical_zh: p.species,
-                    canonical_en: p.species === '须浮鸥' ? 'whiskered tern' : null,
-                    confidence: p.score,
-                  },
-                ],
-              },
-        detections:
-          p.analysisStatus === 'failed'
-            ? null
-            : p.id === 'p1'
-              ? [
-                  {
-                    index: 0,
-                    is_best: true,
-                    bbox: { x1: 1700, y1: 800, x2: 2200, y2: 2200, confidence: 0.93 },
-                    pose: null,
-                    quality: { clipiqa: p.score, hyperiqa: p.score, combined: p.score },
-                    species: p.species,
-                    species_latin: p.latin,
-                    manual_species: false,
-                    species_candidates: [
-                      {
-                        canonical_sci: p.latin,
-                        canonical_zh: p.species,
-                        canonical_en: 'whiskered tern',
-                        confidence: p.score,
-                      },
-                    ],
-                  },
-                  {
-                    index: 1,
-                    is_best: false,
-                    bbox: { x1: 2300, y1: 900, x2: 2750, y2: 2100, confidence: 0.82 },
-                    pose: null,
-                    quality: { clipiqa: 0.76, hyperiqa: 0.71, combined: 0.73 },
-                    species: '翠鸟',
-                    species_latin: 'Alcedo atthis',
-                    manual_species: false,
-                    species_candidates: [
-                      {
-                        canonical_sci: 'Alcedo atthis',
-                        canonical_zh: '翠鸟',
-                        canonical_en: 'common kingfisher',
-                        confidence: 0.82,
-                      },
-                    ],
-                  },
-                ]
-              : null,
+        decision: null,
+        best_detection: {
+          index: 0,
+          bbox: { x1: 1700, y1: 800, x2: 2200, y2: 2200, confidence: 0.93 },
+          pose: null,
+          quality: { clipiqa: p.score, hyperiqa: p.score, combined: p.score },
+          species: p.species,
+          species_latin: p.latin,
+          manual_species: false,
+          species_candidates: [
+            {
+              canonical_sci: p.latin,
+              canonical_zh: p.species,
+              canonical_en: 'red-billed blue magpie',
+              confidence: p.score,
+            },
+          ],
+        },
+        detections: null,
+      }))
+      for (const photo of photos) {
+        reviewRows.set(photo.id, { library_id: libraryState2.id, photo })
       }
-    })
-    for (const photo of photos) {
-      for (const bird of photo.detections ?? (photo.best_detection ? [photo.best_detection] : [])) {
-        const override = speciesOverrides.get(`${photo.id}:${bird.index}`)
-        if (!override?.canonical_sci) continue
-        bird.species = override.canonical_zh ?? override.canonical_sci
-        bird.species_latin = override.canonical_sci
-        bird.manual_species = true
-        if (bird.index === photo.best_detection?.index) {
-          photo.species = bird.species
-          photo.species_latin = bird.species_latin
-        }
-      }
-    }
-    route.fulfill({
-      status: 200,
-      contentType: 'application/json',
-      body: JSON.stringify({ library: libraryState, photos }),
-    })
-  })
-  await page.route('**/library/lib-other', async (route: Route) => {
-    if (route.request().method() === 'PATCH') {
-      const body = JSON.parse(route.request().postData() ?? '{}')
-      libraryState2 = {
-        ...libraryState2,
-        display_name: String(body.display_name ?? '').trim(),
-      }
-      await route.fulfill({
+      route.fulfill({
         status: 200,
         contentType: 'application/json',
-        body: JSON.stringify(libraryState2),
+        body: JSON.stringify({ library: libraryState2, photos }),
       })
-      return
-    }
-    const photos = TEST_PHOTOS_OTHER.map((p, idx) => ({
-      id: p.id,
-      file_path: `/tmp/lib-other/${p.file_name}`,
-      file_name: p.file_name,
-      format: 'jpg',
-      width: 4000,
-      height: 3000,
-      thumb_grid: null,
-      thumb_preview: `preview/${p.id}.jpg`,
-      created_at: `2026-04-22T07:0${idx}:00+00:00`,
-      shot_at: `2026-04-22T07:0${idx}:00+00:00`,
-      exif: null,
-      scene_id: idx,
-      pipeline_version: 'v1-mock',
-      grade: p.grade,
-      quality_score: p.score,
-      bird_count: 1,
-      species: p.species,
-      species_latin: p.latin,
-      decision: null,
-      best_detection: {
-        index: 0,
-        bbox: { x1: 1700, y1: 800, x2: 2200, y2: 2200, confidence: 0.93 },
-        pose: null,
-        quality: { clipiqa: p.score, hyperiqa: p.score, combined: p.score },
-        species: p.species,
-        species_latin: p.latin,
-        manual_species: false,
-        species_candidates: [
-          {
-            canonical_sci: p.latin,
-            canonical_zh: p.species,
-            canonical_en: 'red-billed blue magpie',
-            confidence: p.score,
-          },
-        ],
-      },
-      detections: null,
-    }))
-    route.fulfill({
-      status: 200,
-      contentType: 'application/json',
-      body: JSON.stringify({ library: libraryState2, photos }),
+    },
+  )
+  await page.route('**/library/photo/*/review', (route: Route) => {
+    const photoId = new URL(route.request().url()).pathname.split('/').at(-2)!
+    const review = reviewRows.get(photoId)
+    return route.fulfill({
+      status: review ? 200 : 404,
+      json: review ?? { detail: 'Photo not found' },
     })
   })
   await page.route('**/library/*/selection/query', (route: Route) => {

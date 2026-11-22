@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
+from stat import S_ISREG
 
 import aiosqlite
 
@@ -15,31 +19,72 @@ class StalePhotoInputError(RuntimeError):
     """The source changed while derived data was being produced."""
 
 
+@dataclass(frozen=True, slots=True)
+class SourceStamp:
+    """Metadata for comparing a file before and after reading it."""
+
+    size: int
+    mtime: str
+    mtime_ns: int
+    change_time_ns: int
+    inode: int
+    device: int
+    regular: bool
+
+    def fingerprint_fields(self) -> tuple[int, int, int, int]:
+        # Keep the persisted fingerprint compatible with existing databases.
+        return self.size, self.mtime_ns, self.change_time_ns, self.inode
+
+
+def source_stamp(path: Path) -> SourceStamp | None:
+    try:
+        info = path.stat()
+        return SourceStamp(
+            size=info.st_size,
+            mtime=datetime.fromtimestamp(info.st_mtime, tz=UTC).isoformat(),
+            mtime_ns=info.st_mtime_ns,
+            change_time_ns=file_change_time_ns(path, info),
+            inode=info.st_ino,
+            device=info.st_dev,
+            regular=S_ISREG(info.st_mode),
+        )
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+
+
+def encode_source_fingerprint(
+    primary: Path,
+    primary_stamp: SourceStamp | None,
+    companion: Path | None,
+    companion_stamp: SourceStamp | None,
+) -> str:
+    def fields(path: Path, stamp: SourceStamp | None) -> tuple[object, ...]:
+        return (str(path), *stamp.fingerprint_fields()) if stamp else (str(path), None)
+
+    return json.dumps(
+        (fields(primary, primary_stamp), fields(companion, companion_stamp) if companion else None),
+        separators=(",", ":"),
+    )
+
+
 def source_fingerprint(primary: Path, companion: Path | None = None) -> str:
     """Cheap physical identity, including the optional RAW fallback source.
 
     ctime detects replacements that preserve mtime; the full source SHA is
     recorded separately for analysis provenance.
     """
-    values: list[object] = []
-    for path in (primary, companion):
-        if path is None:
-            values.append(None)
-            continue
-        try:
-            stat = path.stat()
-            values.append(
-                (
-                    str(path),
-                    stat.st_size,
-                    stat.st_mtime_ns,
-                    file_change_time_ns(path, stat),
-                    stat.st_ino,
-                )
-            )
-        except FileNotFoundError:
-            values.append((str(path), None))
-    return json.dumps(values, separators=(",", ":"))
+    return encode_source_fingerprint(
+        primary, source_stamp(primary), companion, source_stamp(companion) if companion else None
+    )
+
+
+def sha256_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
+    """Compute the content identity without loading the whole photo into memory."""
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(chunk_size):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 class SourceChangedError(StalePhotoInputError):

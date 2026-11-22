@@ -183,6 +183,8 @@ export function libraryDetailContentHash(detail: LibraryDetail): string {
   let hash = 2166136261
   for (const photo of detail.photos) {
     hash = hashStableValue(hash, photo.id)
+    hash = hashStableValue(hash, photo.input_revision)
+    hash = hashStableValue(hash, photo.review_revision)
     hash = hashStableValue(hash, photo.pipeline_version)
     hash = hashStableValue(hash, photo.grade)
     hash = hashStableValue(hash, photo.quality_score)

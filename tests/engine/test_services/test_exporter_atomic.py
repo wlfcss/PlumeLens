@@ -8,10 +8,12 @@ import hashlib
 import json
 import os
 import shutil
+import stat
 import sys
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from engine.api.schemas.export import ExportLibraryRequest
@@ -88,6 +90,140 @@ def test_atomic_metadata_failure_keeps_previous_complete_file(
         exporter._write_text_file(dest, "new metadata")
     assert dest.read_bytes() == b"complete-old-metadata"
     assert list(tmp_path.iterdir()) == [dest]
+
+
+def test_readonly_jpeg_metadata_is_written_before_first_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "原片.JPEG"
+    original = b"\xff\xd8\xff\xd9"
+    source.write_bytes(original)
+    source.chmod(stat.S_IREAD)
+    dest = tmp_path / "输出 & photos" / "原片.JPEG"
+    original_replace = os.replace
+    published: list[bytes] = []
+
+    def replace(staged: Path, final: Path) -> None:
+        if final == dest:
+            # Simulate Windows refusing to replace the published read-only JPEG.
+            if final.exists() and not (final.stat().st_mode & stat.S_IWRITE):
+                raise PermissionError("cannot overwrite a read-only file")
+            published.append(staged.read_bytes())
+        original_replace(staged, final)
+
+    monkeypatch.setattr(exporter.os, "replace", replace)
+    try:
+        status = exporter._copy_file(
+            source, dest, jpeg_xmp=exporter._xmp_packet(_photo(source), source)
+        )
+        assert status == "embedded"
+        assert published == [dest.read_bytes()]
+        assert b'xmp:Rating="5"' in published[0]
+        assert source.read_bytes() == original
+        assert not (source.stat().st_mode & stat.S_IWRITE)
+        assert not (dest.stat().st_mode & stat.S_IWRITE)
+        assert list(dest.parent.iterdir()) == [dest]
+    finally:
+        source.chmod(stat.S_IREAD | stat.S_IWRITE)
+        if dest.exists():
+            dest.chmod(stat.S_IREAD | stat.S_IWRITE)
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="Requires macOS Finder-style file flags")
+def test_finder_locked_source_jpeg_exports_without_locking_the_staging_file(tmp_path: Path) -> None:
+    source = tmp_path / "原片.jpg"
+    original = b"\xff\xd8\xff\xd9"
+    source.write_bytes(original)
+    dest = tmp_path / "output" / source.name
+    os.chflags(source, stat.UF_IMMUTABLE | stat.UF_NODUMP)
+    try:
+        status = exporter._copy_file(
+            source, dest, jpeg_xmp=exporter._xmp_packet(_photo(source), source)
+        )
+        assert status == "embedded"
+        assert b'xmp:Rating="5"' in dest.read_bytes()
+        assert source.read_bytes() == original
+        assert source.stat().st_flags & stat.UF_IMMUTABLE
+        assert not dest.stat().st_flags & stat.UF_IMMUTABLE
+        assert dest.stat().st_flags & stat.UF_NODUMP
+        assert list(dest.parent.iterdir()) == [dest]
+    finally:
+        os.chflags(source, 0)
+        if dest.parent.exists():
+            for candidate in dest.parent.iterdir():
+                os.chflags(candidate, 0)
+
+
+@pytest.mark.parametrize("stop", ["cancel", "publish-failure"])
+def test_windows_cleanup_removes_staged_jpeg_after_readonly_attributes_applied(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stop: str
+) -> None:
+    source = tmp_path / "source.jpg"
+    source.write_bytes(b"\xff\xd8\xff\xd9")
+    source.chmod(stat.S_IREAD)
+    dest = tmp_path / "output" / "source.jpg"
+    cancel = threading.Event()
+    original_stat = Path.stat
+    original_unlink = Path.unlink
+    original_copystat = shutil.copystat
+    blocked_deletions: list[Path] = []
+
+    def simulate_stat(path: Path, *, follow_symlinks: bool = True):
+        actual = original_stat(path, follow_symlinks=follow_symlinks)
+        if not follow_symlinks and path.parent == dest.parent:
+            return SimpleNamespace(
+                st_mode=actual.st_mode,
+                st_file_attributes=(
+                    0 if actual.st_mode & stat.S_IWRITE else stat.FILE_ATTRIBUTE_READONLY
+                ),
+            )
+        return actual
+
+    def simulate_unlink(path: Path, *, missing_ok: bool = False):
+        if (
+            path.parent == dest.parent
+            and path.exists()
+            and not (path.stat().st_mode & stat.S_IWRITE)
+        ):
+            blocked_deletions.append(path)
+            raise PermissionError("Windows read-only bit prevents unlink")
+        original_unlink(path, missing_ok=missing_ok)
+
+    def copy_readonly(src: Path, dst: Path) -> None:
+        original_copystat(src, dst)
+        if stop == "cancel":
+            cancel.set()
+
+    def fail_publish(_src: Path, _dst: Path) -> None:
+        raise PermissionError("destination unavailable")
+
+    monkeypatch.setattr(
+        exporter,
+        "os",
+        SimpleNamespace(
+            fsync=os.fsync,
+            replace=fail_publish,
+            name="nt",
+        ),
+    )
+    monkeypatch.setattr(Path, "stat", simulate_stat)
+    monkeypatch.setattr(Path, "unlink", simulate_unlink)
+    monkeypatch.setattr(shutil, "copystat", copy_readonly)
+    try:
+        expected = exporter._ExportCancelled if stop == "cancel" else PermissionError
+        with pytest.raises(expected):
+            exporter._copy_file(
+                source,
+                dest,
+                cancel_event=cancel,
+                jpeg_xmp=exporter._xmp_packet(_photo(source), source),
+            )
+        assert not dest.exists()
+        assert len(blocked_deletions) == 1
+        assert list(dest.parent.iterdir()) == []
+        assert not (source.stat().st_mode & stat.S_IWRITE)
+    finally:
+        source.chmod(stat.S_IREAD | stat.S_IWRITE)
 
 
 def test_changed_input_is_not_copied_under_old_snapshot(tmp_path: Path) -> None:

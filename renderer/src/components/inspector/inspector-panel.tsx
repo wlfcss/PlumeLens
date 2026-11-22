@@ -309,17 +309,17 @@ function InspectorSpeciesSection({
     (detectionBadgeLabel && detectionBadgeKind
       ? { kind: detectionBadgeKind, label: detectionBadgeLabel }
       : null)
-  const candidates =
-    bestDetection?.speciesCandidates && bestDetection.speciesCandidates.length > 0
-      ? bestDetection.speciesCandidates
-      : photo.speciesCandidates
+  const candidateConfidence =
+    bestDetection?.candidateConfidence ??
+    bestDetection?.speciesCandidates?.[0]?.confidence ??
+    photo.candidateConfidence ??
+    photo.speciesCandidates?.[0]?.confidence
   const latinName = effectiveSpeciesLatinName(photo)
   const speciesIdentity = {
     englishName: bestDetection?.speciesEnglishName ?? photo.speciesEnglishName ?? null,
     latinName: bestDetection?.speciesLatinName ?? latinName,
     name: bestDetection?.speciesName ?? effectiveSpeciesName(photo),
   }
-  const primaryCandidate = candidates[0] ?? null
 
   return (
     <InspectorSummaryCard title={t('selection.inspector.speciesSection')}>
@@ -339,11 +339,11 @@ function InspectorSpeciesSection({
           ) : null}
         </div>
         {latinName ? <span className="inspector-species__latin">{latinName}</span> : null}
-        {primaryCandidate ? (
+        {candidateConfidence != null ? (
           <div className="inspector-species__signals">
             <span>
               {t('selection.inspector.topCandidate', {
-                confidence: confidenceLabel(primaryCandidate.confidence),
+                confidence: confidenceLabel(candidateConfidence),
               })}
             </span>
           </div>

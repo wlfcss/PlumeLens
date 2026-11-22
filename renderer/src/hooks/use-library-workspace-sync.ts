@@ -1,22 +1,34 @@
 import { useEffect, useMemo, useRef, type Dispatch, type SetStateAction } from 'react'
 
-import type { LibraryDetail, LibrarySummary } from '@/lib/api-client'
+import type { SelectionSnapshot } from '@/hooks/use-selection'
+import type { LibraryDetail, LibrarySummary, PhotoRow } from '@/lib/api-client'
 import { buildFolderRecord, buildFragmentFromDetail } from '@/lib/backend-adapter'
+import { benchmarkTrace } from '@/lib/benchmark-trace'
 import { applyNewSpeciesMarkers, libraryDetailContentHash } from '@/lib/workspace-projection'
-import type { WorkspaceSnapshot } from '@/lib/workspace-types'
+import type { PhotoRecord, WorkspaceSnapshot } from '@/lib/workspace-types'
 
 type Translate = (key: string, options?: Record<string, unknown>) => string
 
+export interface LibraryWorkspaceSnapshot extends WorkspaceSnapshot {
+  activeProjection?: {
+    detail: LibraryDetail
+    selection?: SelectionSnapshot
+    translate: Translate
+  }
+}
+
 interface UseLibraryWorkspaceSyncOptions {
   activeDetail: LibraryDetail | undefined
+  activeSelection?: SelectionSnapshot
   allDetails: LibraryDetail[]
   libraries: LibrarySummary[] | undefined
-  setWorkspace: Dispatch<SetStateAction<WorkspaceSnapshot>>
+  setWorkspace: Dispatch<SetStateAction<LibraryWorkspaceSnapshot>>
   t: Translate
 }
 
 export function useLibraryWorkspaceSync({
   activeDetail,
+  activeSelection,
   allDetails,
   libraries,
   setWorkspace,
@@ -24,20 +36,28 @@ export function useLibraryWorkspaceSync({
 }: UseLibraryWorkspaceSyncOptions): void {
   const allDetailsRef = useRef(allDetails)
   allDetailsRef.current = allDetails
+  // TanStack reuses equal JSON rows across detail refetches. A new translator needs fresh labels.
+  const photoCache = useMemo(() => new WeakMap<PhotoRow, PhotoRecord>(), [t])
 
   useEffect(() => {
     if (!libraries) return
     const realFolderIds = new Set(libraries.map((library) => library.id))
     setWorkspace((current) => {
-      const merged = applyNewSpeciesMarkers(
-        current.photos.filter((photo) => realFolderIds.has(photo.folderId)),
-        current.groups.filter((group) => realFolderIds.has(group.folderId)),
-      )
+      const photos = current.photos.filter((photo) => realFolderIds.has(photo.folderId))
+      const groups = current.groups.filter((group) => realFolderIds.has(group.folderId))
+      const removed =
+        photos.length !== current.photos.length || groups.length !== current.groups.length
+      const merged = removed ? applyNewSpeciesMarkers(photos, groups) : current
       return {
+        ...current,
         folders: libraries.map(buildFolderRecord),
         photos: merged.photos,
         groups: merged.groups,
         species: [],
+        activeProjection:
+          current.activeProjection && realFolderIds.has(current.activeProjection.detail.library.id)
+            ? current.activeProjection
+            : undefined,
       }
     })
   }, [libraries, setWorkspace])
@@ -70,6 +90,7 @@ export function useLibraryWorkspaceSync({
         ],
       )
       return {
+        ...current,
         folders: current.folders.map((folder) => {
           const updated = fragments.find((fragment) => fragment.folder.id === folder.id)
           return updated ? updated.folder : folder
@@ -77,14 +98,34 @@ export function useLibraryWorkspaceSync({
         photos: merged.photos,
         groups: merged.groups,
         species: [],
+        activeProjection:
+          current.activeProjection &&
+          !realFolderIdsInDetails.has(current.activeProjection.detail.library.id)
+            ? current.activeProjection
+            : undefined,
       }
     })
   }, [allDetailsKey, setWorkspace, t])
 
+  const fragment = useMemo(() => {
+    if (!activeDetail) return undefined
+    benchmarkTrace?.markFor('workspace.fragment_start', activeDetail)
+    const projected = buildFragmentFromDetail(activeDetail, t, photoCache)
+    benchmarkTrace?.markFor('workspace.fragment_end', activeDetail)
+    return projected
+  }, [activeDetail, photoCache, t])
   useEffect(() => {
-    if (!activeDetail) return
-    const fragment = buildFragmentFromDetail(activeDetail, t)
+    if (!activeDetail || !fragment) return
+    const activeProjection = { detail: activeDetail, selection: activeSelection, translate: t }
     setWorkspace((current) => {
+      if (
+        current.activeProjection?.detail === activeDetail &&
+        current.activeProjection.translate === t
+      ) {
+        if (current.activeProjection.selection === activeSelection) return current
+        return { ...current, activeProjection }
+      }
+      benchmarkTrace?.markFor('workspace.merge_start', activeDetail)
       const merged = applyNewSpeciesMarkers(
         [
           ...current.photos.filter((photo) => photo.folderId !== fragment.folder.id),
@@ -95,14 +136,13 @@ export function useLibraryWorkspaceSync({
           ...fragment.groups,
         ],
       )
+      benchmarkTrace?.markFor('workspace.merge_end', activeDetail)
       return {
         ...current,
-        folders: current.folders.map((folder) =>
-          folder.id === fragment.folder.id ? fragment.folder : folder,
-        ),
+        activeProjection,
         photos: merged.photos,
         groups: merged.groups,
       }
     })
-  }, [activeDetail, setWorkspace, t])
+  }, [activeDetail, activeSelection, fragment, setWorkspace, t])
 }

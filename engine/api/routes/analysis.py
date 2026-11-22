@@ -104,6 +104,16 @@ def _has_active_tasks(stats: dict[str, int]) -> bool:
     ) > 0
 
 
+def _has_rescannable_input(paths: list[Path]) -> bool:
+    for path in paths:
+        try:
+            if path.is_file():
+                return True
+        except OSError:
+            return True  # Unreadable is different from missing.
+    return False
+
+
 async def _mark_library_analyzing(db: Database, library_id: str) -> None:
     """Keep library summary/status in sync with the live analysis queue."""
     async with db.transaction():
@@ -314,11 +324,13 @@ async def start_batch(
     await _ensure_library_source_available(db, body.library_id)
 
     async with db.conn.execute(
-        "SELECT 1 FROM photos WHERE library_id=? AND input_needs_scan=1 LIMIT 1",
+        "SELECT file_path FROM photos WHERE library_id=? AND input_needs_scan=1",
         (body.library_id,),
     ) as cur:
-        needs_scan = await cur.fetchone()
-    if needs_scan:
+        pending_rescan = [Path(row["file_path"]) for row in await cur.fetchall()]
+    # A partial relink can retain missing rows for history. They are excluded
+    # from hash backfill and the queue, so they cannot prevent other work.
+    if pending_rescan and await asyncio.to_thread(_has_rescannable_input, pending_rescan):
         raise HTTPException(
             status_code=409,
             detail={

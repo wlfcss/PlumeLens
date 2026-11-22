@@ -1,5 +1,12 @@
 import { contextBridge, ipcRenderer } from 'electron'
+import { BENCHMARK_TRACE_ARGUMENT, type EngineBenchmarkTiming } from '../shared/benchmark-trace'
 import { engineRequestTimeout } from '../shared/engine-request-timeout'
+import {
+  LIBRARY_SUMMARY_BATCH_MEDIA_TYPE,
+  readSummaryLines,
+} from '../shared/library-summary-stream'
+
+const benchmarkTraceEnabled = process.argv?.includes(BENCHMARK_TRACE_ARGUMENT) === true
 
 // 与 main.ts 的 EngineStatusPayload 对应 — 改动需同步两边。
 export type EngineStatusPayload =
@@ -16,11 +23,8 @@ export type EngineStatusPayload =
   | { kind: 'cpu-fallback' }
 
 /**
- * Engine 单次请求的结果 — engineRequest 内部从 fetch 读完 .text() 后压成
- * 可序列化的纯对象,通过 contextBridge 跨 isolated world 传给 renderer。
- *
- * `body` 永远是字符串(response.text()),renderer 侧 api-client 自行 JSON.parse。
- * 二进制响应当前没有调用方,后续如有需求另开 engineRequestBlob。
+ * Engine 响应元数据跨 contextBridge 返回。图库分批模式通过回调传递有界行，
+ * 普通响应仍用 body 字符串。
  */
 export interface EngineResponse {
   ok: boolean
@@ -28,6 +32,7 @@ export interface EngineResponse {
   statusText: string
   body: string
   contentType: string | null
+  benchmarkTiming?: EngineBenchmarkTiming
 }
 
 export interface EngineRequestInit {
@@ -136,6 +141,7 @@ async function ensureUrl(): Promise<string> {
 async function performEngineRequest(
   path: string,
   init: EngineRequestInit = {},
+  receiveSummaryLine?: (line: string) => void,
 ): Promise<EngineResponse> {
   const url = await ensureUrl()
   const enginePath = normalizeEnginePath(path)
@@ -149,19 +155,38 @@ async function performEngineRequest(
   const ctrl = new AbortController()
   const timer = setTimeout(() => ctrl.abort(), init.timeoutMs ?? engineRequestTimeout(enginePath))
   try {
+    const fetchStart = benchmarkTraceEnabled ? performance.now() : undefined
     const res = await fetch(`${url}${enginePath}`, {
       method: init.method ?? 'GET',
       headers,
       body: init.body ?? undefined,
       signal: ctrl.signal,
     })
-    const body = await res.text()
+    const headersAt = benchmarkTraceEnabled ? performance.now() : undefined
+    const contentType = res.headers.get('content-type')
+    let body = ''
+    if (res.ok && contentType === LIBRARY_SUMMARY_BATCH_MEDIA_TYPE && receiveSummaryLine) {
+      if (!res.body) throw new Error('Missing library summary stream')
+      await readSummaryLines(res.body, receiveSummaryLine)
+    } else {
+      body = await res.text()
+    }
+    const benchmarkTiming =
+      fetchStart !== undefined && headersAt !== undefined
+        ? {
+            timeOrigin: performance.timeOrigin,
+            fetchStart,
+            headers: headersAt,
+            body: performance.now(),
+          }
+        : undefined
     return {
       ok: res.ok,
       status: res.status,
       statusText: res.statusText,
       body,
-      contentType: res.headers.get('content-type'),
+      contentType,
+      ...(benchmarkTiming && { benchmarkTiming }),
     }
   } finally {
     clearTimeout(timer)
@@ -287,13 +312,17 @@ async function performEngineSseUrl(path: string): Promise<string> {
 
 contextBridge.exposeInMainWorld('plumelens', {
   platform: process.platform,
+  ...(benchmarkTraceEnabled && { benchmarkTraceEnabled }),
   getBackendUrl: (): Promise<string | null> => ipcRenderer.invoke('get-backend-url'),
   /**
    * Engine API 请求 — 在 preload 的 isolated world 内完成 fetch,token 不进
    * renderer JS。详见 H5 修复(security-batch-2)。
    */
-  engineRequest: (path: string, init?: EngineRequestInit): Promise<EngineResponse> =>
-    performEngineRequest(path, init),
+  engineRequest: (
+    path: string,
+    init?: EngineRequestInit,
+    receiveSummaryLine?: (line: string) => void,
+  ): Promise<EngineResponse> => performEngineRequest(path, init, receiveSummaryLine),
   /** Legacy SSE URL fallback(可能包含 query token,native EventSource 限制)。 */
   engineSseUrl: (path: string): Promise<string> => performEngineSseUrl(path),
   /** 订阅 engine SSE — fetch stream 在 preload 内注入 Authorization,token 不进 renderer。 */

@@ -1,4 +1,8 @@
+import { replaceEqualDeep } from '@tanstack/react-query'
+
 import { logger } from '@/lib/logger'
+import { benchmarkTrace, type BenchmarkApiArea } from '@/lib/benchmark-trace'
+import { LIBRARY_SUMMARY_BATCH_MEDIA_TYPE } from '../../../shared/library-summary-stream'
 import { engineRequestTimeout, engineStartupTimeout } from '../../../shared/engine-request-timeout'
 
 /**
@@ -107,7 +111,39 @@ function _normalizeHeaders(input: HeadersInit | undefined): Record<string, strin
   return out
 }
 
-async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+type ApiTraceMark = (name: string, fields?: { at?: number; status?: number }) => void
+
+function traceApiRequest(path: string): ApiTraceMark | undefined {
+  const trace = benchmarkTrace
+  if (!trace) return undefined
+  const [pathname] = path.split('?', 1)
+  let area: BenchmarkApiArea
+  if (pathname === '/library') area = 'library-list'
+  else if (pathname === '/health') area = 'health'
+  else if (/^\/library\/[^/]+$/.test(pathname)) area = 'library-detail'
+  else if (/^\/library\/[^/]+\/selection\/query$/.test(pathname)) area = 'selection-query'
+  else if (/^\/library\/photo\/[^/]+\/review$/.test(pathname)) area = 'photo-review'
+  else return undefined
+  const id = trace.start('api.start', area)
+  return (name, fields) => trace.mark(name, { id, area, ...fields })
+}
+
+function parseApiResponse(text: string, mark: ApiTraceMark | undefined): unknown {
+  if (!mark) return JSON.parse(text)
+  mark('api.parse_start')
+  try {
+    return JSON.parse(text)
+  } finally {
+    mark('api.parse_end')
+  }
+}
+
+async function request<T>(
+  path: string,
+  init: RequestInit = {},
+  receiveSummaryLine?: (line: string) => void,
+): Promise<T> {
+  const mark = traceApiRequest(path)
   const timeoutMs = engineRequestTimeout(path)
   // Preferred path: preload's engineRequest — token 永远在 isolated context,
   // 不进 renderer JS。当 renderer 跑在 vite-only(无 preload)时 fallback 直连。
@@ -117,21 +153,42 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   if (typeof window !== 'undefined' && window.plumelens?.engineRequest) {
     let res: import('@/env').EngineResponse
     try {
-      res = await window.plumelens.engineRequest(path, {
-        method: init.method,
-        body: bodyStr,
-        headers,
-        timeoutMs,
-      })
+      let firstRecord = true
+      res = await window.plumelens.engineRequest(
+        path,
+        {
+          method: init.method,
+          body: bodyStr,
+          headers,
+          timeoutMs,
+        },
+        receiveSummaryLine &&
+          ((line) => {
+            if (firstRecord) {
+              mark?.('api.stream_first_record')
+              firstRecord = false
+            }
+            receiveSummaryLine(line)
+          }),
+      )
     } catch (err) {
+      mark?.('api.transport_error')
       // 网络层失败(engine 重启 / 超时 / 偏移端口) — 包成 ApiError 让上层 banner 处理。
       const msg = err instanceof Error ? err.message : String(err)
       throw new ApiError(0, msg, err)
     }
+    mark?.('api.transport_end', { status: res.status })
+    if (mark && res.benchmarkTiming) {
+      const { timeOrigin, fetchStart, headers, body } = res.benchmarkTiming
+      const offset = timeOrigin - performance.timeOrigin
+      mark('api.fetch_start', { at: offset + fetchStart })
+      mark('api.headers', { at: offset + headers, status: res.status })
+      mark('api.body', { at: offset + body })
+    }
     if (!res.ok) {
       let detail: unknown
       try {
-        detail = JSON.parse(res.body)
+        detail = parseApiResponse(res.body, mark)
       } catch {
         detail = res.body || undefined
       }
@@ -139,7 +196,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
       throw new ApiError(res.status, `${res.status} ${res.statusText}: ${detailText}`, detail)
     }
     if (res.status === 204 || res.body.length === 0) return undefined as T
-    return JSON.parse(res.body) as T
+    return parseApiResponse(res.body, mark) as T
   }
 
   // Fallback: vite dev / 单元测试 — 直连 127.0.0.1:8000,无 token。
@@ -159,11 +216,23 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   }
   let res: Response
   try {
+    mark?.('api.fetch_start')
     res = await fetch(url, { ...init, headers: fallbackHeaders, signal: timeoutCtrl.signal })
+    mark?.('api.headers', { status: res.status })
+  } catch (error) {
+    mark?.('api.transport_error')
+    throw error
   } finally {
     clearTimeout(timer)
     callerSignal?.removeEventListener('abort', onCallerAbort)
   }
+  if (mark && res.ok && res.status !== 204) {
+    const body = await res.text()
+    mark('api.body')
+    mark('api.transport_end', { status: res.status })
+    return parseApiResponse(body, mark) as T
+  }
+  mark?.('api.transport_end', { status: res.status })
   if (!res.ok) {
     let detail: unknown
     try {
@@ -220,12 +289,12 @@ export interface Keypoint {
 }
 
 export interface PoseDetail {
-  // 头部 5 关键点
-  bill: Keypoint
-  crown: Keypoint
-  nape: Keypoint
-  left_eye: Keypoint
-  right_eye: Keypoint
+  // 轻量图库详情只包含可见性和姿态，关键点随单张复核请求返回。
+  bill?: Keypoint
+  crown?: Keypoint
+  nape?: Keypoint
+  left_eye?: Keypoint
+  right_eye?: Keypoint
   // 躯干 6 关键点(v2 新增,旧 cache 反序列化时有 default 占位)
   belly?: Keypoint
   breast?: Keypoint
@@ -302,7 +371,10 @@ export interface BestDetection {
     | 'manual'
     | 'group_consensus'
     | 'conflict'
-  species_candidates: SpeciesCandidate[]
+  // Summary rows keep the leading candidate's signals, while review owns the full list.
+  candidate_confidence?: number | null
+  candidate_recognition_state?: SpeciesCandidate['recognition_state'] | null
+  species_candidates?: SpeciesCandidate[]
 }
 
 export interface BirdDetectionDetail extends BestDetection {
@@ -311,6 +383,8 @@ export interface BirdDetectionDetail extends BestDetection {
 
 export interface PhotoRow {
   id: string
+  input_revision?: number
+  review_revision?: string | null
   file_path: string
   file_name: string
   format: string | null
@@ -378,6 +452,11 @@ export interface LibraryDetail {
   next_offset?: number | null
 }
 
+export interface PhotoReviewResponse {
+  library_id: string
+  photo: PhotoRow
+}
+
 export interface PhotoThumbnailResponse {
   photo_id: string
   library_id: string
@@ -392,10 +471,49 @@ export interface ImportLibraryRequest {
   recursive?: boolean
 }
 
+/** Assemble one complete revision before publishing it to Query and selection. */
+async function requestLibrarySummary(
+  path: string,
+  signal: AbortSignal | undefined,
+  previousPhotos: readonly PhotoRow[],
+): Promise<LibraryDetail> {
+  let detail: Omit<LibraryDetail, 'photos'> | undefined
+  let completed = false
+  const photos: PhotoRow[] = []
+  const buffered = await request<LibraryDetail>(
+    path,
+    { signal, headers: { Accept: LIBRARY_SUMMARY_BATCH_MEDIA_TYPE } },
+    (line) => {
+      signal?.throwIfAborted()
+      const frame: unknown = JSON.parse(line)
+      if (!completed && Array.isArray(frame) && detail) {
+        for (const row of frame as PhotoRow[]) {
+          // Share before retaining the next frame. Query's final structural
+          // comparison can then reuse these rows by reference.
+          photos.push(replaceEqualDeep(previousPhotos[photos.length], row))
+        }
+      } else if (!detail && frame && typeof frame === 'object' && 'library' in frame) {
+        detail = frame as Omit<LibraryDetail, 'photos'>
+      } else if (detail && !completed && frame === photos.length) {
+        completed = true
+      } else {
+        throw new Error('Invalid library summary stream')
+      }
+    },
+  )
+  if (buffered !== undefined && !detail) return buffered
+  if (!detail || !completed) throw new ApiError(0, 'Incomplete library summary stream')
+  signal?.throwIfAborted()
+  return { ...detail, photos }
+}
+
 export interface LibraryDetailOptions {
   limit?: number
   offset?: number
+  view?: 'summary' | 'full'
+  includeSelectionSnapshot?: boolean
   signal?: AbortSignal
+  previousPhotos?: readonly PhotoRow[]
 }
 
 export interface UpdateLibraryRequest {
@@ -589,12 +707,24 @@ export interface SpeciesOverrideRow {
 // ---------------- Endpoints ----------------
 
 export const api = {
-  querySelection: (libraryId: string, query: SelectionQuery, signal?: AbortSignal) =>
-    request<SelectionQueryResult>(`/library/${libraryId}/selection/query`, {
-      method: 'POST',
-      body: JSON.stringify(query),
-      signal,
-    }),
+  querySelection: (
+    libraryId: string,
+    query: SelectionQuery,
+    signal?: AbortSignal,
+    projectionRevision?: string,
+  ) => {
+    const params = new URLSearchParams()
+    if (projectionRevision) params.set('projection_revision', projectionRevision)
+    const search = params.toString()
+    return request<SelectionQueryResult>(
+      `/library/${libraryId}/selection/query${search ? `?${search}` : ''}`,
+      {
+        method: 'POST',
+        body: JSON.stringify(query),
+        signal,
+      },
+    )
+  },
   // Settings / maintenance
   modelVersions: () => request<ModelVersionsResponse>('/settings/models'),
   clearLocalHistory: () =>
@@ -614,11 +744,24 @@ export const api = {
     const params = new URLSearchParams()
     if (options.limit !== undefined) params.set('limit', String(options.limit))
     if (options.offset !== undefined) params.set('offset', String(options.offset))
+    if (options.view) params.set('view', options.view)
+    if (options.includeSelectionSnapshot) params.set('include_selection_snapshot', 'true')
     const query = params.toString()
-    return request<LibraryDetail>(`/library/${id}${query ? `?${query}` : ''}`, {
-      signal: options.signal,
-    })
+    const path = `/library/${id}${query ? `?${query}` : ''}`
+    if (
+      options.view === 'summary' &&
+      options.limit === undefined &&
+      typeof window !== 'undefined' &&
+      window.plumelens?.engineRequest
+    ) {
+      return requestLibrarySummary(path, options.signal, options.previousPhotos ?? [])
+    }
+    return request<LibraryDetail>(path, { signal: options.signal })
   },
+  photoReview: (photoId: string, signal?: AbortSignal) =>
+    request<PhotoReviewResponse>(`/library/photo/${encodeURIComponent(photoId)}/review`, {
+      signal,
+    }),
   updateLibrary: (id: string, body: UpdateLibraryRequest) =>
     request<LibrarySummary>(`/library/${id}`, {
       method: 'PATCH',

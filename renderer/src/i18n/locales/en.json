@@ -489,6 +489,9 @@
     },
     "review": {
       "label": "Deep review",
+      "loadingDetails": "Loading review details…",
+      "detailsFailed": "Couldn’t load review details.",
+      "detailsChanged": "Photo information has changed. Refresh to continue reviewing.",
       "scoreBreakdown": "Score breakdown",
       "species": "Species candidates",
       "why": "Why this grade",

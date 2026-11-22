@@ -8,8 +8,8 @@
  * - useDeleteLibrary: 删除
  * - useBuildThumbnails: 构建缩略图
  */
-import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useEffect, useRef } from 'react'
+import { useMutation, useQueries, useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query'
+import { useEffect } from 'react'
 
 import {
   api,
@@ -43,6 +43,17 @@ function abortError(): DOMException {
   return new DOMException('Library detail request aborted', 'AbortError')
 }
 
+// Every observer sharing the detail key must register the revision it reads.
+function fetchLibraryDetail(id: string, client: QueryClient, signal?: AbortSignal): Promise<LibraryDetail> {
+  const previous = client.getQueryData<LibraryDetail>(LIBRARY_DETAIL_KEY(id))
+  return api.libraryDetail(id, {
+    signal,
+    view: 'summary',
+    includeSelectionSnapshot: true,
+    ...(previous && { previousPhotos: previous.photos }),
+  })
+}
+
 function drainLibraryDetailQueue(): void {
   while (
     activeLibraryDetailRequests < ALL_LIBRARY_DETAIL_CONCURRENCY &&
@@ -53,7 +64,7 @@ function drainLibraryDetailQueue(): void {
   }
 }
 
-function limitedLibraryDetail(id: string, signal?: AbortSignal): Promise<LibraryDetail> {
+function limitedLibraryDetail(id: string, client: QueryClient, signal?: AbortSignal): Promise<LibraryDetail> {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
       reject(abortError())
@@ -71,8 +82,7 @@ function limitedLibraryDetail(id: string, signal?: AbortSignal): Promise<Library
       }
 
       activeLibraryDetailRequests += 1
-      api
-        .libraryDetail(id, { signal })
+      fetchLibraryDetail(id, client, signal)
         .then(resolve, reject)
         .finally(() => {
           activeLibraryDetailRequests = Math.max(0, activeLibraryDetailRequests - 1)
@@ -104,7 +114,7 @@ export function useLibraries() {
 export function useLibraryDetail(libraryId: string | null | undefined) {
   return useQuery({
     queryKey: LIBRARY_DETAIL_KEY(libraryId ?? ''),
-    queryFn: ({ signal }) => api.libraryDetail(libraryId!, { signal }),
+    queryFn: ({ client, signal }) => fetchLibraryDetail(libraryId!, client, signal),
     enabled: Boolean(libraryId),
     staleTime: 2_000,
   })
@@ -116,10 +126,9 @@ export function useLibraryDetail(libraryId: string | null | undefined) {
  */
 export function useAllLibraryDetails(libraryIds: string[], enabled = true): LibraryDetail[] {
   const results = useQueries({
-    queries: libraryIds.map((id) => ({
+    queries: (enabled ? libraryIds : []).map((id) => ({
       queryKey: LIBRARY_DETAIL_KEY(id),
-      queryFn: ({ signal }) => limitedLibraryDetail(id, signal),
-      enabled,
+      queryFn: ({ client, signal }) => limitedLibraryDetail(id, client, signal),
       staleTime: 2_000,
     })),
   })
@@ -128,25 +137,41 @@ export function useAllLibraryDetails(libraryIds: string[], enabled = true): Libr
 
 export function useLibraryEvents(libraryId: string | null | undefined, enabled = true) {
   const qc = useQueryClient()
-  const refreshTimerRef = useRef<number | null>(null)
 
   useEffect(() => {
     if (!libraryId || !enabled) return undefined
+    const detailQuery = { queryKey: LIBRARY_DETAIL_KEY(libraryId), exact: true }
     let source: EventSource | null = null
     let unsubscribeBridge: (() => void) | null = null
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+    let refreshTimer: ReturnType<typeof setTimeout> | null = null
+    let needsCatchUp = false
     let cancelled = false
 
     const flushRefresh = () => {
-      refreshTimerRef.current = null
-      qc.invalidateQueries({ queryKey: LIBRARY_DETAIL_KEY(libraryId) })
-      qc.invalidateQueries({ queryKey: ['selection', libraryId] })
-      qc.invalidateQueries({ queryKey: LIBRARIES_KEY })
+      refreshTimer = null
+      if (qc.isFetching(detailQuery)) {
+        scheduleRefresh()
+        return
+      }
+      void qc.invalidateQueries(detailQuery, { cancelRefetch: false })
+      const detail = qc.getQueryData<LibraryDetail>(detailQuery.queryKey)
+      if (detail && !detail.projection_revision) {
+        void qc.invalidateQueries({ queryKey: ['selection', libraryId] }, { cancelRefetch: false })
+      }
+      void qc.invalidateQueries({ queryKey: LIBRARIES_KEY }, { cancelRefetch: false })
     }
 
     const scheduleRefresh = () => {
-      if (refreshTimerRef.current !== null) return
-      refreshTimerRef.current = window.setTimeout(flushRefresh, EVENT_REFRESH_DEBOUNCE_MS)
+      if (refreshTimer !== null) return
+      refreshTimer = setTimeout(flushRefresh, EVENT_REFRESH_DEBOUNCE_MS)
+    }
+
+    const handleOpen = () => {
+      // GET already loads the initial snapshot. Reconnection can miss real notifications.
+      if (!needsCatchUp) return
+      needsCatchUp = false
+      scheduleRefresh()
     }
 
     const connect = (): void => {
@@ -157,14 +182,15 @@ export function useLibraryEvents(libraryId: string | null | undefined, enabled =
           (bridgeEvent) => {
             if (cancelled) return
             if (bridgeEvent.type === 'open') {
-              scheduleRefresh()
+              handleOpen()
               return
             }
             if (bridgeEvent.type === 'message') {
-              scheduleRefresh()
+              if (bridgeEvent.event !== 'library_snapshot') scheduleRefresh()
               return
             }
             logger.warn('Library event bridge closed, retrying in 5s:', bridgeEvent.message)
+            needsCatchUp = true
             unsubscribeBridge?.()
             unsubscribeBridge = null
             reconnectTimer = setTimeout(connect, 5000)
@@ -177,10 +203,10 @@ export function useLibraryEvents(libraryId: string | null | undefined, enabled =
         .then((url) => {
           if (cancelled) return
           source = new EventSource(url)
-          source.onopen = scheduleRefresh
+          source.onopen = handleOpen
           source.onmessage = scheduleRefresh
           ;[
-            'library_snapshot',
+            'library_updated',
             'thumbnail_batch',
             'thumbnail_ready',
             'thumbnail_failed',
@@ -194,6 +220,7 @@ export function useLibraryEvents(libraryId: string | null | undefined, enabled =
           // 场景分组完成等通知漏到。CONNECTING(1) 走浏览器原生重连。
           source.onerror = (event) => {
             if (cancelled || !source) return
+            needsCatchUp = true
             if (source.readyState === EventSource.CLOSED) {
               logger.warn('Library event stream closed (likely 4xx), retrying in 5s')
               source.close()
@@ -206,6 +233,7 @@ export function useLibraryEvents(libraryId: string | null | undefined, enabled =
         })
         .catch((error) => {
           if (cancelled) return
+          needsCatchUp = true
           logger.warn('Failed to resolve library event URL, retrying in 5s:', error)
           reconnectTimer = setTimeout(connect, 5000)
         })
@@ -220,10 +248,7 @@ export function useLibraryEvents(libraryId: string | null | undefined, enabled =
       unsubscribeBridge = null
       source?.close()
       source = null
-      if (refreshTimerRef.current !== null) {
-        window.clearTimeout(refreshTimerRef.current)
-        refreshTimerRef.current = null
-      }
+      if (refreshTimer !== null) clearTimeout(refreshTimer)
     }
   }, [enabled, libraryId, qc])
 }

@@ -186,6 +186,217 @@ async def test_facets_ignore_own_selection_and_deduplicate(selection_client) -> 
     assert counts[EGRET] == 2
 
 
+async def test_large_summary_stream_preserves_json_and_yields_between_batches(
+    selection_client, monkeypatch
+) -> None:
+    from engine.api.routes import library
+
+    client, _db, _tmp = selection_client
+    url = "/library/folder?view=summary&include_selection_snapshot=true"
+    buffered = await client.get(url)
+    assert buffered.status_code == 200, buffered.text
+    assert "content-length" in buffered.headers
+
+    monkeypatch.setattr(library, "_SUMMARY_STREAM_THRESHOLD", 1)
+    monkeypatch.setattr(library, "_SUMMARY_ROWS_PER_CHUNK", 3)
+    encoded_sizes: list[int] = []
+    between_chunks = asyncio.Event()
+    between_chunks.set()
+    encode = library._encode_summary_rows
+
+    def observe_chunk(rows):
+        assert between_chunks.is_set()
+        between_chunks.clear()
+        asyncio.get_running_loop().call_soon(between_chunks.set)
+        encoded_sizes.append(len(rows))
+        return encode(rows)
+
+    monkeypatch.setattr(library, "_encode_summary_rows", observe_chunk)
+    streamed = await client.get(url)
+    assert streamed.status_code == 200, streamed.text
+    assert streamed.headers["content-type"] == "application/json"
+    assert "content-length" not in streamed.headers
+    assert streamed.content == buffered.content
+    assert encoded_sizes == [3, 3, 3, 1]
+
+    query = await client.post(
+        "/library/folder/selection/query",
+        params={"projection_revision": streamed.json()["projection_revision"]},
+        json={"species_keys": [KING]},
+    )
+    live = await client.post("/library/folder/selection/query", json={"species_keys": [KING]})
+    assert query.status_code == 200, query.text
+    assert live.status_code == 200, live.text
+    assert query.json() == live.json()
+    assert set(query.json()["matched_photo_ids"]) == {"p1", "p2", "p3", "p6", "p9"}
+
+    page = await client.get("/library/folder?view=summary&limit=3")
+    full = await client.get("/library/folder")
+    assert "content-length" in page.headers
+    assert "content-length" in full.headers
+    assert page.json()["projection_revision"] is None
+    assert full.json()["projection_revision"] == streamed.json()["projection_revision"]
+
+
+async def test_summary_batches_keep_one_revision_and_reuse_unchanged_selection_rows(
+    selection_client, monkeypatch
+) -> None:
+    from engine.api.routes import library
+    from engine.services import library_summary
+
+    client, db, tmp = selection_client
+    await seed_photo(db, tmp, "p11", "select", [bird(KING)], scene_id=1)
+    await seed_photo(db, tmp, "p12", "select", [bird(KING)], scene_id=1)
+    async with db.transaction() as conn:
+        # The larger scene crosses every output batch but is still projected
+        # together. Its original positions must survive the scene ordering.
+        await conn.execute("UPDATE photos SET scene_id = 1 WHERE id IN ('p1', 'p3', 'p9')")
+        await conn.execute("UPDATE photos SET scene_id = 2 WHERE id IN ('p2', 'p4')")
+    url = "/library/folder?view=summary&include_selection_snapshot=true"
+    cache = client._transport.app.state.selection_projections
+    original = (await client.get(url)).json()
+    first = next(photo for photo in original["photos"] if photo["id"] == "p1")
+    assert first["group_species_latin"] == KING[4:]
+    assert first["group_species_total"] == 5
+    previous = cache.get("folder", original["projection_revision"])
+    assert previous is not None
+
+    monkeypatch.setattr(library, "_SUMMARY_STREAM_THRESHOLD", 1)
+    monkeypatch.setattr(library, "_SUMMARY_ROWS_PER_CHUNK", 3)
+    monkeypatch.setattr(library_summary, "_SCENE_BATCH_SIZE", 2)
+    headers = {"Accept": "application/x-ndjson"}
+
+    def decode(batch_response):
+        assert batch_response.status_code == 200
+        assert batch_response.headers["content-type"] == "application/x-ndjson"
+        frames = [json.loads(line) for line in batch_response.text.splitlines()]
+        photos = [photo for batch in frames[1:-1] for photo in batch]
+        assert len(photos) == frames[-1]
+        return frames[0] | {"photos": photos}
+
+    assert decode(await client.get(url, headers=headers)) == original
+    async with db.transaction() as conn:
+        await conn.execute(
+            "INSERT INTO photo_decisions (photo_id, decision, updated_at) "
+            "VALUES ('p1', 'reject', '2026-11-20')"
+        )
+    current = decode(await client.get(url, headers=headers))
+    assert current["projection_revision"] != original["projection_revision"]
+    updated = cache.get("folder", current["projection_revision"])
+    assert updated is not None
+    before_by_id = {photo.id: photo for photo in previous.photos}
+    after_by_id = {photo.id: photo for photo in updated.photos}
+    assert after_by_id["p1"] is not before_by_id["p1"]
+    assert after_by_id["p1"].decision == "reject"
+    assert after_by_id["p2"] is before_by_id["p2"]
+    endpoint = "/library/folder/selection/query"
+    query = {"species_keys": [KING], "sort": "name"}
+    live = await client.post(endpoint, json=query)
+    pinned = await client.post(
+        endpoint, params={"projection_revision": current["projection_revision"]}, json=query
+    )
+    old = await client.post(
+        endpoint, params={"projection_revision": original["projection_revision"]}, json=query
+    )
+    assert pinned.status_code == old.status_code == live.status_code == 200
+    assert pinned.json() == live.json()
+    assert "p1" in old.json()["matched_photo_ids"]
+    assert "p1" not in pinned.json()["matched_photo_ids"]
+
+
+async def test_summary_filters_match_full_view_and_review_loads_complete_metadata(
+    selection_client,
+) -> None:
+    client, db, tmp = selection_client
+    best = bird(KING, flying=True)
+    best["pose"]["tail"] = {"x": 18, "y": 42, "confidence": 0.91}
+    best["species_candidates"].append(bird(EGRET)["species_candidates"][0])
+    await seed_photo(db, tmp, "review-row", "select", [best, bird(EGRET, index=1)])
+    gps = {
+        "GPSLatitude": [31, 0, 0],
+        "GPSLatitudeRef": "N",
+        "GPSLongitude": [121, 0, 0],
+        "GPSLongitudeRef": "E",
+    }
+    exif = {"Make": "Test Camera", "LensModel": "600mm", "FocalLength": 600, "GPSInfo": gps}
+    async with db.transaction() as conn:
+        await conn.execute(
+            "UPDATE photos SET exif_json = ? WHERE id = 'review-row'",
+            (json.dumps(exif),),
+        )
+
+    summary_response = await client.get(
+        "/library/folder?view=summary&include_selection_snapshot=true"
+    )
+    assert summary_response.status_code == 200, summary_response.text
+    summary = summary_response.json()
+    full = (await client.get("/library/folder")).json()
+    assert summary["projection_revision"] == full["projection_revision"]
+    assert [row["id"] for row in summary["photos"]] == [row["id"] for row in full["photos"]]
+    compact = next(row for row in summary["photos"] if row["id"] == "review-row")
+    assert compact["best_detection"]["pose"]["posture"] == "flying"
+    assert compact["best_detection"]["pose"].get("tail") is None
+    assert "species_candidates" not in compact["best_detection"]
+    assert compact["best_detection"]["candidate_confidence"] == 0.95
+    assert (compact.get("exif") or {}).get("Make") is None
+    assert (compact.get("exif") or {}).get("FocalLength") == 600
+    assert (compact.get("exif") or {}).get("GPSInfo") == gps
+
+    review_response = await client.get("/library/photo/review-row/review")
+    assert review_response.status_code == 200, review_response.text
+    review = review_response.json()
+    assert review["library_id"] == "folder"
+    hydrated = review["photo"]
+    assert hydrated == next(row for row in full["photos"] if row["id"] == "review-row")
+    assert hydrated["review_revision"] == compact["review_revision"]
+    assert hydrated["review_revision"]
+    assert hydrated["best_detection"]["pose"]["tail"] == best["pose"]["tail"]
+    assert hydrated["exif"] == exif
+    assert len(hydrated["best_detection"]["species_candidates"]) == 2
+    assert (await client.get("/library/photo/missing/review")).status_code == 404
+
+    query = {
+        "species_keys": [KING],
+        "only_flying": True,
+        "include_review": False,
+        "sort": "name",
+    }
+    route = "/library/folder/selection/query"
+    pinned = await client.post(
+        route, params={"projection_revision": summary["projection_revision"]}, json=query
+    )
+    live = await client.post(route, json=query)
+    assert pinned.status_code == live.status_code == 200
+    assert pinned.json() == live.json()
+    assert pinned.json()["matched_photo_ids"] == ["review-row"]
+
+    async with db.transaction() as conn:
+        await conn.execute(
+            "UPDATE photos SET thumb_preview = 'preview/repaired.jpg', city = 'Refreshed city' "
+            "WHERE id = 'review-row'"
+        )
+    refreshed = (await client.get("/library/folder?view=summary")).json()
+    assert refreshed["projection_revision"] == summary["projection_revision"]
+    display_only = next(row for row in refreshed["photos"] if row["id"] == "review-row")
+    assert display_only["review_revision"] != compact["review_revision"]
+
+    # A re-analysis can replace heavy data while retaining the same source revision.
+    best["pose"]["tail"]["x"] = 25
+    async with db.transaction() as conn:
+        await conn.execute(
+            "UPDATE analysis_results SET result_json = ? WHERE photo_id = 'review-row'",
+            (json.dumps({"detections": [best, bird(EGRET, index=1)]}),),
+        )
+    replacement = (await client.get("/library/photo/review-row/review")).json()["photo"]
+    assert replacement["input_revision"] == hydrated["input_revision"]
+    assert replacement["review_revision"] != display_only["review_revision"]
+    assert replacement["best_detection"]["pose"]["tail"]["x"] == 25
+    with pytest.raises(SelectionRevisionConflict):
+        await freeze_selection(
+            db, "folder", SelectionQueryRequest(**query), summary["projection_revision"]
+        )
+
+
 async def test_selected_absent_species_is_retained_at_zero(selection_client) -> None:
     client, _db, _tmp = selection_client
     data = (
@@ -314,6 +525,8 @@ async def test_full_scene_consensus_precedes_filter_and_matches_library(
     index = next(i for i, photo in enumerate(rows) if photo["id"] == "c4")
     page = (await client.get(f"/library/folder?limit=1&offset={index}")).json()["photos"][0]
     assert page["species_source"] == current["species_source"]
+    review = (await client.get("/library/photo/c4/review")).json()["photo"]
+    assert review == current
 
 
 async def test_topk_other_candidates_do_not_create_membership(selection_client) -> None:
@@ -331,6 +544,43 @@ async def test_topk_other_candidates_do_not_create_membership(selection_client) 
         )
     ).json()
     assert data["matched_count"] == 0
+
+
+async def test_consensus_manual_vote_metadata_is_shared_by_summary_review_and_export(
+    selection_client,
+) -> None:
+    client, db, tmp = selection_client
+    for photo_id in ("a-manual", "b-vote", "c-vote"):
+        await seed_photo(db, tmp, photo_id, "select", [bird(KING)], scene_id=83)
+    await seed_photo(db, tmp, "z-follower", "select", [bird(EGRET, review=True)], scene_id=83)
+    await set_species_override(
+        db,
+        "a-manual",
+        0,
+        {"canonical_sci": "Alcedo atthis", "canonical_zh": "普通翠鸟", "canonical_en": None},
+    )
+    full = (await client.get("/library/folder")).json()
+    summary = (
+        await client.get("/library/folder?view=summary&include_selection_snapshot=true")
+    ).json()
+    assert summary["projection_revision"] == full["projection_revision"]
+    follower = next(row for row in summary["photos"] if row["id"] == "z-follower")
+    assert follower["species_source"] == "group_consensus"
+    review = (await client.get("/library/photo/z-follower/review")).json()["photo"]
+    assert review["review_revision"] == follower["review_revision"]
+    assert review["best_detection"]["species_english"] == "common kingfisher"
+    query = {"species_keys": [KING], "photo_query": "common kingfisher"}
+    selected = await client.post(
+        "/library/folder/selection/query",
+        params={"projection_revision": summary["projection_revision"]},
+        json=query,
+    )
+    assert selected.status_code == 200, selected.text
+    assert "z-follower" in selected.json()["matched_photo_ids"]
+    frozen = await freeze_selection(
+        db, "folder", SelectionQueryRequest(**query), summary["projection_revision"]
+    )
+    assert "z-follower" in frozen.photo_ids
 
 
 async def test_manual_species_english_survives_replaced_raw_candidates(selection_client) -> None:
@@ -393,6 +643,70 @@ async def test_freeze_and_revision_guard(selection_client) -> None:
     assert (await query_selection(db, "folder", query)).projection_revision != (
         new_preview.projection_revision
     )
+
+
+async def test_selection_stays_on_the_requested_detail_revision(selection_client) -> None:
+    client, db, _tmp = selection_client
+    detail_url = "/library/folder?include_selection_snapshot=true"
+    selection_url = "/library/folder/selection/query"
+    body = {"species_keys": [KING], "sort": "name"}
+    detail = (await client.get(detail_url)).json()
+    revision = detail["projection_revision"]
+    before = (await client.post(selection_url, json=body)).json()
+    assert before["projection_revision"] == revision
+    assert before["matched_photo_ids"] == ["p1", "p2", "p3", "p6", "p9"]
+
+    await set_decision(db, "p1", Decision.REJECT)
+    newer_detail = (await client.get(detail_url)).json()
+    latest = (await client.post(selection_url, json=body)).json()
+    assert latest["matched_photo_ids"] == ["p2", "p3", "p6", "p9"]
+    assert latest["projection_revision"] == newer_detail["projection_revision"] != revision
+    assert next(f["photo_count"] for f in latest["facets"] if f["key"] == KING) == 4
+
+    pinned = await client.post(selection_url, params={"projection_revision": revision}, json=body)
+    assert pinned.status_code == 200, pinned.text
+    assert pinned.json() == before
+    with pytest.raises(SelectionRevisionConflict):
+        await freeze_selection(db, "folder", SelectionQueryRequest(**body), revision)
+
+    await set_decision(db, "p2", Decision.REJECT)
+    third = (await client.get(detail_url)).json()
+    assert third["projection_revision"] not in {revision, latest["projection_revision"]}
+    expired = await client.post(selection_url, params={"projection_revision": revision}, json=body)
+    assert expired.status_code == 409
+    assert expired.json() == {"detail": "Selection snapshot expired"}
+
+
+async def test_selection_reads_committed_state_while_writer_is_open(selection_client) -> None:
+    client, db, _tmp = selection_client
+    selection_url = "/library/folder/selection/query"
+    body = {"species_keys": [KING], "grades": ["select"], "sort": "name"}
+    before = (await client.post(selection_url, json=body)).json()
+    written = asyncio.Event()
+    finish = asyncio.Event()
+
+    async def writer() -> None:
+        async with db.transaction():
+            await set_decision(db, "p1", Decision.REJECT)
+            written.set()
+            await finish.wait()
+
+    task = asyncio.create_task(writer())
+    try:
+        await asyncio.wait_for(written.wait(), timeout=2)
+        response = await asyncio.wait_for(client.post(selection_url, json=body), timeout=2)
+        assert response.status_code == 200, response.text
+        assert response.json() == before
+    finally:
+        finish.set()
+        await task
+
+    after = (await client.post(selection_url, json=body)).json()
+    assert before["matched_photo_ids"] == ["p1", "p9"]
+    assert after["matched_photo_ids"] == ["p9"]
+    assert after["projection_revision"] != before["projection_revision"]
+    detail = (await client.get("/library/folder")).json()
+    assert detail["projection_revision"] == after["projection_revision"]
 
 
 async def test_query_is_read_only_and_folder_scoped(selection_client) -> None:

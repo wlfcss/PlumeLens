@@ -7,19 +7,24 @@ import asyncio
 import json
 import sqlite3
 import uuid
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, cast
 
+import aiosqlite
 import structlog
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
+from pydantic import TypeAdapter
 
 from engine.api.schemas.library import (
     ImportLibraryRequest,
     LibraryDetail,
     LibraryStatus,
     LibrarySummary,
+    PhotoReview,
+    PhotoSummary,
     RelinkLibraryRequest,
     RelinkLibraryResponse,
     UpdateLibraryRequest,
@@ -37,6 +42,7 @@ from engine.services.event_bus import (
 from engine.services.library_projection import (
     LibraryProjectionNotFound,
     load_library_photos,
+    load_photo_review,
     projection_revision,
 )
 from engine.services.library_projection import (
@@ -48,8 +54,16 @@ from engine.services.library_projection import (
 from engine.services.library_projection import (
     _match_overrides_to_detections as _match_overrides_to_detections,
 )
+from engine.services.library_relink import RelinkAnalysis, RelinkedPhoto, verify_relinked_photo
+from engine.services.library_summary import prepare_library_summary
+from engine.services.photo_input import invalidate_derived_input
 from engine.services.scanner import backfill_hashes, scan_library
-from engine.services.selection import SelectionLibraryNotFound, query_selection
+from engine.services.selection import (
+    SelectionLibraryNotFound,
+    SelectionProjectionCache,
+    build_selection_projection,
+    query_selection,
+)
 from engine.services.thumbnail import (
     delete_thumbnails_for_photos,
     ensure_thumbnails_for_photo,
@@ -342,21 +356,136 @@ async def import_library(
     return summary
 
 
-def _relative_to_root(path: Path, root: Path) -> Path | None:
-    try:
-        return path.relative_to(root)
-    except ValueError:
-        try:
-            return path.resolve().relative_to(root.resolve())
-        except ValueError:
-            return None
+async def _relink_inputs(
+    conn: aiosqlite.Connection, library_id: str
+) -> tuple[list[aiosqlite.Row], list[aiosqlite.Row]]:
+    async with conn.execute(
+        "SELECT id,file_path,file_size,file_mtime,companion_path,companion_size,companion_mtime,"
+        "file_hash,input_revision,input_needs_scan "
+        "FROM photos WHERE library_id=? ORDER BY id",
+        (library_id,),
+    ) as cur:
+        photos = list(await cur.fetchall())
+    async with conn.execute(
+        "SELECT ar.id,ar.photo_id,ar.source_path,ar.source_hash,ar.source_fingerprint "
+        "FROM analysis_results ar JOIN photos p ON ar.photo_id=p.id "
+        "WHERE p.library_id=? AND ar.input_revision=p.input_revision "
+        "AND ar.input_hash IS p.file_hash ORDER BY ar.id",
+        (library_id,),
+    ) as cur:
+        analyses = list(await cur.fetchall())
+    return photos, analyses
 
 
-def _format_from_path(path: Path, fallback: object) -> str | None:
-    suffix = path.suffix.lstrip(".").upper()
-    if suffix:
-        return suffix
-    return str(fallback) if fallback is not None else None
+def _verify_relink_inputs(
+    old_root: Path,
+    new_root: Path,
+    photos: list[aiosqlite.Row],
+    analyses: dict[str, list[RelinkAnalysis]],
+) -> list[RelinkedPhoto]:
+    return [
+        verify_relinked_photo(
+            old_root,
+            new_root,
+            Path(row["file_path"]),
+            Path(row["companion_path"]) if row["companion_path"] else None,
+            row["file_hash"],
+            analyses.get(row["id"], []),
+        )
+        for row in photos
+    ]
+
+
+def _needs_relink(
+    row: aiosqlite.Row, candidate: RelinkedPhoto, analyses: list[RelinkAnalysis]
+) -> bool:
+    next_companion = str(candidate.companion.path) if candidate.companion else None
+    if str(candidate.primary.path) != row["file_path"] or next_companion != row["companion_path"]:
+        return True
+    if row["input_needs_scan"]:
+        return False  # The unchanged mapping already requires explicit scanning.
+    if not candidate.verified:
+        return True
+    primary = candidate.primary.stamp
+    companion = candidate.companion.stamp if candidate.companion else None
+    assert primary is not None
+    if (primary.size, primary.mtime) != (row["file_size"], row["file_mtime"]):
+        return True
+    if companion and (companion.size, companion.mtime) != (
+        row["companion_size"],
+        row["companion_mtime"],
+    ):
+        return True
+    fingerprint = candidate.fingerprint()
+    return any(a.source_fingerprint and a.source_fingerprint != fingerprint for a in analyses)
+
+
+async def _apply_relinked_photo(
+    conn: aiosqlite.Connection,
+    row: aiosqlite.Row,
+    candidate: RelinkedPhoto,
+    analyses: list[RelinkAnalysis],
+) -> None:
+    next_primary = candidate.primary.path
+    next_companion = candidate.companion.path if candidate.companion else None
+    id_ = str(row["id"])
+    old_revision = int(row["input_revision"])
+    revision = old_revision + 1
+    await conn.execute(
+        "UPDATE photos SET file_path=?,companion_path=?,input_revision=? WHERE id=?",
+        (str(next_primary), str(next_companion) if next_companion else None, revision, id_),
+    )
+    if not candidate.verified or row["input_needs_scan"]:
+        await conn.execute(
+            "UPDATE photos SET input_needs_scan=1,file_hash=NULL,width=NULL,height=NULL,"
+            "exif_json=NULL WHERE id=?",
+            (id_,),
+        )
+        await invalidate_derived_input(conn, id_)
+        return
+
+    primary_stamp = candidate.primary.stamp
+    assert primary_stamp is not None
+    companion_stamp = candidate.companion.stamp if candidate.companion else None
+    await conn.execute(
+        "UPDATE photos SET file_size=?,file_mtime=?,companion_size=?,companion_mtime=? WHERE id=?",
+        (
+            primary_stamp.size,
+            primary_stamp.mtime,
+            companion_stamp.size if companion_stamp else None,
+            companion_stamp.mtime if companion_stamp else None,
+            id_,
+        ),
+    )
+
+    # The bytes are unchanged. Keep the cached outputs and overrides while
+    # rebasing source paths and the revision checked by in-flight publishers.
+    paths = {Path(row["file_path"]): str(next_primary)}
+    if row["companion_path"] and next_companion:
+        paths[Path(row["companion_path"])] = str(next_companion)
+    fingerprint = candidate.fingerprint()
+    for analysis in analyses:
+        source_path = paths.get(Path(analysis.source_path)) if analysis.source_path else None
+        if analysis.source_path and source_path is None:
+            continue
+        await conn.execute(
+            "UPDATE analysis_results SET input_revision=?,source_path=?,source_fingerprint=? "
+            "WHERE id=?",
+            (revision, source_path, fingerprint, analysis.id),
+        )
+    await conn.execute(
+        "UPDATE analysis_results SET is_active=0 WHERE photo_id=? AND input_revision<>?",
+        (id_, revision),
+    )
+    await conn.execute(
+        "UPDATE photo_species_overrides SET input_revision=? WHERE photo_id=? AND input_revision=?",
+        (revision, id_, old_revision),
+    )
+    await conn.execute(
+        "UPDATE task_queue SET input_revision=? WHERE photo_id=? AND input_revision=? "
+        "AND status IN ('pending','paused')",
+        (revision, id_, old_revision),
+    )
 
 
 @router.post("/{library_id}/relink", response_model=RelinkLibraryResponse)
@@ -365,12 +494,7 @@ async def relink_library(
     library_id: str,
     body: RelinkLibraryRequest,
 ) -> RelinkLibraryResponse:
-    """POST /library/{id}/relink — point a moved/renamed library at a new root.
-
-    The operation preserves photo ids, analysis results, decisions, thumbnails, and
-    scene groups. Only absolute source paths are rewritten from old-root-relative
-    paths to new-root-relative paths.
-    """
+    """Point a moved library at a new root and retain results for verified inputs."""
     db = await _db(request)
     new_root = Path(body.root_path).expanduser().resolve()  # noqa: ASYNC240
     if not new_root.exists():  # noqa: ASYNC240
@@ -378,131 +502,90 @@ async def relink_library(
     if not new_root.is_dir():  # noqa: ASYNC240
         raise HTTPException(status_code=400, detail=f"Not a directory: {new_root}")
 
-    async with db.conn.execute(
-        "SELECT id, display_name, root_path FROM libraries WHERE id = ?",
-        (library_id,),
-    ) as cur:
-        library = await cur.fetchone()
-    if library is None:
-        raise HTTPException(status_code=404, detail="Library not found")
+    async with db.transaction() as conn:
+        async with conn.execute("SELECT root_path FROM libraries WHERE id=?", (library_id,)) as cur:
+            library = await cur.fetchone()
+        if library is None:
+            raise HTTPException(status_code=404, detail="Library not found")
+        async with conn.execute(
+            "SELECT id FROM libraries WHERE root_path=? AND id<>?", (str(new_root), library_id)
+        ) as cur:
+            if await cur.fetchone() is not None:
+                raise HTTPException(status_code=409, detail="Path is already imported")
+        rows, analysis_rows = await _relink_inputs(conn, library_id)
 
-    previous_root = Path(str(library["root_path"]))
-    previous_root_path = str(previous_root)
-    new_root_path = str(new_root)
-
-    async with db.conn.execute(
-        "SELECT id FROM libraries WHERE root_path = ? AND id != ?",
-        (new_root_path, library_id),
-    ) as cur:
-        conflict = await cur.fetchone()
-    if conflict is not None:
-        raise HTTPException(status_code=409, detail="Path is already imported as another library")
-
-    async with db.conn.execute(
-        "SELECT id, file_path, file_size, companion_path, companion_format, companion_size "
-        "FROM photos WHERE library_id = ?",
-        (library_id,),
-    ) as cur:
-        rows = list(await cur.fetchall())
-
-    updates: list[
-        tuple[
-            str,
-            str | None,
-            str | None,
-            int | None,
-            str,
-        ]
-    ] = []
-    matched = 0
-    relinked_companions = 0
-
-    for row in rows:
-        old_path = Path(str(row["file_path"]))
-        rel = _relative_to_root(old_path, previous_root)
-        if rel is None:
-            continue
-
-        next_path = new_root / rel
-        try:
-            if next_path.exists() and next_path.stat().st_size == int(row["file_size"]):
-                matched += 1
-        except OSError:
-            pass
-
-        companion_path: str | None = (
-            str(row["companion_path"]) if row["companion_path"] is not None else None
-        )
-        companion_format: str | None = (
-            str(row["companion_format"]) if row["companion_format"] is not None else None
-        )
-        companion_size: int | None = (
-            int(row["companion_size"]) if row["companion_size"] is not None else None
-        )
-        if companion_path is not None:
-            companion_rel = _relative_to_root(Path(companion_path), previous_root)
-            if companion_rel is not None:
-                next_companion = new_root / companion_rel
-                companion_path = str(next_companion)
-                companion_format = _format_from_path(next_companion, row["companion_format"])
-                try:
-                    if next_companion.exists():
-                        companion_size = next_companion.stat().st_size
-                        relinked_companions += 1
-                except OSError:
-                    pass
-
-        updates.append(
-            (
-                str(next_path),
-                companion_path,
-                companion_format,
-                companion_size,
-                str(row["id"]),
+    previous_root_path = str(library["root_path"])
+    analyses: dict[str, list[RelinkAnalysis]] = {}
+    for row in analysis_rows:
+        analyses.setdefault(str(row["photo_id"]), []).append(
+            RelinkAnalysis(
+                row["id"], row["source_path"], row["source_hash"], row["source_fingerprint"]
             )
         )
-
-    if rows:
-        relinkable = len(updates)
-        if relinkable == 0 or matched == 0:
-            raise HTTPException(
-                status_code=400,
-                detail="New folder does not appear to contain this library's photos",
-            )
-        if relinkable >= 5 and matched / relinkable < 0.5:
-            raise HTTPException(
-                status_code=400,
-                detail="New folder only matches a small part of this library",
-            )
 
     try:
-        async with db.transaction():
-            await db.conn.execute(
-                "UPDATE libraries SET parent_path = ?, root_path = ?, status = ?, "
-                "last_opened_at = ? WHERE id = ?",
-                (
-                    str(new_root.parent),
-                    new_root_path,
-                    LibraryStatus.READY.value,
-                    _now_iso(),
-                    library_id,
-                ),
-            )
-            for next_path, companion_path, companion_format, companion_size, photo_id in updates:
-                await db.conn.execute(
-                    "UPDATE photos SET file_path = ?, companion_path = ?, companion_format = ?, "
-                    "companion_size = ? WHERE id = ?",
-                    (next_path, companion_path, companion_format, companion_size, photo_id),
-                )
+        candidates = await asyncio.to_thread(
+            _verify_relink_inputs, Path(previous_root_path), new_root, rows, analyses
+        )
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail="Unable to verify relink sources") from exc
+
+    matched = sum(candidate.primary.verified for candidate in candidates)
+    if rows and (not matched or (len(rows) >= 5 and matched * 2 < len(rows))):
+        raise HTTPException(
+            status_code=400, detail="New folder does not contain enough verified library photos"
+        )
+    changed = [
+        (row, candidate)
+        for row, candidate in zip(rows, candidates, strict=True)
+        if _needs_relink(row, candidate, analyses.get(row["id"], []))
+    ]
+
+    try:
+        async with db.transaction() as conn:
+            # Hashing happens outside the write transaction. Recheck the DB
+            # snapshot and physical destination stamps before committing it.
+            if await _relink_inputs(conn, library_id) != (rows, analysis_rows) or not (
+                await asyncio.to_thread(lambda: all(c.unchanged() for c in candidates))
+            ):
+                raise HTTPException(status_code=409, detail="Library changed during relink; retry")
+            if changed or str(new_root) != previous_root_path:
+                async with conn.execute(
+                    "SELECT 1 FROM task_queue WHERE library_id=? AND status='processing' LIMIT 1",
+                    (library_id,),
+                ) as cur:
+                    if await cur.fetchone() is not None:
+                        raise HTTPException(
+                            status_code=409, detail="Library analysis is in progress"
+                        )
+                async with conn.execute(
+                    "UPDATE libraries SET parent_path=?,root_path=?,status=?,last_opened_at=? "
+                    "WHERE id=? AND root_path=? AND status NOT IN ('scanning','updating') "
+                    "RETURNING id",
+                    (
+                        str(new_root.parent),
+                        str(new_root),
+                        LibraryStatus.READY.value,
+                        _now_iso(),
+                        library_id,
+                        previous_root_path,
+                    ),
+                ) as cur:
+                    if await cur.fetchone() is None:
+                        raise HTTPException(
+                            status_code=409, detail="Library changed during relink; retry"
+                        )
+                for row, candidate in changed:
+                    await _apply_relinked_photo(conn, row, candidate, analyses.get(row["id"], []))
     except sqlite3.IntegrityError as e:
         raise HTTPException(
             status_code=409,
             detail="Relinked paths conflict with existing photos",
         ) from e
-    except Exception:
-        await logger.aexception("Library relink failed", library_id=library_id)
-        raise HTTPException(status_code=500, detail="Relink failed") from None
+    except OSError as exc:
+        raise HTTPException(status_code=409, detail="Library changed during relink; retry") from exc
 
+    archive_cache.invalidate()
     summary = await _fetch_library_summary(db, library_id)
     assert summary is not None
     publish_library_event(
@@ -517,9 +600,12 @@ async def relink_library(
         library=summary,
         previous_root_path=previous_root_path,
         matched_photos=matched,
-        relinked_photos=len(updates),
-        missing_photos=max(0, len(rows) - matched),
-        relinked_companions=relinked_companions,
+        relinked_photos=len(candidates),
+        missing_photos=len(rows) - matched,
+        relinked_companions=sum(
+            candidate.companion is not None and candidate.companion.verified
+            for candidate in candidates
+        ),
     )
 
 
@@ -558,13 +644,59 @@ async def update_library(
     return updated
 
 
+_SUMMARY_BATCH_MEDIA_TYPE = "application/x-ndjson"
+_SUMMARY_STREAM_THRESHOLD = 2_048
+_SUMMARY_ROWS_PER_CHUNK = 256
+_SUMMARY_ROWS = TypeAdapter(list[PhotoSummary])
+
+
+def _encode_summary_rows(photos: list[PhotoSummary]) -> bytes:
+    return _SUMMARY_ROWS.dump_json(photos)[1:-1]
+
+
+async def _stream_library_summary(
+    detail: LibraryDetail, photos: list[PhotoSummary], *, batches: bool = False
+) -> AsyncIterator[bytes]:
+    # The nested models have already been validated by library projection.
+    # Reuse their serializers and the envelope fields used by the buffered path.
+    if batches:
+        yield detail.model_dump_json(exclude={"photos"}).encode() + b"\n"
+    else:
+        yield b'{"library":' + detail.library.model_dump_json().encode() + b',"photos":['
+    for start in range(0, len(photos), _SUMMARY_ROWS_PER_CHUNK):
+        await asyncio.sleep(0)
+        rows = _encode_summary_rows(photos[start : start + _SUMMARY_ROWS_PER_CHUNK])
+        if batches:
+            yield b"[" + rows + b"]\n"
+        else:
+            yield (b"," if start else b"") + rows
+    if batches:
+        # The count is from the same photo snapshot. Library metadata can be
+        # read earlier and legitimately carry a different photo_total.
+        yield f"{len(photos)}\n".encode()
+    else:
+        yield b"]," + detail.model_dump_json(exclude={"library", "photos"}).encode()[1:]
+
+
+async def _stream_prepared_summary(
+    detail: LibraryDetail, rows: list[bytes]
+) -> AsyncIterator[bytes]:
+    yield detail.model_dump_json(exclude={"photos"}).encode() + b"\n"
+    for start in range(0, len(rows), _SUMMARY_ROWS_PER_CHUNK):
+        await asyncio.sleep(0)
+        yield b"[" + b",".join(rows[start : start + _SUMMARY_ROWS_PER_CHUNK]) + b"]\n"
+    yield f"{len(rows)}\n".encode()
+
+
 @router.get("/{library_id}", response_model=LibraryDetail)
 async def library_detail(
     request: Request,
     library_id: str,
     limit: int | None = Query(default=None, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
-) -> LibraryDetail:
+    include_selection_snapshot: bool = Query(default=False),
+    view: Literal["full", "summary"] = Query(default="full"),
+) -> LibraryDetail | StreamingResponse:
     """GET /library/{id} — summary + photos.
 
     默认保持旧契约一次返回全量照片。传入 limit/offset 时按
@@ -576,27 +708,84 @@ async def library_detail(
         raise HTTPException(status_code=404, detail="Library not found")
     photo_total = summary.total_count
 
+    batches = request.headers.get("accept") == _SUMMARY_BATCH_MEDIA_TYPE
     try:
-        photos = await load_library_photos(db, library_id, limit=limit, offset=offset)
+        if (
+            batches
+            and view == "summary"
+            and limit is None
+            and photo_total >= _SUMMARY_STREAM_THRESHOLD
+        ):
+            projections: SelectionProjectionCache = request.app.state.selection_projections
+            prepared = await prepare_library_summary(
+                db,
+                library_id,
+                include_selection_snapshot,
+                projections.latest(library_id) if include_selection_snapshot else None,
+            )
+            if prepared.selection is not None:
+                projections.store(library_id, prepared.selection)
+            detail = LibraryDetail(
+                library=summary,
+                photos=[],
+                projection_revision=prepared.revision,
+                photo_total=photo_total,
+                photo_offset=offset,
+            )
+            return StreamingResponse(
+                _stream_prepared_summary(detail, prepared.rows),
+                media_type=_SUMMARY_BATCH_MEDIA_TYPE,
+                headers={"Vary": "Accept", "Cache-Control": "no-store"},
+            )
+        photos = await load_library_photos(
+            db, library_id, limit=limit, offset=offset, summary=view == "summary"
+        )
     except LibraryProjectionNotFound as exc:
         raise HTTPException(status_code=404, detail="Library not found") from exc
-    revision = (
-        await asyncio.to_thread(projection_revision, library_id, photos) if limit is None else None
-    )
+    revision = None
+    if limit is None:
+        if include_selection_snapshot:
+            projections: SelectionProjectionCache = request.app.state.selection_projections
+            projection = await asyncio.to_thread(
+                build_selection_projection, library_id, photos, projections.latest(library_id)
+            )
+            projections.store(library_id, projection)
+            revision = projection.revision
+        else:
+            revision = await asyncio.to_thread(projection_revision, library_id, photos)
 
     next_offset = None
     if limit is not None and offset + len(photos) < photo_total:
         next_offset = offset + len(photos)
 
-    return LibraryDetail(
+    stream = view == "summary" and limit is None and len(photos) >= _SUMMARY_STREAM_THRESHOLD
+    detail = LibraryDetail(
         library=summary,
-        photos=photos,
+        photos=[] if stream else photos,
         projection_revision=revision,
         photo_total=photo_total,
         photo_offset=offset,
         photo_limit=limit,
         next_offset=next_offset,
     )
+    if stream:
+        return StreamingResponse(
+            _stream_library_summary(detail, cast("list[PhotoSummary]", photos), batches=batches),
+            media_type=_SUMMARY_BATCH_MEDIA_TYPE if batches else "application/json",
+            headers={"Vary": "Accept", "Cache-Control": "no-store"},
+        )
+    return detail
+
+
+@router.get("/photo/{photo_id}/review", response_model=PhotoReview)
+async def photo_review(request: Request, photo_id: str) -> PhotoReview:
+    """Hydrate the selected photo using a single, scene-consistent snapshot."""
+    db = await _db(request)
+    try:
+        library_id, photo = await load_photo_review(db, photo_id)
+    except LibraryProjectionNotFound as exc:
+        raise HTTPException(status_code=404, detail="Photo not found") from exc
+    return PhotoReview(library_id=library_id, photo=photo)
 
 
 @router.post("/{library_id}/selection/query", response_model=SelectionQueryResponse)
@@ -604,11 +793,18 @@ async def selection_query(
     request: Request,
     library_id: str,
     body: SelectionQueryRequest,
+    projection_revision: str | None = Query(default=None, pattern=r"^[0-9a-f]{64}$"),
 ) -> SelectionQueryResponse:
     """Read-only authoritative filters, effective identities and deduplicated facets."""
     db = await _db(request)
+    projection = None
+    if projection_revision is not None:
+        projections: SelectionProjectionCache = request.app.state.selection_projections
+        projection = projections.get(library_id, projection_revision)
+        if projection is None:
+            raise HTTPException(status_code=409, detail="Selection snapshot expired")
     try:
-        return await query_selection(db, library_id, body)
+        return await query_selection(db, library_id, body, projection=projection)
     except SelectionLibraryNotFound as exc:
         raise HTTPException(status_code=404, detail="Library not found") from exc
 
@@ -693,6 +889,8 @@ async def delete_library(request: Request, library_id: str) -> None:
         # 按钮按了无反应,需要排查。
         raise HTTPException(status_code=500, detail="Library deletion failed (constraint)")
 
+    projections: SelectionProjectionCache = request.app.state.selection_projections
+    projections.discard_library(library_id)
     settings = getattr(request.app.state, "settings", None)
     if settings is None:
         from engine.core.config import settings as app_settings

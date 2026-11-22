@@ -45,8 +45,12 @@ function speciesUnconfirmedCause(
   const { source } = resolveSourceFor(photo, detection)
   if (source !== 'model_unconfirmed') return null
 
-  const top = detection?.speciesCandidates?.[0] ?? photo.speciesCandidates?.[0]
-  if (top?.recognitionState === 'uncertain') return 'uncertain'
+  const recognitionState =
+    detection?.candidateRecognitionState ??
+    detection?.speciesCandidates?.[0]?.recognitionState ??
+    photo.candidateRecognitionState ??
+    photo.speciesCandidates?.[0]?.recognitionState
+  if (recognitionState === 'uncertain') return 'uncertain'
 
   const pose = detection?.pose ?? photo.bestPose ?? null
   if (!pose || !pose.head_visible) return 'head'
