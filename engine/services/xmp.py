@@ -178,6 +178,9 @@ def _write_xml(node: minidom.Node, output: io.StringIO) -> None:
         output.write(node.toxml())
 
 
+MAX_SIDECAR_BYTES = 10 * 1024 * 1024
+
+
 def merge_jpeg_xmp(existing: bytes, generated: str) -> bytes:
     """Replace Rating, append new keywords and retain all unrelated XMP fields."""
     try:
@@ -196,3 +199,12 @@ def merge_jpeg_xmp(existing: bytes, generated: str) -> bytes:
         return output.getvalue().encode("utf-8")
     except (expat.ExpatError, RecursionError) as exc:
         raise ExistingXmpError("Could not safely merge XMP") from exc
+
+
+def merge_xmp_sidecar(existing: bytes, generated: str) -> bytes:
+    """Safely merge rating and deduplicated keywords into an existing XMP sidecar file."""
+    if not existing or len(existing) > MAX_SIDECAR_BYTES:
+        raise ExistingXmpError("Existing XMP sidecar is empty or exceeds safe merge limit")
+    # Strip UTF-8 BOM if present so Expat/minidom parses cleanly.
+    payload = existing[3:] if existing.startswith(b"\xef\xbb\xbf") else existing
+    return merge_jpeg_xmp(payload, generated)

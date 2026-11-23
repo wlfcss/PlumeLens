@@ -86,13 +86,33 @@ function photoShotMs(photo: PhotoRecord): number | null {
   return Number.isFinite(ts) ? ts : null
 }
 
+function compareTextStable(left: string, right: string): number {
+  if (left === right) return 0
+  return left < right ? -1 : 1
+}
+
+function normalizedPhotoScore(photo: Pick<PhotoRecord, 'finalScore'>): number {
+  return typeof photo.finalScore === 'number' && Number.isFinite(photo.finalScore)
+    ? photo.finalScore
+    : -1
+}
+
+function compareFileNameStableAsc(
+  left: Pick<PhotoRecord, 'fileName' | 'id'>,
+  right: Pick<PhotoRecord, 'fileName' | 'id'>,
+): number {
+  const nameDiff = left.fileName.localeCompare(right.fileName)
+  if (nameDiff !== 0) return nameDiff
+  return compareTextStable(left.id, right.id)
+}
+
 function comparePhotosByShotTimeAsc(left: PhotoRecord, right: PhotoRecord): number {
   const leftTs = photoShotMs(left)
   const rightTs = photoShotMs(right)
   if (leftTs !== null && rightTs !== null && leftTs !== rightTs) return leftTs - rightTs
   if (leftTs !== null && rightTs === null) return -1
   if (leftTs === null && rightTs !== null) return 1
-  return left.fileName.localeCompare(right.fileName)
+  return compareFileNameStableAsc(left, right)
 }
 
 function comparePhotosByShotTimeDesc(left: PhotoRecord, right: PhotoRecord): number {
@@ -101,17 +121,20 @@ function comparePhotosByShotTimeDesc(left: PhotoRecord, right: PhotoRecord): num
   if (leftTs !== null && rightTs !== null && leftTs !== rightTs) return rightTs - leftTs
   if (leftTs !== null && rightTs === null) return -1
   if (leftTs === null && rightTs !== null) return 1
-  return left.fileName.localeCompare(right.fileName)
+  return compareFileNameStableAsc(left, right)
 }
 
-function comparePhotosByScoreDesc(left: PhotoRecord, right: PhotoRecord): number {
-  // 综合评分（默认）：先按档位降序（精选 → 可用 → 记录 → 淘汰），
-  // 同档内按 quality_score 降序。
+export function comparePhotosByScoreDesc(left: PhotoRecord, right: PhotoRecord): number {
+  // 统一评分 / 组内推荐排序：
+  // 1. 有效档位降序（精选 → 可用 → 记录 → 淘汰，人工评级优先）
+  // 2. 综合分降序（无分排后）
+  // 3. 拍摄时间升序（同档同分时优先先拍到的帧，有时间排在无时间前）
+  // 4. 文件名升序 → 照片 ID 升序（确定性并列键）
   const gradeDiff = GRADE_RANK[effectivePhotoGrade(right)] - GRADE_RANK[effectivePhotoGrade(left)]
   if (gradeDiff !== 0) return gradeDiff
-  const scoreDiff = (right.finalScore ?? -1) - (left.finalScore ?? -1)
+  const scoreDiff = normalizedPhotoScore(right) - normalizedPhotoScore(left)
   if (scoreDiff !== 0) return scoreDiff
-  return comparePhotosByShotTimeDesc(left, right)
+  return comparePhotosByShotTimeAsc(left, right)
 }
 
 function comparePhotosBySort(left: PhotoRecord, right: PhotoRecord, sortBy: SortMode): number {
@@ -138,6 +161,17 @@ export function bestPhotoForStack(photos: PhotoRecord[]): PhotoRecord | null {
     if (comparePhotosByScoreDesc(photo, best) < 0) best = photo
   }
   return best
+}
+
+export function rankPhotoInGroup(photos: PhotoRecord[], photoId: string): number | null {
+  const active = photos.find((photo) => photo.id === photoId)
+  if (!active) return null
+  let rank = 1
+  for (const candidate of photos) {
+    if (candidate.id === active.id) continue
+    if (comparePhotosByScoreDesc(candidate, active) < 0) rank += 1
+  }
+  return rank
 }
 
 function normalizedBestBBox(photo: PhotoRecord): NormalizedBBox | null {

@@ -44,6 +44,13 @@ import {
 import { buildPhotoRecordFromRow } from '@/lib/backend-adapter'
 import { formatBytes } from '@/lib/format-bytes'
 import { gradeLabelKey } from '@/lib/i18n-keys'
+import {
+  BUILTIN_EXPORT_PRESETS,
+  loadCustomExportPresets,
+  matchesExportPreset,
+  saveCustomExportPresets,
+  type ExportPreset,
+} from '@/lib/export-presets'
 import { logger } from '@/lib/logger'
 import type { FolderRecord, PhotoGrade, PhotoRecord } from '@/lib/workspace-types'
 import { effectivePhotoGrade, type FolderSummary } from '@/lib/photo-helpers'
@@ -171,6 +178,11 @@ export function ExportDrawer({
   const [maxScore, setMaxScore] = useState('')
   const [layout, setLayout] = useState<ExportLayout>('merged')
   const [contentMode, setContentMode] = useState<ExportContentMode>('files_xmp')
+  const [customPresets, setCustomPresets] = useState<ExportPreset[]>(() =>
+    loadCustomExportPresets(),
+  )
+  const [savingPreset, setSavingPreset] = useState(false)
+  const [presetNameInput, setPresetNameInput] = useState('')
   const [availableFormats, setAvailableFormats] = useState<ExportFormatStat[] | null>(null)
   const [formatError, setFormatError] = useState(false)
   const [formatRetry, setFormatRetry] = useState(0)
@@ -656,6 +668,8 @@ export function ExportDrawer({
           ? 'cancelled'
           : 'idle'
 
+  const allPresets = useMemo(() => [...BUILTIN_EXPORT_PRESETS, ...customPresets], [customPresets])
+
   if (collapsed) {
     return (
       <aside className="export-sidecar export-sidecar--collapsed" aria-label={t('export.label')}>
@@ -700,6 +714,42 @@ export function ExportDrawer({
         ) : null}
       </aside>
     )
+  }
+
+  const applyPreset = (preset: ExportPreset) => {
+    if (controlsLocked) return
+    setGrades([...preset.grades])
+    setLayout(preset.layout)
+    setContentMode(preset.contentMode)
+    setMinScore(preset.minScore)
+    setMaxScore(preset.maxScore)
+  }
+
+  const handleSaveCustomPreset = () => {
+    const trimmed = presetNameInput.trim()
+    if (!trimmed || grades.length === 0) return
+    const next: ExportPreset = {
+      id: `custom:${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      name: trimmed,
+      builtin: false,
+      grades: [...grades],
+      layout,
+      contentMode,
+      minScore: minScore.trim(),
+      maxScore: maxScore.trim(),
+    }
+    const updated = [...customPresets.filter((item) => item.name !== trimmed), next]
+    setCustomPresets(updated)
+    saveCustomExportPresets(updated)
+    setPresetNameInput('')
+    setSavingPreset(false)
+  }
+
+  const handleDeleteCustomPreset = (presetId: string) => {
+    if (controlsLocked) return
+    const updated = customPresets.filter((item) => item.id !== presetId)
+    setCustomPresets(updated)
+    saveCustomExportPresets(updated)
   }
 
   return (
@@ -770,6 +820,83 @@ export function ExportDrawer({
             }
           />
           <ExportOption title={t('export.bundle.label')} value={t('export.bundle.report')} />
+        </div>
+
+        <div className="export-control-block">
+          <div className="export-presets__head">
+            <SectionLabel label={t('export.presets.label')} />
+            {!controlsLocked ? (
+              <button
+                className="button-ghost button-compact"
+                onClick={() => setSavingPreset((open) => !open)}
+                type="button"
+              >
+                {t('export.presets.saveCurrent')}
+              </button>
+            ) : null}
+          </div>
+          <div className="export-preset-chips" role="group" aria-label={t('export.presets.label')}>
+            {allPresets.map((preset) => {
+              const active = matchesExportPreset(preset, {
+                grades: activeOptions.grades,
+                layout: activeOptions.layout,
+                contentMode: activeOptions.contentMode,
+                minScore,
+                maxScore,
+              })
+              const label = preset.builtin ? t(preset.name) : preset.name
+              return (
+                <div className="export-preset-chip" key={preset.id}>
+                  <button
+                    aria-pressed={active}
+                    className={cn('chip-button', active && 'is-active')}
+                    disabled={controlsLocked}
+                    onClick={() => applyPreset(preset)}
+                    type="button"
+                  >
+                    {label}
+                  </button>
+                  {!preset.builtin && !controlsLocked ? (
+                    <button
+                      aria-label={t('export.presets.deleteAria', { name: label })}
+                      className="export-preset-chip__delete"
+                      onClick={() => handleDeleteCustomPreset(preset.id)}
+                      type="button"
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  ) : null}
+                </div>
+              )
+            })}
+          </div>
+          {savingPreset && !controlsLocked ? (
+            <div className="export-preset-form">
+              <input
+                aria-label={t('export.presets.namePlaceholder')}
+                onChange={(event) => setPresetNameInput(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    event.preventDefault()
+                    handleSaveCustomPreset()
+                  } else if (event.key === 'Escape') {
+                    setSavingPreset(false)
+                  }
+                }}
+                placeholder={t('export.presets.namePlaceholder')}
+                type="text"
+                value={presetNameInput}
+              />
+              <button
+                className="button-ghost button-compact"
+                disabled={!presetNameInput.trim() || grades.length === 0}
+                onClick={handleSaveCustomPreset}
+                type="button"
+              >
+                {t('export.presets.confirmSave')}
+              </button>
+            </div>
+          ) : null}
         </div>
 
         <div className="export-control-block">

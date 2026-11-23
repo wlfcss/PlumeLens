@@ -1201,3 +1201,95 @@ async def test_selection_export_requires_explicit_preview_contract(
         json={"target_dir": str(tmp_path / "out"), "scope": "selection"},
     )
     assert response.status_code == 422
+
+
+async def test_raw_sidecar_export_merges_existing_xmp_and_preserves_lightroom_edits(
+    export_client: tuple[AsyncClient, Path],
+    tmp_path: Path,
+) -> None:
+    """RAW 同伴存在既有 .xmp 时，保留原有 Lightroom 调色/版权/关键词并去重合并鉴翎评级与鸟种。"""
+    client, source_root = export_client
+    existing_xmp = (
+        '<?xpacket begin="\ufeff" id="W5M0MpCehiHzreSzNTczkc9d"?>\n'
+        '<x:xmpmeta xmlns:x="adobe:ns:meta/">\n'
+        ' <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">\n'
+        '  <rdf:Description rdf:about=""\n'
+        '    xmlns:xmp="http://ns.adobe.com/xap/1.0/"\n'
+        '    xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/"\n'
+        '    xmlns:dc="http://purl.org/dc/elements/1.1/"\n'
+        '    xmp:Rating="1"\n'
+        '    crs:Exposure2012="+0.65"\n'
+        '    crs:Highlights2012="-35">\n'
+        "   <dc:subject><rdf:Bag>"
+        "<rdf:li>洞庭湖</rdf:li>"
+        "<rdf:li>PlumeLens:select</rdf:li>"
+        "</rdf:Bag></dc:subject>\n"
+        "  </rdf:Description>\n"
+        " </rdf:RDF>\n"
+        "</x:xmpmeta>\n"
+        '<?xpacket end="w"?>'
+    )
+    (source_root / "a.xmp").write_text(existing_xmp, encoding="utf-8")
+    source_before = (source_root / "a.xmp").read_bytes()
+
+    response = await client.post(
+        "/export/library/lib-export",
+        json={
+            "target_dir": str(tmp_path / "exports"),
+            "grades": ["select"],
+            "formats": ["CR3"],
+            "include_companions": True,
+            "include_xmp_sidecars": True,
+            "include_manifest": True,
+        },
+    )
+    data = await _await_export(client, response)
+    assert data["companion_count"] == 1
+    assert data["xmp_count"] == 1
+    assert data["failed_count"] == 0
+    assert (source_root / "a.xmp").read_bytes() == source_before
+
+    output_dir = AsyncPath(data["output_dir"])
+    merged_text = await (output_dir / "a.xmp").read_text(encoding="utf-8")
+    assert 'xmp:Rating="5"' in merged_text
+    assert 'crs:Exposure2012="+0.65"' in merged_text
+    assert 'crs:Highlights2012="-35"' in merged_text
+    assert "<rdf:li>洞庭湖</rdf:li>" in merged_text
+    assert merged_text.count("<rdf:li>PlumeLens:select</rdf:li>") == 1
+
+
+async def test_raw_sidecar_export_preserves_corrupt_xmp_verbatim_and_reports_warning(
+    export_client: tuple[AsyncClient, Path],
+    tmp_path: Path,
+) -> None:
+    """损坏的既有 .xmp 边车不可覆盖破坏，须原样保留并在清单标注未写入新元数据。"""
+    client, source_root = export_client
+    corrupt_bytes = b"<x:xmpmeta><broken-xml"
+    (source_root / "a.xmp").write_bytes(corrupt_bytes)
+
+    response = await client.post(
+        "/export/library/lib-export",
+        json={
+            "target_dir": str(tmp_path / "exports-corrupt"),
+            "grades": ["select"],
+            "formats": ["CR3"],
+            "include_companions": True,
+            "include_xmp_sidecars": True,
+            "include_manifest": True,
+        },
+    )
+    assert response.status_code == 200, response.text
+    snapshot = await _await_job(client, response.json()["job_id"])
+    assert snapshot["status"] == "failed"
+    assert snapshot["error"]["code"] == "partial_export"
+    data = snapshot["result"]
+    assert data["companion_count"] == 1
+    assert data["xmp_count"] == 0
+    assert data["failed_count"] == 1
+
+    output_dir = AsyncPath(data["output_dir"])
+    assert await (output_dir / "a.xmp").read_bytes() == corrupt_bytes
+    report = json.loads(await AsyncPath(data["manifest"]["json"]).read_text(encoding="utf-8"))
+    row = next(item for item in report["照片清单"] if item["文件名"] == "a.jpg")
+    assert row["已导出XMP"] == "否"
+    assert "保留原有 XMP 边车" in row["错误原因"]

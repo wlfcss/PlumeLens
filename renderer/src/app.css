@@ -9225,6 +9225,115 @@ dialog::backdrop {
   animation: pl-glyph-breathe 1.35s var(--pl-ease) infinite;
 }
 
+.review-save-feedback--saved {
+  border-color: color-mix(in srgb, var(--pl-success) 38%, var(--pl-border-1));
+  color: var(--pl-success);
+}
+
+.review-grade-explain {
+  display: grid;
+  gap: 2px;
+  padding: 8px 10px;
+  border: 1px solid var(--pl-border-1);
+  border-radius: var(--pl-radius-sm);
+  background: var(--pl-surface-1);
+  font-size: 12px;
+  color: var(--pl-fg-1);
+}
+
+.review-grade-explain small {
+  color: var(--pl-fg-3);
+  font-size: 11px;
+}
+
+.review-compare-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 6px;
+}
+
+.review-compare-toggle.is-active {
+  border-color: var(--pl-fg-0);
+  color: var(--pl-fg-0);
+}
+
+.review-stage__images--compare {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.review-compare-pane {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  gap: 6px;
+  padding: 6px;
+  border: 1px solid var(--pl-border-1);
+  border-radius: var(--pl-radius-md);
+  background: var(--pl-surface-1);
+}
+
+.review-compare-pane--focused {
+  border-color: var(--pl-fg-0);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--pl-fg-0) 40%, transparent);
+}
+
+.review-compare-pane__bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 12px;
+}
+
+.review-compare-pane__badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: 1px solid var(--pl-border-1);
+  border-radius: 6px;
+  background: var(--pl-surface-2);
+  color: var(--pl-fg-0);
+  font-family: var(--pl-font-data);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.review-compare-pane--focused .review-compare-pane__badge {
+  border-color: var(--pl-fg-0);
+  background: var(--pl-fg-0);
+  color: var(--pl-bg-0);
+}
+
+.review-compare-pane__name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--pl-font-data);
+}
+
+.review-compare-pane__meta {
+  color: var(--pl-fg-2);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.review-compare-pane__stepper {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: auto;
+}
+
+.review-compare-target-hint {
+  margin-bottom: 6px;
+  color: var(--pl-fg-2);
+  font-size: 11px;
+  text-align: center;
+}
+
 .glyph-matrix .tone-neutral,
 .glyph-matrix .tone-muted {
   background: var(--pl-fg-1);

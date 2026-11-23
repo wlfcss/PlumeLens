@@ -32,6 +32,7 @@ import {
   useEffect,
   useLayoutEffect,
   useMemo,
+  useRef,
   useState,
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
@@ -63,7 +64,10 @@ import type { SortMode } from '@/lib/photo-grid-helpers'
 import { cn } from '@/lib/utils'
 import type { QuickFilter, ViewMode } from '@/stores/ui-store'
 
-import { useSelectionScrollState } from './use-selection-scroll-state'
+import {
+  resolveSurvivingAnchorPhotoId,
+  useSelectionScrollState,
+} from './use-selection-scroll-state'
 import { logger } from '@/lib/logger'
 import { SpeciesFilter, SpeciesFilterChips, type SpeciesFilterProps } from './species-filter'
 import { AnalysisControls } from './analysis-controls'
@@ -176,7 +180,8 @@ export function SelectionScreen({
   viewMode: ViewMode
   workspace: WorkspaceSnapshot
 }) {
-  const selectionResetKey = `${activeFolder?.id ?? ''}:${viewMode}:${activeSort}`
+  const folderKey = activeFolder?.id ?? ''
+  const layoutKey = `${viewMode}:${activeSort}`
   const {
     selectionScrollElement,
     setSelectionScrollNode,
@@ -185,7 +190,48 @@ export function SelectionScreen({
     compactMoreOpen,
     setCompactMoreOpen,
     scrollSelectionToTop,
-  } = useSelectionScrollState(selectionResetKey)
+    restoreAnchorPhoto,
+  } = useSelectionScrollState(folderKey, layoutKey)
+  const previousPhotoOrderRef = useRef<{ folderId: string; ids: string[] }>({
+    folderId: folderKey,
+    ids: [],
+  })
+  const clearFiltersButtonRef = useRef<HTMLButtonElement | null>(null)
+
+  // 筛选/排序导致当前焦点照片被移除时，回退到旧顺序中最近的存活邻图；
+  // 结果为空时引导焦点到可撤销筛选入口，避免键盘操作悬空。
+  useEffect(() => {
+    if (!folderKey || speciesFilterProps.loading) return
+    const nextIds = flatPhotos.map((photo) => photo.id)
+    const previous = previousPhotoOrderRef.current
+    const sameFolder = previous.folderId === folderKey
+    if (sameFolder && focusedPhotoId && !nextIds.includes(focusedPhotoId)) {
+      const survivor = resolveSurvivingAnchorPhotoId(previous.ids, nextIds, focusedPhotoId)
+      if (survivor) {
+        setFocusedPhotoId(survivor)
+        restoreAnchorPhoto(survivor)
+      } else if (nextIds.length === 0) {
+        setFocusedPhotoId(null)
+        const active = document.activeElement
+        if (
+          !active ||
+          active === document.body ||
+          active === document.documentElement ||
+          active.closest('.photo-flow')
+        ) {
+          clearFiltersButtonRef.current?.focus()
+        }
+      }
+    }
+    previousPhotoOrderRef.current = { folderId: folderKey, ids: nextIds }
+  }, [
+    flatPhotos,
+    focusedPhotoId,
+    folderKey,
+    restoreAnchorPhoto,
+    setFocusedPhotoId,
+    speciesFilterProps.loading,
+  ])
 
   const activeFolderGroups = useMemo(
     () =>
@@ -281,7 +327,12 @@ export function SelectionScreen({
           {activeQuickFilters.length === 0 ? (
             <span>{t('selection.speciesFilter.allGrades')}</span>
           ) : null}
-          <button className="button-ghost button-compact" type="button" onClick={onClearFilters}>
+          <button
+            ref={clearFiltersButtonRef}
+            className="button-ghost button-compact"
+            type="button"
+            onClick={onClearFilters}
+          >
             {t('selection.speciesFilter.clearAll')}
           </button>
           {!filtersAreDefault ? (
@@ -395,7 +446,12 @@ export function SelectionScreen({
         t={t}
       />
 
-      <BackgroundTaskBar activeFolder={activeFolder} t={t} />
+      <BackgroundTaskBar
+        activeFolder={activeFolder}
+        progressEvent={progressEvent}
+        refreshing={refreshing}
+        t={t}
+      />
     </main>
   )
 }

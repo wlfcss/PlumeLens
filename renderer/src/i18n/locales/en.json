@@ -216,6 +216,15 @@
       "unknown": "Analysis failed; see logs for details",
       "source_changed": "Source photos changed. Update the folder before reanalysis."
     },
+    "taskbar": {
+      "inProgress": "In progress…",
+      "discoveredCount": "{{count}} discovered",
+      "hashingCount": "Hashing {{count}} photos…",
+      "exportingHint": "Exporting in background…",
+      "analysisPaused": "Analysis paused",
+      "analysisStopping": "Stopping analysis…",
+      "failedCount": "{{count}} failed"
+    },
     "sidebar": {
       "label": "Folder navigation",
       "title": "Working set",
@@ -509,9 +518,15 @@
       "sequenceSingle": "Single photo",
       "sequenceBest": "Best in group",
       "sequenceLabel": "Burst",
+      "sequenceFilteredLabel": "Filtered burst",
+      "sequenceFilteredSingle": "1/{{total}} in filter",
+      "sequenceFilteredSingleValue": "1/{{total}} in filter",
+      "sequenceOutside": "Outside current filter",
+      "sequenceOutsideValue": "Outside current filter",
       "sequencePosition": "#{{index}} / {{count}}",
       "sequenceRankShort": "rank #{{rank}}",
-      "sequenceValue": "{{count}} photos · rank #{{rank}} · best {{score}}",
+      "sequenceValue": "{{count}} in burst · rank #{{rank}} · best {{score}}",
+      "sequenceFilteredValue": "{{count}}/{{total}} in filter · rank #{{rank}} · best {{score}}",
       "sequenceSingleValue": "Single",
       "filmstripSequenceIndex": "{{index}}/{{count}}",
       "posture": {
@@ -551,7 +566,26 @@
       },
       "companion": "RAW companion",
       "companionValue": "{{format}} · {{size}}",
-      "title": "Deep review"
+      "title": "Deep review",
+      "compareOpen": "A/B compare",
+      "compareExit": "Exit compare",
+      "comparePaneLabel": "Frame {{slot}} · Original {{scale}}×",
+      "compareSyncHint": "Hold to sync zoom · drag to pan",
+      "comparePrevB": "Previous B frame",
+      "compareNextB": "Next B frame",
+      "compareTargetHint": "Grading target: Frame {{slot}} ({{file}}) · press A/B to switch",
+      "explain": {
+        "failed": "Analysis failed before quality and pose could be scored",
+        "pending": "Analysis has not completed yet",
+        "noBird": "No valid bird subject detected",
+        "manualOnly": "Manually rated {{effective}}",
+        "manualOverride": "Manual {{effective}} (overrides model {{model}})",
+        "headDowngrade": "Base {{base}} downgraded to {{model}} (head not visible)",
+        "eyeDowngrade": "Base {{base}} downgraded to {{model}} (eye not visible)",
+        "flyingUpgrade": "Base {{base}} upgraded to {{model}} (flying with head & eye visible)",
+        "scoreDirect": "Combined quality {{score}} scored as {{model}}",
+        "baseScoreNote": "Base score {{score}} ({{base}})"
+      }
     },
     "reviewReasons": {
       "no_bird": "No valid bird subject was detected in this frame, so it is better treated as a reject or a record-only frame.",
@@ -641,6 +675,8 @@
     "saveFailed": "Save failed. This change was not applied. Please retry.",
     "operationFailed": "Operation failed. Check the engine and retry.",
     "saving": "Saving…",
+    "saved": "Saved",
+    "savedGrade": "Saved as {{grade}}",
     "pause": "Pause",
     "resume": "Resume analysis",
     "cancel": "Cancel analysis",
@@ -753,6 +789,8 @@
       "unresolved": "{{count}} photos have unresolved coordinates and are hidden from the map",
       "unmappedMixed": "{{noGps}} photos lack GPS and {{unresolved}} have unresolved coordinates, so they are hidden from the map",
       "allMapped": "All GPS photos placed on the map",
+      "loadFailed": "Failed to load geographic stats. Check the engine and retry.",
+      "offlinePending": "Currently offline — {{count}} photos will resolve locations once back online.",
       "unknownPlace": "Unnamed location"
     },
     "species": {
@@ -776,6 +814,16 @@
     "label": "Export",
     "title": "Prepare output",
     "confirm": "Start export",
+    "presets": {
+      "label": "Export presets",
+      "lrStandard": "Lightroom standard",
+      "lrSelects": "Lightroom selects by grade",
+      "lrXmpOnly": "XMP sidecars only",
+      "saveCurrent": "Save preset",
+      "namePlaceholder": "Preset name",
+      "confirmSave": "Save",
+      "deleteAria": "Delete preset {{name}}"
+    },
     "target": {
       "label": "Export location",
       "choose": "Choose location",

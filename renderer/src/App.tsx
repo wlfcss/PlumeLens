@@ -8,6 +8,7 @@ import {
   useEffect,
   useLayoutEffect,
   useMemo,
+  useRef,
   useState,
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
@@ -16,6 +17,7 @@ import { useTranslation } from 'react-i18next'
 
 import appIconUrl from '../../build/icon.png?url'
 import { EngineStatusBanner } from '@/components/engine-status-banner'
+import type { ReviewSaveFeedback } from '@/components/review/review-modal'
 const ReviewModal = lazy(() =>
   import('@/components/review/review-modal').then((m) => ({ default: m.ReviewModal })),
 )
@@ -85,9 +87,11 @@ import {
 } from '@/components/start/start-screen'
 import {
   buildGroupStartMsMap,
+  buildPhotoSegments,
   buildReviewPhotoOrderForGroupedEntries,
   buildReviewSegmentPhotosByPhotoId,
   compareGroupStartDesc,
+  EMPTY_STRING_ARRAY,
   sortPhotos,
 } from '@/lib/photo-grid-helpers'
 import { routeLabelKey } from '@/lib/i18n-keys'
@@ -211,6 +215,17 @@ export default function App() {
   const [operationError, setOperationError] = useState<string | null>(null)
   const [refreshing, setRefreshing] = useState(false)
   const [reviewOrder, setReviewOrder] = useState<string[]>([])
+  const [saveFeedback, setSaveFeedback] = useState<ReviewSaveFeedback | null>(null)
+  const saveRequestSeqRef = useRef(0)
+  const saveFeedbackTimerRef = useRef<number | null>(null)
+
+  useEffect(() => {
+    return () => {
+      if (saveFeedbackTimerRef.current !== null) {
+        window.clearTimeout(saveFeedbackTimerRef.current)
+      }
+    }
+  }, [])
   const deleteLibrary = useDeleteLibrary()
 
   const {
@@ -567,24 +582,44 @@ export default function App() {
       matchesQuery([species.name, species.latinName, species.summary], deferredSearch),
     )
   }, [deferredSearch, shouldLoadArchiveWorkspace, speciesRecords])
+  const reviewSourcePhotos = route === 'archive' ? archivePhotos : flatSelectionPhotos
+  const reviewAllowedIds = useMemo(
+    () => new Set(reviewSourcePhotos.map((photo) => photo.id)),
+    [reviewSourcePhotos],
+  )
+  const reviewPhotoOutsideSelection =
+    route === 'selection' && reviewPhoto !== null && !reviewAllowedIds.has(reviewPhoto.id)
   const reviewPhotos = useMemo(() => {
     if (!reviewPhoto) return []
-    const source = route === 'archive' ? archivePhotos : flatSelectionPhotos
-    const allowed = new Set(source.map((photo) => photo.id))
-    const order = reviewOrder.length ? reviewOrder : source.map((photo) => photo.id)
+    const baseOrder = reviewOrder.length ? reviewOrder : reviewSourcePhotos.map((photo) => photo.id)
+    const seen = new Set(baseOrder)
+    const extraIds = reviewOrder.length
+      ? reviewSourcePhotos.map((photo) => photo.id).filter((id) => !seen.has(id))
+      : EMPTY_STRING_ARRAY
+    const order = extraIds.length ? [...baseOrder, ...extraIds] : baseOrder
     return order.flatMap((id) => {
       const photo = photoById.get(id)
-      return photo && (id === reviewPhoto.id || allowed.has(id)) ? [photo] : []
+      return photo && (id === reviewPhoto.id || reviewAllowedIds.has(id)) ? [photo] : []
     })
-  }, [archivePhotos, flatSelectionPhotos, photoById, reviewOrder, reviewPhoto, route])
+  }, [photoById, reviewAllowedIds, reviewOrder, reviewPhoto, reviewSourcePhotos])
   const reviewSegmentPhotosByPhotoId = useMemo(
-    () => buildReviewSegmentPhotosByPhotoId(reviewPhotos),
-    [reviewPhotos],
+    () => buildReviewSegmentPhotosByPhotoId(reviewSourcePhotos),
+    [reviewSourcePhotos],
   )
   const reviewGroupPhotos = useMemo(() => {
-    if (!reviewPhoto) return EMPTY_PHOTOS
+    if (!reviewPhoto || reviewPhotoOutsideSelection) return EMPTY_PHOTOS
     return reviewSegmentPhotosByPhotoId.get(reviewPhoto.id) ?? EMPTY_PHOTOS
-  }, [reviewSegmentPhotosByPhotoId, reviewPhoto])
+  }, [reviewPhoto, reviewPhotoOutsideSelection, reviewSegmentPhotosByPhotoId])
+  const reviewSequenceTotalCount = useMemo(() => {
+    if (!reviewPhoto || route !== 'selection' || reviewPhotoOutsideSelection) return null
+    const unfilteredGroupPhotos = activeFolderPhotos.filter(
+      (photo) => photo.groupId === reviewPhoto.groupId,
+    )
+    const fullSegment = buildPhotoSegments(unfilteredGroupPhotos).find((segment) =>
+      segment.photos.some((photo) => photo.id === reviewPhoto.id),
+    )
+    return fullSegment ? fullSegment.photos.length : null
+  }, [activeFolderPhotos, reviewPhoto, reviewPhotoOutsideSelection, route])
 
   const { data: realLibraries } = useLibraries()
   const allLibraryIds = useMemo(() => (realLibraries ?? []).map((l) => l.id), [realLibraries])
@@ -791,18 +826,49 @@ export default function App() {
     setOperationError(null)
     // Only authoritative detail updates workspace; failures cannot leave an optimistic copy behind.
     setFocusedPhotoId(photoId)
+    const requestId = ++saveRequestSeqRef.current
+    if (saveFeedbackTimerRef.current !== null) {
+      window.clearTimeout(saveFeedbackTimerRef.current)
+      saveFeedbackTimerRef.current = null
+    }
+    setSaveFeedback({
+      photoId,
+      requestId,
+      status: 'saving',
+      grade: decision ?? undefined,
+    })
     void setDecisionMutation
       .mutateAsync({
         photoId,
         decision: decision as DecisionValue,
         libraryId: photoById.get(photoId)?.folderId,
       })
-      .then(() => refreshUnversionedReview(photoId))
+      .then(() => {
+        refreshUnversionedReview(photoId)
+        setSaveFeedback((current) => {
+          if (current && current.requestId !== requestId) return current
+          return {
+            photoId,
+            requestId,
+            status: 'saved',
+            grade: decision ?? undefined,
+          }
+        })
+        saveFeedbackTimerRef.current = window.setTimeout(() => {
+          setSaveFeedback((current) => (current?.requestId === requestId ? null : current))
+          saveFeedbackTimerRef.current = null
+        }, 1800)
+      })
       .catch((err: unknown) => {
         logger.warn('Failed to persist decision:', err)
-        setOperationError(
-          t('selection.savePhotoFailed', { file: photoById.get(photoId)?.fileName ?? photoId }),
-        )
+        const message = t('selection.savePhotoFailed', {
+          file: photoById.get(photoId)?.fileName ?? photoId,
+        })
+        setOperationError(message)
+        setSaveFeedback((current) => {
+          if (current && current.requestId !== requestId) return current
+          return { photoId, requestId, status: 'error', message }
+        })
       })
   }
 
@@ -814,6 +880,12 @@ export default function App() {
   ) {
     setOperationError(null)
     setFocusedPhotoId(photoId)
+    const requestId = ++saveRequestSeqRef.current
+    if (saveFeedbackTimerRef.current !== null) {
+      window.clearTimeout(saveFeedbackTimerRef.current)
+      saveFeedbackTimerRef.current = null
+    }
+    setSaveFeedback({ photoId, requestId, status: 'saving' })
     void setSpeciesOverrideMutation
       .mutateAsync({
         photoId,
@@ -822,12 +894,27 @@ export default function App() {
         bbox: bbox ?? null,
         libraryId: photoById.get(photoId)?.folderId,
       })
-      .then(() => refreshUnversionedReview(photoId))
+      .then(() => {
+        refreshUnversionedReview(photoId)
+        setSaveFeedback((current) => {
+          if (current && current.requestId !== requestId) return current
+          return { photoId, requestId, status: 'saved' }
+        })
+        saveFeedbackTimerRef.current = window.setTimeout(() => {
+          setSaveFeedback((current) => (current?.requestId === requestId ? null : current))
+          saveFeedbackTimerRef.current = null
+        }, 1800)
+      })
       .catch((err: unknown) => {
         logger.warn('Failed to persist species override:', err)
-        setOperationError(
-          t('selection.savePhotoFailed', { file: photoById.get(photoId)?.fileName ?? photoId }),
-        )
+        const message = t('selection.savePhotoFailed', {
+          file: photoById.get(photoId)?.fileName ?? photoId,
+        })
+        setOperationError(message)
+        setSaveFeedback((current) => {
+          if (current && current.requestId !== requestId) return current
+          return { photoId, requestId, status: 'error', message }
+        })
       })
   }
 
@@ -853,12 +940,13 @@ export default function App() {
     if (!focusedPhotoId || !flatSelectionPhotos.some((photo) => photo.id === focusedPhotoId)) return
 
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (
-        event.defaultPrevented ||
-        !isPlainSpaceKey(event) ||
-        document.querySelector(':popover-open')
-      )
-        return
+      let popoverOpen = false
+      try {
+        popoverOpen = Boolean(document.querySelector(':popover-open'))
+      } catch {
+        popoverOpen = false
+      }
+      if (event.defaultPrevented || !isPlainSpaceKey(event) || popoverOpen) return
       if (shouldIgnoreSelectionReviewShortcutTarget(event.target)) return
       event.preventDefault()
       const targetPhotoId =
@@ -1053,19 +1141,24 @@ export default function App() {
             <ReviewModal
               detail={{ photo: reviewPhoto, group: reviewGroup }}
               groupPhotos={reviewGroupPhotos}
-              onClose={() => setReviewPhotoId(null)}
+              onClose={() => {
+                setReviewPhotoId(null)
+                setReviewOrder([])
+              }}
               onSelectPhoto={handleOpenReview}
               onSetDecision={handleSetDecision}
               onSetSpeciesOverride={handleSetSpeciesOverride}
               onThumbnailLoadStatus={handleThumbnailLoadStatus}
               photos={reviewPhotos}
-              outsideSelection={
-                route === 'selection' &&
-                !filteredSelectionPhotos.some((photo) => photo.id === reviewPhoto.id)
-              }
+              outsideSelection={reviewPhotoOutsideSelection}
+              sequenceTotalCount={reviewSequenceTotalCount}
               saveError={operationError}
               saving={setDecisionMutation.isPending || setSpeciesOverrideMutation.isPending}
-              onDismissError={() => setOperationError(null)}
+              saveFeedback={saveFeedback}
+              onDismissError={() => {
+                setOperationError(null)
+                setSaveFeedback((current) => (current?.status === 'error' ? null : current))
+              }}
               t={t}
             />
           </Suspense>

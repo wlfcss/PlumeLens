@@ -20,6 +20,7 @@ import re
 import unicodedata
 from collections import Counter
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -106,6 +107,26 @@ class GeoSummary(BaseModel):
     pending: int  # 有可用经纬度但未填充地名
     unresolved_count: int = 0  # 有可用经纬度但 provider 链路无法解析
     photos_without_gps: int  # 没有可用经纬度的
+
+
+class ArchiveSpeciesSummaryRow(BaseModel):
+    """全局羽迹物种聚合条目（跨全部图库、按羽迹口径去重计数）。"""
+
+    key: str
+    name: str
+    latin_name: str | None = None
+    english_name: str | None = None
+    photo_count: int
+    best_score: float | None = None
+    first_seen_at: str | None = None
+    latest_seen_at: str | None = None
+    library_count: int
+
+
+class ArchiveSpeciesSummaryResponse(BaseModel):
+    total_species: int
+    total_photos: int
+    species: list[ArchiveSpeciesSummaryRow]
 
 
 # ---------------------------------------------------------------------------
@@ -820,4 +841,102 @@ async def geo_spots(
             )
             for b in sorted(spots.values(), key=lambda x: -int(x["photo_total"]))
         ],
+    )
+
+
+def _shot_at_sort_key(value: str) -> tuple[int, float, str]:
+    try:
+        ts = datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+        return (0, ts, value)
+    except ValueError:
+        return (1, 0.0, value)
+
+
+@router.get("/species/summary", response_model=ArchiveSpeciesSummaryResponse)
+async def archive_species_summary(request: Request) -> ArchiveSpeciesSummaryResponse:
+    """跨全部图库聚合已确认羽迹物种（照片数、最高分、首见/最近拍摄时间与图库数）。"""
+    db = await _db(request)
+    cache_key = f"{db.path}:species-summary"
+    cached = _get_geo_cache(cache_key)
+    if cached is not None:
+        return cached
+
+    photos = await _load_geo_photos(db, "1=1", ())
+    eligible_photo_ids: set[str] = set()
+    aggregates: dict[str, dict[str, Any]] = {}
+
+    for item in photos:
+        species_list = _archive_species_for_photo(item.photo)
+        if not species_list:
+            continue
+        eligible_photo_ids.add(item.photo.id)
+        shot_at = item.photo.shot_at or None
+        shot_key = _shot_at_sort_key(shot_at) if shot_at else None
+        score = float(item.photo.quality_score) if item.photo.quality_score is not None else None
+        seen_in_photo: set[str] = set()
+        for sp in species_list:
+            key = _species_key(sp)
+            if key in seen_in_photo:
+                continue
+            seen_in_photo.add(key)
+            bucket = aggregates.get(key)
+            if bucket is None:
+                aggregates[key] = {
+                    "key": key,
+                    "name": sp.name,
+                    "latin_name": sp.latin_name,
+                    "english_name": sp.english_name,
+                    "photo_ids": {item.photo.id},
+                    "library_ids": {item.library_id},
+                    "best_score": score,
+                    "first_seen_at": shot_at,
+                    "first_seen_key": shot_key,
+                    "latest_seen_at": shot_at,
+                    "latest_seen_key": shot_key,
+                }
+                continue
+            bucket["photo_ids"].add(item.photo.id)
+            bucket["library_ids"].add(item.library_id)
+            if not bucket["english_name"] and sp.english_name:
+                bucket["english_name"] = sp.english_name
+            if score is not None and (
+                bucket["best_score"] is None or score > float(bucket["best_score"])
+            ):
+                bucket["best_score"] = score
+            if shot_at and shot_key is not None:
+                if bucket["first_seen_key"] is None or shot_key < bucket["first_seen_key"]:
+                    bucket["first_seen_at"] = shot_at
+                    bucket["first_seen_key"] = shot_key
+                if bucket["latest_seen_key"] is None or shot_key > bucket["latest_seen_key"]:
+                    bucket["latest_seen_at"] = shot_at
+                    bucket["latest_seen_key"] = shot_key
+
+    rows = [
+        ArchiveSpeciesSummaryRow(
+            key=str(bucket["key"]),
+            name=str(bucket["name"]),
+            latin_name=bucket["latin_name"],
+            english_name=bucket["english_name"],
+            photo_count=len(bucket["photo_ids"]),
+            best_score=bucket["best_score"],
+            first_seen_at=bucket["first_seen_at"],
+            latest_seen_at=bucket["latest_seen_at"],
+            library_count=len(bucket["library_ids"]),
+        )
+        for bucket in sorted(
+            aggregates.values(),
+            key=lambda b: (
+                -len(b["photo_ids"]),
+                -(float(b["best_score"]) if b["best_score"] is not None else -1.0),
+                str(b["key"]),
+            ),
+        )
+    ]
+    return _set_geo_cache(
+        cache_key,
+        ArchiveSpeciesSummaryResponse(
+            total_species=len(rows),
+            total_photos=len(eligible_photo_ids),
+            species=rows,
+        ),
     )

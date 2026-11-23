@@ -216,6 +216,15 @@
       "unknown": "分析失败，详见日志",
       "source_changed": "源照片已变化，请先更新文件夹后重新分析。"
     },
+    "taskbar": {
+      "inProgress": "进行中…",
+      "discoveredCount": "已发现 {{count}} 张",
+      "hashingCount": "共 {{count}} 张，校验指纹中…",
+      "exportingHint": "后台导出中…",
+      "analysisPaused": "分析已暂停",
+      "analysisStopping": "正在停止分析…",
+      "failedCount": "失败 {{count}}"
+    },
     "sidebar": {
       "label": "文件夹导航",
       "title": "当前工作集",
@@ -346,7 +355,7 @@
     },
     "group": {
       "photos": "张照片",
-      "bestScore": "组内最高",
+      "bestScore": "组内最佳",
       "keepBest": "保留最佳 1 张",
       "collapseStack": "收起为多张",
       "stackAria": "{{count}} 张连拍，封面 {{file}}，点击查看封面信息",
@@ -509,9 +518,15 @@
       "sequenceSingle": "单张照片",
       "sequenceBest": "本组最佳",
       "sequenceLabel": "连拍",
+      "sequenceFilteredLabel": "当前筛选连拍",
+      "sequenceFilteredSingle": "当前筛选 1/{{total}} 张",
+      "sequenceFilteredSingleValue": "当前筛选 1/{{total}} 张",
+      "sequenceOutside": "已移出当前筛选",
+      "sequenceOutsideValue": "已移出当前筛选",
       "sequencePosition": "第 {{index}} / {{count}} 张",
       "sequenceRankShort": "排名 #{{rank}}",
-      "sequenceValue": "{{count}} 张 · 当前排名 #{{rank}} · 最高 {{score}}",
+      "sequenceValue": "本组 {{count}} 张 · 排名 #{{rank}} · 最佳 {{score}}",
+      "sequenceFilteredValue": "当前筛选 {{count}}/{{total}} 张 · 排名 #{{rank}} · 最佳 {{score}}",
       "sequenceSingleValue": "单张",
       "filmstripSequenceIndex": "{{index}}/{{count}}",
       "posture": {
@@ -551,7 +566,26 @@
       },
       "companion": "RAW 同伴",
       "companionValue": "{{format}} · {{size}}",
-      "title": "深度复核"
+      "title": "深度复核",
+      "compareOpen": "A/B 对照",
+      "compareExit": "退出对照",
+      "comparePaneLabel": "帧 {{slot}} · 原图 {{scale}}×",
+      "compareSyncHint": "按住同步放大 · 拖动平移",
+      "comparePrevB": "上一张对照帧",
+      "compareNextB": "下一张对照帧",
+      "compareTargetHint": "当前评级目标：帧 {{slot}}（{{file}}）· 按 A/B 切换",
+      "explain": {
+        "failed": "分析阶段失败，无法评估画质与姿态",
+        "pending": "尚未完成分析",
+        "noBird": "未检测到有效鸟主体",
+        "manualOnly": "已人工评定为{{effective}}",
+        "manualOverride": "人工评定为{{effective}}（覆盖模型「{{model}}」）",
+        "headDowngrade": "基础档「{{base}}」因头部不可见降为「{{model}}」",
+        "eyeDowngrade": "基础档「{{base}}」因眼部不可见降为「{{model}}」",
+        "flyingUpgrade": "基础档「{{base}}」因头眼齐飞版升为「{{model}}」",
+        "scoreDirect": "综合画质 {{score}} 直接定为「{{model}}」",
+        "baseScoreNote": "综合基础分 {{score}}（{{base}}）"
+      }
     },
     "reviewReasons": {
       "no_bird": "当前帧没有检测到有效鸟主体，更适合直接淘汰或保留为空片记录",
@@ -641,6 +675,8 @@
     "saveFailed": "保存失败，未应用本次修改，请重试。",
     "operationFailed": "操作失败，请检查引擎状态后重试。",
     "saving": "正在保存…",
+    "saved": "已保存",
+    "savedGrade": "已保存为{{grade}}",
     "pause": "暂停",
     "resume": "继续分析",
     "cancel": "取消分析",
@@ -753,6 +789,8 @@
       "unresolved": "{{count}} 张照片坐标无法解析，未在地图中展示",
       "unmappedMixed": "{{noGps}} 张照片缺少 GPS，{{unresolved}} 张坐标无法解析，未在地图中展示",
       "allMapped": "所有 GPS 照片均已上图",
+      "loadFailed": "地理统计加载失败，请检查后端状态后重试。",
+      "offlinePending": "当前处于离线状态，{{count}} 张待解析坐标将在联网后自动解析。",
       "unknownPlace": "未命名拍摄点"
     },
     "species": {
@@ -776,6 +814,16 @@
     "label": "导出",
     "title": "准备出片",
     "confirm": "开始导出",
+    "presets": {
+      "label": "导出预设",
+      "lrStandard": "Lightroom 标准导入",
+      "lrSelects": "Lightroom 精选分档",
+      "lrXmpOnly": "仅 XMP 边车",
+      "saveCurrent": "保存为预设",
+      "namePlaceholder": "输入预设名称",
+      "confirmSave": "保存",
+      "deleteAria": "删除预设 {{name}}"
+    },
     "target": {
       "label": "导出位置",
       "choose": "选择位置",

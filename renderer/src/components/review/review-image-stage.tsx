@@ -27,6 +27,12 @@ import type { useTranslation } from 'react-i18next'
 import type { AfOverlay, PhotoRecord } from '@/lib/workspace-types'
 import { cn } from '@/lib/utils'
 
+export type SyncLoupeState = {
+  active: boolean
+  xPct: number
+  yPct: number
+}
+
 export function ReviewImageStage({
   label,
   hint,
@@ -44,6 +50,8 @@ export function ReviewImageStage({
   onOpenFullscreen,
   onZoomScaleChange,
   showHeader = true,
+  syncLoupe = null,
+  onSyncLoupeChange,
   t,
   variant,
   zoomOptions,
@@ -65,6 +73,8 @@ export function ReviewImageStage({
   onOpenFullscreen?: () => void
   onZoomScaleChange?: (scale: number) => void
   showHeader?: boolean
+  syncLoupe?: SyncLoupeState | null
+  onSyncLoupeChange?: (state: SyncLoupeState) => void
   t: ReturnType<typeof useTranslation>['t']
   variant: 'primary' | 'crop' | 'fullscreen'
   zoomOptions?: readonly number[]
@@ -76,11 +86,13 @@ export function ReviewImageStage({
     width: 0,
     height: 0,
   })
-  const [loupeActive, setLoupeActive] = useState(false)
-  const [loupePos, setLoupePos] = useState<{ xPct: number; yPct: number }>({
+  const [localLoupeActive, setLocalLoupeActive] = useState(false)
+  const [localLoupePos, setLocalLoupePos] = useState<{ xPct: number; yPct: number }>({
     xPct: 50,
     yPct: 50,
   })
+  const loupeActive = syncLoupe ? syncLoupe.active : localLoupeActive
+  const loupePos = syncLoupe ? { xPct: syncLoupe.xPct, yPct: syncLoupe.yPct } : localLoupePos
   const pointerStateRef = useRef<{
     pointerId: number
     moved: boolean
@@ -108,20 +120,32 @@ export function ReviewImageStage({
   }, [])
 
   useEffect(() => {
-    setLoupeActive(false)
-    setLoupePos({ xPct: 50, yPct: 50 })
+    setLocalLoupeActive(false)
+    setLocalLoupePos({ xPct: 50, yPct: 50 })
     pointerStateRef.current = null
   }, [photoId])
 
-  const updateLoupePosition = useCallback(
+  const emitLoupe = useCallback(
+    (active: boolean, xPct: number, yPct: number) => {
+      if (onSyncLoupeChange) {
+        onSyncLoupeChange({ active, xPct, yPct })
+        return
+      }
+      setLocalLoupeActive(active)
+      setLocalLoupePos({ xPct, yPct })
+    },
+    [onSyncLoupeChange],
+  )
+
+  const computeLoupeCoords = useCallback(
     (element: HTMLDivElement, clientX: number, clientY: number) => {
       const rect = element.getBoundingClientRect()
-      const xPct = ((clientX - rect.left) / rect.width) * 100
-      const yPct = ((clientY - rect.top) / rect.height) * 100
-      setLoupePos({
+      const xPct = rect.width > 0 ? ((clientX - rect.left) / rect.width) * 100 : 50
+      const yPct = rect.height > 0 ? ((clientY - rect.top) / rect.height) * 100 : 50
+      return {
         xPct: Math.max(0, Math.min(100, xPct)),
         yPct: Math.max(0, Math.min(100, yPct)),
-      })
+      }
     },
     [],
   )
@@ -140,8 +164,8 @@ export function ReviewImageStage({
       startY: e.clientY,
       wasActive: loupeActive,
     }
-    updateLoupePosition(e.currentTarget, e.clientX, e.clientY)
-    setLoupeActive(true)
+    const coords = computeLoupeCoords(e.currentTarget, e.clientX, e.clientY)
+    emitLoupe(true, coords.xPct, coords.yPct)
     e.currentTarget.setPointerCapture(e.pointerId)
   }
   const handlePointerMove = (e: ReactPointerEvent<HTMLDivElement>) => {
@@ -150,13 +174,14 @@ export function ReviewImageStage({
     if (Math.abs(e.clientX - state.startX) + Math.abs(e.clientY - state.startY) > 4) {
       state.moved = true
     }
-    updateLoupePosition(e.currentTarget, e.clientX, e.clientY)
+    const coords = computeLoupeCoords(e.currentTarget, e.clientX, e.clientY)
+    emitLoupe(true, coords.xPct, coords.yPct)
   }
   const handlePointerEnd = (e: ReactPointerEvent<HTMLDivElement>) => {
     const state = pointerStateRef.current
     if (state && state.pointerId === e.pointerId) {
       // 总是退出放大 — hold-to-zoom 语义。
-      setLoupeActive(false)
+      emitLoupe(false, loupePos.xPct, loupePos.yPct)
     }
     pointerStateRef.current = null
     if (e.currentTarget.hasPointerCapture(e.pointerId)) {

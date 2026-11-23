@@ -41,7 +41,12 @@ from engine.core.database import Database
 from engine.core.file_identity import file_change_time_ns
 from engine.pipeline.preprocess import IMAGE_EXTENSIONS, RAW_EXTENSIONS
 from engine.services.photo_input import source_fingerprint as analysis_input_fingerprint
-from engine.services.xmp import ExistingXmpError, merge_jpeg_xmp
+from engine.services.xmp import (
+    MAX_SIDECAR_BYTES,
+    ExistingXmpError,
+    merge_jpeg_xmp,
+    merge_xmp_sidecar,
+)
 
 logger = structlog.stdlib.get_logger()
 
@@ -443,6 +448,7 @@ _ERROR_LABELS: dict[str, str] = {
     "insufficient_space": "目标磁盘剩余空间不足",
     "source_changed": "源文件在导出期间发生变化，请重新扫描后重试",
     "xmp_preserved": "已原样导出 JPEG，鉴翎评级与关键词未写入，以保留原有 XMP",
+    "sidecar_xmp_preserved": "已原样保留原有 XMP 边车，鉴翎评级与关键词未写入",
     "copy_failed": "文件复制或元数据写入失败",
     "permission_denied": "没有读取源文件或写入目标目录的权限",
 }
@@ -911,6 +917,15 @@ def _xmp_label(grade: str | None) -> str:
 
 def _xmp_sidecar_path(path: Path) -> Path:
     return path.with_suffix(".xmp")
+
+
+def _discover_existing_xmp_sidecar(media_path: Path) -> Path | None:
+    """Read-only lookup for an existing `.xmp`/`.XMP` sidecar next to the source photo."""
+    for suffix in (".xmp", ".XMP"):
+        candidate = media_path.with_suffix(suffix)
+        if candidate.is_file():
+            return candidate
+    return None
 
 
 def _xmp_dest_for(output_dir: Path, base: Path, used: set[Path]) -> Path:
@@ -1487,9 +1502,42 @@ def _run_export(
                             )
                         )
                         xmp_dest = _xmp_dest_for(output_dir, xmp_base, used)
-                        _write_text_file(xmp_dest, jpeg_packet or _xmp_packet(photo, xmp_source))
-                        created_paths.append(xmp_dest)
-                    exported_xmp = xmp_dest is not None
+                        generated_xmp = jpeg_packet or _xmp_packet(photo, xmp_source)
+                        existing_sidecar = _discover_existing_xmp_sidecar(xmp_source)
+                        if existing_sidecar is None and photo.companion_path:
+                            existing_sidecar = _discover_existing_xmp_sidecar(
+                                Path(photo.companion_path)
+                            )
+                        if existing_sidecar is not None:
+                            sidecar_size = _file_size(existing_sidecar)
+                            if sidecar_size > MAX_SIDECAR_BYTES:
+                                _copy_file(
+                                    existing_sidecar,
+                                    xmp_dest,
+                                    cancel_event=job.cancel_event if job is not None else None,
+                                )
+                                created_paths.append(xmp_dest)
+                                error = "sidecar_xmp_preserved"
+                                failed += 1
+                            else:
+                                existing_bytes = existing_sidecar.read_bytes()
+                                try:
+                                    merged_bytes = merge_xmp_sidecar(existing_bytes, generated_xmp)
+                                except ExistingXmpError:
+                                    _write_bytes_file(xmp_dest, existing_bytes)
+                                    created_paths.append(xmp_dest)
+                                    error = "sidecar_xmp_preserved"
+                                    failed += 1
+                                else:
+                                    _write_bytes_file(xmp_dest, merged_bytes)
+                                    created_paths.append(xmp_dest)
+                                    exported_xmp = True
+                        else:
+                            _write_text_file(xmp_dest, generated_xmp)
+                            created_paths.append(xmp_dest)
+                            exported_xmp = True
+                    if jpeg_xmp_status == "embedded":
+                        exported_xmp = xmp_dest is not None
 
                 if exported_main:
                     exported += 1

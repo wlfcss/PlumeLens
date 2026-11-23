@@ -11,7 +11,16 @@
  * 反向依赖 App.tsx。
  */
 
-import { Check, ChevronLeft, ChevronRight, Clock3, Images, Sparkles, X } from 'lucide-react'
+import {
+  Check,
+  ChevronLeft,
+  ChevronRight,
+  Clock3,
+  Columns2,
+  Images,
+  Sparkles,
+  X,
+} from 'lucide-react'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import type { useTranslation } from 'react-i18next'
@@ -40,13 +49,19 @@ import {
   type ReviewDetail,
 } from '@/lib/photo-helpers'
 import {
+  bestPhotoForStack,
+  comparePhotosByScoreDesc,
+  rankPhotoInGroup,
+} from '@/lib/photo-grid-helpers'
+import { describePhotoGradeExplanation } from '@/lib/review-grade-explanation'
+import {
   speciesSourceBadge,
   speciesSourceDetail,
   speciesSourceKind,
   speciesSourceTone,
 } from '@/lib/species-source'
 import { cn } from '@/lib/utils'
-import { ReviewImageStage } from './review-image-stage'
+import { ReviewImageStage, type SyncLoupeState } from './review-image-stage'
 import { SpeciesOverrideEditor } from './species-override-editor'
 import { useModalDialog } from '@/hooks/use-modal-dialog'
 import { usePhotoReview } from '@/hooks/use-photo-review'
@@ -60,7 +75,15 @@ const REVIEW_FILMSTRIP_ITEM_ESTIMATE = REVIEW_FILMSTRIP_ITEM_WIDTH + REVIEW_FILM
 
 // HUD 反馈用 — 键盘 1/2/3/4 评级时在舞台角落 flash 一下确认动作生效。
 // nonce 用于强制重 mount,同键连按时重新触发动画。
-type HudFlashState = { grade: PhotoGrade; nonce: number } | null
+type HudFlashState = { grade: PhotoGrade; nonce: number; photoId: string } | null
+
+export type ReviewSaveFeedback = {
+  photoId: string
+  requestId: number
+  status: 'saving' | 'saved' | 'error'
+  grade?: PhotoGrade
+  message?: string
+}
 
 const GRADE_HUD_TONE: Record<PhotoGrade, 'success' | 'warning' | 'neutral' | 'accent'> = {
   select: 'success',
@@ -76,11 +99,21 @@ const GRADE_HUD_KEY: Record<PhotoGrade, '1' | '2' | '3' | '4'> = {
   reject: '4',
 }
 
+function hasOpenPopover(): boolean {
+  try {
+    return Boolean(document.querySelector(':popover-open'))
+  } catch {
+    return false
+  }
+}
+
 export function ReviewModal({
   saveError,
   saving,
+  saveFeedback,
   onDismissError,
   outsideSelection = false,
+  sequenceTotalCount = null,
   detail,
   groupPhotos,
   onClose,
@@ -93,8 +126,10 @@ export function ReviewModal({
 }: {
   saveError?: string | null
   saving?: boolean
+  saveFeedback?: ReviewSaveFeedback | null
   onDismissError?: () => void
   outsideSelection?: boolean
+  sequenceTotalCount?: number | null
   detail: ReviewDetail
   groupPhotos: PhotoRecord[]
   onClose: () => void
@@ -121,14 +156,18 @@ export function ReviewModal({
   const [showAfPoint, setShowAfPoint] = useState(true)
   const [zoomScale, setZoomScale] = useState<number>(DEFAULT_REVIEW_ZOOM)
   const [fullscreenOpen, setFullscreenOpen] = useState(false)
+  const [compareOpen, setCompareOpen] = useState(false)
+  const [comparePhotoId, setComparePhotoId] = useState<string | null>(null)
+  const [compareFocus, setCompareFocus] = useState<'a' | 'b'>('a')
+  const [syncLoupe, setSyncLoupe] = useState<SyncLoupeState>({ active: false, xPct: 50, yPct: 50 })
   const [hudFlash, setHudFlash] = useState<HudFlashState>(null)
   const hudTimerRef = useRef<number | null>(null)
 
-  const flashHud = useCallback((grade: PhotoGrade) => {
+  const flashHud = useCallback((grade: PhotoGrade, targetPhotoId: string) => {
     if (hudTimerRef.current !== null) {
       window.clearTimeout(hudTimerRef.current)
     }
-    setHudFlash({ grade, nonce: Date.now() })
+    setHudFlash({ grade, nonce: Date.now(), photoId: targetPhotoId })
     hudTimerRef.current = window.setTimeout(() => {
       setHudFlash(null)
       hudTimerRef.current = null
@@ -184,18 +223,19 @@ export function ReviewModal({
     [photos],
   )
   const activeIndex = photoIndexById.get(photo.id) ?? -1
-  const reviewGroupPhotos = groupPhotos.length > 0 ? groupPhotos : [photo]
+  const reviewGroupPhotos = !outsideSelection && groupPhotos.length > 0 ? groupPhotos : [photo]
   const reviewGroupOrderById = useMemo(
     () => new Map(reviewGroupPhotos.map((item, index) => [item.id, index] as const)),
     [reviewGroupPhotos],
   )
   const isSequence = reviewGroupPhotos.length > 1
+  const sequenceFiltered =
+    !outsideSelection &&
+    sequenceTotalCount !== null &&
+    sequenceTotalCount > reviewGroupPhotos.length
   const sequenceIndex = reviewGroupOrderById.get(photo.id) ?? -1
   const sequenceDisplayIndex = sequenceIndex >= 0 ? sequenceIndex + 1 : 1
-  const sequenceBestPhoto = useMemo(
-    () => bestReviewGroupPhoto(reviewGroupPhotos),
-    [reviewGroupPhotos],
-  )
+  const sequenceBestPhoto = useMemo(() => bestPhotoForStack(reviewGroupPhotos), [reviewGroupPhotos])
   const sequenceBestIndex = sequenceBestPhoto
     ? (reviewGroupOrderById.get(sequenceBestPhoto.id) ?? -1)
     : -1
@@ -205,8 +245,111 @@ export function ReviewModal({
   )
   const sequenceRank = useMemo(() => {
     if (!isSequence) return null
-    return rankReviewGroupPhoto(reviewGroupPhotos, photo.id, sequenceIndex)
-  }, [isSequence, photo.id, reviewGroupPhotos, sequenceIndex])
+    return rankPhotoInGroup(reviewGroupPhotos, photo.id)
+  }, [isSequence, photo.id, reviewGroupPhotos])
+  const sequenceSummaryLabel = outsideSelection
+    ? t('selection.review.sequenceOutside')
+    : isSequence
+      ? sequenceFiltered
+        ? t('selection.review.sequenceFilteredLabel')
+        : t('selection.review.sequenceLabel')
+      : sequenceFiltered
+        ? t('selection.review.sequenceFilteredSingle', { total: sequenceTotalCount })
+        : t('selection.review.sequenceSingle')
+  const sequenceDetailValue = outsideSelection
+    ? t('selection.review.sequenceOutsideValue')
+    : isSequence
+      ? sequenceFiltered
+        ? t('selection.review.sequenceFilteredValue', {
+            count: reviewGroupPhotos.length,
+            total: sequenceTotalCount,
+            rank: sequenceRank ?? '--',
+            score: formatScore(sequenceBestPhoto?.finalScore),
+          })
+        : t('selection.review.sequenceValue', {
+            count: reviewGroupPhotos.length,
+            rank: sequenceRank ?? '--',
+            score: formatScore(sequenceBestPhoto?.finalScore),
+          })
+      : sequenceFiltered
+        ? t('selection.review.sequenceFilteredSingleValue', { total: sequenceTotalCount })
+        : t('selection.review.sequenceSingleValue')
+  // 同组两帧 A/B 对照：仅当前照片处于有效连拍段（≥2 张且未移出筛选）时可用。
+  const compareCandidates = useMemo(
+    () => reviewGroupPhotos.filter((item) => item.id !== photo.id),
+    [photo.id, reviewGroupPhotos],
+  )
+  const defaultComparePhoto = useMemo(() => {
+    if (compareCandidates.length === 0) return null
+    if (sequenceBestPhoto && sequenceBestPhoto.id !== photo.id) return sequenceBestPhoto
+    return compareCandidates.toSorted(comparePhotosByScoreDesc)[0] ?? compareCandidates[0] ?? null
+  }, [compareCandidates, photo.id, sequenceBestPhoto])
+  const comparePhoto = useMemo(() => {
+    if (!compareOpen || !isSequence || outsideSelection) return null
+    if (comparePhotoId) {
+      const explicit = compareCandidates.find((item) => item.id === comparePhotoId)
+      if (explicit) return explicit
+    }
+    return defaultComparePhoto
+  }, [
+    compareCandidates,
+    compareOpen,
+    comparePhotoId,
+    defaultComparePhoto,
+    isSequence,
+    outsideSelection,
+  ])
+  const compareActive = compareOpen && comparePhoto !== null
+  const compareTargetPhoto = compareActive && compareFocus === 'b' ? comparePhoto : photo
+  const comparePhotoRank = useMemo(
+    () => (comparePhoto ? rankPhotoInGroup(reviewGroupPhotos, comparePhoto.id) : null),
+    [comparePhoto, reviewGroupPhotos],
+  )
+  const compareCandidateIndex = useMemo(
+    () => (comparePhoto ? compareCandidates.findIndex((item) => item.id === comparePhoto.id) : -1),
+    [compareCandidates, comparePhoto],
+  )
+  const gradeExplanation = useMemo(
+    () => describePhotoGradeExplanation(photo, pose, t),
+    [photo, pose, t],
+  )
+
+  useEffect(() => {
+    if (!isSequence || outsideSelection) {
+      setCompareOpen(false)
+      setCompareFocus('a')
+      setSyncLoupe({ active: false, xPct: 50, yPct: 50 })
+    }
+  }, [isSequence, outsideSelection])
+
+  useEffect(() => {
+    setSyncLoupe((current) => (current.active ? { ...current, active: false } : current))
+  }, [photo.id, comparePhoto?.id])
+
+  const stepComparePhoto = useCallback(
+    (offset: -1 | 1) => {
+      if (compareCandidates.length === 0) return
+      const currentIdx = compareCandidateIndex >= 0 ? compareCandidateIndex : 0
+      const nextIdx = (currentIdx + offset + compareCandidates.length) % compareCandidates.length
+      setComparePhotoId(compareCandidates[nextIdx]?.id ?? null)
+    },
+    [compareCandidateIndex, compareCandidates],
+  )
+
+  const toggleCompareMode = useCallback(() => {
+    if (!isSequence || outsideSelection || compareCandidates.length === 0) return
+    setCompareOpen((open) => {
+      const next = !open
+      if (!next) {
+        setCompareFocus('a')
+        setSyncLoupe({ active: false, xPct: 50, yPct: 50 })
+      } else if (!comparePhotoId || !compareCandidates.some((item) => item.id === comparePhotoId)) {
+        setComparePhotoId(defaultComparePhoto?.id ?? null)
+      }
+      return next
+    })
+  }, [compareCandidates, comparePhotoId, defaultComparePhoto?.id, isSequence, outsideSelection])
+
   // 深度复核是“当前筛选照片流”的审片器，连拍只提供上下文提示。
   // 左右键 / 顶部切换 / 底部胶片条必须能跨出当前连拍堆叠继续审片。
   const navigationPhotos = photos
@@ -227,8 +370,15 @@ export function ReviewModal({
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.defaultPrevented || document.querySelector(':popover-open')) return
-      if (event.target instanceof Node && !dialogRef.current?.contains(event.target)) return
+      if (event.defaultPrevented || hasOpenPopover()) return
+      if (
+        event.target instanceof Node &&
+        event.target !== document.body &&
+        event.target !== document.documentElement &&
+        !dialogRef.current?.contains(event.target)
+      ) {
+        return
+      }
       const target = event.target
       if (
         target instanceof HTMLInputElement ||
@@ -247,17 +397,44 @@ export function ReviewModal({
         return
       }
 
+      if (compareActive && event.key === 'Escape') {
+        event.preventDefault()
+        setCompareOpen(false)
+        setCompareFocus('a')
+        setSyncLoupe({ active: false, xPct: 50, yPct: 50 })
+        return
+      }
+
       if (event.key === 'ArrowLeft') {
         event.preventDefault()
-        selectRelativePhoto(-1)
+        if (compareActive && compareFocus === 'b') stepComparePhoto(-1)
+        else selectRelativePhoto(-1)
         return
       }
       if (event.key === 'ArrowRight') {
         event.preventDefault()
-        selectRelativePhoto(1)
+        if (compareActive && compareFocus === 'b') stepComparePhoto(1)
+        else selectRelativePhoto(1)
         return
       }
       if (event.metaKey || event.ctrlKey || event.altKey) return
+      if (event.key === 'c' || event.key === 'C') {
+        if (isSequence && !outsideSelection) {
+          event.preventDefault()
+          toggleCompareMode()
+        }
+        return
+      }
+      if (compareActive && (event.key === 'a' || event.key === 'A')) {
+        event.preventDefault()
+        setCompareFocus('a')
+        return
+      }
+      if (compareActive && (event.key === 'b' || event.key === 'B')) {
+        event.preventDefault()
+        setCompareFocus('b')
+        return
+      }
       const gradeByKey: Record<string, PhotoGrade> = {
         '1': 'select',
         '2': 'usable',
@@ -267,15 +444,62 @@ export function ReviewModal({
       const grade = gradeByKey[event.key]
       if (grade) {
         event.preventDefault()
-        onSetDecision(photo.id, grade)
-        flashHud(grade)
+        onSetDecision(compareTargetPhoto.id, grade)
+        flashHud(grade, compareTargetPhoto.id)
         return
       }
     }
 
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [flashHud, fullscreenOpen, onClose, onSetDecision, photo.id, selectRelativePhoto])
+  }, [
+    compareActive,
+    compareFocus,
+    compareTargetPhoto.id,
+    flashHud,
+    fullscreenOpen,
+    isSequence,
+    onClose,
+    onSetDecision,
+    outsideSelection,
+    selectRelativePhoto,
+    stepComparePhoto,
+    toggleCompareMode,
+  ])
+
+  const activeFeedback = useMemo(() => {
+    if (saveFeedback !== undefined) {
+      return saveFeedback && saveFeedback.photoId === compareTargetPhoto.id ? saveFeedback : null
+    }
+    if (saveError) {
+      return {
+        photoId: compareTargetPhoto.id,
+        requestId: 0,
+        status: 'error' as const,
+        message: saveError,
+      }
+    }
+    if (saving) {
+      return { photoId: compareTargetPhoto.id, requestId: 0, status: 'saving' as const }
+    }
+    return null
+  }, [compareTargetPhoto.id, saveError, saveFeedback, saving])
+
+  const handleFilmstripSelectPhoto = useCallback(
+    (selectedId: string) => {
+      if (
+        compareActive &&
+        compareFocus === 'b' &&
+        selectedId !== photo.id &&
+        reviewGroupOrderById.has(selectedId)
+      ) {
+        setComparePhotoId(selectedId)
+        return
+      }
+      onSelectPhoto(selectedId)
+    },
+    [compareActive, compareFocus, onSelectPhoto, photo.id, reviewGroupOrderById],
+  )
 
   // IQA 裁切框（与后端 expand_for_iqa 一致：2.5× + 比例约束 + cap + shift）
   const iqaCrop = useMemo(() => {
@@ -290,7 +514,11 @@ export function ReviewModal({
       onCancel={(event) => {
         event.preventDefault()
         if (fullscreenOpen) setFullscreenOpen(false)
-        else onClose()
+        else if (compareActive) {
+          setCompareOpen(false)
+          setCompareFocus('a')
+          setSyncLoupe({ active: false, xPct: 50, yPct: 50 })
+        } else onClose()
       }}
       className="overlay-backdrop"
       onPointerDown={(event) => {
@@ -298,16 +526,22 @@ export function ReviewModal({
       }}
     >
       <div className="review-panel" onPointerDown={(event) => event.stopPropagation()}>
-        {saveError ? (
+        {activeFeedback?.status === 'error' ? (
           <div className="review-save-feedback" role="alert">
-            <span>{saveError}</span>
+            <span>{activeFeedback.message ?? saveError}</span>
             <button type="button" className="button-ghost button-compact" onClick={onDismissError}>
               {t('common.close')}
             </button>
           </div>
-        ) : saving ? (
+        ) : activeFeedback?.status === 'saving' ? (
           <div className="review-save-feedback" role="status">
             {t('selection.saving')}
+          </div>
+        ) : activeFeedback?.status === 'saved' ? (
+          <div className="review-save-feedback review-save-feedback--saved" role="status">
+            {activeFeedback.grade
+              ? t('selection.savedGrade', { grade: t(gradeLabelKey(activeFeedback.grade)) })
+              : t('selection.saved')}
           </div>
         ) : null}
         {outsideSelection ? (
@@ -316,7 +550,7 @@ export function ReviewModal({
           </div>
         ) : null}
         <div className="review-stage">
-          {hudFlash ? (
+          {hudFlash && hudFlash.photoId === compareTargetPhoto.id ? (
             <div
               aria-hidden="true"
               className={cn(
@@ -375,11 +609,7 @@ export function ReviewModal({
               <span className="review-sequence__glyph" aria-hidden="true">
                 <Images className="h-3.5 w-3.5" />
               </span>
-              <span className="review-sequence__label">
-                {isSequence
-                  ? t('selection.review.sequenceLabel')
-                  : t('selection.review.sequenceSingle')}
-              </span>
+              <span className="review-sequence__label">{sequenceSummaryLabel}</span>
               {isSequence ? (
                 <strong>
                   {t('selection.review.sequencePosition', {
@@ -409,6 +639,23 @@ export function ReviewModal({
               {isSequence && sequenceBestPhoto?.id === photo.id ? (
                 <b>{t('selection.review.sequenceBest')}</b>
               ) : null}
+              {isSequence && !outsideSelection ? (
+                <button
+                  aria-keyshortcuts="c"
+                  aria-pressed={compareActive}
+                  className={cn(
+                    'button-ghost button-compact review-compare-toggle',
+                    compareActive && 'is-active',
+                  )}
+                  onClick={toggleCompareMode}
+                  type="button"
+                >
+                  <Columns2 className="h-3.5 w-3.5" />
+                  {t(
+                    compareActive ? 'selection.review.compareExit' : 'selection.review.compareOpen',
+                  )}
+                </button>
+              ) : null}
             </div>
           </div>
 
@@ -427,7 +674,7 @@ export function ReviewModal({
                 type="checkbox"
                 checked={showPose}
                 onChange={(e) => setShowPose(e.target.checked)}
-                disabled={!detailsReady}
+                disabled={!detailsReady || compareActive}
               />
               <span>{t('selection.review.togglePose')}</span>
             </label>
@@ -436,7 +683,7 @@ export function ReviewModal({
                 type="checkbox"
                 checked={showAfPoint}
                 onChange={(e) => setShowAfPoint(e.target.checked)}
-                disabled={afOverlay === null}
+                disabled={afOverlay === null || compareActive}
               />
               <span>
                 {t('selection.review.toggleAfPoint')}
@@ -445,49 +692,183 @@ export function ReviewModal({
             </label>
           </div>
 
-          <div className="review-stage__images">
-            <ReviewImageStage
-              label={t('selection.review.original')}
-              hint={t('selection.review.originalHint')}
-              previewSrc={previewSrc}
-              fallbackGradient={photo.previewGradient}
-              aspect={aspect}
-              imgW={imgW}
-              imgH={imgH}
-              bbox={showBbox ? bbox : null}
-              pose={null}
-              afOverlay={showAfPoint ? afOverlay : null}
-              photoId={photo.id}
-              loupeEnabled
-              cropRect={null}
-              onOpenFullscreen={() => setFullscreenOpen(true)}
-              onZoomScaleChange={setZoomScale}
-              t={t}
-              variant="primary"
-              zoomOptions={REVIEW_ZOOM_OPTIONS}
-              zoomScale={zoomScale}
-            />
-            <ReviewImageStage
-              label={t('selection.review.iqaCrop')}
-              hint={
-                iqaCrop ? t('selection.review.cropHint') : t('selection.review.cropNeedsSubject')
-              }
-              previewSrc={previewSrc}
-              fallbackGradient={photo.previewGradient}
-              aspect={aspect}
-              imgW={imgW}
-              imgH={imgH}
-              bbox={null}
-              pose={detailsReady && showPose ? pose : null}
-              afOverlay={null}
-              photoId={photo.id}
-              loupeEnabled={false}
-              cropRect={iqaCrop}
-              t={t}
-              variant="crop"
-              zoomScale={zoomScale}
-            />
-          </div>
+          {compareActive && comparePhoto ? (
+            <div className="review-stage__images review-stage__images--compare">
+              <div
+                className={cn(
+                  'review-compare-pane',
+                  compareFocus === 'a' && 'review-compare-pane--focused',
+                )}
+                data-compare-pane="a"
+                onClick={() => setCompareFocus('a')}
+              >
+                <div className="review-compare-pane__bar">
+                  <button
+                    aria-pressed={compareFocus === 'a'}
+                    className="review-compare-pane__badge"
+                    onClick={() => setCompareFocus('a')}
+                    type="button"
+                  >
+                    A
+                  </button>
+                  <strong className="review-compare-pane__name">{photo.fileName}</strong>
+                  <span className="review-compare-pane__meta">
+                    {t(gradeLabelKey(effectivePhotoGrade(photo)))} · {formatScore(photo.finalScore)}
+                    {sequenceRank !== null ? ` · #${sequenceRank}` : ''}
+                  </span>
+                </div>
+                <ReviewImageStage
+                  label={t('selection.review.comparePaneLabel', {
+                    slot: 'A',
+                    scale: zoomScale,
+                  })}
+                  hint={t('selection.review.compareSyncHint')}
+                  previewSrc={previewSrc}
+                  fallbackGradient={photo.previewGradient}
+                  aspect={aspect}
+                  imgW={imgW}
+                  imgH={imgH}
+                  bbox={showBbox ? bbox : null}
+                  pose={null}
+                  afOverlay={null}
+                  photoId={photo.id}
+                  loupeEnabled
+                  cropRect={null}
+                  onZoomScaleChange={setZoomScale}
+                  syncLoupe={syncLoupe}
+                  onSyncLoupeChange={setSyncLoupe}
+                  t={t}
+                  variant="primary"
+                  zoomOptions={REVIEW_ZOOM_OPTIONS}
+                  zoomScale={zoomScale}
+                />
+              </div>
+
+              <div
+                className={cn(
+                  'review-compare-pane',
+                  compareFocus === 'b' && 'review-compare-pane--focused',
+                )}
+                data-compare-pane="b"
+                onClick={() => setCompareFocus('b')}
+              >
+                <div className="review-compare-pane__bar">
+                  <button
+                    aria-pressed={compareFocus === 'b'}
+                    className="review-compare-pane__badge"
+                    onClick={() => setCompareFocus('b')}
+                    type="button"
+                  >
+                    B
+                  </button>
+                  <strong className="review-compare-pane__name">{comparePhoto.fileName}</strong>
+                  <span className="review-compare-pane__meta">
+                    {t(gradeLabelKey(effectivePhotoGrade(comparePhoto)))} ·{' '}
+                    {formatScore(comparePhoto.finalScore)}
+                    {comparePhotoRank !== null ? ` · #${comparePhotoRank}` : ''}
+                  </span>
+                  {compareCandidates.length > 1 ? (
+                    <div
+                      className="review-compare-pane__stepper"
+                      onClick={(event) => event.stopPropagation()}
+                    >
+                      <IconButton
+                        label={t('selection.review.comparePrevB')}
+                        onClick={() => {
+                          setCompareFocus('b')
+                          stepComparePhoto(-1)
+                        }}
+                      >
+                        <ChevronLeft className="h-3.5 w-3.5" />
+                      </IconButton>
+                      <IconButton
+                        label={t('selection.review.compareNextB')}
+                        onClick={() => {
+                          setCompareFocus('b')
+                          stepComparePhoto(1)
+                        }}
+                      >
+                        <ChevronRight className="h-3.5 w-3.5" />
+                      </IconButton>
+                    </div>
+                  ) : null}
+                </div>
+                <ReviewImageStage
+                  label={t('selection.review.comparePaneLabel', {
+                    slot: 'B',
+                    scale: zoomScale,
+                  })}
+                  hint={t('selection.review.compareSyncHint')}
+                  previewSrc={comparePhoto.thumbPreviewUrl ?? comparePhoto.thumbGridUrl ?? null}
+                  fallbackGradient={comparePhoto.previewGradient}
+                  aspect={
+                    comparePhoto.imageWidth && comparePhoto.imageHeight
+                      ? comparePhoto.imageWidth / comparePhoto.imageHeight
+                      : null
+                  }
+                  imgW={comparePhoto.imageWidth ?? null}
+                  imgH={comparePhoto.imageHeight ?? null}
+                  bbox={showBbox ? (comparePhoto.bestBbox ?? null) : null}
+                  pose={null}
+                  afOverlay={null}
+                  photoId={comparePhoto.id}
+                  loupeEnabled
+                  cropRect={null}
+                  onZoomScaleChange={setZoomScale}
+                  syncLoupe={syncLoupe}
+                  onSyncLoupeChange={setSyncLoupe}
+                  t={t}
+                  variant="primary"
+                  zoomOptions={REVIEW_ZOOM_OPTIONS}
+                  zoomScale={zoomScale}
+                />
+              </div>
+            </div>
+          ) : (
+            <div className="review-stage__images">
+              <ReviewImageStage
+                label={t('selection.review.original')}
+                hint={t('selection.review.originalHint')}
+                previewSrc={previewSrc}
+                fallbackGradient={photo.previewGradient}
+                aspect={aspect}
+                imgW={imgW}
+                imgH={imgH}
+                bbox={showBbox ? bbox : null}
+                pose={null}
+                afOverlay={showAfPoint ? afOverlay : null}
+                photoId={photo.id}
+                loupeEnabled
+                cropRect={null}
+                onOpenFullscreen={() => setFullscreenOpen(true)}
+                onZoomScaleChange={setZoomScale}
+                t={t}
+                variant="primary"
+                zoomOptions={REVIEW_ZOOM_OPTIONS}
+                zoomScale={zoomScale}
+              />
+              <ReviewImageStage
+                label={t('selection.review.iqaCrop')}
+                hint={
+                  iqaCrop ? t('selection.review.cropHint') : t('selection.review.cropNeedsSubject')
+                }
+                previewSrc={previewSrc}
+                fallbackGradient={photo.previewGradient}
+                aspect={aspect}
+                imgW={imgW}
+                imgH={imgH}
+                bbox={null}
+                pose={detailsReady && showPose ? pose : null}
+                afOverlay={null}
+                photoId={photo.id}
+                loupeEnabled={false}
+                cropRect={iqaCrop}
+                t={t}
+                variant="crop"
+                zoomScale={zoomScale}
+              />
+            </div>
+          )}
         </div>
 
         <aside className="review-detail review-detail--compact">
@@ -521,6 +902,10 @@ export function ReviewModal({
               totalBirds={photo.birdDetections?.length ?? 0}
               t={t}
             />
+            <div className="review-grade-explain" data-explain-kind={gradeExplanation.kind}>
+              <span>{gradeExplanation.summary}</span>
+              {gradeExplanation.detail ? <small>{gradeExplanation.detail}</small> : null}
+            </div>
 
             {/* 关键指标 3 列 — head/eye 移到 PoseChipsRow,birdCount 移除(单鸟图永远 1,
                 多鸟图由 SpeciesOverrideEditor bird tabs 表达,这里冗余)。 */}
@@ -574,18 +959,7 @@ export function ReviewModal({
 
             <CompactKV label={t('selection.metrics.scene')} value={group?.title ?? '--'} />
 
-            <CompactKV
-              label={t('selection.review.sequenceLabel')}
-              value={
-                isSequence
-                  ? t('selection.review.sequenceValue', {
-                      count: reviewGroupPhotos.length,
-                      rank: sequenceRank ?? '--',
-                      score: formatScore(sequenceBestPhoto?.finalScore),
-                    })
-                  : t('selection.review.sequenceSingleValue')
-              }
-            />
+            <CompactKV label={t('selection.review.sequenceLabel')} value={sequenceDetailValue} />
 
             {photo.companionFormat && photo.companionPath ? (
               <CompactKV
@@ -617,10 +991,21 @@ export function ReviewModal({
           </div>
 
           <div className="review-detail__footer">
+            {compareActive && comparePhoto ? (
+              <div className="review-compare-target-hint">
+                {t('selection.review.compareTargetHint', {
+                  slot: compareFocus.toUpperCase(),
+                  file: compareTargetPhoto.fileName,
+                })}
+              </div>
+            ) : null}
             <div className="inspector-actions inspector-actions--compact">
               <button
                 className="button-primary"
-                onClick={() => onSetDecision(photo.id, 'select')}
+                onClick={() => {
+                  onSetDecision(compareTargetPhoto.id, 'select')
+                  flashHud('select', compareTargetPhoto.id)
+                }}
                 type="button"
               >
                 <Sparkles className="h-4 w-4" />
@@ -628,7 +1013,10 @@ export function ReviewModal({
               </button>
               <button
                 className="button-ghost"
-                onClick={() => onSetDecision(photo.id, 'usable')}
+                onClick={() => {
+                  onSetDecision(compareTargetPhoto.id, 'usable')
+                  flashHud('usable', compareTargetPhoto.id)
+                }}
                 type="button"
               >
                 <Check className="h-4 w-4" />
@@ -636,7 +1024,10 @@ export function ReviewModal({
               </button>
               <button
                 className="button-ghost"
-                onClick={() => onSetDecision(photo.id, 'record')}
+                onClick={() => {
+                  onSetDecision(compareTargetPhoto.id, 'record')
+                  flashHud('record', compareTargetPhoto.id)
+                }}
                 type="button"
               >
                 <Clock3 className="h-4 w-4" />
@@ -644,7 +1035,10 @@ export function ReviewModal({
               </button>
               <button
                 className="button-danger"
-                onClick={() => onSetDecision(photo.id, 'reject')}
+                onClick={() => {
+                  onSetDecision(compareTargetPhoto.id, 'reject')
+                  flashHud('reject', compareTargetPhoto.id)
+                }}
                 type="button"
               >
                 <X className="h-4 w-4" />
@@ -660,7 +1054,7 @@ export function ReviewModal({
           bestGroupPhotoId={sequenceBestPhoto?.id ?? null}
           groupPhotoOrderById={reviewGroupOrderById}
           onThumbnailLoadStatus={onThumbnailLoadStatus}
-          onSelectPhoto={onSelectPhoto}
+          onSelectPhoto={handleFilmstripSelectPhoto}
           photos={photos}
           sequenceCount={reviewGroupPhotos.length}
           t={t}
@@ -763,37 +1157,6 @@ function ReviewFullscreenViewer({
       />
     </div>
   )
-}
-
-function bestReviewGroupPhoto(photos: PhotoRecord[]): PhotoRecord | null {
-  let best: PhotoRecord | null = null
-  for (const photo of photos) {
-    if (!best) {
-      best = photo
-      continue
-    }
-    const diff = (photo.finalScore ?? -1) - (best.finalScore ?? -1)
-    if (diff > 0 || (diff === 0 && photo.shotAt.localeCompare(best.shotAt) < 0)) best = photo
-  }
-  return best
-}
-
-function rankReviewGroupPhoto(
-  photos: PhotoRecord[],
-  activePhotoId: string,
-  activeSequenceIndex: number,
-): number | null {
-  const activePhoto = activeSequenceIndex >= 0 ? (photos[activeSequenceIndex] ?? null) : null
-  if (!activePhoto || activePhoto.id !== activePhotoId) return null
-  const activeScore = activePhoto.finalScore ?? -1
-  let rank = 1
-
-  for (let index = 0; index < photos.length; index += 1) {
-    if (index === activeSequenceIndex) continue
-    const score = photos[index]?.finalScore ?? -1
-    if (score > activeScore || (score === activeScore && index < activeSequenceIndex)) rank += 1
-  }
-  return rank
 }
 
 function buildSequenceRailDots(count: number, currentIndex: number, bestIndex: number): number[] {

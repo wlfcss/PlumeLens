@@ -138,6 +138,49 @@ const TEST_STACK_PHOTOS: TestPhotoFixture[] = [
   },
 ]
 
+const TEST_BURST_RANKING_PHOTOS: TestPhotoFixture[] = [
+  {
+    id: 'br-1',
+    file_name: 'TIE_0001.JPG',
+    species: '白鹭',
+    latin: 'Egretta garzetta',
+    grade: 'usable',
+    score: 0.75,
+    posture: 'perched',
+    bbox: { x1: 1700, y1: 800, x2: 2200, y2: 2200, confidence: 0.94 },
+  },
+  {
+    id: 'br-2',
+    file_name: 'TIE_0002.JPG',
+    species: '白鹭',
+    latin: 'Egretta garzetta',
+    grade: 'usable',
+    score: 0.75,
+    posture: 'flying',
+    bbox: { x1: 1710, y1: 800, x2: 2210, y2: 2200, confidence: 0.94 },
+  },
+  {
+    id: 'br-3',
+    file_name: 'TIE_0003.JPG',
+    species: '白鹭',
+    latin: 'Egretta garzetta',
+    grade: 'select',
+    score: 0.88,
+    posture: 'perched',
+    bbox: { x1: 1720, y1: 800, x2: 2220, y2: 2200, confidence: 0.95 },
+  },
+  {
+    id: 'br-4',
+    file_name: 'TIE_0004.JPG',
+    species: '白鹭',
+    latin: 'Egretta garzetta',
+    grade: 'usable',
+    score: 0.75,
+    posture: 'flying',
+    bbox: { x1: 1730, y1: 800, x2: 2230, y2: 2200, confidence: 0.94 },
+  },
+]
+
 const TEST_SINGLE_BURST_PHOTOS: TestPhotoFixture[] = Array.from({ length: 12 }, (_, idx) => ({
   id: `burst-${idx + 1}`,
   file_name: `5Y3A${String(8091 + idx)}.JPG`,
@@ -313,6 +356,7 @@ function exportSseBody(): string {
 async function mockBackend(
   page: Page,
   options: {
+    burstRankingCases?: boolean
     driftingStack?: boolean
     includeFailed?: boolean
     manyGroups?: boolean
@@ -329,9 +373,11 @@ async function mockBackend(
         ? TEST_DRIFT_STACK_PHOTOS
         : options.singleBurstScene
           ? TEST_SINGLE_BURST_PHOTOS
-          : options.stackedBursts
-            ? TEST_STACK_PHOTOS
-            : TEST_PHOTOS
+          : options.burstRankingCases
+            ? TEST_BURST_RANKING_PHOTOS
+            : options.stackedBursts
+              ? TEST_STACK_PHOTOS
+              : TEST_PHOTOS
   const failedPhoto: TestPhotoFixture = {
     id: 'failed-1',
     file_name: 'BROKEN_0005.JPG',
@@ -573,7 +619,7 @@ async function mockBackend(
       }
       const photos = primaryPhotos.map((p, idx) => {
         const burstSecond =
-          options.driftingStack || options.singleBurstScene
+          options.driftingStack || options.singleBurstScene || options.burstRankingCases
             ? idx
             : options.stackedBursts
               ? idx + (idx >= 2 ? 3 : 0)
@@ -586,12 +632,17 @@ async function mockBackend(
           ? p.shotAt
           : options.manyGroups
             ? `2026-04-23T${String(manyGroupHour).padStart(2, '0')}:${String(manyGroupMinute).padStart(2, '0')}:00+00:00`
-            : options.driftingStack || options.singleBurstScene || options.stackedBursts
+            : options.driftingStack ||
+                options.singleBurstScene ||
+                options.stackedBursts ||
+                options.burstRankingCases
               ? `2026-04-23T07:00:${String(burstSecond).padStart(2, '0')}+00:00`
               : `2026-04-23T07:0${idx}:00+00:00`
         const bbox = p.bbox ?? { x1: 1700, y1: 800, x2: 2200, y2: 2200, confidence: 0.93 }
         const pose =
-          (options.manyGroups || options.realisticStacks) && p.posture ? makePose(p.posture) : null
+          (options.manyGroups || options.realisticStacks || options.burstRankingCases) && p.posture
+            ? makePose(p.posture)
+            : null
 
         return {
           id: p.id,
@@ -625,7 +676,10 @@ async function mockBackend(
               : null,
           scene_id:
             p.sceneId ??
-            (options.driftingStack || options.singleBurstScene || options.stackedBursts
+            (options.driftingStack ||
+            options.singleBurstScene ||
+            options.stackedBursts ||
+            options.burstRankingCases
               ? 111
               : idx),
           pipeline_version: 'v1-mock',
@@ -1273,6 +1327,132 @@ test.describe('Photo stack interactions (mock backend)', () => {
     await expect(page.locator('.review-heading h2')).toContainText('STACK_0003.JPG')
   })
 
+  test('manual grade upgrade keeps stack cover, review best, burst rank and export aligned', async ({
+    page,
+  }) => {
+    await mockBackend(page, { stackedBursts: true })
+    await page.goto('/')
+    await page.getByRole('button', { name: '选片', exact: true }).click()
+
+    const stackGroup = page.locator('.photo-group').first()
+    const firstStack = stackGroup.locator('.photo-tile--stack').first()
+    await expect(firstStack).toHaveAttribute('data-photo-id', 's2')
+
+    await page.getByRole('button', { name: '展开 2 张连拍' }).first().click()
+    await stackGroup.locator('.photo-tile[data-photo-id="s1"] .photo-preview').dblclick()
+
+    await expect(page.locator('.review-panel')).toBeVisible()
+    await expect(page.locator('.review-heading h2')).toContainText('STACK_0001.JPG')
+    await expect(page.locator('.review-sequence__meta')).toContainText('排名 #2')
+    await expect(page.locator('.review-sequence__meta')).not.toContainText('本组最佳')
+    await expect(page.locator('.review-filmstrip__best')).toHaveCount(1)
+
+    await page.keyboard.press('1')
+    await expect(page.locator('.review-sequence__meta')).toContainText('排名 #1')
+    await expect(page.locator('.review-sequence__meta')).toContainText('本组最佳')
+    await expect(page.locator('.review-detail')).toContainText('本组 2 张 · 排名 #1 · 最佳 56.7')
+    await expect(page.locator('.review-filmstrip__best')).toHaveCount(1)
+
+    await page.keyboard.press('ArrowRight')
+    await expect(page.locator('.review-heading h2')).toContainText('STACK_0002.JPG')
+    await expect(page.locator('.review-sequence__meta')).toContainText('排名 #2')
+    await expect(page.locator('.review-sequence__meta')).not.toContainText('本组最佳')
+
+    await page.keyboard.press('Escape')
+    await expect(page.locator('.review-panel')).toHaveCount(0)
+
+    await page.getByRole('button', { name: '收起 2 张连拍' }).first().click()
+    await expect(stackGroup.locator('.photo-tile--stack').first()).toHaveAttribute(
+      'data-photo-id',
+      's1',
+    )
+    await expect(stackGroup.locator('.photo-preview--stack').first()).toHaveAttribute(
+      'aria-label',
+      /封面 STACK_0001\.JPG/,
+    )
+
+    const exportRequest = page.waitForRequest(
+      (req) => req.url().includes('/export/library/lib-test') && req.method() === 'POST',
+    )
+    await page.locator('.folder-actions').getByRole('button', { name: '导出' }).click()
+    await page.getByRole('radio', { name: /当前筛选/ }).click()
+    await expect(page.locator('.export-sidecar')).toContainText('4')
+    await page.getByRole('button', { name: '选择位置' }).click()
+    await page.getByRole('button', { name: '开始导出' }).click()
+    const payload = JSON.parse((await exportRequest).postData() ?? '{}')
+    expect(payload.selection_query.grades).toEqual(['select', 'usable', 'record'])
+    expect(payload.projection_revision).toBe('decisions-1')
+  })
+
+  test('ties and filter member changes stay aligned across grid, review and selection export', async ({
+    page,
+  }) => {
+    await mockBackend(page, { burstRankingCases: true })
+    await page.goto('/')
+    await page.getByRole('button', { name: '选片', exact: true }).click()
+
+    const stackGroup = page.locator('.photo-group').first()
+    await expect(stackGroup.locator('.photo-tile')).toHaveCount(4)
+    await page.getByRole('button', { name: '收起 4 张连拍' }).click()
+    await expect(stackGroup.locator('.photo-tile--stack')).toHaveAttribute('data-photo-id', 'br-3')
+
+    // Filter down to flying-only: remaining members are tied usable 75.0 frames [br-2, br-4].
+    // The stack stays collapsed and its cover updates to the earlier tied frame (br-2).
+    await page.getByRole('button', { name: '仅飞版', exact: true }).click()
+    await expect(page.getByRole('button', { name: '展开 2 张连拍' })).toBeVisible()
+    await expect(stackGroup.locator('.photo-tile--stack')).toHaveAttribute('data-photo-id', 'br-2')
+    await expect(stackGroup.locator('.photo-preview--stack')).toHaveAttribute(
+      'aria-label',
+      /封面 TIE_0002\.JPG/,
+    )
+
+    // Open review on the tied cover: filtered scope, #1 and best must match the grid cover.
+    await stackGroup.locator('.photo-preview--stack').dblclick()
+    await expect(page.locator('.review-panel')).toBeVisible()
+    await expect(page.locator('.review-heading h2')).toContainText('TIE_0002.JPG')
+    await expect(page.locator('.review-sequence__label')).toHaveText('当前筛选连拍')
+    await expect(page.locator('.review-sequence__meta')).toContainText('排名 #1')
+    await expect(page.locator('.review-sequence__meta')).toContainText('本组最佳')
+    await expect(page.locator('.review-detail')).toContainText(
+      '当前筛选 2/4 张 · 排名 #1 · 最佳 75.0',
+    )
+
+    await page.keyboard.press('ArrowRight')
+    await expect(page.locator('.review-heading h2')).toContainText('TIE_0004.JPG')
+    await expect(page.locator('.review-sequence__meta')).toContainText('排名 #2')
+    await expect(page.locator('.review-sequence__meta')).not.toContainText('本组最佳')
+
+    // Rejecting br-2 from review moves it outsideSelection and removes any stale burst best/rank.
+    await page.keyboard.press('ArrowLeft')
+    await expect(page.locator('.review-heading h2')).toContainText('TIE_0002.JPG')
+    await page.keyboard.press('4')
+    await expect(page.locator('.review-scope-notice')).toBeVisible()
+    await expect(page.locator('.review-sequence__label')).toHaveText('已移出当前筛选')
+    await expect(page.locator('.review-sequence__meta')).not.toContainText('本组最佳')
+    await expect(page.locator('.review-sequence__meta')).not.toContainText('排名 #')
+
+    await page.keyboard.press('ArrowRight')
+    await expect(page.locator('.review-heading h2')).toContainText('TIE_0004.JPG')
+    await expect(page.locator('.review-sequence__label')).toHaveText('当前筛选 1/4 张')
+    await expect(page.locator('.review-filmstrip__item')).toHaveCount(1)
+
+    await page.keyboard.press('Escape')
+    await expect(stackGroup.locator('.photo-tile')).toHaveCount(1)
+    await expect(stackGroup.locator('.photo-tile')).toHaveAttribute('data-photo-id', 'br-4')
+
+    const exportRequest = page.waitForRequest(
+      (req) => req.url().includes('/export/library/lib-test') && req.method() === 'POST',
+    )
+    await page.locator('.folder-actions').getByRole('button', { name: '导出' }).click()
+    await page.getByRole('radio', { name: /当前筛选/ }).click()
+    await expect(page.locator('.export-sidecar')).toContainText('1')
+    await page.getByRole('button', { name: '选择位置' }).click()
+    await page.getByRole('button', { name: '开始导出' }).click()
+    const payload = JSON.parse((await exportRequest).postData() ?? '{}')
+    expect(payload.selection_query.only_flying).toBe(true)
+    expect(payload.projection_revision).toBe('decisions-1')
+  })
+
   test('grouped scenes stay time-ordered and never overlap', async ({ page }) => {
     await mockBackend(page)
     await page.goto('/')
@@ -1592,7 +1772,7 @@ test.describe('Photo decision flow (mock backend)', () => {
 
   test('folder context menu can open Finder from start and selection lists', async ({ page }) => {
     await page.locator('.folder-rail-item--active').click({ button: 'right' })
-    await page.getByRole('menuitem', { name: '在 Finder 中打开' }).click()
+    await page.getByRole('menuitem', { name: '在文件管理器中打开' }).click()
     await expect
       .poll(() =>
         page.evaluate(
@@ -1603,7 +1783,7 @@ test.describe('Photo decision flow (mock backend)', () => {
 
     await page.getByRole('button', { name: '开始', exact: true }).click()
     await page.locator('.folder-line').first().click({ button: 'right' })
-    await page.getByRole('menuitem', { name: '在 Finder 中打开' }).click()
+    await page.getByRole('menuitem', { name: '在文件管理器中打开' }).click()
     await expect
       .poll(() =>
         page.evaluate(

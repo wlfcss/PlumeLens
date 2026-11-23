@@ -405,9 +405,11 @@ export function ArchiveScreen({
   t: ReturnType<typeof useTranslation>['t']
 }) {
   const archiveScrollRef = useRef<HTMLElement | null>(null)
-  const [collectionFilter, setCollectionFilter] = useState<SpeciesCollectionFilter>('all')
-  const [speciesPhotosOpen, setSpeciesPhotosOpen] = useState(false)
   const collectedSpeciesCount = archiveSpecies.filter((species) => species.collected).length
+  const [userSelectedFilter, setUserSelectedFilter] = useState<SpeciesCollectionFilter | null>(null)
+  const collectionFilter: SpeciesCollectionFilter =
+    userSelectedFilter ?? (collectedSpeciesCount > 0 ? 'collected' : 'all')
+  const [speciesPhotosOpen, setSpeciesPhotosOpen] = useState(false)
   const collectionGroupStats = useMemo(() => {
     return buildSpeciesCollectionGroups(archiveSpecies)
   }, [archiveSpecies])
@@ -484,17 +486,9 @@ export function ArchiveScreen({
   }, [archiveSearchKey, archiveTab, collectionFilter])
 
   return (
-    <main
-      className={cn(
-        'archive-screen',
-        archiveTab === 'map' && 'archive-screen--map',
-      )}
-    >
+    <main className={cn('archive-screen', archiveTab === 'map' && 'archive-screen--map')}>
       <section
-        className={cn(
-          'archive-main selection-scroll',
-          archiveTab === 'map' && 'archive-main--map',
-        )}
+        className={cn('archive-main selection-scroll', archiveTab === 'map' && 'archive-main--map')}
         ref={archiveScrollRef}
       >
         <div className="archive-heading">
@@ -524,7 +518,7 @@ export function ArchiveScreen({
                 filterId={item.id}
                 key={item.id}
                 label={item.label}
-                onClick={() => setCollectionFilter(item.id)}
+                onClick={() => setUserSelectedFilter(item.id)}
                 signal={item.signal}
                 t={t}
                 tone={item.tone}
@@ -658,9 +652,7 @@ export function ArchiveScreen({
                       <StatRow
                         label={t('archive.species.rarity')}
                         value={
-                          displayedActiveSpecies.protectLevel ??
-                          displayedActiveSpecies.iucn ??
-                          '--'
+                          displayedActiveSpecies.protectLevel ?? displayedActiveSpecies.iucn ?? '--'
                         }
                       />
                     </div>

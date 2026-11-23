@@ -586,6 +586,19 @@ export function ArchiveGeoMap({ onOpenPhoto }: ArchiveGeoMapProps): ReactElement
     t,
   ])
 
+  const geoLoadFailed =
+    summary.isError ||
+    provincesQ.isError ||
+    (level === 'province' && citiesQ.isError) ||
+    (level === 'city' && spotsQ.isError)
+  const isOffline = typeof navigator !== 'undefined' && navigator.onLine === false
+  const retryGeoQueries = () => {
+    void summary.refetch()
+    void provincesQ.refetch()
+    if (level === 'province') void citiesQ.refetch()
+    if (level === 'city') void spotsQ.refetch()
+  }
+
   return (
     <div className="archive-geo">
       <div className="archive-geo__head">
@@ -695,13 +708,24 @@ export function ArchiveGeoMap({ onOpenPhoto }: ArchiveGeoMapProps): ReactElement
       </div>
 
       <p className="archive-geo__note">
-        {summary.data && noGpsCount > 0 && unresolvedCount > 0
-          ? t('archive.geo.unmappedMixed', { noGps: noGpsCount, unresolved: unresolvedCount })
-          : summary.data && unresolvedCount > 0
-            ? t('archive.geo.unresolved', { count: unresolvedCount })
-            : summary.data && noGpsCount > 0
-              ? t('archive.geo.unmapped', { count: noGpsCount })
-          : t('archive.geo.allMapped')}
+        {geoLoadFailed ? (
+          <span role="alert">
+            {t('archive.geo.loadFailed')}{' '}
+            <button className="button-ghost button-compact" onClick={retryGeoQueries} type="button">
+              {t('common.retry')}
+            </button>
+          </span>
+        ) : isOffline && pendingCount > 0 ? (
+          t('archive.geo.offlinePending', { count: pendingCount })
+        ) : summary.data && noGpsCount > 0 && unresolvedCount > 0 ? (
+          t('archive.geo.unmappedMixed', { noGps: noGpsCount, unresolved: unresolvedCount })
+        ) : summary.data && unresolvedCount > 0 ? (
+          t('archive.geo.unresolved', { count: unresolvedCount })
+        ) : summary.data && noGpsCount > 0 ? (
+          t('archive.geo.unmapped', { count: noGpsCount })
+        ) : (
+          t('archive.geo.allMapped')
+        )}
       </p>
 
       {/* 三级 spot 详情弹卡 */}

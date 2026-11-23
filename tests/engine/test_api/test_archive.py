@@ -200,3 +200,22 @@ def test_archive_gps_parser_accepts_exif_rationals() -> None:
     assert coords is not None
     assert coords[0] == pytest.approx(-31.2416666667)
     assert coords[1] == pytest.approx(-121.4708333333)
+
+
+async def test_archive_species_summary_aggregates_confirmed_species_globally(
+    archive_client: AsyncClient,
+) -> None:
+    response = await archive_client.get("/archive/species/summary")
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    # p1 (须浮鸥, select, model) 与 p4 (暗绿绣眼鸟, select, manual override) 入档；
+    # p2 (reject) 与 p3 (head_visible=False -> model_unconfirmed) 排除。
+    assert payload["total_species"] == 2
+    assert payload["total_photos"] == 2
+    by_latin = {row["latin_name"]: row for row in payload["species"]}
+    assert set(by_latin) == {"Chlidonias hybrida", "Zosterops simplex"}
+    assert by_latin["Chlidonias hybrida"]["photo_count"] == 1
+    assert by_latin["Chlidonias hybrida"]["best_score"] == 0.8
+    assert by_latin["Chlidonias hybrida"]["library_count"] == 1
+    assert by_latin["Zosterops simplex"]["name"] == "暗绿绣眼鸟"
+    assert by_latin["Zosterops simplex"]["first_seen_at"] == "2026-04-24T00:03:00"

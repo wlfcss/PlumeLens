@@ -7,9 +7,11 @@ filters or pagination never changes scene consensus. No inference runs here.
 from __future__ import annotations
 
 import asyncio
+import math
 from collections import OrderedDict
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import datetime
 
 from engine.api.schemas.library import BestDetection, DetectionSummary, PhotoRow
 from engine.api.schemas.selection import (
@@ -216,21 +218,62 @@ def _matches_photo_conditions(
     return (photo.decision or photo.grade) in query.grades
 
 
+_GRADE_RANK: dict[str | None, int] = {
+    "select": 3,
+    "usable": 2,
+    "record": 1,
+    "reject": 0,
+}
+
+
+def _effective_grade_rank(photo: SelectionPhoto) -> int:
+    return _GRADE_RANK.get(photo.decision or photo.grade, 0)
+
+
+def _normalized_score(photo: SelectionPhoto) -> float:
+    score = photo.quality_score
+    return score if score is not None and math.isfinite(score) else -1.0
+
+
+def _parse_shot_timestamp(value: str) -> float | None:
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def _shot_time_asc_key(photo: SelectionPhoto) -> tuple[int, float]:
+    ts = _parse_shot_timestamp(photo.shot_at)
+    return (0, ts) if ts is not None else (1, 0.0)
+
+
+def _shot_time_desc_key(photo: SelectionPhoto) -> tuple[int, float]:
+    ts = _parse_shot_timestamp(photo.shot_at)
+    return (0, -ts) if ts is not None else (1, 0.0)
+
+
 def _sort_photos(
     photos: list[SelectionPhoto], query: SelectionQueryRequest
 ) -> list[SelectionPhoto]:
     if query.sort == "name":
-        return sorted(photos, key=lambda photo: (photo.file_name.casefold(), photo.id))
+        return sorted(
+            photos,
+            key=lambda photo: (photo.file_name.casefold(), _shot_time_asc_key(photo), photo.id),
+        )
     if query.sort == "time":
-        return sorted(photos, key=lambda photo: (photo.shot_at, photo.id), reverse=True)
+        return sorted(
+            photos,
+            key=lambda photo: (_shot_time_desc_key(photo), photo.file_name.casefold(), photo.id),
+        )
     return sorted(
         photos,
         key=lambda photo: (
-            photo.quality_score if photo.quality_score is not None else -1,
-            photo.shot_at,
+            -_effective_grade_rank(photo),
+            -_normalized_score(photo),
+            _shot_time_asc_key(photo),
+            photo.file_name.casefold(),
             photo.id,
         ),
-        reverse=True,
     )
 
 

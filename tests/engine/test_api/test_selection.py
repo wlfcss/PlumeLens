@@ -805,3 +805,87 @@ async def test_archive_projection_cannot_cache_another_tasks_uncommitted_grade(s
 async def test_invalid_filters_are_rejected(selection_client, body) -> None:
     client, _db, _tmp = selection_client
     assert (await client.post("/library/folder/selection/query", json=body)).status_code == 422
+
+
+async def test_score_sort_prioritizes_effective_grade_and_stable_tiebreakers_through_freeze(
+    selection_client,
+) -> None:
+    client, db, tmp = selection_client
+    burst_rows = [
+        ("b-auto-high", "usable", 0.85, "2026-11-17T08:10:00+00:00", "BURST_0001.JPG"),
+        ("b-manual-up", "record", 0.62, "2026-11-17T08:10:01+00:00", "BURST_0002.JPG"),
+        ("b-tie-late", "usable", 0.75, "2026-11-17T08:10:03+00:00", "BURST_0003.JPG"),
+        ("b-tie-early", "usable", 0.75, "2026-11-17T16:10:02+08:00", "BURST_0009.JPG"),
+        ("b-tie-name-b", "usable", 0.75, "2026-11-17T08:10:03+00:00", "BURST_0004.JPG"),
+        ("b-tie-id-b", "usable", 0.75, "2026-11-17T08:10:03+00:00", "BURST_0003.JPG"),
+    ]
+    async with db.transaction() as conn:
+        for photo_id, grade, score, shot_at, file_name in burst_rows:
+            await conn.execute(
+                "INSERT INTO photos (id, library_id, file_path, file_name, file_size, "
+                "file_mtime, file_hash, format, created_at, scene_id) "
+                "VALUES (?, 'folder', ?, ?, 10, ?, ?, 'JPG', ?, 77)",
+                (
+                    photo_id,
+                    str(tmp / f"{photo_id}.jpg"),
+                    file_name,
+                    shot_at,
+                    f"hash-{photo_id}",
+                    shot_at,
+                ),
+            )
+            await conn.execute(
+                "INSERT INTO analysis_results (id, photo_id, pipeline_version, result_json, "
+                "quality_score, grade, bird_count, species, created_at, is_active) "
+                "VALUES (?, ?, 'test-v1', ?, ?, ?, 1, '普通翠鸟', ?, 1)",
+                (
+                    f"result-{photo_id}",
+                    photo_id,
+                    json.dumps({"detections": [bird(KING)]}),
+                    score,
+                    grade,
+                    shot_at,
+                ),
+            )
+    await set_decision(db, "b-manual-up", Decision.SELECT)
+
+    full_query = {"photo_query": "BURST_", "sort": "score"}
+    full_response = await client.post("/library/folder/selection/query", json=full_query)
+    assert full_response.status_code == 200, full_response.text
+    full_data = full_response.json()
+    expected_full = [
+        "b-manual-up",
+        "b-auto-high",
+        "b-tie-early",
+        "b-tie-id-b",
+        "b-tie-late",
+        "b-tie-name-b",
+    ]
+    assert full_data["matched_photo_ids"] == expected_full
+    frozen_full = await freeze_selection(
+        db,
+        "folder",
+        SelectionQueryRequest(**full_query),
+        full_data["projection_revision"],
+    )
+    assert list(frozen_full.photo_ids) == expected_full
+
+    usable_only = {"photo_query": "BURST_", "grades": ["usable"], "sort": "score"}
+    filtered_response = await client.post("/library/folder/selection/query", json=usable_only)
+    assert filtered_response.status_code == 200, filtered_response.text
+    filtered_data = filtered_response.json()
+    expected_filtered = [
+        "b-auto-high",
+        "b-tie-early",
+        "b-tie-id-b",
+        "b-tie-late",
+        "b-tie-name-b",
+    ]
+    assert filtered_data["matched_photo_ids"] == expected_filtered
+    frozen_filtered = await freeze_selection(
+        db,
+        "folder",
+        SelectionQueryRequest(**usable_only),
+        filtered_data["projection_revision"],
+    )
+    assert list(frozen_filtered.photo_ids) == expected_filtered
