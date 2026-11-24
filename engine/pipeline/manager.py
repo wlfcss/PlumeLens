@@ -137,6 +137,13 @@ class PipelineManager:
         """Load ONNX models and torch species assets during FastAPI startup."""
 
         models_dir = self._settings.models_dir
+        try:
+            import cv2
+
+            # Prevent OpenCV from spawning a full-core thread pool alongside ONNX/Torch/asyncio.
+            cv2.setNumThreads(1)
+        except Exception:
+            pass
 
         # 供应链整完整性闸门 — 在加载任何模型前先核对 manifest.json 的 SHA-256。
         # species/v4/seed42_adapter.pt 走 torch.load(weights_only=False) 反序列

@@ -139,7 +139,7 @@ async def _attach_legacy_runs(db: Database, library_id: str | None = None) -> No
 
 
 async def get_library_control(db: Database, library_id: str) -> dict:
-    async with db.conn.execute(
+    async with db.read_snapshot() as conn, conn.execute(
         "SELECT id,desired_state FROM analysis_runs WHERE library_id=? ORDER BY rowid DESC LIMIT 1",
         (library_id,),
     ) as cur:
@@ -153,7 +153,7 @@ async def get_library_control(db: Database, library_id: str) -> dict:
 async def get_task_force_rerun(db: Database, task: Task) -> bool:
     if not task.run_id:
         return False
-    async with db.conn.execute(
+    async with db.read_snapshot() as conn, conn.execute(
         "SELECT force_rerun FROM analysis_runs WHERE id=?", (task.run_id,)
     ) as cur:
         row = await cur.fetchone()
@@ -161,7 +161,7 @@ async def get_task_force_rerun(db: Database, task: Task) -> bool:
 
 
 async def _run_desired_state(db: Database, run_id: str | None) -> str:
-    async with db.conn.execute(
+    async with db.read_snapshot() as conn, conn.execute(
         "SELECT desired_state FROM analysis_runs WHERE id=?", (run_id,)
     ) as cur:
         row = await cur.fetchone()
@@ -250,7 +250,7 @@ async def enqueue_library(
     传 current_pipeline_version 让 enqueue_photos 跳过已分析的，避免重复点击
     「开始分析」累积 task_queue（之前 bug：3173 个 task / 783 个 photo = 4× 膨胀）。
     """
-    async with db.conn.execute(
+    async with db.read_snapshot() as conn, conn.execute(
         "SELECT id FROM photos WHERE library_id = ? AND file_hash IS NOT NULL",
         (library_id,),
     ) as cur:
@@ -288,7 +288,7 @@ async def list_tasks(
         params.append(status.value)
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     params.append(limit)
-    async with db.conn.execute(
+    async with db.read_snapshot() as conn, conn.execute(
         f"SELECT * FROM task_queue {where} ORDER BY priority DESC, created_at ASC LIMIT ?",
         params,
     ) as cur:
@@ -305,7 +305,7 @@ async def get_stats(db: Database, library_id: str | None = None) -> dict[str, in
         query = "SELECT status, COUNT(*) AS c FROM task_queue WHERE library_id = ? GROUP BY status"
         params = (library_id,)
     stats = {status.value: 0 for status in TaskStatus}
-    async with db.conn.execute(query, params) as cur:
+    async with db.read_snapshot() as conn, conn.execute(query, params) as cur:
         async for row in cur:
             stats[str(row["status"])] = int(row["c"])
     return stats
@@ -332,7 +332,7 @@ async def clear_terminal_tasks(db: Database, library_id: str) -> int:
 
 
 async def get_task(db: Database, task_id: str) -> Task | None:
-    async with db.conn.execute(
+    async with db.read_snapshot() as conn, conn.execute(
         "SELECT * FROM task_queue WHERE id = ?",
         (task_id,),
     ) as cur:

@@ -650,7 +650,6 @@ const PhotoStackTile = memo(function PhotoStackTile({
           <ThumbnailImage
             alt={photo.fileName}
             className="photo-preview__image"
-            highResSrc={photo.thumbPreviewUrl}
             onStatusChange={onThumbnailLoadStatus}
             photoId={photo.id}
             src={photo.thumbGridUrl}
@@ -759,7 +758,6 @@ const PhotoTile = memo(function PhotoTile({
           alt={photo.fileName}
           className="photo-preview__image"
           onStatusChange={onThumbnailLoadStatus}
-          highResSrc={photo.thumbPreviewUrl}
           photoId={photo.id}
           src={photo.thumbGridUrl}
         />

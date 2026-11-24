@@ -294,7 +294,7 @@ async def backfill_library_locations(
 
 async def backfill_all_libraries(db: Database) -> None:
     """lifespan 启动后台跑 — 扫所有 library 的未解析照片。"""
-    async with db.conn.execute("SELECT id FROM libraries") as cur:
+    async with db.read_snapshot() as conn, conn.execute("SELECT id FROM libraries") as cur:
         rows = await cur.fetchall()
     for row in rows:
         try:

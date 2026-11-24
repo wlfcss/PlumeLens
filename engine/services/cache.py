@@ -215,7 +215,7 @@ async def list_input_history(db: Database, photo_id: str) -> list[dict]:
 
 async def list_versions(db: Database, photo_id: str) -> list[dict]:
     """Return all analysis versions for a photo (for history/diagnostics)."""
-    async with db.conn.execute(
+    async with db.read_snapshot() as conn, conn.execute(
         "SELECT id, pipeline_version, quality_score, grade, bird_count, "
         "created_at, is_active FROM analysis_results "
         "WHERE photo_id = ? ORDER BY created_at DESC, rowid DESC",

@@ -26,7 +26,48 @@ function retryDelayMs(attempt: number): number {
  *   PhotoTile re-render with same src → 浏览器 fs cache 同样命中,新文件 mtime 变
  *   会让 net.fetch 取新内容,所以最终一致。轻微延迟用户能接受。
  */
+const MAX_LOADED_SRC_CACHE = 4096
 const loadedSrcCache = new Set<string>()
+
+function rememberLoadedSrc(src: string): void {
+  if (loadedSrcCache.has(src)) {
+    loadedSrcCache.delete(src)
+  } else if (loadedSrcCache.size >= MAX_LOADED_SRC_CACHE) {
+    const oldest = loadedSrcCache.values().next().value
+    if (oldest !== undefined) loadedSrcCache.delete(oldest)
+  }
+  loadedSrcCache.add(src)
+}
+
+// Single shared focus/visibility listener across all unloaded ThumbnailImage instances
+// instead of registering 2 global listeners per mounted tile.
+const retrySubscribers = new Set<() => void>()
+let globalRetryListenersAttached = false
+
+function notifyRetrySubscribers(): void {
+  for (const listener of retrySubscribers) listener()
+}
+
+function handleGlobalVisibilityChange(): void {
+  if (document.visibilityState === 'visible') notifyRetrySubscribers()
+}
+
+function subscribeRetryOnWake(listener: () => void): () => void {
+  retrySubscribers.add(listener)
+  if (!globalRetryListenersAttached) {
+    globalRetryListenersAttached = true
+    window.addEventListener('focus', notifyRetrySubscribers)
+    document.addEventListener('visibilitychange', handleGlobalVisibilityChange)
+  }
+  return () => {
+    retrySubscribers.delete(listener)
+    if (retrySubscribers.size === 0 && globalRetryListenersAttached) {
+      globalRetryListenersAttached = false
+      window.removeEventListener('focus', notifyRetrySubscribers)
+      document.removeEventListener('visibilitychange', handleGlobalVisibilityChange)
+    }
+  }
+}
 
 export type ThumbnailLoadStatus = 'missing' | 'loading' | 'loaded' | 'error'
 
@@ -99,16 +140,7 @@ export function ThumbnailImage({
       setAttempt((value) => (value >= MAX_RETRY_ATTEMPTS ? 0 : value + 1))
     }
 
-    const handleVisibilityChange = () => {
-      if (document.visibilityState === 'visible') retryNow()
-    }
-
-    window.addEventListener('focus', retryNow)
-    document.addEventListener('visibilitychange', handleVisibilityChange)
-    return () => {
-      window.removeEventListener('focus', retryNow)
-      document.removeEventListener('visibilitychange', handleVisibilityChange)
-    }
+    return subscribeRetryOnWake(retryNow)
   }, [loaded, src])
 
   const displaySrc = useMemo(() => {
@@ -147,7 +179,7 @@ export function ThumbnailImage({
           retryTimerRef.current = null
         }
         setLoaded(true)
-        if (src) loadedSrcCache.add(src) // 记入跨 mount cache,后续 remount 跳渐变帧
+        if (src) rememberLoadedSrc(src) // 记入有界 LRU cache,后续 remount 跳渐变帧
         if (photoId) onStatusChangeRef.current?.(photoId, 'loaded')
       }}
       src={displaySrc}

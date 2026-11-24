@@ -9,7 +9,7 @@ import numpy as np
 from numpy.typing import NDArray
 from PIL import Image
 
-from engine.core.orientation import orient_image, raw_orientation
+from engine.core.orientation import orient_array, raw_orientation
 
 # RAW 格式扩展名（rawpy 支持）
 RAW_EXTENSIONS: frozenset[str] = frozenset(
@@ -78,8 +78,9 @@ def _load_pillow_u8(path: Path) -> NDArray[np.uint8]:
 
     with Image.open(path) as img:
         img = ImageOps.exif_transpose(img) or img
-        img = img.convert("RGB")
-        return np.asarray(img, dtype=np.uint8).copy()
+        if img.mode != "RGB":
+            img = img.convert("RGB")
+        return np.array(img, dtype=np.uint8, copy=True)
 
 
 def _load_pillow(path: Path) -> NDArray[np.float32]:
@@ -111,8 +112,7 @@ def _load_raw_u8(path: Path) -> NDArray[np.uint8]:
             no_auto_bright=True,
             user_flip=0,
         )
-    oriented = orient_image(Image.fromarray(rgb), orientation)
-    return np.asarray(oriented, dtype=np.uint8).copy()
+    return orient_array(rgb, orientation)
 
 
 def _load_raw(path: Path) -> NDArray[np.float32]:

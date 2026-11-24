@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef } from 'react'
+import { useCallback, useEffect, useMemo, useRef } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 
 import type { ThumbnailLoadStatus } from '@/components/thumbnail-image'
@@ -30,8 +30,9 @@ export function useThumbnailRepair({
   const invalidateTimerRef = useRef<number | null>(null)
   const failedResourcesRef = useRef(new Set<string>())
   const attemptsRef = useRef(new Map<string, { src: string | null | undefined; count: number }>())
-  const photosRef = useRef(photos)
-  photosRef.current = photos
+  const photoById = useMemo(() => new Map(photos.map((photo) => [photo.id, photo])), [photos])
+  const photoByIdRef = useRef(photoById)
+  photoByIdRef.current = photoById
 
   useEffect(() => {
     const timers = missingTimersRef.current
@@ -54,7 +55,7 @@ export function useThumbnailRepair({
       const nextPhotoId = queueRef.current.shift()
       if (!nextPhotoId) return
 
-      const currentPhoto = photosRef.current.find((photo) => photo.id === nextPhotoId)
+      const currentPhoto = photoByIdRef.current.get(nextPhotoId)
       if (
         !currentPhoto ||
         (currentPhoto.thumbGridUrl && !failedResourcesRef.current.has(nextPhotoId)) ||
@@ -97,7 +98,7 @@ export function useThumbnailRepair({
 
       const enqueueBackendRebuild = () => {
         if (repairingRef.current.has(photoId)) return
-        const photo = photosRef.current.find((item) => item.id === photoId)
+        const photo = photoByIdRef.current.get(photoId)
         if (!photo) return
         const previous = attemptsRef.current.get(photoId)
         const sameResource = previous?.src === photo.thumbGridUrl
@@ -114,7 +115,7 @@ export function useThumbnailRepair({
       }
 
       if (status === 'missing') {
-        const photo = photosRef.current.find((p) => p.id === photoId)
+        const photo = photoByIdRef.current.get(photoId)
         if (!photo) return
         if (photo.analysisStatus !== 'done' && photo.analysisStatus !== 'failed') return
         if (missingTimersRef.current.has(photoId)) return
@@ -126,7 +127,7 @@ export function useThumbnailRepair({
         }
         const timerId = window.setTimeout(() => {
           missingTimersRef.current.delete(photoId)
-          const refreshed = photosRef.current.find((p) => p.id === photoId)
+          const refreshed = photoByIdRef.current.get(photoId)
           if (refreshed?.thumbGridUrl) return
           enqueueBackendRebuild()
         }, THUMBNAIL_MISSING_REPAIR_DELAY_MS)

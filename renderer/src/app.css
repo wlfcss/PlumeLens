@@ -103,13 +103,11 @@
 @keyframes pl-tile-in {
   from {
     opacity: 0;
-    filter: blur(3px);
-    transform: translateY(12px) scale(0.985);
+    transform: translateY(10px) scale(0.985);
   }
 
   to {
     opacity: 1;
-    filter: blur(0);
     transform: translateY(0) scale(1);
   }
 }
@@ -9881,10 +9879,6 @@ select:focus-visible,
 }
 
 @media (prefers-reduced-motion: no-preference) {
-  .app-shell {
-    animation: pl-grid-drift 64s linear infinite;
-  }
-
   .engine-panel:hover::before,
   .start-list:hover::before,
   .metric-strip:hover::before,

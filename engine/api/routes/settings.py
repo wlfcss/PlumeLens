@@ -223,7 +223,10 @@ async def model_versions(request: Request) -> ModelVersionsResponse:
 
 
 async def _count_rows(db: Database, table: str) -> int:
-    async with db.conn.execute(f"SELECT COUNT(*) AS c FROM {table}") as cur:
+    async with (
+        db.read_snapshot() as conn,
+        conn.execute(f"SELECT COUNT(*) AS c FROM {table}") as cur,
+    ):
         row = await cur.fetchone()
     return int(row["c"]) if row else 0
 

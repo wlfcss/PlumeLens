@@ -399,7 +399,17 @@ def _photo_from_row(row: Any, overrides: list[SpeciesOverrideRecord]) -> PhotoRo
         ]
         if details:
             best_detail = details[min(best_index, len(details) - 1)]
-            best = BestDetection.model_validate(best_detail.model_dump())
+            best = BestDetection(
+                bbox=best_detail.bbox,
+                pose=best_detail.pose,
+                quality=best_detail.quality,
+                species=best_detail.species,
+                species_latin=best_detail.species_latin,
+                species_english=best_detail.species_english,
+                manual_species=best_detail.manual_species,
+                species_source=best_detail.species_source,
+                species_candidates=best_detail.species_candidates,
+            )
             effective_species = (
                 None if best.species_source == "none" else (best.species or effective_species)
             )
@@ -460,11 +470,46 @@ _ARCHIVE_PHOTO_SELECT = (
 )
 
 
+def _project_geo_rows_sync(
+    all_context_rows: list[Any],
+    target_rows: list[Any],
+    target_ids: set[str],
+    overrides: dict[str, list[SpeciesOverrideRecord]],
+) -> list[_GeoPhoto]:
+    projected_by_id: dict[str, _GeoPhoto] = {}
+    by_library: dict[str, list[PhotoRow]] = {}
+    for row in all_context_rows:
+        pid = str(row["id"])
+        photo = _photo_from_row(row, overrides.get(pid, []))
+        lib_id = str(row["library_id"])
+        by_library.setdefault(lib_id, []).append(photo)
+        if pid in target_ids:
+            projected_by_id[pid] = _GeoPhoto(
+                library_id=lib_id,
+                photo=photo,
+                exif_json=(str(row["exif_json"]) if row["exif_json"] is not None else None),
+                province=(str(row["province"]) if row["province"] is not None else None),
+                city=(str(row["city"]) if row["city"] is not None else None),
+                district=(str(row["district"]) if row["district"] is not None else None),
+                place=(str(row["place"]) if row["place"] is not None else None),
+                thumb_grid=(str(row["thumb_grid"]) if row["thumb_grid"] is not None else None),
+            )
+    for library_photos in by_library.values():
+        _apply_group_species_consensus(library_photos)
+    return [
+        projected_by_id[str(row["id"])]
+        for row in target_rows
+        if str(row["id"]) in projected_by_id
+    ]
+
+
 async def _load_geo_photos(
     db: Database,
     where_sql: str,
     params: tuple[object, ...] = (),
 ) -> list[_GeoPhoto]:
+    import asyncio
+
     async with db.read_snapshot() as conn:
         async with conn.execute(
             _ARCHIVE_PHOTO_SELECT
@@ -510,31 +555,9 @@ async def _load_geo_photos(
             db, [str(row["id"]) for row in all_context_rows], connection=conn
         )
 
-    projected_by_id: dict[str, _GeoPhoto] = {}
-    by_library: dict[str, list[PhotoRow]] = {}
-    for row in all_context_rows:
-        pid = str(row["id"])
-        photo = _photo_from_row(row, overrides.get(pid, []))
-        lib_id = str(row["library_id"])
-        by_library.setdefault(lib_id, []).append(photo)
-        if pid in target_ids:
-            projected_by_id[pid] = _GeoPhoto(
-                library_id=lib_id,
-                photo=photo,
-                exif_json=(str(row["exif_json"]) if row["exif_json"] is not None else None),
-                province=(str(row["province"]) if row["province"] is not None else None),
-                city=(str(row["city"]) if row["city"] is not None else None),
-                district=(str(row["district"]) if row["district"] is not None else None),
-                place=(str(row["place"]) if row["place"] is not None else None),
-                thumb_grid=(str(row["thumb_grid"]) if row["thumb_grid"] is not None else None),
-            )
-    for library_photos in by_library.values():
-        _apply_group_species_consensus(library_photos)
-    return [
-        projected_by_id[str(row["id"])]
-        for row in target_rows
-        if str(row["id"]) in projected_by_id
-    ]
+    return await asyncio.to_thread(
+        _project_geo_rows_sync, all_context_rows, target_rows, target_ids, overrides
+    )
 
 
 def _get_geo_cache(key: str) -> Any | None:
@@ -650,27 +673,7 @@ def _gps_from_exif(exif_json: str | None) -> tuple[float, float] | None:
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
-@router.get("/geo/summary", response_model=GeoSummary)
-async def geo_summary(request: Request) -> GeoSummary:
-    """整体地理解析进度 — 羽迹页面顶部进度条用。
-
-    pending 必须只计"有可用经纬度但还没 backfill"的。部分相机会写入空的
-    GPSInfo 容器(GPSVersionID/GPSSatellites 等),但不含 GPSLatitude/GPSLongitude;
-    这些照片要算作无坐标,否则进度条会永远显示 X/Y。
-    """
-    db = await _db(request)
-    async with db.read_snapshot() as conn:
-        async with conn.execute("SELECT COUNT(*) AS total FROM photos") as cur:
-            total_row = await cur.fetchone()
-        async with conn.execute(
-            "SELECT exif_json, country FROM photos "
-            "WHERE (exif_json LIKE '%\"GPSLatitude\"%' "
-            "AND exif_json LIKE '%\"GPSLongitude\"%') "
-            "OR country IS NOT NULL",
-        ) as cur:
-            rows = await cur.fetchall()
-
-    total = int(total_row["total"] or 0) if total_row is not None else 0
+def _tally_geo_summary_sync(rows: list[Any]) -> tuple[int, int, int]:
     has_gps = 0
     resolved = 0
     unresolved = 0
@@ -683,6 +686,33 @@ async def geo_summary(request: Request) -> GeoSummary:
             unresolved += 1
         elif country is not None:
             resolved += 1
+    return has_gps, resolved, unresolved
+
+
+@router.get("/geo/summary", response_model=GeoSummary)
+async def geo_summary(request: Request) -> GeoSummary:
+    """整体地理解析进度 — 羽迹页面顶部进度条用。
+
+    pending 必须只计"有可用经纬度但还没 backfill"的。部分相机会写入空的
+    GPSInfo 容器(GPSVersionID/GPSSatellites 等),但不含 GPSLatitude/GPSLongitude;
+    这些照片要算作无坐标,否则进度条会永远显示 X/Y。
+    """
+    import asyncio
+
+    db = await _db(request)
+    async with db.read_snapshot() as conn:
+        async with conn.execute("SELECT COUNT(*) AS total FROM photos") as cur:
+            total_row = await cur.fetchone()
+        async with conn.execute(
+            "SELECT exif_json, country FROM photos "
+            "WHERE (exif_json LIKE '%\"GPSLatitude\"%' "
+            "AND exif_json LIKE '%\"GPSLongitude\"%') "
+            "OR country IS NOT NULL",
+        ) as cur:
+            rows = list(await cur.fetchall())
+
+    total = int(total_row["total"] or 0) if total_row is not None else 0
+    has_gps, resolved, unresolved = await asyncio.to_thread(_tally_geo_summary_sync, rows)
     pending = max(0, has_gps - resolved - unresolved)
     return GeoSummary(
         total_with_gps=has_gps,

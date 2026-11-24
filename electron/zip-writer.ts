@@ -6,7 +6,14 @@
  * Compatible with macOS Archive Utility, Windows Explorer, and Python `zipfile`.
  */
 
-import { deflateRawSync } from 'zlib'
+import { promisify } from 'util'
+import * as zlib from 'zlib'
+
+const deflateRawAsync = promisify(zlib.deflateRaw)
+const nativeCrc32: ((data: Buffer) => number) | null =
+  typeof (zlib as unknown as { crc32?: (data: Buffer) => number }).crc32 === 'function'
+    ? (zlib as unknown as { crc32: (data: Buffer) => number }).crc32
+    : null
 
 export interface ZipEntryInput {
   /** Forward-slash relative path inside the archive (e.g. `logs/client.jsonl`). */
@@ -28,6 +35,7 @@ const CRC32_TABLE = (() => {
 })()
 
 export function crc32(buffer: Buffer): number {
+  if (nativeCrc32) return nativeCrc32(buffer) >>> 0
   let crc = 0xffffffff
   for (let i = 0; i < buffer.length; i += 1) {
     const byte = buffer[i] ?? 0
@@ -64,7 +72,7 @@ export function buildZipArchive(entries: ZipEntryInput[]): Buffer {
     let method = 0
     let payload = rawBuf
     if (rawBuf.length >= 64) {
-      const deflated = deflateRawSync(rawBuf, { level: 6 })
+      const deflated = zlib.deflateRawSync(rawBuf, { level: 6 })
       if (deflated.length < rawBuf.length) {
         method = 8
         payload = deflated
@@ -121,6 +129,90 @@ export function buildZipArchive(entries: ZipEntryInput[]): Buffer {
   eocd.writeUInt32LE(centralDirBuf.length, 12)
   eocd.writeUInt32LE(offset, 16)
   eocd.writeUInt16LE(0, 20) // comment length
+
+  return Buffer.concat([...localParts, centralDirBuf, eocd])
+}
+
+/**
+ * Async ZIP builder: offloads Deflate compression to libuv's C++ thread pool
+ * and uses native `zlib.crc32` so large diagnostics bundles never stall the
+ * Electron main event loop.
+ */
+export async function buildZipArchiveAsync(entries: ZipEntryInput[]): Promise<Buffer> {
+  const prepared = await Promise.all(
+    entries.map(async (entry) => {
+      const normalizedName = entry.name.replace(/\\/g, '/').replace(/^\/+/, '')
+      const nameBuf = Buffer.from(normalizedName, 'utf-8')
+      const rawBuf = typeof entry.data === 'string' ? Buffer.from(entry.data, 'utf-8') : entry.data
+      const checksum = crc32(rawBuf)
+      const { dosTime, dosDate } = toDosTimeDate(entry.mtime ?? new Date())
+
+      let method = 0
+      let payload = rawBuf
+      if (rawBuf.length >= 64) {
+        const deflated = await deflateRawAsync(rawBuf, { level: 6 })
+        if (deflated.length < rawBuf.length) {
+          method = 8
+          payload = deflated
+        }
+      }
+      return { nameBuf, rawBuf, checksum, dosTime, dosDate, method, payload }
+    }),
+  )
+
+  const localParts: Buffer[] = []
+  const centralParts: Buffer[] = []
+  let offset = 0
+
+  for (const item of prepared) {
+    const localHeader = Buffer.alloc(30)
+    localHeader.writeUInt32LE(0x04034b50, 0)
+    localHeader.writeUInt16LE(20, 4)
+    localHeader.writeUInt16LE(0x0800, 6)
+    localHeader.writeUInt16LE(item.method, 8)
+    localHeader.writeUInt16LE(item.dosTime, 10)
+    localHeader.writeUInt16LE(item.dosDate, 12)
+    localHeader.writeUInt32LE(item.checksum, 14)
+    localHeader.writeUInt32LE(item.payload.length, 18)
+    localHeader.writeUInt32LE(item.rawBuf.length, 22)
+    localHeader.writeUInt16LE(item.nameBuf.length, 26)
+    localHeader.writeUInt16LE(0, 28)
+
+    localParts.push(localHeader, item.nameBuf, item.payload)
+
+    const centralHeader = Buffer.alloc(46)
+    centralHeader.writeUInt32LE(0x02014b50, 0)
+    centralHeader.writeUInt16LE(20, 4)
+    centralHeader.writeUInt16LE(20, 6)
+    centralHeader.writeUInt16LE(0x0800, 8)
+    centralHeader.writeUInt16LE(item.method, 10)
+    centralHeader.writeUInt16LE(item.dosTime, 12)
+    centralHeader.writeUInt16LE(item.dosDate, 14)
+    centralHeader.writeUInt32LE(item.checksum, 16)
+    centralHeader.writeUInt32LE(item.payload.length, 20)
+    centralHeader.writeUInt32LE(item.rawBuf.length, 24)
+    centralHeader.writeUInt16LE(item.nameBuf.length, 28)
+    centralHeader.writeUInt16LE(0, 30)
+    centralHeader.writeUInt16LE(0, 32)
+    centralHeader.writeUInt16LE(0, 34)
+    centralHeader.writeUInt16LE(0, 36)
+    centralHeader.writeUInt32LE(0, 38)
+    centralHeader.writeUInt32LE(offset, 42)
+
+    centralParts.push(centralHeader, item.nameBuf)
+    offset += localHeader.length + item.nameBuf.length + item.payload.length
+  }
+
+  const centralDirBuf = Buffer.concat(centralParts)
+  const eocd = Buffer.alloc(22)
+  eocd.writeUInt32LE(0x06054b50, 0)
+  eocd.writeUInt16LE(0, 4)
+  eocd.writeUInt16LE(0, 6)
+  eocd.writeUInt16LE(prepared.length, 8)
+  eocd.writeUInt16LE(prepared.length, 10)
+  eocd.writeUInt32LE(centralDirBuf.length, 12)
+  eocd.writeUInt32LE(offset, 16)
+  eocd.writeUInt16LE(0, 20)
 
   return Buffer.concat([...localParts, centralDirBuf, eocd])
 }

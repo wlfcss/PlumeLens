@@ -88,14 +88,18 @@ export function applyNewSpeciesMarkers(
   groups: PhotoGroupRecord[],
 ): { photos: PhotoRecord[]; groups: PhotoGroupRecord[] } {
   if (photos.length === 0) return { photos, groups }
+  // 预解析拍摄时间戳避免比较器内 O(N log N) 次 Date.parse
+  const shotMs = new Map<string, number>()
+  for (const photo of photos) {
+    const parsed = Date.parse(photo.shotAt)
+    shotMs.set(photo.id, Number.isFinite(parsed) ? parsed : 0)
+  }
   // 按拍摄时间升序排;ties 用 photo.id 稳定排序避免不同渲染下 first-seen 漂移
   const sorted = [...photos].sort((a, b) => {
-    const aTs = Date.parse(a.shotAt)
-    const bTs = Date.parse(b.shotAt)
-    const aSafe = Number.isFinite(aTs) ? aTs : 0
-    const bSafe = Number.isFinite(bTs) ? bTs : 0
+    const aSafe = shotMs.get(a.id) ?? 0
+    const bSafe = shotMs.get(b.id) ?? 0
     if (aSafe !== bSafe) return aSafe - bSafe
-    return a.id.localeCompare(b.id)
+    return a.id < b.id ? -1 : a.id > b.id ? 1 : 0
   })
   const seenSpecies = new Set<string>()
   const firstEncounterSpeciesKeysByGroupId = new Map<string, Set<string>>()
@@ -219,9 +223,16 @@ export function libraryDetailContentHash(detail: LibraryDetail): string {
     hash = hashStableValue(hash, photo.city)
     hash = hashStableValue(hash, photo.district)
     hash = hashStableValue(hash, photo.place)
-    hash = hashStableValue(hash, photo.exif)
-    hash = hashStableValue(hash, photo.best_detection)
-    hash = hashStableValue(hash, photo.detections)
+    hash = hashStableValue(hash, photo.shot_at)
+    const dets = photo.detections
+    hash = hashStableValue(hash, dets ? dets.length : 0)
+    if (dets) {
+      for (const det of dets) {
+        hash = hashStableValue(hash, det.species)
+        hash = hashStableValue(hash, det.species_source)
+        hash = hashStableValue(hash, det.manual_species)
+      }
+    }
   }
   const encoded = hash.toString(36)
   detailContentHashCache.set(detail, encoded)
@@ -245,6 +256,7 @@ export function deriveSpeciesRecords(workspace: WorkspaceSnapshot): SpeciesRecor
       latinName: string
       englishName: string | null
       photos: PhotoRecord[]
+      photoIds: Set<string>
       bestScore: number
       firstSeenAt: string
       lastSeenAt: string
@@ -263,7 +275,8 @@ export function deriveSpeciesRecords(workspace: WorkspaceSnapshot): SpeciesRecor
       const score = photo.finalScore ?? 0
       const existing = capturedGroups.get(groupKey)
       if (existing) {
-        if (!existing.photos.some((item) => item.id === photo.id)) {
+        if (!existing.photoIds.has(photo.id)) {
+          existing.photoIds.add(photo.id)
           existing.photos.push(photo)
         }
         if (score > existing.bestScore) existing.bestScore = score
@@ -275,6 +288,7 @@ export function deriveSpeciesRecords(workspace: WorkspaceSnapshot): SpeciesRecor
           latinName: entry.latinName,
           englishName: entry.englishName,
           photos: [photo],
+          photoIds: new Set([photo.id]),
           bestScore: score,
           firstSeenAt: photo.shotAt,
           lastSeenAt: photo.shotAt,
@@ -548,6 +562,7 @@ export function buildArchiveMapPins(
   const speciesByLatin = new Map(speciesRecords.map((species) => [species.latinName, species]))
   const speciesByName = new Map(speciesRecords.map((species) => [species.name, species]))
   const pins = new Map<string, ArchiveMapPin>()
+  const pinPhotoIds = new Map<string, Set<string>>()
 
   for (const photo of photos) {
     const gps = extractPhotoGps(photo.exif)
@@ -576,10 +591,13 @@ export function buildArchiveMapPins(
       const pinKey = `${coordinateKey}:${speciesId}`
       const existing = pins.get(pinKey)
       if (existing) {
-        if (!existing.photos.some((item) => item.id === photo.id)) {
+        const seenIds = pinPhotoIds.get(pinKey)!
+        if (!seenIds.has(photo.id)) {
+          seenIds.add(photo.id)
           existing.photos.push(photo)
         }
       } else {
+        pinPhotoIds.set(pinKey, new Set([photo.id]))
         pins.set(pinKey, {
           id: pinKey,
           speciesId,

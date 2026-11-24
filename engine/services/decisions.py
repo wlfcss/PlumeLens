@@ -84,7 +84,7 @@ async def get_decision(db: Database, photo_id: str) -> Decision | None:
 
     Returns None when the photo has no explicit manual override.
     """
-    async with db.conn.execute(
+    async with db.read_snapshot() as conn, conn.execute(
         "SELECT decision FROM photo_decisions WHERE photo_id = ?",
         (photo_id,),
     ) as cur:
@@ -175,7 +175,7 @@ async def list_decisions(
 
     Photos without a row in photo_decisions are omitted.
     """
-    async with db.conn.execute(
+    async with db.read_snapshot() as conn, conn.execute(
         "SELECT pd.photo_id, pd.decision FROM photo_decisions pd "
         "JOIN photos p ON pd.photo_id = p.id "
         "WHERE p.library_id = ?",
@@ -188,7 +188,7 @@ async def list_decisions(
 async def count_by_decision(db: Database, library_id: str) -> dict[str, int]:
     """Summary counts per manual grade for a library."""
     counts = {d.value: 0 for d in Decision}
-    async with db.conn.execute(
+    async with db.read_snapshot() as conn, conn.execute(
         "SELECT pd.decision, COUNT(*) AS c FROM photo_decisions pd "
         "JOIN photos p ON pd.photo_id = p.id "
         "WHERE p.library_id = ? GROUP BY pd.decision",

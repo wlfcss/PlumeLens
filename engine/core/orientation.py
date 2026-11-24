@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+import numpy as np
+from numpy.typing import NDArray
 from PIL import Image
 
 _TRANSPOSE = {
@@ -40,6 +42,29 @@ def raw_orientation(path: Path, raw_flip: int) -> int:
 def orient_image(image: Image.Image, orientation: int) -> Image.Image:
     operation = _TRANSPOSE.get(orientation)
     return image.transpose(operation) if operation is not None else image
+
+
+def orient_array(arr: NDArray[np.uint8], orientation: int) -> NDArray[np.uint8]:
+    """Pure-NumPy equivalent of orient_image(Image.fromarray(arr), orientation).
+
+    Avoids the PIL Image.fromarray + transpose + np.asarray round-trip that triples
+    peak RAM on 45 MP RAW images (536-670 MB -> 134-268 MB).
+    """
+    if orientation == 2:
+        return np.ascontiguousarray(arr[:, ::-1])
+    if orientation == 3:
+        return np.ascontiguousarray(arr[::-1, ::-1])
+    if orientation == 4:
+        return np.ascontiguousarray(arr[::-1, :])
+    if orientation == 5:
+        return np.ascontiguousarray(arr.transpose(1, 0, 2))
+    if orientation == 6:
+        return np.ascontiguousarray(arr.transpose(1, 0, 2)[:, ::-1])
+    if orientation == 7:
+        return np.ascontiguousarray(arr[::-1, ::-1].transpose(1, 0, 2))
+    if orientation == 8:
+        return np.ascontiguousarray(arr.transpose(1, 0, 2)[::-1, :])
+    return np.ascontiguousarray(arr)
 
 
 def display_dimensions(width: int, height: int, orientation: int) -> tuple[int, int]:

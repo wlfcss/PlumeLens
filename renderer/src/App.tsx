@@ -622,8 +622,8 @@ export default function App() {
     })
   }, [photoById, reviewAllowedIds, reviewOrder, reviewPhoto, reviewSourcePhotos])
   const reviewSegmentPhotosByPhotoId = useMemo(
-    () => buildReviewSegmentPhotosByPhotoId(reviewSourcePhotos),
-    [reviewSourcePhotos],
+    () => (reviewPhoto ? buildReviewSegmentPhotosByPhotoId(reviewSourcePhotos) : new Map<string, PhotoRecord[]>()),
+    [reviewPhoto, reviewSourcePhotos],
   )
   const reviewGroupPhotos = useMemo(() => {
     if (!reviewPhoto || reviewPhotoOutsideSelection) return EMPTY_PHOTOS

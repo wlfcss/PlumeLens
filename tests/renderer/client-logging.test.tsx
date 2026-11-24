@@ -20,11 +20,12 @@ import { redactText, sanitizeLogEntry } from '../../electron/log-redactor'
 import { ClientLogger } from '../../electron/logger'
 import {
   buildAndWriteDiagnosticsZip,
+  buildAndWriteDiagnosticsZipAsync,
   buildTaskMetricsSummary,
   clearLogFiles,
   getLogsStorageStats,
 } from '../../electron/log-diagnostics'
-import { buildZipArchive } from '../../electron/zip-writer'
+import { buildZipArchive, buildZipArchiveAsync } from '../../electron/zip-writer'
 import {
   __resetRendererLoggerForTests,
   createLogger,
@@ -355,12 +356,30 @@ describe('ZIP builder and diagnostics bundle export', () => {
     expect(getLogsStorageStats(logsDir).fileCount).toBe(0)
   })
 
-  it('compresses and round-trips UTF-8 filenames in buildZipArchive', () => {
-    const zip = buildZipArchive([
-      { name: '摘要/说明.txt', data: '鉴翎日志测试内容'.repeat(20) },
-    ])
-    const entries = readZipEntries(zip)
-    expect(entries.get('摘要/说明.txt')).toBe('鉴翎日志测试内容'.repeat(20))
+  it('compresses and round-trips UTF-8 filenames in buildZipArchive and buildZipArchiveAsync', async () => {
+    const payload = '鉴翎日志测试内容'.repeat(20)
+    const zipSync = buildZipArchive([{ name: '摘要/说明.txt', data: payload }])
+    const zipAsync = await buildZipArchiveAsync([{ name: '摘要/说明.txt', data: payload }])
+    expect(readZipEntries(zipSync).get('摘要/说明.txt')).toBe(payload)
+    expect(readZipEntries(zipAsync).get('摘要/说明.txt')).toBe(payload)
+
+    const userDataDir = makeTempDir()
+    const logsDir = join(userDataDir, 'logs')
+    const outZip = join(userDataDir, 'async-diag.zip')
+    const res = await buildAndWriteDiagnosticsZipAsync({
+      outputPath: outZip,
+      logsDir,
+      userDataDir,
+      deviceId: 'pl-1234567890abcdef12345678',
+      sessionId: 'sess_async',
+      loggingEnabled: true,
+      profile: null,
+      dbSummary: { libraries: { total: 1 }, photos: { total: 10 }, db_size_bytes: 4096 },
+    })
+    expect(res.sizeBytes).toBeGreaterThan(0)
+    const entries = readZipEntries(readFileSync(outZip))
+    expect(entries.has('SUMMARY.txt')).toBe(true)
+    expect(entries.has('manifest.json')).toBe(true)
   })
 
   it('aggregates task metrics percentiles correctly', () => {

@@ -273,11 +273,31 @@ export function useSelectionScrollState(
     if (!node) return undefined
 
     let frame = 0
+    let anchorIdleTimer: number | null = null
+    const captureAnchorOnIdle = () => {
+      anchorIdleTimer = null
+      if (folderKey) {
+        anchorByFolderRef.current.set(folderKey, captureVisiblePhotoAnchor(node))
+      }
+    }
     const update = () => {
       frame = 0
       syncChromeFromNode(node)
       if (folderKey) {
-        anchorByFolderRef.current.set(folderKey, captureVisiblePhotoAnchor(node))
+        const existing = anchorByFolderRef.current.get(folderKey)
+        if (existing) {
+          existing.scrollTop = node.scrollTop
+        } else {
+          anchorByFolderRef.current.set(folderKey, {
+            photoId: null,
+            relativeOffset: 0,
+            scrollTop: node.scrollTop,
+          })
+        }
+        // Debounce DOM-reading anchor capture until scrolling settles so 60/120fps
+        // scroll frames never trigger per-frame layout reflow (getBoundingClientRect).
+        if (anchorIdleTimer !== null) window.clearTimeout(anchorIdleTimer)
+        anchorIdleTimer = window.setTimeout(captureAnchorOnIdle, 180)
       }
     }
 
@@ -290,6 +310,7 @@ export function useSelectionScrollState(
     node.addEventListener('scroll', requestUpdate, { passive: true })
     return () => {
       if (frame !== 0) window.cancelAnimationFrame(frame)
+      if (anchorIdleTimer !== null) window.clearTimeout(anchorIdleTimer)
       node.removeEventListener('scroll', requestUpdate)
     }
   }, [folderKey, selectionScrollElement, syncChromeFromNode])

@@ -270,7 +270,7 @@ async def ensure_thumbnails_for_photo(
     避免选片页对坏 JPG 永远空缩略图(虽然 pipeline 会 fallback 成功,但 thumbnail
     层之前没复用这个 fallback)。
     """
-    async with db.conn.execute(
+    async with db.read_snapshot() as conn, conn.execute(
         "SELECT p.file_path,p.companion_path,p.thumb_grid,p.thumb_preview,p.input_revision,"
         "p.input_needs_scan,(SELECT source_fingerprint FROM analysis_results ar "
         "WHERE ar.photo_id=p.id AND ar.is_active=1 AND ar.input_revision=p.input_revision "

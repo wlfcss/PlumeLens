@@ -25,13 +25,14 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'fs'
+import { mkdir as mkdirAsync, open as openAsync, readdir as readdirAsync, readFile as readFileAsync, stat as statAsync, writeFile as writeFileAsync } from 'fs/promises'
 import { dirname, join } from 'path'
 import type {
   ClearLogsResult,
   SystemProfileSnapshot,
 } from '../shared/client-log'
 import { redactText, type RedactorOptions } from './log-redactor'
-import { buildZipArchive, type ZipEntryInput } from './zip-writer'
+import { buildZipArchive, buildZipArchiveAsync, type ZipEntryInput } from './zip-writer'
 
 const MAX_LOG_FILE_EXPORT_BYTES = 8 * 1024 * 1024 // 8 MB tail per log file
 const MAX_STDERR_LOGS_EXPORT = 3
@@ -594,6 +595,196 @@ export function buildAndWriteDiagnosticsZip(params: ExportBundleParams): {
   const zipBuffer = buildZipArchive(zipEntries)
   mkdirSync(dirname(params.outputPath), { recursive: true })
   writeFileSync(params.outputPath, zipBuffer, { mode: 0o600 })
+
+  return {
+    sizeBytes: zipBuffer.length,
+    fileCount: zipEntries.length,
+  }
+}
+
+async function readTailUtf8Async(
+  filePath: string,
+  maxBytes = MAX_LOG_FILE_EXPORT_BYTES,
+): Promise<{
+  text: string
+  truncated: boolean
+  originalBytes: number
+}> {
+  const st = await statAsync(filePath)
+  const originalBytes = st.size
+  if (originalBytes <= maxBytes) {
+    return {
+      text: await readFileAsync(filePath, 'utf-8'),
+      truncated: false,
+      originalBytes,
+    }
+  }
+  const handle = await openAsync(filePath, 'r')
+  try {
+    const start = originalBytes - maxBytes
+    const buf = Buffer.alloc(maxBytes)
+    const { bytesRead } = await handle.read(buf, 0, maxBytes, start)
+    let text = buf.subarray(0, bytesRead).toString('utf-8')
+    const firstNewline = text.indexOf('\n')
+    if (firstNewline !== -1) {
+      text = text.slice(firstNewline + 1)
+    }
+    return { text, truncated: true, originalBytes }
+  } finally {
+    await handle.close()
+  }
+}
+
+const yieldEventLoop = (): Promise<void> => new Promise((resolve) => setImmediate(resolve))
+
+/**
+ * Non-blocking async diagnostics ZIP builder for the Electron main process:
+ * reads files via `fs/promises`, yields between entries, and runs zlib deflate
+ * on libuv's worker pool so UI/protocol/health checks stay responsive.
+ */
+export async function buildAndWriteDiagnosticsZipAsync(params: ExportBundleParams): Promise<{
+  sizeBytes: number
+  fileCount: number
+}> {
+  const exportedAt = new Date().toISOString()
+  const redactorOpts: RedactorOptions = {
+    deviceId: params.deviceId,
+    extraSecrets: params.extraSecrets,
+  }
+
+  const zipEntries: ZipEntryInput[] = []
+  const fileManifest: Array<{ path: string; truncated?: boolean; originalBytes?: number }> = []
+  const jsonlTextsForMetrics: string[] = []
+
+  const addRedactedTextFile = async (
+    archivePath: string,
+    diskPath: string,
+    collectForMetrics = false,
+  ): Promise<void> => {
+    try {
+      const { text, truncated, originalBytes } = await readTailUtf8Async(diskPath)
+      const clean = redactText(text, redactorOpts)
+      if (collectForMetrics) jsonlTextsForMetrics.push(clean)
+      zipEntries.push({ name: archivePath, data: clean })
+      fileManifest.push({ path: archivePath, truncated, originalBytes })
+      await yieldEventLoop()
+    } catch {
+      /* skip missing/unreadable file */
+    }
+  }
+
+  await addRedactedTextFile('logs/client.jsonl', join(params.logsDir, 'client.jsonl'), true)
+  await addRedactedTextFile('logs/client.jsonl.1', join(params.logsDir, 'client.jsonl.1'), true)
+  await addRedactedTextFile('logs/engine.jsonl', join(params.logsDir, 'engine.jsonl'), true)
+  await addRedactedTextFile('logs/engine.jsonl.1', join(params.logsDir, 'engine.jsonl.1'), true)
+
+  try {
+    const names = (await readdirAsync(params.logsDir)).filter((f) =>
+      /^engine\.stderr\..+\.log$/.test(f),
+    )
+    const withMtime = (
+      await Promise.all(
+        names.map(async (name) => {
+          try {
+            const st = await statAsync(join(params.logsDir, name))
+            return { name, mtimeMs: st.mtimeMs }
+          } catch {
+            return null
+          }
+        }),
+      )
+    )
+      .filter((x): x is { name: string; mtimeMs: number } => x !== null)
+      .sort((a, b) => b.mtimeMs - a.mtimeMs)
+      .slice(0, MAX_STDERR_LOGS_EXPORT)
+    for (const item of withMtime) {
+      await addRedactedTextFile(`logs/${item.name}`, join(params.logsDir, item.name))
+    }
+  } catch {
+    /* ignore */
+  }
+
+  const crashDir = join(params.logsDir, 'crash')
+  try {
+    const names = (await readdirAsync(crashDir)).filter((f) => /^(client|engine)-.+\.txt$/.test(f))
+    const allCrash = (
+      await Promise.all(
+        names.map(async (name) => {
+          try {
+            const st = await statAsync(join(crashDir, name))
+            return { name, mtimeMs: st.mtimeMs }
+          } catch {
+            return null
+          }
+        }),
+      )
+    )
+      .filter((x): x is { name: string; mtimeMs: number } => x !== null)
+      .sort((a, b) => b.mtimeMs - a.mtimeMs)
+    const clientCrashes = allCrash.filter((c) => c.name.startsWith('client-')).slice(0, MAX_CRASH_FILES_PER_KIND)
+    const engineCrashes = allCrash.filter((c) => c.name.startsWith('engine-')).slice(0, MAX_CRASH_FILES_PER_KIND)
+    for (const item of [...clientCrashes, ...engineCrashes]) {
+      await addRedactedTextFile(`crash/${item.name}`, join(crashDir, item.name))
+    }
+  } catch {
+    /* ignore */
+  }
+
+  const metrics = buildTaskMetricsSummary(jsonlTextsForMetrics)
+  await yieldEventLoop()
+  zipEntries.push({
+    name: 'task-metrics-summary.json',
+    data: redactText(JSON.stringify(metrics, null, 2), redactorOpts),
+  })
+  fileManifest.push({ path: 'task-metrics-summary.json' })
+
+  if (params.profile) {
+    zipEntries.push({
+      name: 'system-profile.json',
+      data: redactText(JSON.stringify(params.profile, null, 2), redactorOpts),
+    })
+    fileManifest.push({ path: 'system-profile.json' })
+  }
+
+  const fallbackDbSummary = params.dbSummary ?? buildOfflineDbFallbackSummary(params.userDataDir)
+  zipEntries.push({
+    name: 'db-summary.json',
+    data: redactText(JSON.stringify(fallbackDbSummary, null, 2), redactorOpts),
+  })
+  fileManifest.push({ path: 'db-summary.json' })
+
+  const manifestObj = {
+    schemaVersion: 1,
+    exportedAt,
+    deviceId: params.deviceId,
+    sessionId: params.sessionId,
+    loggingEnabled: params.loggingEnabled,
+    appVersion: params.profile?.app.version ?? null,
+    files: fileManifest,
+  }
+  zipEntries.push({
+    name: 'manifest.json',
+    data: JSON.stringify(manifestObj, null, 2),
+  })
+
+  const summaryTxt = redactText(
+    buildHumanSummaryText({
+      deviceId: params.deviceId,
+      sessionId: params.sessionId,
+      exportedAt,
+      loggingEnabled: params.loggingEnabled,
+      profile: params.profile,
+      dbSummary: fallbackDbSummary,
+      metrics,
+      includedFiles: ['SUMMARY.txt', 'manifest.json', ...fileManifest.map((f) => f.path)],
+    }),
+    redactorOpts,
+  )
+  zipEntries.unshift({ name: 'SUMMARY.txt', data: summaryTxt })
+
+  const zipBuffer = await buildZipArchiveAsync(zipEntries)
+  await mkdirAsync(dirname(params.outputPath), { recursive: true })
+  await writeFileAsync(params.outputPath, zipBuffer, { mode: 0o600 })
 
   return {
     sizeBytes: zipBuffer.length,

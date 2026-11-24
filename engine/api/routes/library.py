@@ -161,29 +161,29 @@ async def _sync_library_path_status(db: Database, row: Any) -> LibraryStatus:
 
 
 async def _fetch_library_summary(db: Database, library_id: str) -> LibrarySummary | None:
-    async with db.conn.execute(
-        "SELECT * FROM libraries WHERE id = ?",
-        (library_id,),
-    ) as cur:
-        row = await cur.fetchone()
-    if row is None:
-        return None
+    async with db.read_snapshot() as conn:
+        async with conn.execute(
+            "SELECT * FROM libraries WHERE id = ?",
+            (library_id,),
+        ) as cur:
+            row = await cur.fetchone()
+        if row is None:
+            return None
+        async with conn.execute(
+            "SELECT COUNT(*) AS c FROM photos WHERE library_id = ?",
+            (library_id,),
+        ) as cur:
+            total_row = await cur.fetchone()
+        total = int(total_row["c"]) if total_row else 0
+        async with conn.execute(
+            "SELECT COUNT(*) AS c FROM analysis_results ar "
+            "JOIN photos p ON ar.photo_id = p.id "
+            "WHERE p.library_id = ? AND ar.is_active = 1 AND ar.input_revision = p.input_revision",
+            (library_id,),
+        ) as cur:
+            analyzed_row = await cur.fetchone()
+        analyzed = int(analyzed_row["c"]) if analyzed_row else 0
     status = await _sync_library_path_status(db, row)
-    # Counts
-    async with db.conn.execute(
-        "SELECT COUNT(*) AS c FROM photos WHERE library_id = ?",
-        (library_id,),
-    ) as cur:
-        total_row = await cur.fetchone()
-    total = int(total_row["c"]) if total_row else 0
-    async with db.conn.execute(
-        "SELECT COUNT(*) AS c FROM analysis_results ar "
-        "JOIN photos p ON ar.photo_id = p.id "
-        "WHERE p.library_id = ? AND ar.is_active = 1 AND ar.input_revision = p.input_revision",
-        (library_id,),
-    ) as cur:
-        analyzed_row = await cur.fetchone()
-    analyzed = int(analyzed_row["c"]) if analyzed_row else 0
 
     return LibrarySummary(
         id=str(row["id"]),
@@ -208,10 +208,10 @@ async def _fetch_library_summary(db: Database, library_id: str) -> LibrarySummar
 async def list_libraries(request: Request) -> list[LibrarySummary]:
     """GET /library — all libraries, most recently opened first."""
     db = await _db(request)
-    async with db.conn.execute(
+    async with db.read_snapshot() as conn, conn.execute(
         "SELECT id FROM libraries ORDER BY last_opened_at DESC",
     ) as cur:
-        ids = [str(r["id"]) async for r in cur]
+        ids = [str(r["id"]) for r in await cur.fetchall()]
     out: list[LibrarySummary] = []
     for lid in ids:
         summary = await _fetch_library_summary(db, lid)
@@ -912,7 +912,7 @@ async def selection_query(
 async def build_photo_thumbnail(request: Request, photo_id: str) -> dict:
     """POST /library/photo/{photo_id}/thumbnail — rebuild one visible thumbnail."""
     db = await _db(request)
-    async with db.conn.execute(
+    async with db.read_snapshot() as conn, conn.execute(
         "SELECT library_id FROM photos WHERE id = ?",
         (photo_id,),
     ) as cur:
@@ -929,7 +929,7 @@ async def build_photo_thumbnail(request: Request, photo_id: str) -> dict:
     cache_root = thumbnail_cache_root(settings.data_dir)
 
     result = await ensure_thumbnails_for_photo(db, photo_id, cache_root, force=True)
-    async with db.conn.execute(
+    async with db.read_snapshot() as conn, conn.execute(
         "SELECT thumb_grid, thumb_preview FROM photos WHERE id = ?",
         (photo_id,),
     ) as cur:

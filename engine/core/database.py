@@ -12,7 +12,8 @@ import structlog
 
 logger = structlog.stdlib.get_logger()
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
+_READ_POOL_SIZE = 4
 
 # SQL 放在模块常量里便于审阅与测试
 _SCHEMA_STATEMENTS: tuple[str, ...] = (
@@ -191,11 +192,11 @@ class Database:
     def __init__(self, db_path: Path) -> None:
         self._path = db_path
         self._conn: aiosqlite.Connection | None = None
-        self._read_conn: aiosqlite.Connection | None = None
+        self._read_pool: list[aiosqlite.Connection] = []
+        self._read_queue: asyncio.LifoQueue[aiosqlite.Connection] | None = None
         self._write_lock = asyncio.Lock()
-        self._read_lock = asyncio.Lock()
         self._transaction_owner: asyncio.Task[object] | None = None
-        self._read_owner: asyncio.Task[object] | None = None
+        self._read_owners: dict[asyncio.Task[object], aiosqlite.Connection] = {}
         self._savepoint_counter = 0
 
     @contextlib.asynccontextmanager
@@ -254,25 +255,26 @@ class Database:
                 yield conn
             return
 
-        if self._read_owner is task:
-            assert self._read_conn is not None
-            yield self._read_conn
+        existing = self._read_owners.get(task)
+        if existing is not None:
+            yield existing
             return
 
-        async with self._read_lock:
-            reader = self._read_conn
-            if reader is None:
-                raise RuntimeError("Database not connected; call connect() first")
-            self._read_owner = task
+        if self._read_queue is None:
+            raise RuntimeError("Database not connected; call connect() first")
+
+        reader = await self._read_queue.get()
+        self._read_owners[task] = reader
+        try:
+            # Deferred BEGIN pins the WAL snapshot on the first SELECT.
+            await reader.execute("BEGIN")
+            yield reader
+        finally:
             try:
-                # Deferred BEGIN pins the WAL snapshot on the first SELECT.
-                await reader.execute("BEGIN")
-                yield reader
+                await reader.rollback()
             finally:
-                try:
-                    await reader.rollback()
-                finally:
-                    self._read_owner = None
+                self._read_owners.pop(task, None)
+                self._read_queue.put_nowait(reader)
 
     @property
     def path(self) -> Path:
@@ -310,10 +312,19 @@ class Database:
                     # SQLite's default URI handler expects an empty authority.
                     # Keep the initial // of a Windows UNC path in the path itself.
                     uri = "file:////" + uri.removeprefix("file://")
-                reader = await aiosqlite.connect(f"{uri}?mode=ro", timeout=5, uri=True)
-                reader.row_factory = aiosqlite.Row
-                self._read_conn = reader
-                await reader.execute("PRAGMA temp_store = MEMORY;")
+                queue: asyncio.LifoQueue[aiosqlite.Connection] = asyncio.LifoQueue(
+                    maxsize=_READ_POOL_SIZE
+                )
+                for _ in range(_READ_POOL_SIZE):
+                    reader = await aiosqlite.connect(f"{uri}?mode=ro", timeout=5, uri=True)
+                    reader.row_factory = aiosqlite.Row
+                    await reader.execute("PRAGMA query_only = ON;")
+                    await reader.execute("PRAGMA busy_timeout = 5000;")
+                    await reader.execute("PRAGMA temp_store = MEMORY;")
+                    await reader.execute("PRAGMA cache_size = -16000;")
+                    self._read_pool.append(reader)
+                    queue.put_nowait(reader)
+                self._read_queue = queue
         except BaseException:
             await self.close()
             raise
@@ -330,6 +341,10 @@ class Database:
         await self._conn.execute("PRAGMA synchronous = NORMAL;")
         # 临时表使用内存
         await self._conn.execute("PRAGMA temp_store = MEMORY;")
+        # 64 MB 页缓存 + 256 MB mmap 加速大库扫描与聚合
+        await self._conn.execute("PRAGMA cache_size = -64000;")
+        with contextlib.suppress(Exception):
+            await self._conn.execute("PRAGMA mmap_size = 268435456;")
         await self._conn.commit()
 
     async def _ensure_schema(self) -> None:
@@ -560,6 +575,32 @@ class Database:
             await self._conn.execute(
                 "ALTER TABLE photos ADD COLUMN input_needs_scan INTEGER NOT NULL DEFAULT 0"
             )
+        if prior_version < 14:
+            # v14：补齐跨库地理聚合、单图场景检索、待哈希补强及任务队列状态监控索引
+            v14_indexes = (
+                "CREATE INDEX IF NOT EXISTS ix_photos_library_scene "
+                "ON photos(library_id, scene_id) WHERE scene_id IS NOT NULL",
+                "CREATE INDEX IF NOT EXISTS ix_photos_geo_province_city "
+                "ON photos(province, city, district) WHERE province IS NOT NULL",
+                "CREATE INDEX IF NOT EXISTS ix_photos_library_mtime_id "
+                "ON photos(library_id, file_mtime, id)",
+                "CREATE INDEX IF NOT EXISTS ix_photos_pending_hash "
+                "ON photos(library_id) WHERE file_hash IS NULL",
+                "CREATE INDEX IF NOT EXISTS ix_queue_run_status "
+                "ON task_queue(run_id, status) WHERE run_id IS NOT NULL",
+                "CREATE INDEX IF NOT EXISTS ix_queue_processing_started "
+                "ON task_queue(started_at) WHERE status = 'processing'",
+                "CREATE INDEX IF NOT EXISTS ix_analysis_runs_state "
+                "ON analysis_runs(desired_state, created_at)",
+            )
+            for stmt in v14_indexes:
+                with contextlib.suppress(Exception):
+                    await self._conn.execute(stmt)
+            await logger.ainfo(
+                "DB migrated",
+                from_version=prior_version,
+                added="performance_indexes_v14",
+            )
 
     async def get_schema_version(self) -> int:
         """Return the PRAGMA user_version as stored in this database."""
@@ -569,25 +610,36 @@ class Database:
         return int(row[0]) if row else 0
 
     async def close(self) -> None:
-        """Close the snapshot and write connections after in-flight scopes finish."""
+        """Close the snapshot pool and write connection after in-flight scopes finish."""
         current = asyncio.current_task()
-        if self._read_owner is not None and self._read_owner is current:
+        if current is not None and current in self._read_owners:
             raise RuntimeError("Cannot close the database from inside its read snapshot")
         if self._transaction_owner is not None and self._transaction_owner is current:
             raise RuntimeError("Cannot close the database from inside its write transaction")
-        async with self._write_lock, self._read_lock:
-            if self._conn is None:
+        async with self._write_lock:
+            if self._conn is None and not self._read_pool:
                 return
             try:
-                if self._read_conn is not None:
-                    await self._read_conn.close()
+                if self._read_queue is not None:
+                    # Drain every pooled reader so active read snapshots finish cleanly.
+                    checked_out: list[aiosqlite.Connection] = []
+                    for _ in range(len(self._read_pool)):
+                        checked_out.append(await self._read_queue.get())
+                    for reader in checked_out:
+                        await reader.close()
+                else:
+                    for reader in self._read_pool:
+                        await reader.close()
             finally:
-                self._read_conn = None
-                try:
-                    await self._conn.close()
-                finally:
-                    self._conn = None
-                    await logger.ainfo("Database closed")
+                self._read_pool.clear()
+                self._read_queue = None
+                self._read_owners.clear()
+                if self._conn is not None:
+                    try:
+                        await self._conn.close()
+                    finally:
+                        self._conn = None
+                        await logger.ainfo("Database closed")
 
     async def list_tables(self) -> list[str]:
         """List all user tables (utility for tests/diagnostics)."""

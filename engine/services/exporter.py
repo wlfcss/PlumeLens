@@ -1849,19 +1849,19 @@ async def _freeze_export_photos(
         except SelectionLibraryNotFound as exc:
             raise ExportError("library_not_found", "Library not found") from exc
         raw = {p.id: p for p in await _load_export_photos(db, library_id, connection=conn)}
-        effective = {p.id: p for p in projected}
-        photos: list[ExportPhoto] = []
-        for photo_id in ids:
-            photo = raw.get(photo_id)
-            display = effective.get(photo_id)
-            if photo is None or display is None:
-                raise ExportError("selection_changed", "Selection member no longer exists")
-            detections = display.detections or (
-                [display.best_detection] if display.best_detection is not None else []
-            )
-            names = list(dict.fromkeys(d.species for d in detections if d.species))
-            photo.species = "；".join(names) if names else display.species
-            photos.append(photo)
+    effective = {p.id: p for p in projected}
+    photos: list[ExportPhoto] = []
+    for photo_id in ids:
+        photo = raw.get(photo_id)
+        display = effective.get(photo_id)
+        if photo is None or display is None:
+            raise ExportError("selection_changed", "Selection member no longer exists")
+        detections = display.detections or (
+            [display.best_detection] if display.best_detection is not None else []
+        )
+        names = list(dict.fromkeys(d.species for d in detections if d.species))
+        photo.species = "；".join(names) if names else display.species
+        photos.append(photo)
     return str(library["display_name"]), str(library["root_path"]), photos
 
 
@@ -1871,20 +1871,21 @@ async def list_export_formats(db: Database, library_id: str) -> list[ExportForma
     体积直接取 photos 表里已记的 file_size / companion_size,不碰磁盘 —— 面板
     每次打开都要拉,几千行的 SQL 聚合比几千次 stat 便宜得多。
     """
-    async with db.conn.execute(
-        "SELECT id FROM libraries WHERE id = ?",
-        (library_id,),
-    ) as cur:
-        if await cur.fetchone() is None:
-            msg = "Library not found"
-            raise ExportError("library_not_found", msg)
+    async with db.read_snapshot() as conn:
+        async with conn.execute(
+            "SELECT id FROM libraries WHERE id = ?",
+            (library_id,),
+        ) as cur:
+            if await cur.fetchone() is None:
+                msg = "Library not found"
+                raise ExportError("library_not_found", msg)
 
-    async with db.conn.execute(
-        "SELECT file_name, file_size, companion_path, companion_format, companion_size "
-        "FROM photos WHERE library_id = ?",
-        (library_id,),
-    ) as cur:
-        rows = await cur.fetchall()
+        async with conn.execute(
+            "SELECT file_name, file_size, companion_path, companion_format, companion_size "
+            "FROM photos WHERE library_id = ?",
+            (library_id,),
+        ) as cur:
+            rows = await cur.fetchall()
 
     tally: dict[str, list[int]] = {}
 

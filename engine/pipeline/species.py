@@ -209,6 +209,28 @@ class LoRALinear(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.base(x) + self.lora_B(self.lora_A(self.dropout(x))) * self.scaling
 
+    @torch.no_grad()
+    def merge_into_base(self) -> nn.Linear:
+        """Fuse LoRA delta into base Linear weight in fp32 for zero-overhead inference."""
+        delta = (self.lora_B.weight.float() @ self.lora_A.weight.float()) * self.scaling
+        merged_weight = self.base.weight.float() + delta
+        self.base.weight.copy_(merged_weight.to(self.base.weight.dtype))
+        return self.base
+
+
+def fuse_lora(backbone: nn.Module) -> int:
+    """Replace every LoRALinear wrapper with its fused nn.Linear base layer."""
+    fused = 0
+    for name, module in backbone.named_modules():
+        if not name.endswith(".attention"):
+            continue
+        for proj_name in ("q_proj", "v_proj"):
+            layer = getattr(module, proj_name, None)
+            if isinstance(layer, LoRALinear):
+                setattr(module, proj_name, layer.merge_into_base())
+                fused += 1
+    return fused
+
 
 def apply_lora(backbone: nn.Module, r: int = 8, alpha: float = 16.0, dropout: float = 0.05) -> int:
     """Wrap q_proj/v_proj in each DINOv3 attention block."""
@@ -437,8 +459,11 @@ class SpeciesClassifier:
             )
             raise ValueError(msg)
         _apply_ema_shadow(self._model, ckpt.get("ema_shadow"))
+        # Fuse all 48 LoRALinear adapters into base q_proj/v_proj in fp32 before casting to bf16,
+        # eliminating 48 extra LoRA matmuls and intermediate tensors on every bird inference.
+        fuse_lora(self._model.backbone)
 
-        # Backbone + LoRA 用 bf16 on MPS/CUDA；heads 保持 fp32 保证 softmax/reject 数值稳定。
+        # Backbone + fused LoRA 用 bf16 on MPS/CUDA；heads 保持 fp32 保证 softmax/reject 数值稳定。
         self._model.backbone.to(device=self.device, dtype=self._dtype).eval()
         self._model.species_head.to(device=self.device, dtype=torch.float32).eval()
         self._model.reject_head.to(device=self.device, dtype=torch.float32).eval()
@@ -515,8 +540,9 @@ class SpeciesClassifier:
                     # Only flush the Metal allocator pool periodically to avoid per-bird OS realloc.
                     if infer_count % _MPS_EMPTY_CACHE_INTERVAL == 0:
                         torch.mps.empty_cache()
-                elif self.device == "cuda":
-                    torch.cuda.synchronize()
+                elif self.device == "cuda" and infer_count % _MPS_EMPTY_CACHE_INTERVAL == 0:
+                    # `.cpu()` above already synchronizes the CUDA/ROCm stream for the result.
+                    # Throttle cache flushes to avoid stalling multi-bird/batch throughput.
                     torch.cuda.empty_cache()
 
         if probs is None or reject_score is None or not np.isfinite(probs).all():

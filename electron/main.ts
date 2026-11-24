@@ -12,7 +12,7 @@ import {
 import { spawn } from 'child_process'
 import { pathToFileURL } from 'url'
 import { chmodSync, existsSync, mkdirSync, readFileSync } from 'fs'
-import { realpath, stat } from 'fs/promises'
+import { readdir, realpath, stat } from 'fs/promises'
 import { homedir, platform as osPlatform } from 'os'
 import { join, resolve } from 'path'
 import { BENCHMARK_TRACE_ARGUMENT } from '../shared/benchmark-trace'
@@ -48,7 +48,7 @@ import {
   saveSystemProfileCache,
 } from './system-profile'
 import {
-  buildAndWriteDiagnosticsZip,
+  buildAndWriteDiagnosticsZipAsync,
   clearLogFiles,
   getLogsStorageStats,
 } from './log-diagnostics'
@@ -102,6 +102,8 @@ const GITHUB_LATEST_RELEASE_API = `https://api.github.com/repos/${GITHUB_REPO}/r
 const SKIP_CLOSE_CONFIRM = process.env['PLUMELENS_E2E_DISABLE_CLOSE_CONFIRM'] === '1'
 
 const realpathCache = new Map<string, { value: string; expiresAt: number }>()
+const realpathInFlight = new Map<string, Promise<string>>()
+let speciesArtworkIndex: Map<string, string> | null = null
 
 function normalizeExternalUrl(target: unknown): string | null {
   if (typeof target !== 'string' || target.trim() === '') return null
@@ -146,6 +148,10 @@ function normalizeSpeciesArtworkKey(target: unknown): string | null {
 }
 
 function resolveCachedSpeciesArtworkPath(root: string, key: string): string | null {
+  if (speciesArtworkIndex !== null) {
+    const fileName = speciesArtworkIndex.get(key)
+    return fileName ? join(root, fileName) : null
+  }
   for (const ext of SPECIES_ARTWORK_EXTENSIONS) {
     const candidate = join(root, `${key}${ext}`)
     if (existsSync(candidate)) return candidate
@@ -172,7 +178,14 @@ async function serveLocalCacheFile(
     if (!fileStat.isFile()) {
       return new Response('Not found', { status: 404 })
     }
-    return await net.fetch(pathToFileURL(realFile).toString())
+    const upstream = await net.fetch(pathToFileURL(realFile).toString())
+    const headers = new Headers(upstream.headers)
+    headers.set('Cache-Control', 'public, max-age=31536000, immutable')
+    return new Response(upstream.body, {
+      status: upstream.status,
+      statusText: upstream.statusText,
+      headers,
+    })
   } catch (err) {
     realpathCache.delete(resolved)
     getScopedLogger(logPrefix).warn('serve_local_cache_failed', { logPrefix }, err)
@@ -767,14 +780,24 @@ async function cachedRealpath(path: string): Promise<string> {
   }
   if (cached) realpathCache.delete(path)
 
-  const value = await realpath(path)
-  realpathCache.set(path, { value, expiresAt: now + REALPATH_CACHE_TTL_MS })
-  while (realpathCache.size > REALPATH_CACHE_MAX) {
-    const oldest = realpathCache.keys().next()
-    if (oldest.done) break
-    realpathCache.delete(oldest.value)
-  }
-  return value
+  const pending = realpathInFlight.get(path)
+  if (pending) return pending
+
+  const job = realpath(path)
+    .then((value) => {
+      realpathCache.set(path, { value, expiresAt: Date.now() + REALPATH_CACHE_TTL_MS })
+      while (realpathCache.size > REALPATH_CACHE_MAX) {
+        const oldest = realpathCache.keys().next()
+        if (oldest.done) break
+        realpathCache.delete(oldest.value)
+      }
+      return value
+    })
+    .finally(() => {
+      realpathInFlight.delete(path)
+    })
+  realpathInFlight.set(path, job)
+  return job
 }
 
 function createWindow(): void {
@@ -1375,7 +1398,7 @@ ipcMain.handle('logs:export-bundle', async (event): Promise<ExportDiagnosticsRes
       userSettings.tencentKey,
     ].filter((s): s is string => typeof s === 'string' && s.length >= 6)
 
-    const result = buildAndWriteDiagnosticsZip({
+    const result = await buildAndWriteDiagnosticsZipAsync({
       outputPath: saveDialog.filePath,
       logsDir: getLogsDirPath(),
       userDataDir: app.getPath('userData'),
@@ -1524,6 +1547,17 @@ app.whenReady().then(async () => {
   let realSpeciesArtworkRootCache: string | null = null
   try {
     realSpeciesArtworkRootCache = await realpath(speciesArtworkRoot)
+    const files = await readdir(realSpeciesArtworkRootCache)
+    const index = new Map<string, string>()
+    // Populate in reverse priority order so earlier SPECIES_ARTWORK_EXTENSIONS win.
+    for (const ext of [...SPECIES_ARTWORK_EXTENSIONS].reverse()) {
+      for (const file of files) {
+        if (file.endsWith(ext)) {
+          index.set(file.slice(0, -ext.length), file)
+        }
+      }
+    }
+    speciesArtworkIndex = index
   } catch {
     /* 开发期未下载物种图时目录可能不存在;请求会返回 404 并由 UI 渐变兜底。 */
   }
@@ -1537,7 +1571,6 @@ app.whenReady().then(async () => {
     thumbnailsRoot,
     speciesArtworkRoot,
   })
-  resolveEditors()
 
   // Register CSP header handler once for the default session (avoid stacking
   // listeners on macOS window recreation).
@@ -1711,6 +1744,8 @@ app.whenReady().then(async () => {
   })
 
   createWindow()
+  // Defer external editor discovery (which spawns reg.exe on Windows) off the critical boot path.
+  setImmediate(() => resolveEditors())
   await processManager.start()
 })
 
