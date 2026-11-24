@@ -16,7 +16,7 @@
  * 改图标坐标记得同步 build_dmg_background.py 的 LEFT_ICON_CENTER / RIGHT_ICON_CENTER。
  */
 const { execFileSync } = require('child_process')
-const { downloadArtifact } = require('app-builder-lib/out/binDownload')
+const { getBinFromUrl } = require('app-builder-lib/out/binDownload')
 const fs = require('fs')
 const path = require('path')
 const { createDmgMount, cleanupDmgWorkspace } = require('./dmg-mount.cjs')
@@ -39,15 +39,16 @@ const DMG_BUILDER_CHECKSUMS = {
 
 async function getDmgbuildPythonPath() {
   const customDmgbuildPath = process.env.CUSTOM_DMGBUILD_PATH?.trim()
+  const filenameWithExt = `dmgbuild-bundle-${process.arch === 'arm64' ? 'arm64' : 'x86_64'}-${DMG_BUILDER_RELEASE}.tar.gz`
   const dmgbuildPath = customDmgbuildPath
     ? path.resolve(customDmgbuildPath)
     : path.resolve(
-        await downloadArtifact({
-          releaseName: 'dmg-builder@1.2.0',
-          filenameWithExt: `dmgbuild-bundle-${process.arch === 'arm64' ? 'arm64' : 'x86_64'}-${DMG_BUILDER_RELEASE}.tar.gz`,
-          checksums: DMG_BUILDER_CHECKSUMS,
-          githubOrgRepo: 'electron-userland/electron-builder-binaries',
-        }),
+        await getBinFromUrl(
+          'dmg-builder@1.2.0',
+          filenameWithExt,
+          DMG_BUILDER_CHECKSUMS[filenameWithExt],
+          'electron-userland/electron-builder-binaries',
+        ),
         'dmgbuild',
       )
   const pythonPath = path.join(path.dirname(dmgbuildPath), 'python', 'bin', 'python3')

@@ -735,12 +735,13 @@ def _temporary_path(dest: Path) -> Path:
 
 
 def _clear_bsd_lock_flags(path: Path) -> None:
-    if not hasattr(os, "chflags"):
+    chflags = getattr(os, "chflags", None)
+    if chflags is None:
         return
     info = path.stat(follow_symlinks=False)
     flags = getattr(info, "st_flags", 0)
     if stat.S_ISREG(info.st_mode) and flags & _BSD_FILE_LOCK_FLAGS:
-        os.chflags(path, flags & ~_BSD_FILE_LOCK_FLAGS, follow_symlinks=False)
+        chflags(path, flags & ~_BSD_FILE_LOCK_FLAGS, follow_symlinks=False)
 
 
 def _copy_file(

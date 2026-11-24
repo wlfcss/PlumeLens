@@ -166,7 +166,9 @@ def _load_raw_with_embedded_preview(path: Path) -> Image.Image:
         with rawpy.imread(str(path)) as raw:
             orientation = raw_orientation(path, int(raw.sizes.flip))
             thumb = raw.extract_thumb()
-            if thumb.format == thumb_format.JPEG:
+            if thumb.format == thumb_format.JPEG and isinstance(
+                thumb.data, (bytes, bytearray, memoryview)
+            ):
                 embedded = Image.open(io.BytesIO(thumb.data))
                 _decode_preview(embedded)
                 # 不够大 → 回退完整解码（仅当 preview 级别需要时）
