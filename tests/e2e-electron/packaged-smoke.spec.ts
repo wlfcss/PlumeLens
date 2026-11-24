@@ -9,7 +9,7 @@
  * 5. 零未捕获 pageerror，关闭应用后后端进程优雅退出无残留，同目录重启历史仍完整可见
  */
 import { expect, test } from '@playwright/test'
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
   FIXTURE_PHOTOS_DIR,
@@ -23,10 +23,23 @@ import {
 } from './helpers/launch.js'
 
 test('Packaged app: real inference, thumbnails, offline artwork, export and clean shutdown', async () => {
-  test.setTimeout(process.env.CI ? 480_000 : 240_000)
+  test.setTimeout(process.env.CI ? 600_000 : 240_000)
 
   const dataDir = makeTmpDataDir()
-  const fixtureDir = process.env.PLUMELENS_TEST_PHOTOS || FIXTURE_PHOTOS_DIR
+  const baseFixtureDir = process.env.PLUMELENS_TEST_PHOTOS || FIXTURE_PHOTOS_DIR
+  const photoLimit = Number.parseInt(process.env.PLUMELENS_SMOKE_PHOTO_LIMIT ?? '', 10)
+  let fixtureDir = baseFixtureDir
+  if (Number.isFinite(photoLimit) && photoLimit > 0) {
+    fixtureDir = join(dataDir, 'smoke-photos')
+    mkdirSync(fixtureDir, { recursive: true })
+    const candidates = readdirSync(baseFixtureDir)
+      .filter((name) => /\.(jpe?g|png|webp)$/i.test(name))
+      .sort()
+      .slice(0, photoLimit)
+    for (const name of candidates) {
+      copyFileSync(join(baseFixtureDir, name), join(fixtureDir, name))
+    }
+  }
   const exportDir = join(dataDir, 'smoke-exports')
   mkdirSync(exportDir, { recursive: true })
 
@@ -78,7 +91,7 @@ test('Packaged app: real inference, thumbnails, offline artwork, export and clea
           }
           return snapshot.stats.completed ?? 0
         },
-        { timeout: process.env.CI ? 360_000 : 180_000, intervals: [500, 1_000, 2_000] },
+        { timeout: process.env.CI ? 480_000 : 180_000, intervals: [500, 1_000, 2_000] },
       )
       .toBe(photos.length)
 

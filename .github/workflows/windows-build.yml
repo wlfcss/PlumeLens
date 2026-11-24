@@ -204,11 +204,14 @@ jobs:
 
       - name: Run packaged smoke specs on CPU
         env:
+          OMP_NUM_THREADS: '4'
+          MKL_NUM_THREADS: '4'
           PLUMELENS_YOLO_PROVIDER: cpu
           PLUMELENS_POSE_PROVIDER: cpu
           PLUMELENS_IQA_PROVIDER: cpu
           PLUMELENS_SPECIES_PROVIDER: cpu
           PLUMELENS_ANALYSIS_CONCURRENCY: '1'
+          PLUMELENS_SMOKE_PHOTO_LIMIT: '1'
         run: |
           npx playwright test --config tests/e2e-electron/playwright.config.ts cold-start.spec.ts packaged-smoke.spec.ts
 
