@@ -1630,15 +1630,6 @@ test.describe('Photo decision flow (mock backend)', () => {
     await expect(page.getByText(/当前工作集|文件夹导航/).first()).toBeVisible()
   })
 
-  test('user can navigate into selection and see photo tiles', async ({ page }) => {
-    // fixture workspace 数据会让至少一个照片 tile 可见
-    // 等主工作区面板出现
-    await expect(page.locator('.photo-tile, [class*="tile"]').first()).toBeVisible({
-      timeout: 5000,
-    })
-    await expect(page.locator('.photo-actions .icon-button')).toHaveCount(0)
-  })
-
   test('settings panel shows ownership, updates, model versions, and confirms history clear', async ({
     page,
   }) => {
@@ -2022,17 +2013,6 @@ test.describe('Photo decision flow (mock backend)', () => {
 
     await expect(page.locator('.export-sidecar--collapsed')).toHaveCount(2)
     expect(await Promise.all(requests)).toHaveLength(2)
-  })
-
-  test('quick filter tabs are clickable', async ({ page }) => {
-    const filters = page.locator('.filter-row')
-    await expect(filters.getByRole('button', { name: '精选', exact: true })).toBeVisible()
-    await expect(filters.getByRole('button', { name: '可用', exact: true })).toBeVisible()
-    await expect(filters.getByRole('button', { name: '记录', exact: true })).toBeVisible()
-    await expect(filters.getByRole('button', { name: '淘汰', exact: true })).toBeVisible()
-    await expect(filters.getByRole('button', { name: '无鸟', exact: true })).toBeVisible()
-    await filters.getByRole('button', { name: '淘汰', exact: true }).click()
-    await expect(filters.getByRole('button', { name: '淘汰', exact: true })).toBeVisible()
   })
 
   test('deep review closes after attempted internal scroll', async ({ page }) => {

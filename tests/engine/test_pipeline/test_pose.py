@@ -8,7 +8,6 @@ from engine.pipeline.models import PoseInfo
 from engine.pipeline.pose import (
     _ROW_WIDTH,
     BODY_PARTS,
-    EYE_PARTS,
     HEAD_PARTS,
     PART_NAMES,
     TAIL_PART,
@@ -95,16 +94,13 @@ def _make_mock_flight_classifier(
 
 
 class TestPoseDetectorBasic:
-    def test_constants_alignment(self) -> None:
-        """v2 关键点列表必须严格对齐:5 头 + 6 身 = 11。"""
-        assert len(PART_NAMES) == 11
-        assert PART_NAMES[:5] == ("bill", "crown", "nape", "left_eye", "right_eye")
-        assert PART_NAMES[5:] == ("belly", "breast", "back", "tail", "left_wing", "right_wing")
-        assert HEAD_PARTS == ("bill", "crown", "nape")
-        assert EYE_PARTS == ("left_eye", "right_eye")
-        assert BODY_PARTS == ("belly", "breast", "back")
-        assert WING_PARTS == ("left_wing", "right_wing")
-        assert TAIL_PART == "tail"
+    def test_pose_info_requires_all_keypoints(self) -> None:
+        from engine.pipeline.models import Keypoint, PoseInfo
+        from pydantic import ValidationError
+
+        kp = Keypoint(x=0.5, y=0.5, confidence=0.9)
+        with pytest.raises(ValidationError):
+            PoseInfo(bill=kp, crown=kp, nape=kp, left_eye=kp)  # type: ignore[call-arg]
 
     def test_empty_below_threshold_returns_none(self) -> None:
         raw = np.zeros((300, _ROW_WIDTH), dtype=np.float32)

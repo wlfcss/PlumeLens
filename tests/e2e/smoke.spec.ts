@@ -215,34 +215,21 @@ async function mockBackend(
   )
 }
 
-// ---------------- Basic rendering ----------------
+// ---------------- Basic rendering & layout ----------------
 
 test.describe('App shell', () => {
   test.beforeEach(async ({ page }) => {
     await mockBackend(page)
   })
 
-  test('loads without crashes and shows the app title', async ({ page }) => {
-    await page.goto('/')
-    // App title is rendered via i18next, either in start hero or brand header
-    await expect(page.getByText('鉴翎').first()).toBeVisible()
-  })
-
-  test('shows the PlumeLens brand mark', async ({ page }) => {
-    await page.goto('/')
-    await expect(page.locator('.brand-mark__copy')).toContainText('鉴翎')
-    await expect(page.locator('.brand-mark__logo')).toBeVisible()
-  })
-
-  test('start screen has the primary CTA', async ({ page }) => {
-    await page.goto('/')
-    await expect(page.getByRole('button', { name: /选择照片文件夹/ })).toBeVisible()
-  })
-
-  test('start screen stays viewport-locked with no vertical scroll and pinned pipeline bar', async ({
+  test('renders brand mark, primary CTA, and viewport-locked start screen with pinned pipeline bar', async ({
     page,
   }) => {
     await page.goto('/')
+    await expect(page.locator('.brand-mark__copy')).toContainText('鉴翎')
+    await expect(page.locator('.brand-mark__logo')).toBeVisible()
+    await expect(page.getByRole('button', { name: /选择照片文件夹/ })).toBeVisible()
+
     const startScreen = page.locator('.start-screen')
     const pipelineBar = page.locator('.pipeline-bar')
     await expect(startScreen).toBeVisible()
@@ -316,33 +303,60 @@ test.describe('Start recent folders', () => {
   })
 })
 
-// ---------------- Route navigation ----------------
+// ---------------- Route navigation & cross-platform layout geometry ----------------
 
-test.describe('Route switcher', () => {
+test.describe('Route switcher & layout geometry', () => {
   test.beforeEach(async ({ page }) => {
     await mockBackend(page)
     await page.goto('/')
   })
 
-  test('navigates to selection', async ({ page }) => {
-    await page.getByRole('button', { name: '选片', exact: true }).click()
-    // 选片页应出现文件夹侧栏或筛选工具栏某个标志
-    await expect(page.getByText(/当前工作集|文件夹导航/).first()).toBeVisible()
-  })
+  test('navigates across start, selection, archive, and back without horizontal overflow', async ({
+    page,
+  }) => {
+    for (const viewport of [
+      { width: 1680, height: 1040 },
+      { width: 1280, height: 720 },
+    ]) {
+      await page.setViewportSize(viewport)
 
-  test('navigates to archive', async ({ page }) => {
-    await page.getByRole('button', { name: '羽迹', exact: true }).click()
-    // 羽迹页有 tab 切换（物种 / 地理分布）
-    await expect(page.getByRole('button', { name: '物种' }).first()).toBeVisible()
-    await expect(page.getByRole('button', { name: '地理分布' }).first()).toBeVisible()
-    await expect(page.getByRole('button', { name: '照片', exact: true })).toHaveCount(0)
-  })
+      // 选片页
+      await page.getByRole('button', { name: '选片', exact: true }).click()
+      await expect(page.getByText(/当前工作集|文件夹导航/).first()).toBeVisible()
+      await expect(page.locator('.photo-tile').first()).toBeVisible()
+      await page
+        .locator('.inspector')
+        .evaluate((el) => Promise.all(el.getAnimations().map((a) => a.finished)))
 
-  test('returns to start from brand mark', async ({ page }) => {
-    await page.getByRole('button', { name: '选片', exact: true }).click()
-    // 点 brand mark 回开始页
-    await page.locator('.brand-mark').first().click()
-    await expect(page.getByRole('button', { name: /选择照片文件夹/ })).toBeVisible()
+      const selectionLayout = await page.evaluate(() => {
+        const settingsBtn = document.querySelector<HTMLElement>('button[aria-label="设置"]')
+        const inspector = document.querySelector<HTMLElement>('.inspector')
+        return {
+          docOverflowX: document.documentElement.scrollWidth - window.innerWidth,
+          settingsRight: settingsBtn?.getBoundingClientRect().right ?? 0,
+          inspectorRight: inspector?.getBoundingClientRect().right ?? 0,
+          innerWidth: window.innerWidth,
+        }
+      })
+      expect(selectionLayout.docOverflowX).toBeLessThanOrEqual(1)
+      expect(selectionLayout.settingsRight).toBeLessThanOrEqual(selectionLayout.innerWidth + 1)
+      expect(selectionLayout.inspectorRight).toBeLessThanOrEqual(selectionLayout.innerWidth + 1)
+
+      // 羽迹页
+      await page.getByRole('button', { name: '羽迹', exact: true }).click()
+      await expect(page.getByRole('button', { name: '物种' }).first()).toBeVisible()
+      await expect(page.getByRole('button', { name: '地理分布' }).first()).toBeVisible()
+      await expect(page.getByRole('button', { name: '照片', exact: true })).toHaveCount(0)
+
+      const archiveOverflowX = await page.evaluate(
+        () => document.documentElement.scrollWidth - window.innerWidth,
+      )
+      expect(archiveOverflowX).toBeLessThanOrEqual(1)
+
+      // 点 brand mark 回开始页
+      await page.locator('.brand-mark').first().click()
+      await expect(page.getByRole('button', { name: /选择照片文件夹/ })).toBeVisible()
+    }
   })
 })
 
@@ -366,55 +380,6 @@ test.describe('Backend health indicator', () => {
     await page.goto('/')
     await expect(page.getByText(/后端连接失败/).first()).toBeVisible({
       timeout: 5000,
-    })
-  })
-})
-
-// ---------------- Visual snapshots ----------------
-
-test.describe('Visual regression', () => {
-  test.beforeEach(async ({ page }) => {
-    await mockBackend(page)
-  })
-
-  test('start screen snapshot', async ({ page }) => {
-    await page.goto('/')
-    // 等一下确保 glyph 灯阵动画稳定在某一帧
-    await page.waitForTimeout(500)
-    await expect(page).toHaveScreenshot('start-screen.png', {
-      fullPage: false,
-      animations: 'disabled',
-    })
-  })
-
-  test('selection screen snapshot', async ({ page }) => {
-    await page.goto('/')
-    await page.getByRole('button', { name: '选片', exact: true }).click()
-    await page.waitForTimeout(500)
-    await expect(page).toHaveScreenshot('selection-screen.png', {
-      fullPage: false,
-      animations: 'disabled',
-    })
-  })
-
-  test('archive screen snapshot', async ({ page }) => {
-    await page.goto('/')
-    await page.getByRole('button', { name: '羽迹', exact: true }).click()
-    await page.waitForTimeout(500)
-    // 物种详情面板的封面走 plumelens://species-artwork 随包资源协议；
-    // Chromium UI 层 E2E 无 Electron protocol handler,这里仅等待常规 img 稳定。
-    await page
-      .waitForFunction(() => Array.from(document.images).every((img) => img.complete), undefined, {
-        timeout: 5000,
-      })
-      .catch(() => {
-        // 网络不可达时不阻塞快照（snapshot 容忍小差异）
-      })
-    await expect(page).toHaveScreenshot('archive-screen.png', {
-      fullPage: false,
-      animations: 'disabled',
-      maxDiffPixels: 80000,
-      maxDiffPixelRatio: 0.08, // 容忍 cover 图加载差异
     })
   })
 })

@@ -12,7 +12,7 @@ from engine.core.database import Database
 from engine.main import create_app
 from engine.services.decisions import list_species_overrides, set_species_override
 from engine.services.exporter import _unique_dest
-from engine.services.library_summary import dump_compact_summary_row, normalize_root_prefix
+from engine.services.library_summary import normalize_root_prefix
 from engine.services.selection import SelectionProjectionCache
 from PIL import Image
 
@@ -172,7 +172,6 @@ async def test_compact_v1_streaming_and_budget_headers(tmp_path: Path, monkeypat
         assert "best_detection" not in rows[0]
         assert rows[0]["rel_path"].startswith("IMG_")
         assert normalize_root_prefix(str(root)).endswith("/")
-        assert dump_compact_summary_row is not None
     finally:
         await client.aclose()
         await db.close()

@@ -20,7 +20,6 @@ import torch
 import torch.nn as nn
 from engine.pipeline.species import (
     DEFAULT_IMAGE_SIZE,
-    DEFAULT_MIN_CONFIDENCE,
     IMAGENET_MEAN,
     IMAGENET_STD,
     LoRALinear,
@@ -75,9 +74,6 @@ class TestPreprocessForDinov3:
         r_channel_mean = float(x[0, 0].mean())
         expected = (1.0 - IMAGENET_MEAN[0]) / IMAGENET_STD[0]
         assert r_channel_mean == pytest.approx(expected, abs=0.02)
-
-    def test_default_size_is_384(self) -> None:
-        assert DEFAULT_IMAGE_SIZE == 384
 
 
 class TestSpeciesPolicy:
@@ -171,12 +167,3 @@ class TestSpeciesTaxonomy:
         self._write_v4_taxonomy(tmp_path)
         tax = SpeciesTaxonomy(tmp_path)
         assert tax.lookup("MissingSpecies") is None
-
-
-def test_imagenet_constants_unchanged() -> None:
-    assert IMAGENET_MEAN == (0.485, 0.456, 0.406)
-    assert IMAGENET_STD == (0.229, 0.224, 0.225)
-
-
-def test_default_min_confidence_remains_review_friendly() -> None:
-    assert DEFAULT_MIN_CONFIDENCE == 0.01

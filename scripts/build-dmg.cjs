@@ -182,13 +182,12 @@ exports.default = async function (context) {
       await rwMount.detach()
     }
 
-    // 3) 转换为压缩 UDZO 发布版
-    console.log(`[build-dmg] hdiutil convert → ${candidateDmg}`)
-    execFileSync(
-      'hdiutil',
-      ['convert', tmpDmg, '-format', 'UDZO', '-imagekey', 'zlib-level=9', '-o', candidateDmg],
-      { stdio: 'inherit' },
-    )
+    // 3) 转换为 LZFSE (ULFO) 压缩发布版（macOS 10.11+ 原生支持，最低基线 14.0 完全兼容，
+    // 相比 UDZO zlib-level=9 在不可压缩模型权重上显著减少 CI 耗时且体积相当）
+    console.log(`[build-dmg] hdiutil convert (ULFO) → ${candidateDmg}`)
+    execFileSync('hdiutil', ['convert', tmpDmg, '-format', 'ULFO', '-o', candidateDmg], {
+      stdio: 'inherit',
+    })
     // 验证 dmg 内 Framework binary 真的在
     console.log(`[build-dmg] verifying dmg contents...`)
     const verifyMountPoint = verifyMount.attach(true)

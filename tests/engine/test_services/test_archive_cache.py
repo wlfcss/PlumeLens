@@ -36,15 +36,26 @@ def test_get_returns_none_when_empty() -> None:
 
 
 def test_put_then_get_within_ttl() -> None:
-    archive_cache.put("k1", [1, 2, 3])
+    out = archive_cache.put("k1", [1, 2, 3])
+    assert out == [1, 2, 3]
     assert archive_cache.get("k1") == [1, 2, 3]
     assert archive_cache.size() == 1
 
 
-def test_put_returns_value() -> None:
-    """put 返回 value,便于链式调用。"""
-    out = archive_cache.put("k", {"a": 1})
-    assert out == {"a": 1}
+def test_generation_blocks_stale_writeback() -> None:
+    """并发读快照期间若发生 invalidate，旧代际快照不得回写污染缓存。"""
+    gen_before = archive_cache.generation()
+    archive_cache.invalidate()
+    assert archive_cache.generation() == gen_before + 1
+
+    # 旧代际写入被忽略
+    archive_cache.put("provinces", ["stale"], expected_generation=gen_before)
+    assert archive_cache.get("provinces") is None
+
+    # 当前代际写入正常生效
+    current_gen = archive_cache.generation()
+    archive_cache.put("provinces", ["fresh"], expected_generation=current_gen)
+    assert archive_cache.get("provinces") == ["fresh"]
 
 
 def test_invalidate_clears_all() -> None:
@@ -90,13 +101,20 @@ def test_get_evicts_after_ttl(monkeypatch: pytest.MonkeyPatch) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_lru_eviction_drops_oldest() -> None:
-    """超 64 上限时,最旧条目应被踢出。"""
+def test_lru_eviction_drops_oldest(monkeypatch: pytest.MonkeyPatch) -> None:
+    """超 64 上限时,最旧条目应被踢出（使用受控时钟避免真实 sleep）。"""
+    tick = 100.0
+
+    def fake_monotonic() -> float:
+        nonlocal tick
+        tick += 0.01
+        return tick
+
+    monkeypatch.setattr(archive_cache, "monotonic", fake_monotonic)
+
     cap = archive_cache.GEO_CACHE_MAX_ENTRIES
     for i in range(cap):
         archive_cache.put(f"k{i}", i)
-        # 给每条不同的 monotonic 时间戳确保排序稳定
-        time.sleep(0.0005)
     assert archive_cache.size() == cap
     # 再 put 一个 → 总数仍为 cap,最旧 k0 被踢
     archive_cache.put("kN", "new")

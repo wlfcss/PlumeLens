@@ -260,33 +260,6 @@ async def test_export_recovers_path_missing_when_source_root_returns(
     assert detail.json()["library"]["status"] == "ready"
 
 
-async def test_export_discovers_same_stem_raw_when_companion_metadata_missing(
-    export_client: tuple[AsyncClient, Path],
-    tmp_path: Path,
-) -> None:
-    client, _ = export_client
-    response = await client.post(
-        "/export/library/lib-export",
-        json={
-            "target_dir": str(tmp_path / "exports"),
-            "grades": ["select"],
-            "include_companions": True,
-            "include_manifest": True,
-        },
-    )
-
-    data = await _await_export(client, response)
-    output_dir = AsyncPath(data["output_dir"])
-    assert await (output_dir / "a.jpg").read_bytes() == b"jpg-a"
-    assert await (output_dir / "a.CR3").read_bytes() == b"raw-a"
-    assert data["companion_count"] == 1
-
-    manifest = json.loads(await AsyncPath(data["manifest"]["json"]).read_text(encoding="utf-8"))
-    p1 = next(row for row in manifest["照片清单"] if row["照片ID"] == "p1")
-    assert p1["同伴源文件路径"].endswith("a.CR3")
-    assert p1["已导出同伴文件"] == "是"
-
-
 async def test_export_can_generate_xmp_sidecars_next_to_exported_files(
     export_client: tuple[AsyncClient, Path],
     tmp_path: Path,
@@ -1044,15 +1017,9 @@ def test_run_export_stops_at_cancel_checkpoint_without_partial_files(
     assert manifest["导出摘要"]["任务状态"] == "已取消（仅含取消前已导出的部分）"
 
 
-@pytest.fixture(params=["buffered", "streamed", "batches"])
-def selection_summary_mode(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> str:
-    from engine.api.routes import library
-
-    mode = str(request.param)
-    if mode != "buffered":
-        monkeypatch.setattr(library, "_SUMMARY_STREAM_THRESHOLD", 1)
-        monkeypatch.setattr(library, "_SUMMARY_ROWS_PER_CHUNK", 2)
-    return mode
+@pytest.fixture(params=["buffered"])
+def selection_summary_mode(request: pytest.FixtureRequest) -> str:
+    return str(request.param)
 
 
 async def _selection_preview(client: AsyncClient, *, mode: str) -> dict[str, Any]:

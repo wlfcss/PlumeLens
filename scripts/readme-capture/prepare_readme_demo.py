@@ -14,7 +14,7 @@ from pathlib import Path
 import pyarrow.parquet as pq
 from PIL import Image
 
-REPO = Path(__file__).resolve().parents[3]
+REPO = Path(__file__).resolve().parents[2]
 ARTWORK = REPO / "resources" / "species-artwork"
 ROOT = Path(os.environ.get("PLUMELENS_README_DEMO_ROOT", "/private/tmp/PlumeLens演示图库"))
 PHOTO_DIR = ROOT / "春日观鸟"

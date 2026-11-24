@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import shutil
 import sys
 from pathlib import Path
 from typing import Any
@@ -136,3 +137,37 @@ def create_session(path: str, *, providers: list) -> Any:
                 providers=_strip_coreml_cache_dir(providers),
             )
     return ort.InferenceSession(path, sess_options=options, providers=providers)
+
+
+def prune_stale_coreml_caches(cache_root: Path, active_dirname: str) -> list[str]:
+    """Remove obsolete ``ort-*`` CoreML compiled cache directories after upgrade.
+
+    Best-effort: only removes non-symlink ``ort-*`` subdirectories whose name
+    differs from ``active_dirname``, leaving unrelated files/folders untouched.
+    """
+    if not cache_root.exists() or not cache_root.is_dir():
+        return []
+    removed: list[str] = []
+    try:
+        entries = list(cache_root.iterdir())
+    except OSError:
+        return []
+    for entry in entries:
+        if (
+            entry.name == active_dirname
+            or not entry.name.startswith("ort-")
+            or entry.is_symlink()
+            or not entry.is_dir()
+        ):
+            continue
+        shutil.rmtree(entry, ignore_errors=True)
+        if not entry.exists():
+            removed.append(entry.name)
+    if removed:
+        logger.info(
+            "Pruned stale CoreML cache directories",
+            cache_root=str(cache_root),
+            active=active_dirname,
+            removed=sorted(removed),
+        )
+    return sorted(removed)

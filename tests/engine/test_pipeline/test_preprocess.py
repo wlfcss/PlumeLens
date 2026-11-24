@@ -39,23 +39,18 @@ class TestResizeLetterbox:
         assert pad_left == 100
 
     def test_output_dtype(self) -> None:
-        img = np.random.rand(50, 50, 3).astype(np.float32)
+        img = np.random.default_rng(0).random((50, 50, 3), dtype=np.float32)
         result, _, _ = resize_letterbox(img, 100)
         assert result.dtype == np.float32
 
-    def test_yolo_standard_fill_value(self) -> None:
-        """填充值必须是 YOLO 标准 114/255，而非 0.5。"""
-        assert pytest.approx(114.0 / 255.0) == YOLO_LETTERBOX_FILL
-
     def test_padding_uses_yolo_fill(self) -> None:
-        """图像周围的填充区域应为 YOLO 114 灰色。"""
+        """图像周围的填充区域应为 YOLO 标准 114/255 灰色。"""
         # 构造一张 100x200 风景图，letterbox 到 400x400 → 上下各 100px 填充
         img = np.ones((100, 200, 3), dtype=np.float32) * 0.9  # 非灰色的内容区
         result, _, (pad_top, pad_left) = resize_letterbox(img, 400)
-        # 顶部填充区域应为 YOLO 填充值
         top_pad_sample = result[0:pad_top, :, :]
+        assert np.allclose(top_pad_sample, 114.0 / 255.0)
         assert np.allclose(top_pad_sample, YOLO_LETTERBOX_FILL)
-        # 左侧无填充（landscape）
         assert pad_left == 0
 
 

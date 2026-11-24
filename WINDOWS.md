@@ -1,13 +1,15 @@
 # Windows 与 AMD 优化、验证记录
 
-## 安装 0.7.8 便携版
+## 安装便携版
 
-1. 将 [Windows x64 便携包](https://github.com/wlfcss/PlumeLens/releases/download/v0.7.8/PlumeLens-0.7.8-Windows-x64.zip) 和 [SHA-256 校验文件](https://github.com/wlfcss/PlumeLens/releases/download/v0.7.8/PlumeLens-0.7.8-Windows-x64.zip.sha256) 下载到同一目录。
+1. 从 [GitHub Releases](https://github.com/wlfcss/PlumeLens/releases) 下载对应版本的 `PlumeLens-<version>-Windows-x64.zip` 和 `.sha256` 校验文件到同一目录（以 `0.7.9` 为例）。
 2. 在该目录打开 PowerShell，运行下面的命令。结果为 `True` 表示 ZIP 的 SHA-256 与发布值一致。
 3. 完整解压 ZIP，从解压目录运行 `PlumeLens.exe`。模型和运行库随包提供。
 
+> **升级与兼容说明**：便携包将数据库、缩略图与配置保存在用户应用数据目录（`%APPDATA%\PlumeLens` / `%LOCALAPPDATA%\PlumeLens`），替换新版本目录后历史图库、人工评级与物种修正会自动延续；增量执行「开始分析」默认跳过已有有效分析结果的照片，仅处理新增或变更原片。`0.7.9` 已升级 Electron 45 与新版 Python 依赖（仍锁定经过实测的 `onnxruntime-windowsml 1.30.1` 与 `windowsml 2.5.96`），Windows AMD 组合需随 CI/实机发版复验。
+
 ```powershell
-$zip = 'PlumeLens-0.7.8-Windows-x64.zip'
+$zip = 'PlumeLens-0.7.9-Windows-x64.zip'
 $expected = ((Get-Content "$zip.sha256" -Raw).Trim() -split '\s+')[0]
 (Get-FileHash $zip -Algorithm SHA256).Hash -eq $expected
 ```

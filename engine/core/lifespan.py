@@ -504,10 +504,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     if reset_count > 0:
         await logger.ainfo("Reset transient queue tasks during shutdown", count=reset_count)
 
-    # Drain all thread-pool workers (including shielded inference threads) BEFORE
-    # closing ONNX/PyTorch sessions and SQLite so no worker accesses freed state.
-    thread_pool.shutdown(wait=True, cancel_futures=True)
-
     close_pipeline = getattr(app.state.pipeline, "close", None)
     if callable(close_pipeline):
         close_result = close_pipeline()
@@ -515,3 +511,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
             await close_result
     await app.state.db.close()
     await logger.ainfo("PlumeLens Engine shutting down")
+
+    # Shut down the custom default executor LAST — after db.close() and final
+    # async structlog calls — because aiosqlite/structlog dispatch to the loop's
+    # default executor during cleanup.
+    thread_pool.shutdown(wait=True, cancel_futures=True)

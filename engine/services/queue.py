@@ -195,12 +195,15 @@ async def enqueue_photos(
         run_created = run is not None
         for pid in dict.fromkeys(photo_ids):
             if current_pipeline_version and not force_rerun:
+                # 默认跳过已有有效 active 分析结果且源输入未变化的照片（含旧版本引擎
+                # 产出的历史结果），避免应用升级后仅新增少量照片却触发全库重跑；
+                # 需要用新引擎重跑时由调用方显式传 force_rerun=True。
                 async with conn.execute(
                     "SELECT 1 FROM analysis_results ar JOIN photos p ON p.id=ar.photo_id "
-                    "WHERE ar.photo_id=? AND ar.pipeline_version=? AND ar.is_active=1 "
+                    "WHERE ar.photo_id=? AND ar.is_active=1 "
                     "AND ar.input_revision=p.input_revision "
                     "AND (ar.input_hash IS p.file_hash OR ar.input_hash IS NULL)",
-                    (pid, current_pipeline_version),
+                    (pid,),
                 ) as cur:
                     if await cur.fetchone() is not None:
                         continue

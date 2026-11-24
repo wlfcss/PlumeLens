@@ -1,11 +1,10 @@
 name: macOS App Build
 
 on:
-  pull_request:
   push:
     branches: [main]
-    tags: ['v*']
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
@@ -18,44 +17,15 @@ env:
 
 concurrency:
   group: mac-build-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  quality:
-    name: Type, lint and unit checks
-    runs-on: macos-15
-    timeout-minutes: 30
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
-        with:
-          node-version: 24
-          cache: npm
-      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          enable-cache: true
-      - run: npm ci
-      - run: uv sync --locked --extra dev
-      - run: npm run typecheck
-      - run: npm run lint
-      - run: npm test
-      - run: uv run ruff check .
-      - run: uv run pyright
-      # Real model loading is exercised by the asset-gated packaged build below.
-      - run: uv run pytest --ignore=tests/engine/test_pipeline/test_integration.py
-
   build:
-    needs: quality
-    if: github.event_name != 'pull_request'
-    name: Build macOS arm64 DMG
+    name: Build & verify macOS arm64 DMG
     runs-on: macos-15
-    timeout-minutes: 120
+    timeout-minutes: 75
 
     env:
-      PLUMELENS_FORCE_ENGINE_BUILD: '1'
       MODEL_BUNDLE_URL: ${{ secrets.PLUMELENS_MODELS_URL }}
       MODEL_RELEASE_TAG: ${{ vars.PLUMELENS_MODELS_RELEASE_TAG || 'models-v4' }}
       MODEL_RELEASE_ASSET: ${{ vars.PLUMELENS_MODELS_RELEASE_ASSET || 'plumelens-models-v4.tar.gz' }}
@@ -76,15 +46,30 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
           enable-cache: true
 
+      - name: Cache Electron & electron-builder archives
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/Library/Caches/electron
+            ~/Library/Caches/electron-builder
+          key: mac-electron-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            mac-electron-
+
       - name: Install dependencies
         run: |
           npm ci
-          npx install-electron --no
           uv sync --locked --extra dev
           uv run python --version
           uv run pyinstaller --version
 
-      - name: Restore private model assets
+      - name: Run macOS-specific unit tests
+        run: |
+          uv run pytest \
+            tests/engine/test_services/test_exporter_atomic.py \
+            tests/engine/test_pipeline/test_runtime.py
+
+      - name: Restore & verify reviewed model assets
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -95,7 +80,8 @@ jobs:
 
           bundle="$RUNNER_TEMP/plumelens-models"
           if [[ -n "${MODEL_BUNDLE_URL}" ]]; then
-            curl --fail --location --retry 3 --output "$bundle" "${MODEL_BUNDLE_URL}"
+            curl --fail --location --retry 3 --connect-timeout 30 --max-time 600 \
+              --output "$bundle" "${MODEL_BUNDLE_URL}"
           elif [[ -n "${MODEL_RELEASE_TAG}" ]]; then
             bundle="$RUNNER_TEMP/${MODEL_RELEASE_ASSET}"
             gh release download "${MODEL_RELEASE_TAG}" \
@@ -108,173 +94,60 @@ jobs:
           fi
 
           uv run python scripts/restore_models.py --archive "$bundle" \
-            --trusted-manifest "$RUNNER_TEMP/plumelens-trusted-manifest.json"
+            --trusted-manifest "$RUNNER_TEMP/plumelens-trusted-manifest.json" \
+            --require-tracked
           rm -f "$bundle"
 
-      - name: Validate packaged model assets
-        run: |
-          set -euo pipefail
-
-          # v0.7.0 模型清单(v0.6.0 → v0.7.0 变更):
-          # - DINOv3 species v4:heads/seed*.pt 已替换为 v4 LoRA 单文件 adapter
-          #   (v4/seed42_adapter.pt + v4_calibration_policy.json,1591 类三态)
-          # - bird_visibility v2.0 (11 关键点):bird_visibility.onnx → bird_visibility11.onnx +
-          #   bird_visibility11_config.json (含 best_body / best_tail / best_wings 校准段)
-          # - bird_flight_classifier v1:新增,飞版/非飞版二分类器
-          # - YOLOv26l-bird-det:v1.0 → v1.1 (实拍 holdout recall 提升到 87.2%)
-          required=(
-            "engine/models/yolo26l-bird-det.onnx"
-            "engine/models/bird_visibility11.onnx"
-            "engine/models/bird_flight_classifier.onnx"
-            "engine/models/clipiqa_plus.onnx"
-            "engine/models/hyperiqa.onnx"
-            "engine/models/bird_visibility11_config.json"
-            "engine/models/bird_flight_classifier_config.json"
-            "engine/models/species/backbone/config.json"
-            "engine/models/species/backbone/model.safetensors"
-            "engine/models/species/canonical_extended.parquet"
-            "engine/models/species/v4_calibration_policy.json"
-            "engine/models/species/v4/seed42_adapter.pt"
-            "engine/models/species_wiki.parquet"
-            "engine/models/manifest.json"
-          )
-
-          missing=0
-          for file in "${required[@]}"; do
-            if [[ ! -s "$file" ]]; then
-              echo "::error::Missing required model asset: $file"
-              missing=1
-            fi
-          done
-          exit "$missing"
-
-      - name: Verify model manifest SHA-256
-        # 供应链整完整性闸门 — 把打包前模型文件的 SHA-256 与 git-tracked
-        # engine/models/manifest.json 比对,任一不一致直接 fail build。
-        # 拦截两类风险:(1) Release tarball 被中间人替换,(2) 仓库内 manifest
-        # 被篡改但未同步真实模型(开发期忘记重跑 build_model_manifest.py)。
-        # 引擎运行时也会做同样校验(engine/core/manifest.py),CI 这一步是双保险。
-        run: |
-          uv run python - <<'PY'
-          import os
-          from pathlib import Path
-
-          from engine.core.manifest import ManifestError, verify_manifest
-          from scripts.build_model_manifest import TRACKED_ASSETS
-
-          try:
-              verified = verify_manifest(
-                  Path("engine/models"),
-                  Path(os.environ["RUNNER_TEMP"]) / "plumelens-trusted-manifest.json",
-                  required_assets=TRACKED_ASSETS,
-              )
-          except ManifestError as exc:
-              raise SystemExit(f"::error::{exc}") from exc
-          print(f"manifest verified: {len(verified)} entries")
-          PY
+      - name: Run real-model pipeline integration tests
+        run: uv run pytest -m integration
 
       - name: Build macOS DMG
-        run: npm run dist:mac
+        run: npm run dist:mac:bundle
 
-      # packaged E2E 失败时,upload-artifact 之前的步骤已经中断,DMG 也不会上传 ——
-      # 结果就是 CI 日志里只剩一句 "Engine URL never resolved",trace / engine 日志
-      # 全部丢失(v0.7.6 tag 构建就卡在这里,只能靠本机复现才定位到是超时阈值问题)。
+      - name: Smoke test mounted DMG application
+        run: |
+          set -euo pipefail
+          dmg="$(ls release/PlumeLens-*-arm64.dmg | head -n 1)"
+          mount_dir="$(mktemp -d "$RUNNER_TEMP/plumelens-dmg-smoke.XXXXXX")"
+          cleanup() {
+            hdiutil detach "$mount_dir" -force >/dev/null 2>&1 || true
+            rm -rf "$mount_dir"
+          }
+          trap cleanup EXIT
+
+          hdiutil attach "$dmg" -readonly -nobrowse -mountpoint "$mount_dir"
+          app_bin="$mount_dir/PlumeLens.app/Contents/MacOS/PlumeLens"
+          test -x "$app_bin"
+
+          uv run --no-sync python tests/e2e-electron/fixtures/generate_photos.py
+          PLUMELENS_APP_PATH="$app_bin" npx playwright test \
+            --config=tests/e2e-electron/playwright.config.ts \
+            cold-start.spec.ts packaged-smoke.spec.ts
+
       - name: Upload packaged E2E diagnostics
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: packaged-e2e-diagnostics-${{ github.sha }}
-          path: |
-            test-results/
-            tests/e2e-electron/test-results/
+          name: packaged-e2e-diagnostics-mac-${{ github.run_attempt }}-${{ github.sha }}
+          path: test-results/
           if-no-files-found: warn
           retention-days: 7
+
+      - name: Generate DMG SHA-256 & upload artifact
+        run: |
+          set -euo pipefail
+          dmg="$(ls release/PlumeLens-*-arm64.dmg | head -n 1)"
+          dmg_basename="$(basename "$dmg")"
+          sha256_value="$(shasum -a 256 "$dmg" | awk '{print $1}')"
+          printf '%s  %s\n' "$sha256_value" "$dmg_basename" > "${dmg}.sha256"
 
       - name: Upload DMG artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: PlumeLens-macOS-arm64-${{ github.sha }}
-          path: release/PlumeLens-*-arm64.dmg
+          path: |
+            release/PlumeLens-*-arm64.dmg
+            release/PlumeLens-*-arm64.dmg.sha256
+          compression-level: 0
           if-no-files-found: error
           retention-days: 7
-
-  publish:
-    name: Publish tagged macOS release asset
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: macos-15
-    timeout-minutes: 15
-    permissions:
-      contents: write
-    steps:
-      - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
-      - name: Download DMG artifact
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: PlumeLens-macOS-arm64-${{ github.sha }}
-          path: release
-
-      - name: Publish tagged release asset
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          tag="${GITHUB_REF_NAME}"
-          version="${tag#v}"
-          dmg="$(ls release/PlumeLens-*-arm64.dmg | head -n 1)"
-
-          # 算 SHA-256 + 写 sidecar — 用户下载后可对照校验。
-          # 这是 release tarball 中间人篡改的最直接抵抗:GitHub 即使被入侵推
-          # 篡改 DMG,sha256 文件和 release notes 内的 hash 不会自动跟着改
-          # (release notes 是这次 publish 的 commit 内容)。
-          dmg_basename="$(basename "$dmg")"
-          sha256_value="$(shasum -a 256 "$dmg" | awk '{print $1}')"
-          sha256_path="${dmg}.sha256"
-          printf '%s  %s\n' "$sha256_value" "$dmg_basename" > "$sha256_path"
-
-          # Release notes 从 CHANGELOG.md 抽取当前 tag 对应的章节,避免 workflow
-          # 模板与版本说明双源漂移。CHANGELOG 约定:版本以 `## <version>` 开头,
-          # 下一个 `## ` 行结束。
-          changelog_body=""
-          if [[ -f CHANGELOG.md ]]; then
-            changelog_body="$(awk -v v="$version" '
-              /^## / {
-                if (found) { exit }
-                if ($2 == v) { found = 1; next }
-              }
-              found { print }
-            ' CHANGELOG.md)"
-          fi
-
-          {
-            echo "## PlumeLens ${version}"
-            echo
-            if [[ -n "$changelog_body" ]]; then
-              echo "$changelog_body"
-            else
-              echo "_(未在 CHANGELOG.md 找到 ${version} 章节;详见仓库提交记录。)_"
-            fi
-            echo
-            echo "### 自动构建与校验"
-            echo
-            echo "- 本 Release 由 GitHub Actions 的 macOS arm64 自动构建流程生成。"
-            echo "- 模型资产 SHA-256、PyInstaller 后端冻结、Electron 打包、codesign 与 packaged cold-start smoke 都在 CI 中完成。"
-            echo "- Windows x64 便携包由独立 Windows 工作流构建；AMD 实机验证与使用说明见仓库 WINDOWS.md。"
-            echo
-            echo "### DMG 校验"
-            echo
-            echo "下载 \`${dmg_basename}\` 后本地比对 SHA-256:"
-            echo
-            echo '```bash'
-            echo "shasum -a 256 ${dmg_basename}"
-            echo "# 应输出: ${sha256_value}"
-            echo "# 也可下载 ${dmg_basename}.sha256 调 \`shasum -a 256 -c\` 自动校验"
-            echo '```'
-          } > release-notes.md
-
-          if ! gh release create "$tag" --title "PlumeLens ${version}" --notes-file release-notes.md 2>/dev/null; then
-            gh release edit "$tag" --title "PlumeLens ${version}" --notes-file release-notes.md
-          fi
-          gh release upload "$tag" "$dmg" "$sha256_path" --clobber

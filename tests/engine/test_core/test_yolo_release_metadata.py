@@ -34,10 +34,13 @@ def _sha256(path: Path) -> str:
     return h.hexdigest()
 
 
-pytestmark = pytest.mark.skipif(
-    not YOLO_ONNX.exists(),
-    reason="YOLO ONNX asset not present in this checkout",
-)
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.skipif(
+        not YOLO_ONNX.exists(),
+        reason="YOLO ONNX asset not present in this checkout",
+    ),
+]
 
 
 def test_yolo_release_asset_matches_v11_manifest_and_docs() -> None:

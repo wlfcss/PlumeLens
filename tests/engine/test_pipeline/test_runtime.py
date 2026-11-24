@@ -210,3 +210,33 @@ def test_species_classify_throttles_mps_empty_cache(monkeypatch):
     assert empty_calls == 1
     clf.classify(crop)
     assert empty_calls == 2
+
+
+def test_prune_stale_coreml_caches_removes_only_old_ort_dirs(tmp_path):
+    from engine.pipeline.runtime import prune_stale_coreml_caches
+
+    cache_root = tmp_path / "cache" / "coreml"
+    old_a = cache_root / "ort-1.24.0"
+    old_b = cache_root / "ort-1.25.0"
+    active = cache_root / "ort-1.32.0"
+    unrelated_dir = cache_root / "custom-cache"
+    unrelated_file = cache_root / "ort-note.txt"
+    external_target = tmp_path / "external-target"
+
+    for directory in (old_a, old_b, active, unrelated_dir, external_target):
+        directory.mkdir(parents=True)
+        (directory / "artifact.bin").write_bytes(b"ok")
+    unrelated_file.write_text("keep", encoding="utf-8")
+    symlink_dir = cache_root / "ort-1.20.0"
+    symlink_dir.symlink_to(external_target, target_is_directory=True)
+
+    removed = prune_stale_coreml_caches(cache_root, "ort-1.32.0")
+
+    assert removed == ["ort-1.24.0", "ort-1.25.0"]
+    assert not old_a.exists()
+    assert not old_b.exists()
+    assert active.is_dir()
+    assert unrelated_dir.is_dir()
+    assert unrelated_file.is_file()
+    assert symlink_dir.is_symlink()
+    assert (external_target / "artifact.bin").is_file()

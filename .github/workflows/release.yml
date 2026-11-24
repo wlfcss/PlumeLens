@@ -1,0 +1,112 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  mac:
+    name: macOS arm64
+    uses: ./.github/workflows/mac-build.yml
+    secrets: inherit
+
+  windows:
+    name: Windows x64
+    uses: ./.github/workflows/windows-build.yml
+    with:
+      gpu_target: gfx1100
+    secrets: inherit
+
+  publish:
+    name: Publish coordinated GitHub Release
+    needs: [mac, windows]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Download macOS artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: PlumeLens-macOS-arm64-${{ github.sha }}
+          path: release
+
+      - name: Download Windows artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: PlumeLens-Windows-x64-gfx1100-${{ github.sha }}
+          path: release
+
+      - name: Verify checksums & publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          version="${tag#v}"
+
+          dmg="$(ls release/PlumeLens-*-arm64.dmg | head -n 1)"
+          dmg_sha_file="${dmg}.sha256"
+          win_zip="$(ls release/PlumeLens-*-Windows-x64.zip | head -n 1)"
+          win_sha_file="${win_zip}.sha256"
+
+          (cd release && sha256sum -c "$(basename "$dmg_sha_file")" && sha256sum -c "$(basename "$win_sha_file")")
+
+          dmg_basename="$(basename "$dmg")"
+          dmg_sha="$(awk '{print $1}' "$dmg_sha_file")"
+          win_basename="$(basename "$win_zip")"
+          win_sha="$(awk '{print $1}' "$win_sha_file")"
+
+          changelog_body=""
+          if [[ -f CHANGELOG.md ]]; then
+            changelog_body="$(awk -v v="$version" '
+              /^## / {
+                if (found) { exit }
+                if ($2 == v) { found = 1; next }
+              }
+              found { print }
+            ' CHANGELOG.md)"
+          fi
+
+          {
+            echo "## PlumeLens ${version}"
+            echo
+            if [[ -n "$changelog_body" ]]; then
+              echo "$changelog_body"
+            else
+              echo "_(未在 CHANGELOG.md 找到 ${version} 章节；详见仓库提交记录。)_"
+            fi
+            echo
+            echo "### 自动构建与校验"
+            echo
+            echo "- 本 Release 由 GitHub Actions 协同构建并验证通过后统一发布（macOS arm64 DMG 与 Windows x64 便携包均已通过模型 SHA-256 校验、后端冻结、打包与真机/实包端到端冒烟验证）。"
+            echo "- macOS 需 **macOS 14.0（Sonoma）及以上**（Apple 芯片）；macOS 13 用户请继续使用 0.7.8。"
+            echo "- Windows AMD 加速配置与说明见仓库 \`WINDOWS.md\`。"
+            echo
+            echo "### 安装包 SHA-256 校验"
+            echo
+            echo "| 平台 | 文件 | SHA-256 |"
+            echo "| --- | --- | --- |"
+            echo "| macOS arm64 | \`${dmg_basename}\` | \`${dmg_sha}\` |"
+            echo "| Windows x64 | \`${win_basename}\` | \`${win_sha}\` |"
+          } > release-notes.md
+
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release edit "$tag" --title "PlumeLens ${version}" --notes-file release-notes.md
+          else
+            gh release create "$tag" --verify-tag --title "PlumeLens ${version}" --notes-file release-notes.md
+          fi
+          gh release upload "$tag" \
+            "$dmg" "$dmg_sha_file" \
+            "$win_zip" "$win_sha_file" \
+            --clobber

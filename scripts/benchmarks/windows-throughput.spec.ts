@@ -2,7 +2,12 @@ import { expect, test } from '@playwright/test'
 import { spawn } from 'node:child_process'
 import { join } from 'node:path'
 import { readFileSync, readdirSync, writeFileSync, rmSync } from 'node:fs'
-import { launchApp, waitForEngineReady, callEngine, REPO_ROOT } from './helpers/launch.js'
+import {
+  launchApp,
+  waitForEngineReady,
+  callEngine,
+  REPO_ROOT,
+} from '../../tests/e2e-electron/helpers/launch.js'
 
 test('Windows: measure bounded concurrency with real GPU and memory counters', async () => {
   test.skip(

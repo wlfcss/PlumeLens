@@ -4,11 +4,10 @@ import json
 import tomllib
 from pathlib import Path
 
-import pytest
-from httpx import AsyncClient
+from engine.main import create_app
+from httpx import ASGITransport, AsyncClient
 
 
-@pytest.mark.asyncio
 async def test_health_returns_ok(client: AsyncClient) -> None:
     response = await client.get("/health")
     assert response.status_code == 200
@@ -33,7 +32,6 @@ def _release_versions() -> set[str]:
     }
 
 
-@pytest.mark.asyncio
 async def test_runtime_and_locked_package_versions_agree(client: AsyncClient) -> None:
     response = await client.get("/health")
 
@@ -41,31 +39,15 @@ async def test_runtime_and_locked_package_versions_agree(client: AsyncClient) ->
     assert _release_versions() == {response.json()["version"]}
 
 
-@pytest.mark.asyncio
-async def test_health_includes_pipeline_status(client: AsyncClient) -> None:
+async def test_health_reflects_real_pipeline_manager_slots(client: AsyncClient) -> None:
     response = await client.get("/health")
     data = response.json()
-    assert "pipeline" in data
     pipeline = data["pipeline"]
-    assert "ready" in pipeline
-    assert "version" in pipeline
-    assert "models" in pipeline
-    assert "quality_available" in pipeline
-    assert "pose_available" in pipeline
-    assert "species_available" in pipeline
-    # Mock pipeline is not ready; enhancements unavailable
     assert pipeline["ready"] is False
     assert pipeline["quality_available"] is False
     assert pipeline["pose_available"] is False
     assert pipeline["species_available"] is False
-
-
-@pytest.mark.asyncio
-async def test_health_lists_current_model_slots(client: AsyncClient) -> None:
-    response = await client.get("/health")
-    data = response.json()
-    models = data["pipeline"]["models"]
-    assert set(models.keys()) == {
+    assert set(pipeline["models"].keys()) == {
         "yolo",
         "bird_visibility",
         "bird_flight_classifier",
@@ -73,3 +55,14 @@ async def test_health_lists_current_model_slots(client: AsyncClient) -> None:
         "hyperiqa",
         "dinov3_species_v4",
     }
+
+
+async def test_health_before_pipeline_attach_returns_unready() -> None:
+    app = create_app()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        response = await ac.get("/health")
+    assert response.status_code == 200
+    pipeline = response.json()["pipeline"]
+    assert pipeline["ready"] is False
+    assert pipeline["models"] == {}

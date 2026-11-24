@@ -2,7 +2,9 @@
 
 按版本记录主要功能、修复与兼容性变化。
 
-## 未发布
+## 0.7.9
+
+发布日期：2026-11-24。桌面运行时升级至 Electron 45.4.1（macOS 最低基线 14.0+），全面升级 Python/JS 依赖，大幅提升 Apple Silicon 推理吞吐并完成全栈审计与 CI/测试体系重构。[发布说明](docs/releases/0.7.9.md)
 
 ### 新增
 
@@ -18,6 +20,9 @@
   - 适配 Electron 43+ 原生文件夹选择器默认目录变化，独立持久化导入/导出最近路径并传入 `defaultPath`。
   - 迁移 `electron/user-settings.ts` 至 Electron 45+ 异步 `safeStorage` API（`isAsyncEncryptionAvailable` / `encryptStringAsync` / `decryptStringAsync` 及 `shouldReEncrypt` 自动重加密），并改为 `0o600` 原子写盘与损坏容错。
   - 启用 `electron-vite` main/preload/renderer `esbuild` 压缩与显式 `node24`/`chrome156` 编译目标。
+- **历史版本原地升级兼容**：
+  - 升级后对已有图库执行「开始分析」（`force_rerun=false`）默认跳过已有有效 `is_active=1` 且源输入未变的历史分析结果（即使推理依赖升级导致 `pipeline_version` 变化），仅分析新增或变更照片；显式传 `force_rerun=true` 仍可用新版本引擎全量重跑。
+  - 新版 CoreML 编译缓存加载成功后自动清理历史 `cache/coreml/ort-*` 旧版本缓存目录，防止升级累积磁盘占用。
 - 全面升级 Python 与前端依赖（OSV 复扫 Python 73 个包 **0 漏洞**，前端生产依赖 **0 漏洞**）：
   - **图像与相机解码**：升级 `pillow 12.2.0 → 13.0.0`（修复数十个图像解码器 Critical/High 漏洞）、`rawpy 0.26.1 → 0.28.0`（底层 LibRaw `0.22.2`，新增 Nikon Z6 III/Z8/Z9 HE*、Canon R6 Mark III、Sony A7 V/A7R VI、OM-3 与 DNG 1.7 等机身格式支持）。
   - **推理引擎**：升级 `onnxruntime 1.25.0 → 1.32.0`（macOS/Linux CoreML 初始化与内存优化）、`torch 2.11.0 → 2.14.1` + `torchvision 0.26.0 → 0.29.2`（锁定 `<2.15` 保持 macOS 14+ 兼容，获得 AOT Metal shaders / FlexAttention / `bf16` GEMV 与 MPS allocator 优化）、`transformers 5.6.2 → 5.24.0`、`safetensors 0.7.0 → 0.8.0`。
@@ -54,6 +59,12 @@
 - 分批计算图库修订，刷新选片工作区时复用未变化的照片记录，减少后台分析期间的筛选停顿。
 - 刷新大图库时复用未变化照片的筛选快照记录。Electron 分批接收与解析大图库摘要，完整校验后一次更新选片结果。
 - 大图库摘要按完整场景分批投影，提前释放照片模型。Electron 在接收摘要时复用相同的照片记录，降低后台分析期间的筛选延迟和渲染内存峰值。
+
+### 工程与测试
+
+- 重构 GitHub Actions 流水线：新增独立 `ci.yml`（`ubuntu-latest` 统一执行静态检查、单测与 Web Playwright E2E）、新增 `release.yml` 协同 macOS/Windows 构建并在 `ubuntu-latest` 原子发布双端安装包与合并 SHA-256 校验表；macOS 构建改用 `ULFO`（LZFSE）压缩 DMG 并直接挂载最终 DMG 执行跨平台打包端到端冒烟测试；Windows 打包校验与冒烟合并为单遍哈希与单运行器执行。
+- 清理后端与前端冗余/空转/硬编码路径用例，注册 `pytest` `integration` 标记并在构建流水线中用确定性鸟图跑通真实 6 模型集成测试；补齐 `PipelineManager._analyze_sync`、`lifespan` 任务恢复、`/analysis` 暂停/恢复/SSE 上限、`archive_cache` 代际防陈旧回写与 `geocoder.reverse()` 降级链核心单测。
+- 修复 `playwright.config.ts` 视口覆盖与并发配置，用跨平台几何/布局断言替代易抖动的 macOS 专属全屏像素快照，将文档截图与手动压测脚本迁至 `scripts/`，统一跨平台 `packaged-smoke.spec.ts` 验收套件。
 
 ## 0.7.8
 

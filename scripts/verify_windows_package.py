@@ -22,7 +22,12 @@ def file_digest(path: Path) -> str:
         return digest(source)
 
 
-def verify_package(package: Path, archive: Path | None, require_amd: bool) -> dict:
+def verify_package(
+    package: Path,
+    archive: Path | None,
+    require_amd: bool,
+    trusted_manifest: Path | None = None,
+) -> dict:
     package = package.resolve()
     resources = package / "resources"
     engine = resources / "plumelens-engine"
@@ -40,12 +45,26 @@ def verify_package(package: Path, archive: Path | None, require_amd: bool) -> di
         if not path.is_file() or not path.stat().st_size:
             raise ValueError(f"Missing package file: {path}")
     models = resources / "models"
-    assets = json.loads((models / "manifest.json").read_text(encoding="utf-8"))["assets"]
+    manifest_source = trusted_manifest if trusted_manifest is not None else models / "manifest.json"
+    assets = json.loads(manifest_source.read_text(encoding="utf-8"))["assets"]
+    cached_digests: dict[Path, str] = {}
+
+    def cached_file_digest(path: Path) -> str:
+        resolved = path.resolve()
+        value = cached_digests.get(resolved)
+        if value is None:
+            value = file_digest(resolved)
+            cached_digests[resolved] = value
+        return value
+
     for name, expected in assets.items():
         path = (models / name).resolve()
         if not path.is_relative_to(models.resolve()):
             raise ValueError(f"Invalid model path: {name}")
-        if path.stat().st_size != expected["size"] or file_digest(path) != expected["sha256"]:
+        if (
+            path.stat().st_size != expected["size"]
+            or cached_file_digest(path) != expected["sha256"]
+        ):
             raise ValueError(f"Packaged model SHA mismatch: {name}")
     sdk = engine / "_internal/_rocm_sdk_core"
     if require_amd and not sdk.is_dir():
@@ -62,8 +81,8 @@ def verify_package(package: Path, archive: Path | None, require_amd: bool) -> di
         "unpacked_bytes": sum(path.stat().st_size for path in files.values()),
         "verified_models": len(assets),
         "amd_runtime": sdk.is_dir(),
-        "app_sha256": file_digest(required[0]),
-        "engine_sha256": file_digest(required[1]),
+        "app_sha256": cached_file_digest(required[0]),
+        "engine_sha256": cached_file_digest(required[1]),
     }
     if archive is not None:
         with zipfile.ZipFile(archive) as bundle:
@@ -73,9 +92,9 @@ def verify_package(package: Path, archive: Path | None, require_amd: bool) -> di
             for index, entry in enumerate(entries, 1):
                 source = files[entry.filename]
                 with bundle.open(entry) as stream:
-                    if entry.file_size != source.stat().st_size or digest(stream) != file_digest(
-                        source
-                    ):
+                    if entry.file_size != source.stat().st_size or digest(
+                        stream
+                    ) != cached_file_digest(source):
                         raise ValueError(f"ZIP byte mismatch: {entry.filename}")
                 if index % 500 == 0:
                     print(f"Verified ZIP entries: {index}/{len(entries)}", flush=True)
@@ -95,10 +114,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--package-dir", type=Path, default=Path("release/win-unpacked"))
     parser.add_argument("--archive", type=Path)
+    parser.add_argument("--trusted-manifest", type=Path)
     parser.add_argument("--require-amd", action="store_true")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
-    report = verify_package(args.package_dir, args.archive, args.require_amd)
+    report = verify_package(args.package_dir, args.archive, args.require_amd, args.trusted_manifest)
     if args.output:
         args.output.write_text(json.dumps(report, indent=2), encoding="utf-8")
     print(json.dumps(report, indent=2))

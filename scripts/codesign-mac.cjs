@@ -77,11 +77,7 @@ exports.default = async function (context) {
   const engineDir = path.join(appPath, 'Contents', 'Resources', 'plumelens-engine')
   const dylibs = findRecursive(engineDir, (full) => {
     const lower = full.toLowerCase()
-    return (
-      lower.endsWith('.dylib') ||
-      lower.endsWith('.so') ||
-      lower.endsWith('.cpython-312-darwin.so')
-    )
+    return lower.endsWith('.dylib') || lower.endsWith('.so')
   })
   for (const f of dylibs) sign(f, entInherit, `dylib: ${path.basename(f)}`)
 

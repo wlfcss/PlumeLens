@@ -999,10 +999,6 @@ test.describe('Selection species filter', () => {
           doneRect.y + doneRect.height <= rect!.y + rect!.height,
         ),
       })
-      await page.screenshot({
-        path: `/private/tmp/plumelens-species-panel-${viewport.width}.png`,
-        animations: 'disabled',
-      })
       await closeFilter(page)
     }
     expect(geometry).toEqual([

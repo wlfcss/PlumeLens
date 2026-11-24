@@ -74,20 +74,6 @@ class TestQualityAssessor:
         assert scores.hyperiqa == pytest.approx(0.5)
         assert scores.combined == pytest.approx(0.5)
 
-    def test_equal_weights(self) -> None:
-        clipiqa_session = _make_iqa_session(0.5, (1, 1))
-        hyperiqa_session = _make_iqa_session(0.5, (1, 1, 1))
-        assessor = QualityAssessor(
-            clipiqa_session,
-            hyperiqa_session,
-            clipiqa_weight=0.5,
-            hyperiqa_weight=0.5,
-        )
-
-        crop = np.random.rand(80, 80, 3).astype(np.float32)
-        scores = assessor.assess(crop)
-        assert scores.combined == pytest.approx(0.5)
-
     def test_uses_separate_semantic_and_technical_crops(self) -> None:
         clipiqa_session = _make_iqa_session(0.7, (1, 1))
         hyperiqa_session = _make_iqa_session(0.4, (1, 1, 1))

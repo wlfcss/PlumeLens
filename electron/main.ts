@@ -1092,7 +1092,9 @@ app.whenReady().then(async () => {
   const thumbnailsRoot = join(userDataDir, 'derived', 'thumbnails')
   const speciesArtworkRoot = app.isPackaged
     ? join(process.resourcesPath, 'species-artwork')
-    : join(app.getAppPath(), 'resources', 'species-artwork')
+    : existsSync(join(app.getAppPath(), 'resources', 'species-artwork'))
+      ? join(app.getAppPath(), 'resources', 'species-artwork')
+      : join(__dirname, '..', '..', 'resources', 'species-artwork')
   const thumbnailsRootResolved = resolve(thumbnailsRoot)
   const speciesArtworkRootResolved = resolve(speciesArtworkRoot)
   // 首次启动也先创建缓存目录再取真实路径。Windows 的 RUNNER~1 等短路径

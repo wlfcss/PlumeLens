@@ -19,7 +19,7 @@ import {
   waitForEngineReady,
   waitForLibraryReady,
   type LaunchHandle,
-} from './helpers/launch.js'
+} from '../../tests/e2e-electron/helpers/launch.js'
 
 const demoRoot = process.env.PLUMELENS_README_DEMO_ROOT ?? '/private/tmp/PlumeLens演示图库'
 const demo = JSON.parse(readFileSync(join(demoRoot, 'manifest.json'), 'utf8')) as {

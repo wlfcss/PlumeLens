@@ -46,7 +46,7 @@ def create_app() -> FastAPI:
 
     application = FastAPI(
         title="PlumeLens Engine",
-        version="0.7.8",
+        version="0.7.9",
         lifespan=lifespan,
     )
     application.state.selection_projections = SelectionProjectionCache()

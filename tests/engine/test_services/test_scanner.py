@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import struct
 from fractions import Fraction
 from pathlib import Path
@@ -13,7 +12,6 @@ from engine.core.database import Database
 from engine.services.scanner import (
     _extract_exif,
     _parse_canon_afinfo2,
-    _probe_image_meta,
     _resolve_pairs,
     backfill_companion_for_library,
     backfill_hashes,
@@ -149,27 +147,6 @@ def test_parse_canon_afinfo2_preserves_area_and_focused_points() -> None:
     assert len(af["selected_points"]) == 4
     assert af["bounds"]["x1"] < af["center"]["x"] < af["bounds"]["x2"]
     assert af["bounds"]["y1"] < af["center"]["y"] < af["bounds"]["y2"]
-
-
-def test_probe_extracts_canon_r5m2_af_point_when_local_fixture_exists() -> None:
-    """Regression fixture for the user's Canon EOS R5m2 JPG batch."""
-    fixture = Path(
-        "/Users/wlfcss/Desktop/workspace/lingjian-v2/benchmark/results/new1/5Y3A7177.JPG"
-    )
-    if not fixture.exists():
-        pytest.skip("local Canon R5m2 fixture is not available")
-
-    meta = _probe_image_meta(fixture)
-    exif = json.loads(str(meta.get("exif_json") or "{}"))
-    af = exif.get("af_point")
-    af_area = exif.get("af_area")
-
-    assert isinstance(af, dict)
-    assert af["x"] == pytest.approx(4096)
-    assert af["y"] == pytest.approx(2732)
-    assert isinstance(af_area, dict)
-    assert af_area["center"]["x"] == pytest.approx(4096)
-    assert af_area["center"]["y"] == pytest.approx(2732)
 
 
 class TestScanLibrary:

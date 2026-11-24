@@ -194,6 +194,42 @@ class TestBatch:
             await asyncio.sleep(0.05)
         assert pipeline.analyze.await_count == 2
 
+    async def test_batch_skips_photos_analyzed_by_older_pipeline_version(
+        self, client_with_lib
+    ) -> None:
+        client, lib_id, _, pipeline = client_with_lib
+        await client.post("/analysis/batch", json={"library_id": lib_id})
+        for _ in range(50):
+            stats_resp = await client.get(f"/analysis/library/{lib_id}/stats")
+            stats = stats_resp.json()["stats"]
+            if stats.get("completed", 0) >= 2:
+                break
+            await asyncio.sleep(0.05)
+        assert stats.get("completed", 0) == 2
+
+        # 模拟升级后 pipeline_version 变更：默认批量分析应跳过已分析的老图，不触发全量重跑
+        pipeline.pipeline_version = "v2-upgraded"
+        pipeline.analyze.reset_mock()
+        resp = await client.post("/analysis/batch", json={"library_id": lib_id})
+        assert resp.status_code == 200
+        assert resp.json()["enqueued"] == 0
+        assert pipeline.analyze.await_count == 0
+
+        # 显式 force_rerun=True 时才会按新版本重跑
+        resp_forced = await client.post(
+            "/analysis/batch",
+            json={"library_id": lib_id, "force_rerun": True},
+        )
+        assert resp_forced.status_code == 200
+        assert resp_forced.json()["enqueued"] == 2
+        for _ in range(50):
+            stats_resp = await client.get(f"/analysis/library/{lib_id}/stats")
+            stats = stats_resp.json()["stats"]
+            if stats.get("completed", 0) >= 2:
+                break
+            await asyncio.sleep(0.05)
+        assert pipeline.analyze.await_count == 2
+
     async def test_stats_returns_all_keys(self, client_with_lib) -> None:
         client, lib_id, _, _ = client_with_lib
         resp = await client.get(f"/analysis/library/{lib_id}/stats")
@@ -358,13 +394,17 @@ class TestAutoBackfill:
 
 
 class TestPipelineGate:
-    async def test_batch_requires_pipeline_ready(self, tmp_path: Path) -> None:
+    async def test_batch_requires_pipeline_ready(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         from engine.core.config import settings
         from engine.core.database import Database
         from engine.main import create_app
 
-        settings.data_dir = tmp_path
-        settings.models_dir = tmp_path / "x"
+        monkeypatch.setattr(settings, "data_dir", tmp_path)
+        monkeypatch.setattr(settings, "models_dir", tmp_path / "x")
         app = create_app()
         db = Database(tmp_path / "t.db")
         await db.connect()
@@ -385,3 +425,41 @@ class TestPipelineGate:
             resp = await c.post("/analysis/batch", json={"library_id": "lib-x"})
         assert resp.status_code == 503
         await db.close()
+
+
+class TestPauseResumeAndProgressLimit:
+    async def test_pause_and_resume_endpoints_and_sse_cap(
+        self,
+        client_with_lib,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from engine.api.routes import analysis as analysis_route
+        from engine.services.queue import enqueue_library
+
+        client, lib_id, db, _ = client_with_lib
+        inserted = await enqueue_library(db, lib_id, current_pipeline_version="v1-test")
+        assert inserted == 2
+
+        pause_resp = await client.post(f"/analysis/library/{lib_id}/pause")
+        assert pause_resp.status_code == 200
+        assert pause_resp.json()["stats"]["paused"] == 2
+        assert pause_resp.json()["desired_state"] == "paused"
+
+        resume_resp = await client.post(f"/analysis/library/{lib_id}/resume")
+        assert resume_resp.status_code == 200
+        assert resume_resp.json()["desired_state"] == "running"
+        assert (
+            resume_resp.json()["stats"]["pending"]
+            + resume_resp.json()["stats"]["processing"]
+            + resume_resp.json()["stats"]["completed"]
+            == 2
+        )
+
+        # 超过单库 SSE 并发上限时返回 429
+        monkeypatch.setitem(
+            analysis_route._progress_stream_counts,
+            lib_id,
+            analysis_route.MAX_PROGRESS_SSE_PER_LIBRARY,
+        )
+        sse_resp = await client.get(f"/analysis/library/{lib_id}/progress")
+        assert sse_resp.status_code == 429

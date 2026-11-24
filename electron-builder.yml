@@ -51,6 +51,7 @@ extraResources:
     filter:
       - '*.onnx'
       - '*.parquet'
+      - '!species_wiki.parquet'
       - '*.json'
   # species v4 的子目录（safetensors backbone + LoRA adapter + parquet/json）单独捞。
   # **/* 是全包，因此显式排除开发期临时产物，避免 .bak/缓存文件意外进 DMG。
@@ -101,6 +102,3 @@ win:
   # Branding is applied in after-pack without the legacy privileged archive.
   # This local build is unsigned; release signing can run after resource editing.
   signAndEditExecutable: false
-nsis:
-  oneClick: false
-  allowToChangeInstallationDirectory: true

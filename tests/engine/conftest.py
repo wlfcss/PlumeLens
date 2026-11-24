@@ -1,38 +1,23 @@
 """Shared pytest fixtures for engine tests."""
 
 from collections.abc import AsyncGenerator
-from unittest.mock import MagicMock
+from pathlib import Path
 
 import pytest
+from engine.core.config import Settings
+from engine.pipeline.manager import PipelineManager
 from httpx import ASGITransport, AsyncClient
 
 
-def _make_mock_pipeline() -> MagicMock:
-    """Create a mock PipelineManager for tests that don't need real ONNX models."""
-    pipeline = MagicMock()
-    pipeline.is_ready = False
-    pipeline.quality_available = False
-    pipeline.pose_available = False
-    pipeline.species_available = False
-    pipeline.pipeline_version = "test-v1-00000000"
-    pipeline.model_status = {
-        "yolo": False,
-        "bird_visibility": False,
-        "bird_flight_classifier": False,
-        "clipiqa": False,
-        "hyperiqa": False,
-        "dinov3_species_v4": False,
-    }
-    pipeline.model_providers = {}
-    return pipeline
-
-
 @pytest.fixture
-async def client() -> AsyncGenerator[AsyncClient]:
-    from engine.main import app
+async def client(tmp_path: Path) -> AsyncGenerator[AsyncClient]:
+    """Isolated FastAPI app with a real uninitialized PipelineManager (no model I/O)."""
+    from engine.main import create_app
 
-    # Inject mock pipeline to avoid loading real ONNX models
-    app.state.pipeline = _make_mock_pipeline()
+    app = create_app()
+    app.state.pipeline = PipelineManager(
+        Settings(data_dir=tmp_path, models_dir=tmp_path / "models")
+    )
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:

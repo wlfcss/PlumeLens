@@ -30,9 +30,11 @@ if ($archives.Count -ge 10) {
 } else {
     & $uvCommand pip install --python .venv-amd\Scripts\python.exe --index https://repo.amd.com/rocm/whl-multi-arch/ "torch[device-$GfxTarget]==2.12.0+rocm7.14.1" "torchvision[device-$GfxTarget]==0.27.0+rocm7.14.1"
     if ($LASTEXITCODE -ne 0) { throw 'AMD runtime installation failed' }
-    & $uvCommand pip install --python .venv-amd\Scripts\python.exe -r .tools\locked-amd-requirements.txt
+    & $uvCommand pip install --python .venv-amd\Scripts\python.exe --no-deps -r .tools\locked-amd-requirements.txt
 }
 if ($LASTEXITCODE -ne 0) { throw 'Dependency installation failed' }
+& .\.venv-amd\Scripts\python.exe -c "import torch, torchvision, transformers; assert '+rocm' in torch.__version__, f'Expected ROCm torch, got {torch.__version__}'"
+if ($LASTEXITCODE -ne 0) { throw 'ROCm torch verification failed after dependency installation' }
 if ($InstallOnly) {
     Write-Output "AMD dependencies installed for $GfxTarget. GPU validation was not requested."
     return

@@ -1,10 +1,8 @@
 name: Windows App Build
 
 on:
-  pull_request:
   push:
     branches: [main]
-    tags: ['v*']
   workflow_dispatch:
     inputs:
       gpu_target:
@@ -12,6 +10,13 @@ on:
         type: choice
         default: gfx1100
         options: [gfx1100, gfx1101, gfx1102, gfx1200, gfx1201]
+  workflow_call:
+    inputs:
+      gpu_target:
+        description: AMD ROCm device target
+        type: string
+        required: false
+        default: gfx1100
 
 permissions:
   contents: read
@@ -26,53 +31,44 @@ env:
 
 concurrency:
   group: windows-build-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  quality:
-    name: Type, lint and unit checks
-    runs-on: windows-2025
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
-        with:
-          node-version: 24
-          cache: npm
-      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          enable-cache: true
-      - run: npm ci
-      - run: uv sync --locked --extra dev
-      - run: npm run typecheck
-      - run: npm run lint
-      - run: npm test
-      - run: uv run ruff check .
-      - run: uv run pyright --pythonpath .venv/Scripts/python.exe
-      - run: uv run pytest --ignore=tests/engine/test_pipeline/test_integration.py
-
   build:
     name: Build Windows x64 portable app
-    needs: quality
-    if: github.event_name != 'pull_request'
     runs-on: windows-2025
-    timeout-minutes: 120
+    timeout-minutes: 90
     env:
       GPU_TARGET: ${{ inputs.gpu_target || 'gfx1100' }}
       MODEL_BUNDLE_URL: ${{ secrets.PLUMELENS_MODELS_URL }}
       MODEL_RELEASE_TAG: ${{ vars.PLUMELENS_MODELS_RELEASE_TAG || 'models-v4' }}
       MODEL_RELEASE_ASSET: ${{ vars.PLUMELENS_MODELS_RELEASE_ASSET || 'plumelens-models-v4.tar.gz' }}
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Setup Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version: 24
           cache: npm
-      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           enable-cache: false
+
+      - name: Cache Electron & electron-builder archives
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/AppData/Local/electron/Cache
+            ~/AppData/Local/electron-builder/Cache
+          key: win-electron-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            win-electron-
+
       - name: Install desktop and AMD build dependencies
         shell: pwsh
         run: |
@@ -83,6 +79,17 @@ jobs:
           "BUILD_PYTHON=$(uv python find $env:PYTHON_VERSION)" >> $env:GITHUB_ENV
           "PLUMELENS_PYTHON=$((Resolve-Path .venv-amd/Scripts/python.exe).Path)" >> $env:GITHUB_ENV
           uv cache clean
+
+      - name: Run Windows-specific unit tests
+        shell: pwsh
+        run: |
+          & $env:PLUMELENS_PYTHON -m pytest `
+            tests/engine/test_core/test_parent_liveness.py `
+            tests/engine/test_core/test_windows_resources.py `
+            tests/engine/test_core/test_windows_runtime_policy.py `
+            tests/engine/test_pipeline/test_windows_gpu.py
+          if ($LASTEXITCODE -ne 0) { throw 'Windows-specific unit tests failed' }
+
       - name: Restore and verify reviewed model assets
         shell: pwsh
         env:
@@ -92,21 +99,20 @@ jobs:
           Copy-Item -LiteralPath engine/models/manifest.json -Destination $trusted
           $bundle = Join-Path $env:RUNNER_TEMP 'plumelens-model-bundle'
           if ($env:MODEL_BUNDLE_URL) {
-            Invoke-WebRequest -Uri $env:MODEL_BUNDLE_URL -OutFile $bundle
+            Invoke-WebRequest -Uri $env:MODEL_BUNDLE_URL -OutFile $bundle -TimeoutSec 600
           } else {
             gh release download $env:MODEL_RELEASE_TAG --repo $env:GITHUB_REPOSITORY --pattern $env:MODEL_RELEASE_ASSET --output $bundle
             if ($LASTEXITCODE -ne 0) { throw 'Model download failed' }
           }
-          & $env:PLUMELENS_PYTHON scripts/restore_models.py --archive $bundle --trusted-manifest $trusted
+          & $env:PLUMELENS_PYTHON scripts/restore_models.py --archive $bundle --trusted-manifest $trusted --require-tracked
           if ($LASTEXITCODE -ne 0) { throw 'Model SHA-256 verification failed' }
           Remove-Item -LiteralPath $bundle
+
       - name: Build renderer and freeze AMD backend
         shell: pwsh
         run: |
           npm run build
           if ($LASTEXITCODE -ne 0) { throw 'Desktop build failed' }
-          & $env:PLUMELENS_PYTHON tests/e2e-electron/fixtures/generate_photos.py
-          if ($LASTEXITCODE -ne 0) { throw 'Fixture generation failed' }
           node scripts/build-engine.cjs
           if ($LASTEXITCODE -ne 0) { throw 'Backend freeze failed' }
           # Keep the hosted runner's disk budget bounded: the frozen runtime is
@@ -114,17 +120,13 @@ jobs:
           $venv = (Resolve-Path .venv-amd).Path
           if (-not $venv.StartsWith("$env:GITHUB_WORKSPACE\", [StringComparison]::OrdinalIgnoreCase)) { throw 'Unexpected virtualenv path' }
           Remove-Item -LiteralPath $venv -Recurse -Force
-          uv cache clean
-      - name: Package portable app
+
+      - name: Package, archive and verify portable app (single pass)
         shell: pwsh
         run: |
+          $trusted = Join-Path $env:RUNNER_TEMP 'plumelens-trusted-manifest.json'
           npx electron-builder --win dir --x64
           if ($LASTEXITCODE -ne 0) { throw 'Windows packaging failed' }
-          & $env:BUILD_PYTHON scripts/verify_windows_package.py --require-amd
-          if ($LASTEXITCODE -ne 0) { throw 'Frozen package validation failed' }
-      - name: Archive and verify portable package
-        shell: pwsh
-        run: |
           foreach ($relative in @('dist/plumelens-engine', 'engine/models')) {
             $target = (Resolve-Path $relative).Path
             if (-not $target.StartsWith("$env:GITHUB_WORKSPACE\", [StringComparison]::OrdinalIgnoreCase)) { throw 'Unexpected build path' }
@@ -133,8 +135,9 @@ jobs:
           npx electron-builder --prepackaged release/win-unpacked --win zip --x64
           if ($LASTEXITCODE -ne 0) { throw 'ZIP creation failed' }
           $archive = (Get-ChildItem release/PlumeLens-*-Windows-x64.zip | Select-Object -First 1).FullName
-          & $env:BUILD_PYTHON scripts/verify_windows_package.py --require-amd --archive $archive --output release/windows-package-verification.json
-          if ($LASTEXITCODE -ne 0) { throw 'ZIP verification failed' }
+          & $env:BUILD_PYTHON scripts/verify_windows_package.py --require-amd --trusted-manifest $trusted --archive $archive --output release/windows-package-verification.json
+          if ($LASTEXITCODE -ne 0) { throw 'Package & ZIP verification failed' }
+
       - name: Upload failure diagnostics
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -142,16 +145,9 @@ jobs:
           name: Windows-build-diagnostics-${{ github.run_attempt }}-${{ github.sha }}
           path: build/plumelens-engine/warn-plumelens-engine.txt
           retention-days: 7
-      - name: Upload smoke test photos
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: Windows-smoke-photos-${{ github.sha }}
-          path: tests/e2e-electron/fixtures/sample_photos/*.JPG
-          if-no-files-found: error
-          overwrite: true
-          retention-days: 7
+
       - name: Upload verified Windows package
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: PlumeLens-Windows-x64-${{ env.GPU_TARGET }}-${{ github.sha }}
           path: |
@@ -164,75 +160,62 @@ jobs:
           retention-days: 7
 
   smoke:
-    name: Test packaged Windows app (${{ matrix.spec }})
+    name: Smoke test packaged Windows app
     needs: build
-    permissions:
-      actions: read
-      contents: read
     runs-on: windows-2025
     timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        spec: [cold-start, windows-smoke]
+    env:
+      GPU_TARGET: ${{ inputs.gpu_target || 'gfx1100' }}
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Setup Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version: 24
           cache: npm
-      - run: npm ci
-      - name: Unpack the verified distribution and test photos
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+
+      - name: Install Playwright & download verified package
+        run: npm ci
+
+      - name: Download verified Windows artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: PlumeLens-Windows-x64-${{ env.GPU_TARGET }}-${{ github.sha }}
+          path: release
+
+      - name: Verify ZIP checksum, unpack & prepare deterministic smoke photos
         shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GPU_TARGET: ${{ inputs.gpu_target || 'gfx1100' }}
         run: |
-          gh run download $env:GITHUB_RUN_ID --repo $env:GITHUB_REPOSITORY --name "PlumeLens-Windows-x64-$env:GPU_TARGET-$env:GITHUB_SHA" --dir release
-          if ($LASTEXITCODE -ne 0) { throw 'Package download failed' }
           $archive = Get-Item release/PlumeLens-*-Windows-x64.zip
           $report = Get-Content release/windows-package-verification.json -Raw | ConvertFrom-Json
           if ((Get-FileHash $archive.FullName).Hash -ne $report.archive_sha256) { throw 'Downloaded ZIP checksum mismatch' }
           7z x $archive.FullName -orelease/win-unpacked -y | Out-Null
           if ($LASTEXITCODE -ne 0) { throw 'Package extraction failed' }
-          gh run download $env:GITHUB_RUN_ID --repo $env:GITHUB_REPOSITORY --name "Windows-smoke-photos-$env:GITHUB_SHA" --dir tests/e2e-electron/fixtures/sample_photos
-          if ($LASTEXITCODE -ne 0) { throw 'Fixture download failed' }
-          New-Item -ItemType Directory -Force .tools | Out-Null
-      - name: Test the extracted application on CPU
+          uv run --with pillow python tests/e2e-electron/fixtures/generate_photos.py
+          if ($LASTEXITCODE -ne 0) { throw 'Fixture generation failed' }
+
+      - name: Run packaged smoke specs on CPU
         env:
           PLUMELENS_YOLO_PROVIDER: cpu
           PLUMELENS_POSE_PROVIDER: cpu
           PLUMELENS_IQA_PROVIDER: cpu
           PLUMELENS_SPECIES_PROVIDER: cpu
           PLUMELENS_ANALYSIS_CONCURRENCY: '1'
-          PLUMELENS_TEST_PHOTOS: ${{ github.workspace }}\tests\e2e-electron\fixtures\sample_photos
-          PLUMELENS_SMOKE_PROGRESS_FILE: windows-ci-smoke-progress.json
-        run: npx playwright test --config tests/e2e-electron/playwright.config.ts ${{ matrix.spec }}.spec.ts
+        run: |
+          npx playwright test --config tests/e2e-electron/playwright.config.ts cold-start.spec.ts packaged-smoke.spec.ts
+
       - name: Upload smoke test diagnostics
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: Windows-diagnostics-${{ matrix.spec }}-${{ github.run_attempt }}-${{ github.sha }}
+          name: Windows-smoke-diagnostics-${{ github.run_attempt }}-${{ github.sha }}
           path: test-results/
           retention-days: 7
-
-  publish:
-    name: Publish tagged Windows asset
-    needs: smoke
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    permissions:
-      actions: read
-      contents: write
-    env:
-      GH_TOKEN: ${{ github.token }}
-    steps:
-      - name: Download verified artifact and publish
-        run: |
-          set -euo pipefail
-          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "PlumeLens-Windows-x64-gfx1100-$GITHUB_SHA" --dir release
-          if ! gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes || gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null
-          fi
-          gh release upload "$GITHUB_REF_NAME" release/PlumeLens-*-Windows-x64.zip release/PlumeLens-*-Windows-x64.zip.sha256 --repo "$GITHUB_REPOSITORY" --clobber

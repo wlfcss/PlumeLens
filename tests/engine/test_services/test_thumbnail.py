@@ -32,8 +32,8 @@ async def db_with_photos(tmp_path: Path) -> tuple[Database, Path]:
     photo_dir.mkdir()
     for i in range(3):
         path = photo_dir / f"p{i}.jpg"
-        # 制作一张足够大的原图，确认 resize 真的缩小
-        Image.new("RGB", (4000, 3000), color=(10 * i, 20 * i, 30 * i)).save(
+        # 制作一张大于 PREVIEW_LONG_EDGE(1920) 的原图，确认 resize 真的缩小且控制单测像素量
+        Image.new("RGB", (2400, 1800), color=(10 * i, 20 * i, 30 * i)).save(
             path,
             "JPEG",
             quality=85,
@@ -51,7 +51,7 @@ async def db_with_photos(tmp_path: Path) -> tuple[Database, Path]:
 class TestGenerateThumbnails:
     async def test_creates_both_levels(self, tmp_path: Path) -> None:
         src = tmp_path / "a.jpg"
-        Image.new("RGB", (4000, 3000), (50, 100, 150)).save(src, "JPEG")
+        Image.new("RGB", (2400, 1800), (50, 100, 150)).save(src, "JPEG")
         cache = tmp_path / "cache"
 
         paths = await generate_thumbnails(src, "photo-a", cache)
@@ -65,12 +65,12 @@ class TestGenerateThumbnails:
 
     async def test_preserves_aspect_ratio(self, tmp_path: Path) -> None:
         src = tmp_path / "landscape.jpg"
-        Image.new("RGB", (4000, 2000), (200, 200, 200)).save(src, "JPEG")
+        Image.new("RGB", (2400, 1200), (200, 200, 200)).save(src, "JPEG")
         cache = tmp_path / "cache"
 
         paths = await generate_thumbnails(src, "ls", cache)
         with Image.open(paths.grid) as g:
-            # 4000:2000 = 2:1 → grid 应是 384×192
+            # 2400:1200 = 2:1 → grid 应是 384×192
             assert g.size == (384, 192)
         with Image.open(paths.preview) as p:
             assert p.size == (1920, 960)
@@ -147,26 +147,34 @@ class TestEnsureThumbnailsForPhoto:
 
     async def test_missing_source_returns_none(
         self,
-        db_with_photos: tuple[Database, Path],
+        tmp_path: Path,
     ) -> None:
-        db, cache = db_with_photos
-        # 插入一条 photo 指向不存在的文件
-        await db.conn.execute(
-            "INSERT INTO photos (id, file_path, file_name, file_size, "
-            "file_mtime, created_at, library_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (
-                "photo-missing",
-                "/nonexistent/file.jpg",
-                "file.jpg",
-                0,
-                "2026-04-24",
-                "2026-04-24",
-                "lib-1",
-            ),
-        )
-        await db.conn.commit()
-        result = await ensure_thumbnails_for_photo(db, "photo-missing", cache)
-        assert result is None
+        db = Database(tmp_path / "missing_src.db")
+        await db.connect()
+        try:
+            await db.conn.execute(
+                "INSERT INTO libraries (id, display_name, parent_path, root_path, "
+                "created_at, last_opened_at) VALUES ('lib-1', 'X', '/p', '/p/r', "
+                "'2026-04-24', '2026-04-24')",
+            )
+            await db.conn.execute(
+                "INSERT INTO photos (id, file_path, file_name, file_size, "
+                "file_mtime, created_at, library_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "photo-missing",
+                    "/nonexistent/file.jpg",
+                    "file.jpg",
+                    0,
+                    "2026-04-24",
+                    "2026-04-24",
+                    "lib-1",
+                ),
+            )
+            await db.conn.commit()
+            result = await ensure_thumbnails_for_photo(db, "photo-missing", tmp_path / "cache")
+            assert result is None
+        finally:
+            await db.close()
 
 
 class TestBatchGenerate:

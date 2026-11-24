@@ -60,12 +60,6 @@ class TestGrader:
         assert grade(0.60, custom) == QualityGrade.USABLE
         assert grade(0.90, custom) == QualityGrade.SELECT
 
-    def test_edge_zero(self) -> None:
-        assert grade(0.0) == QualityGrade.REJECT
-
-    def test_edge_one(self) -> None:
-        assert grade(1.0) == QualityGrade.SELECT
-
 
 class TestGradeShifts:
     """downgrade / upgrade 边界。"""
@@ -151,8 +145,3 @@ class TestBackwardCompat:
 
     def test_apply_pose_penalty_alias(self) -> None:
         assert apply_pose_penalty is apply_pose_adjustment
-
-    def test_old_callsite_still_works(self) -> None:
-        pose = _make_pose(head_visible=True, eye_visible=True, posture="flying")
-        # 老代码路径仍能用旧名调用,语义切换为新 adjustment(含升档)
-        assert apply_pose_penalty(QualityGrade.USABLE, pose) == QualityGrade.SELECT

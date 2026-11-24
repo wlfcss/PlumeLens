@@ -36,11 +36,12 @@ function resolveDevElectronBinary(): string {
 }
 
 export const APP_PATH =
-  process.env.PLUMELENS_E2E_DEV === '1'
+  process.env.PLUMELENS_APP_PATH ||
+  (process.env.PLUMELENS_E2E_DEV === '1'
     ? resolveDevElectronBinary()
     : process.platform === 'win32'
       ? join(REPO_ROOT, 'release', 'win-unpacked', 'PlumeLens.exe')
-      : join(REPO_ROOT, 'release', 'mac-arm64', 'PlumeLens.app', 'Contents', 'MacOS', 'PlumeLens')
+      : join(REPO_ROOT, 'release', 'mac-arm64', 'PlumeLens.app', 'Contents', 'MacOS', 'PlumeLens'))
 export const FIXTURE_PHOTOS_DIR = join(
   REPO_ROOT,
   'tests',

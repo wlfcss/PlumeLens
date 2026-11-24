@@ -9,9 +9,10 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/wlfcss/PlumeLens/actions/workflows/mac-build.yml"><img alt="构建状态" src="https://github.com/wlfcss/PlumeLens/actions/workflows/mac-build.yml/badge.svg"></a>
-  <img alt="版本 0.7.8" src="https://img.shields.io/badge/version-0.7.8-white">
-  <img alt="macOS arm64" src="https://img.shields.io/badge/platform-macOS%20arm64-111111">
+  <a href="https://github.com/wlfcss/PlumeLens/actions/workflows/ci.yml"><img alt="CI 质量检查" src="https://github.com/wlfcss/PlumeLens/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="https://github.com/wlfcss/PlumeLens/actions/workflows/mac-build.yml"><img alt="macOS 构建状态" src="https://github.com/wlfcss/PlumeLens/actions/workflows/mac-build.yml/badge.svg"></a>
+  <img alt="版本 0.7.9" src="https://img.shields.io/badge/version-0.7.9-white">
+  <img alt="macOS 14+ arm64" src="https://img.shields.io/badge/platform-macOS%2014%2B%20arm64-111111">
   <a href="https://github.com/wlfcss/PlumeLens/actions/workflows/windows-build.yml"><img alt="Windows 构建状态" src="https://github.com/wlfcss/PlumeLens/actions/workflows/windows-build.yml/badge.svg"></a>
   <img alt="Windows x64" src="https://img.shields.io/badge/platform-Windows%20x64-111111">
   <img alt="本地分析" src="https://img.shields.io/badge/inference-local-74F69C">
@@ -22,14 +23,16 @@
 
 ## 下载安装
 
-0.7.8 正式版包含本地分析所需的模型。按电脑平台下载，校验文件与安装包放在同一目录。
+发行版均随附本地分析所需的完整模型。请前往 [GitHub Releases](https://github.com/wlfcss/PlumeLens/releases) 按平台下载对应安装包与 `.sha256` 校验文件并置于同一目录：
 
-| 平台               | 下载                                                                                                                                                                                                                                   | 安装                                            |
-| ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------- |
-| macOS · Apple 芯片 | [DMG（1.54 GB）](https://github.com/wlfcss/PlumeLens/releases/download/v0.7.8/PlumeLens-0.7.8-arm64.dmg) · [SHA-256](https://github.com/wlfcss/PlumeLens/releases/download/v0.7.8/PlumeLens-0.7.8-arm64.dmg.sha256)                    | 打开镜像，将 `PlumeLens.app` 拖入「应用程序」。 |
-| Windows x64        | [ZIP 便携包（2.01 GB）](https://github.com/wlfcss/PlumeLens/releases/download/v0.7.8/PlumeLens-0.7.8-Windows-x64.zip) · [SHA-256](https://github.com/wlfcss/PlumeLens/releases/download/v0.7.8/PlumeLens-0.7.8-Windows-x64.zip.sha256) | 完整解压到独立文件夹，双击 `PlumeLens.exe`。    |
+| 平台                       | 获取方式                                                                 | 安装说明                                        |
+| -------------------------- | ------------------------------------------------------------------------ | ----------------------------------------------- |
+| macOS 14+ · Apple 芯片     | [0.7.9 Release](https://github.com/wlfcss/PlumeLens/releases/tag/v0.7.9)（`PlumeLens-0.7.9-arm64.dmg` + `.sha256`） | 打开镜像，将 `PlumeLens.app` 拖入「应用程序」。 |
+| Windows x64                | [0.7.9 Release](https://github.com/wlfcss/PlumeLens/releases/tag/v0.7.9)（`PlumeLens-0.7.9-Windows-x64.zip` + `.sha256`） | 完整解压到独立文件夹，双击 `PlumeLens.exe`。    |
 
-macOS 可在下载目录执行 `shasum -a 256 -c PlumeLens-0.7.8-arm64.dmg.sha256`。Windows 的校验命令和 AMD 加速设置见 [Windows 指南](WINDOWS.md)。
+macOS 可在下载目录执行 `shasum -a 256 -c PlumeLens-0.7.9-arm64.dmg.sha256`。Windows 的校验命令和 AMD 加速设置见 [Windows 指南](WINDOWS.md)。
+
+> **系统与升级兼容说明**：`0.7.9` 起 macOS 最低系统要求为 **macOS 14.0（Sonoma）+**（macOS 13 用户请继续使用 [0.7.8](https://github.com/wlfcss/PlumeLens/releases/tag/v0.7.8)）。从 `0.7.x` 原地升级会完整保留已有 SQLite 图库、历史分析结果、人工评级、人工物种修正与加密配置；升级后对老文件夹执行「开始分析」默认跳过已有有效分析结果的照片，仅分析新增或变更原片，且旧版 CoreML 编译缓存会在新引擎就绪后自动清理。
 
 ## 主要功能
 
@@ -52,16 +55,17 @@ macOS 可在下载目录执行 `shasum -a 256 -c PlumeLens-0.7.8-arm64.dmg.sha25
 
 截图来自使用随附授权图片构建的演示图库，鸟种与评级已人工确认。图片作者及许可见[第三方图片归因](resources/species-artwork/THIRD_PARTY_ATTRIBUTIONS.md)。
 
-## 0.7.8 更新
+## 0.7.9 更新
 
-- Windows x64 便携包支持离线运行，在支持的 AMD 显卡上可启用硬件加速。
-- 改善 Windows 高 DPI 显示、中文界面和短路径下的缩略图访问，延长引擎冷启动等待时间。
-- 加快 RAW 内嵌预览解码，并根据可用硬件资源调整处理并发。
+- 升级桌面运行时至 Electron 45.4.1（macOS 最低基线 14.0+）及全量 Python/JS 依赖（Pillow 13、LibRaw 0.22.2、ONNX Runtime 1.32、PyTorch 2.14.1、Transformers 5.24、ECharts 6.1 等，OSV 零已知漏洞）。
+- Apple Silicon 推理管线切换至 CoreML `MLProgram` + 版本隔离持久化缓存，结合物种锁外预处理、`uint8` 惰性管线与自适应并发，常规鸟图吞吐提升 65%–75%，二次冷启缩短 66%。
+- 新增深度复核 A/B 并排对照、Lightroom 导出预设与大库分页/紧凑摘要流，首屏主 bundle 瘦身 68%；完成全栈安全/并发审计与 CI/测试体系重构，升级原地保留历史记录并默认跳过已分析照片。
 
-[0.7.8 发布说明](docs/releases/0.7.8.md) · [完整更新日志](CHANGELOG.md) · [GitHub Release](https://github.com/wlfcss/PlumeLens/releases/tag/v0.7.8)
+[0.7.9 发布说明](docs/releases/0.7.9.md) · [完整更新日志](CHANGELOG.md) · [GitHub Release](https://github.com/wlfcss/PlumeLens/releases/tag/v0.7.9)
 
 | 历史版本 | 主要更新                                              |
 | -------- | ----------------------------------------------------- |
+| 0.7.8    | Windows x64 便携包、AMD 原生加速、RAW 预览与资源自适应 |
 | 0.7.7    | 鸟种多选与筛选导出、人工复核及任务恢复                |
 | 0.7.6    | 后台导出、格式选择、工作集文件夹移除                  |
 | 0.7.5    | 前端结构整理、离线鸟种封面、安全与测试完善            |
@@ -93,7 +97,7 @@ macOS 可在下载目录执行 `shasum -a 256 -c PlumeLens-0.7.8-arm64.dmg.sha25
 
 ![系统架构](assets/readme/system-architecture.svg)
 
-桌面端使用 Electron 41、React 19 和 TypeScript；后端使用 Python、FastAPI 与 SQLite WAL。检测、姿态、飞版和画质模型由 ONNX Runtime 执行，鸟种识别由 PyTorch 与 transformers 执行。
+桌面端使用 Electron 45、React 19 和 TypeScript；后端使用 Python、FastAPI 与 SQLite WAL。检测、姿态、飞版和画质模型由 ONNX Runtime 执行，鸟种识别由 PyTorch 与 transformers 执行。
 
 - 照片分析无需上传原片；地图查询和版本检查可能联网。
 - 数据库、日志、缩略图及任务记录保存在应用数据目录。
@@ -125,7 +129,7 @@ npm test
 npm run test:e2e
 uv run ruff check .
 uv run pyright --pythonpath .venv/bin/python
-uv run pytest
+uv run pytest -m "not integration"
 ```
 
 macOS 打包：
@@ -144,7 +148,7 @@ npm run dist:win
 
 Windows 发行包解压后运行 `PlumeLens.exe`；首次启用原生 AMD 检测可先运行随包的 `prepare-windows-gpu.cmd`。应用会根据 CPU、内存和可用 GPU 后端设置并发，并在内存紧张时减少新任务。AMD 依赖版本、设备目标与手动覆盖见 [Windows 指南](WINDOWS.md)。
 
-产物位于 `release/`。PR 执行质量检查；主分支、版本标签和手动操作触发相应平台构建。工作流完成模型 SHA-256 校验、后端冻结、打包及启动验证，通过后上传产物；版本标签还会上传到对应 Release。配置见 [macOS 构建](.github/workflows/mac-build.yml)与 [Windows 构建](.github/workflows/windows-build.yml)。
+产物位于 `release/`。PR 与主分支由 [CI 质量检查](.github/workflows/ci.yml) 在 Linux 上统一执行静态检查、单测与 Web Playwright E2E；主分支与手动操作分别触发 [macOS 构建](.github/workflows/mac-build.yml) 与 [Windows 构建](.github/workflows/windows-build.yml) 完成模型 SHA-256 校验、后端冻结、打包与实包冒烟验证；版本标签由 [协同发布工作流](.github/workflows/release.yml) 待双端构建与验收均通过后统一发布至 GitHub Release。
 
 ## 许可证
 

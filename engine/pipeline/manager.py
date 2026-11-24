@@ -33,7 +33,11 @@ from engine.pipeline.pose import (
 )
 from engine.pipeline.preprocess import crop_bbox, expand_for_iqa, load_image_u8
 from engine.pipeline.quality import IQA_NONFINITE_FALLBACK_SCORE, QualityAssessor
-from engine.pipeline.runtime import create_session, resolve_providers
+from engine.pipeline.runtime import (
+    create_session,
+    prune_stale_coreml_caches,
+    resolve_providers,
+)
 from engine.pipeline.species import (
     BBOX_MARGIN,
     DEFAULT_IMAGE_SIZE,
@@ -154,9 +158,9 @@ class PipelineManager:
 
         import onnxruntime as ort
 
-        coreml_cache_dir = str(
-            self._settings.data_dir / "cache" / "coreml" / f"ort-{ort.__version__}"
-        )
+        coreml_cache_root = self._settings.data_dir / "cache" / "coreml"
+        coreml_active_dirname = f"ort-{ort.__version__}"
+        coreml_cache_dir = str(coreml_cache_root / coreml_active_dirname)
 
         # ---- YOLO detector ----
         yolo_path = models_dir / "yolo26l-bird-det.onnx"
@@ -454,6 +458,9 @@ class PipelineManager:
         self._analysis_slots = MemoryBoundLimiter(self._settings.analysis_concurrency)
         if self.resource_profile:
             await logger.ainfo("Configured platform processing pipelines", **self.resource_profile)
+        if self.is_ready and "CoreMLExecutionProvider" in self._model_providers.values():
+            prune_stale_coreml_caches(coreml_cache_root, coreml_active_dirname)
+
         self._pipeline_version = self._compute_version(checksums)
         await logger.ainfo(
             "Pipeline initialized",

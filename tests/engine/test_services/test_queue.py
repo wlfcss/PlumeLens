@@ -110,6 +110,40 @@ class TestEnqueue:
         )
         assert forced == 1
 
+    async def test_enqueue_skips_active_result_from_older_pipeline_version_by_default(
+        self,
+        db_with_photos: Database,
+    ) -> None:
+        db = db_with_photos
+        await db.conn.execute(
+            "INSERT INTO analysis_results (id, photo_id, pipeline_version, result_json, "
+            "bird_count, created_at, is_active, input_revision, input_hash) "
+            "VALUES (?, ?, ?, ?, 1, ?, 1, 0, ?)",
+            ("result-old", "photo-0", "v1-old-engine", "{}", "2026-04-24", "hash-0"),
+        )
+        await db.conn.commit()
+
+        # 升级后默认只入队尚未分析的 photo-1，跳过已有有效旧版本结果的 photo-0
+        inserted = await enqueue_photos(
+            db,
+            "lib-1",
+            ["photo-0", "photo-1"],
+            current_pipeline_version="v2-new-engine",
+        )
+        assert inserted == 1
+        tasks = await list_tasks(db, library_id="lib-1")
+        assert [t.photo_id for t in tasks] == ["photo-1"]
+
+        # 显式 force_rerun=True 仍可对 photo-0 按新版本重跑
+        forced = await enqueue_photos(
+            db,
+            "lib-1",
+            ["photo-0"],
+            current_pipeline_version="v2-new-engine",
+            force_rerun=True,
+        )
+        assert forced == 1
+
 
 class TestPickNext:
     async def test_pick_pending_marks_processing(

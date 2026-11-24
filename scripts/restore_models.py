@@ -7,14 +7,27 @@ import hashlib
 import json
 import tarfile
 import zipfile
+from collections.abc import Iterable
 from contextlib import ExitStack
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO
 
 
-def restore_models(archive: Path, models_dir: Path, trusted_manifest: Path) -> int:
+def restore_models(
+    archive: Path,
+    models_dir: Path,
+    trusted_manifest: Path,
+    *,
+    required_assets: Iterable[str] | None = None,
+) -> int:
     manifest_bytes = trusted_manifest.read_bytes()
     assets = json.loads(manifest_bytes)["assets"]
+    if required_assets is not None:
+        missing_required = sorted(set(required_assets) - set(assets))
+        if missing_required:
+            raise ValueError(
+                f"Trusted manifest missing required tracked assets: {', '.join(missing_required)}"
+            )
     root = models_dir.resolve()
     root.mkdir(parents=True, exist_ok=True)
     with ExitStack() as stack:
@@ -95,8 +108,23 @@ def main() -> None:
     parser.add_argument("--archive", type=Path, required=True)
     parser.add_argument("--models-dir", type=Path, default=Path("engine/models"))
     parser.add_argument("--trusted-manifest", type=Path, required=True)
+    parser.add_argument(
+        "--require-tracked",
+        action="store_true",
+        help="Ensure trusted manifest covers every TRACKED_ASSETS entry",
+    )
     args = parser.parse_args()
-    count = restore_models(args.archive, args.models_dir, args.trusted_manifest)
+    required_assets: list[str] | None = None
+    if args.require_tracked:
+        from scripts.build_model_manifest import TRACKED_ASSETS
+
+        required_assets = list(TRACKED_ASSETS)
+    count = restore_models(
+        args.archive,
+        args.models_dir,
+        args.trusted_manifest,
+        required_assets=required_assets,
+    )
     print(f"Restored and SHA-256 verified {count} reviewed model assets")
 
 

@@ -10,7 +10,7 @@ import {
   importFixtureLibrary,
   waitForLibraryReady,
   REPO_ROOT,
-} from './helpers/launch.js'
+} from '../../tests/e2e-electron/helpers/launch.js'
 
 test('Windows: cold start, real photo analysis, export, clean exit and history reload', async () => {
   const full = process.env.PLUMELENS_FULL_VALIDATION === '1'

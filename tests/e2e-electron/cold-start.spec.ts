@@ -32,6 +32,7 @@ if (process.platform === 'win32') {
 }
 
 test.describe('Cold start - fresh data dir (新装首次打开)', () => {
+  test.describe.configure({ mode: 'serial' })
   let dataDir: string
   let handle: LaunchHandle | null = null
 
@@ -66,8 +67,8 @@ test.describe('Cold start - fresh data dir (新装首次打开)', () => {
 })
 
 test.describe('Cold start - persisted history (装新版后的回归测试)', () => {
-  // 关键:这两个 test 共用同一个 dataDir,模拟"用户上次用过 → 关闭 → 装新版本 → 重新打开"。
-  // 正是今天用户踩的场景:db 里有 library 但前端不显示。
+  test.describe.configure({ mode: 'serial' })
+  // 共用同一个 dataDir，模拟"用户上次用过 → 关闭 → 装新版本 → 重新打开"。
   let dataDir: string
 
   test.beforeAll(() => {
@@ -93,13 +94,12 @@ test.describe('Cold start - persisted history (装新版后的回归测试)', ()
     }
   })
 
-  test('Phase 2 — relaunch same data dir → 历史 library 立刻可见(P0 回归)', async () => {
+  test('Phase 2 — relaunch same data dir → 历史 library 立即可见并进入选片屏加载照片', async () => {
     const handle = await launchApp(dataDir)
     try {
       await waitForEngineReady(handle.page, handle.dataDir)
 
-      // 关键断言:start screen 必须显示 library 名字 + "继续上次文件夹"激活。
-      // 失败时正是装新 dmg 看不到历史的复现 — 今天踩的两个 P0 都会让这条挂。
+      // 关键断言:start screen 必须显示 library 名字 + "继续上次文件夹"激活
       await expect(handle.page.getByText('最近文件夹').first()).toBeVisible({
         timeout: 15_000,
       })
@@ -108,30 +108,12 @@ test.describe('Cold start - persisted history (装新版后的回归测试)', ()
       })
       const continueBtn = handle.page.getByRole('button', { name: /继续上次文件夹/ })
       await expect(continueBtn).toBeEnabled()
-    } finally {
-      await handle.app.close()
-    }
-  })
 
-  test('Phase 3 — 进入选片屏 → fixture photos 加载', async () => {
-    const handle = await launchApp(dataDir)
-    try {
-      await waitForEngineReady(handle.page, handle.dataDir)
-      // 等首页 library 出现再切选片(否则可能因 list 还没 ready 导致 navigate 后空)
-      await expect(handle.page.getByText('e2e-fixture-lib').first()).toBeVisible({
-        timeout: 15_000,
-      })
-
+      // 同一次启动直接进入选片屏验证照片渲染，省去一次多余冷启动
       await handle.page.getByRole('button', { name: '选片', exact: true }).click()
-
-      // selection 屏的 sidebar 应有 folder 项
       await expect(handle.page.getByText('e2e-fixture-lib').first()).toBeVisible({
         timeout: 10_000,
       })
-
-      // photos 网格不能空 — fixture 5 张应该都扫进来 + 显示在 selection 屏。
-      // .photo-preview 是 PhotoTile 的容器(app.css 有定义)。
-      // 一条 spec 内 photos 可能因为 hash 异步还没全部入库,容忍 ≥1 张。
       await expect(async () => {
         const count = await handle.page.locator('.photo-preview').count()
         expect(count).toBeGreaterThan(0)
@@ -141,7 +123,7 @@ test.describe('Cold start - persisted history (装新版后的回归测试)', ()
     }
   })
 
-  test('Phase 4 — close prompt 确认后退出进程 → 同 data dir 重启初始化正常', async () => {
+  test('Phase 3 — close prompt 确认后退出进程 → 同 data dir 重启初始化正常', async () => {
     const handle = await launchApp(dataDir, { disableCloseConfirm: false })
     const childProcess = handle.app.process()
     const exited = new Promise<void>((resolve) => {

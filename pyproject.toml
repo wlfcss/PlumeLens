@@ -1,6 +1,6 @@
 [project]
 name = "plumelens-engine"
-version = "0.7.8"
+version = "0.7.9"
 description = "PlumeLens Python backend - hybrid ONNX + torch bird photo analysis"
 requires-python = ">=3.11"
 dependencies = [
@@ -64,3 +64,6 @@ include = ["engine"]
 testpaths = ["tests/engine"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
+markers = [
+    "integration: tests requiring local ONNX/PyTorch model assets in engine/models/",
+]
