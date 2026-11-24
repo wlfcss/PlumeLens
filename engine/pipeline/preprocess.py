@@ -153,12 +153,16 @@ def resize_letterbox(
     import cv2
 
     h, w = image.shape[:2]
+    if h <= 0 or w <= 0:
+        msg = f"Invalid image dimensions for letterbox resize: {h}x{w}"
+        raise ValueError(msg)
     scale = target_size / max(h, w)
 
     # ⚠ 必须用 round() — int() 截断会造成 ±1px 误差被 CoreML EP 放大成
     # bbox 几何错位（验证：MODEL_CARD §5.5.9 + 用户实测 a56b80a 撞过此坑）
-    new_h = int(round(h * scale))
-    new_w = int(round(w * scale))
+    # 极端长宽比（如 1×2000 裁切）时 clamp 下限为 1，防止 cv2.resize 收到 0 维崩溃。
+    new_h = max(1, int(round(h * scale)))
+    new_w = max(1, int(round(w * scale)))
 
     resized_raw = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
     if image.dtype == np.uint8:

@@ -169,3 +169,25 @@ async def test_cancelling_a_caller_keeps_the_native_decode_slot_until_thread_fin
         release.set()
         await second
     assert limiter.active == 0
+
+
+async def test_memory_limiter_no_deadlock_between_reserve_and_reserve_plus_one_gib(monkeypatch):
+    gib = 1024**3
+    # 32 GiB total => reserve = 4.8 GiB. 5.2 GiB is in [reserve, reserve + 1 GiB).
+    monkeypatch.setattr(
+        windows_resources, "memory_status", lambda: MemoryStatus(32 * gib, int(5.2 * gib))
+    )
+    limiter = windows_resources.MemoryBoundLimiter(3)
+    assert limiter.target_limit == 1
+
+    # wait_for_memory waits until available >= reserve + 1 GiB (5.8 GiB)
+    statuses = iter([MemoryStatus(32 * gib, int(5.2 * gib)), MemoryStatus(32 * gib, 6 * gib)])
+    monkeypatch.setattr(windows_resources, "memory_status", lambda: next(statuses))
+    sleeps = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(windows_resources.asyncio, "sleep", fake_sleep)
+    await windows_resources.wait_for_memory()
+    assert sleeps == [0.5]

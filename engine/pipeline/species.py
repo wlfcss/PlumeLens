@@ -395,9 +395,16 @@ class SpeciesClassifier:
 
         # 防御性 manifest 校验:正常路径下 manager.initialize() 已经核对过整批
         # SHA-256(verify_manifest 同进程缓存),这里 cache fast path,不重复哈希。
-        # 离开 manager 单独构造 SpeciesClassifier(测试 / 脚本)时仍走完整校验,
+        # 必须传 required_assets:防止 manifest.json 与 YOLO 同时被删时绕过校验，
         # 不让 torch.load(weights_only=False) 在未验证的 pickle 上反序列化。
-        verify_manifest(self.deploy_dir.parent)
+        models_dir = self.deploy_dir.parent
+        verify_manifest(
+            models_dir,
+            required_assets=(
+                adapter_path.relative_to(models_dir).as_posix(),
+                (backbone_dir / "model.safetensors").relative_to(models_dir).as_posix(),
+            ),
+        )
 
         # weights_only=False 是 v4 adapter 必需(checkpoint 含 EMA shadow / args
         # 等非张量对象);上面的 manifest SHA-256 pin 是阻断 pickle RCE 的最后一道闸。

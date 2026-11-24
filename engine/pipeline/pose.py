@@ -262,8 +262,12 @@ class PoseDetector:
 
         if raw.shape[0] == 0 or raw.shape[1] != _ROW_WIDTH:
             return None
-        best_idx = int(np.argmax(raw[:, 4]))
+        # Guard against NaN/Inf in box confidences (argmax picks first NaN otherwise)
+        confs = np.where(np.isfinite(raw[:, 4]), raw[:, 4], -np.inf)
+        best_idx = int(np.argmax(confs))
         det = raw[best_idx]
+        if not bool(np.isfinite(det[:5]).all()):
+            return None
         box_conf = float(det[4])
         if box_conf < self._box_threshold:
             return None
@@ -286,6 +290,10 @@ class PoseDetector:
         kpts_crop: dict[str, tuple[float, float, float]] = {}
         for i, name in enumerate(PART_NAMES):
             lx, ly, kc = float(kpt_raw[i][0]), float(kpt_raw[i][1]), float(kpt_raw[i][2])
+            if not (np.isfinite(lx) and np.isfinite(ly) and np.isfinite(kc)):
+                kpts_crop[name] = (0.0, 0.0, 0.0)
+                kpts_by_name[name] = Keypoint(x=float(crop_x0), y=float(crop_y0), confidence=0.0)
+                continue
             cx, cy = _to_crop(lx, ly)
             kpts_crop[name] = (cx, cy, kc)
             kpts_by_name[name] = Keypoint(x=cx + crop_x0, y=cy + crop_y0, confidence=kc)

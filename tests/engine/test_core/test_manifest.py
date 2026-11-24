@@ -161,3 +161,11 @@ def test_release_check_requires_coverage_even_if_an_asset_exists(tmp_path: Path)
 def test_release_check_requires_a_trusted_manifest_in_an_empty_environment(tmp_path: Path) -> None:
     with pytest.raises(ManifestError, match="Trusted manifest missing"):
         verify_manifest(tmp_path, tmp_path / "missing.json", required_assets=["a.onnx"])
+
+
+def test_verify_rejects_missing_manifest_when_only_species_adapter_present(tmp_path: Path) -> None:
+    adapter = tmp_path / "species" / "v4" / "seed42_adapter.pt"
+    adapter.parent.mkdir(parents=True)
+    adapter.write_bytes(b"fake-pickle-adapter")
+    with pytest.raises(ManifestError, match="Suspicious"):
+        verify_manifest(tmp_path)

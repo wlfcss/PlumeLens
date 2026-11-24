@@ -29,7 +29,7 @@ def _preprocess_for_iqa(crop: NDArray[np.float32] | NDArray[np.uint8]) -> NDArra
     pil = (
         Image.fromarray(crop)
         if crop.dtype == np.uint8
-        else Image.fromarray((crop * 255).astype(np.uint8))
+        else Image.fromarray(np.rint(np.clip(crop, 0.0, 1.0) * 255.0).astype(np.uint8))
     )
     pil = pil.resize((IQA_INPUT_SIZE, IQA_INPUT_SIZE), Image.Resampling.BICUBIC)
     arr = np.asarray(pil, dtype=np.float32) / 255.0

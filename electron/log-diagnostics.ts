@@ -576,16 +576,19 @@ export function buildAndWriteDiagnosticsZip(params: ExportBundleParams): {
     data: JSON.stringify(manifestObj, null, 2),
   })
 
-  const summaryTxt = buildHumanSummaryText({
-    deviceId: params.deviceId,
-    sessionId: params.sessionId,
-    exportedAt,
-    loggingEnabled: params.loggingEnabled,
-    profile: params.profile,
-    dbSummary: fallbackDbSummary,
-    metrics,
-    includedFiles: ['SUMMARY.txt', 'manifest.json', ...fileManifest.map((f) => f.path)],
-  })
+  const summaryTxt = redactText(
+    buildHumanSummaryText({
+      deviceId: params.deviceId,
+      sessionId: params.sessionId,
+      exportedAt,
+      loggingEnabled: params.loggingEnabled,
+      profile: params.profile,
+      dbSummary: fallbackDbSummary,
+      metrics,
+      includedFiles: ['SUMMARY.txt', 'manifest.json', ...fileManifest.map((f) => f.path)],
+    }),
+    redactorOpts,
+  )
   zipEntries.unshift({ name: 'SUMMARY.txt', data: summaryTxt })
 
   const zipBuffer = buildZipArchive(zipEntries)

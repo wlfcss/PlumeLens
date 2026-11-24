@@ -48,6 +48,79 @@ def test_redact_text_strips_secrets_home_and_photo_paths() -> None:
     assert "<photo>/f_" in cleaned
 
 
+def test_redact_text_handles_windows_json_escaped_and_spaces() -> None:
+    device_id = "pl-abcdef0123456789abcdef01"
+    raw = (
+        '{"file":"C:\\\\Users\\\\Alice\\\\Bird Photos\\\\IMG 001.CR3",'
+        '"other":"C:/Users/Alice/DCIM/IMG_002.JPG",'
+        '"dir":"C:\\\\Users\\\\Alice\\\\AppData"}'
+    )
+    cleaned = redact_text(raw, device_id=device_id)
+    assert "Alice" not in cleaned
+    assert "Bird Photos" not in cleaned
+    assert "IMG 001" not in cleaned
+    assert "IMG_002" not in cleaned
+    assert cleaned.count("<photo>/f_") == 2
+
+
+@pytest.mark.asyncio
+async def test_runtime_identity_survives_across_async_tasks_after_reconfigure(
+    tmp_path: Path,
+) -> None:
+    import asyncio
+
+    logs_dir = tmp_path / "logs"
+    setup_logging(log_level="INFO", logs_dir=logs_dir, enabled=False)
+    try:
+        reconfigure_logging(
+            enabled=True,
+            device_id="pl-333333333333333333333333",
+            session_id="sess_cross_task",
+        )
+
+        async def worker_task() -> None:
+            structlog.contextvars.clear_contextvars()
+            structlog.stdlib.get_logger("test.worker").info("cross_task_event")
+
+        await asyncio.create_task(worker_task())
+        lines = (logs_dir / "engine.jsonl").read_text(encoding="utf-8").strip().splitlines()
+        parsed = [json.loads(line) for line in lines]
+        rec = next(item for item in parsed if item["event"] == "cross_task_event")
+        assert rec["device_id"] == "pl-333333333333333333333333"
+        assert rec["session_id"] == "sess_cross_task"
+    finally:
+        reconfigure_logging(enabled=False)
+
+
+def test_pipeline_version_invariant_to_logging_and_session_settings() -> None:
+    from engine.core.config import Settings
+    from engine.pipeline.manager import PipelineManager
+
+    m1 = PipelineManager(
+        Settings(
+            _env_file=None,
+            logging_enabled=False,
+            device_id=None,
+            session_id="sess_a",
+        )
+    )
+    m2 = PipelineManager(
+        Settings(
+            _env_file=None,
+            logging_enabled=True,
+            device_id="pl-444444444444444444444444",
+            session_id="sess_b",
+        )
+    )
+    v1 = m1._compute_version({})
+    v2 = m2._compute_version({})
+    assert v1 == v2
+    params = m2.version_descriptor["parameters"]
+    assert "session_id" not in params
+    assert "device_id" not in params
+    assert "logging_enabled" not in params
+
+
 def test_logging_hot_toggle_and_redaction_in_jsonl(tmp_path: Path) -> None:
     logs_dir = tmp_path / "logs"
     setup_logging(

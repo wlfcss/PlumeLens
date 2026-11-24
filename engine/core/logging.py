@@ -64,12 +64,18 @@ _PHOTO_EXTS = (
     "cr2|cr3|nef|nrw|arw|srf|sr2|orf|rw2|pef|dng|raf|srw|3fr|iiq|"
     "jpg|jpeg|png|webp|tif|tiff|heic|heif|avif"
 )
+_PATH_PREFIX = r"(?:[A-Za-z]:(?:\\\\|\\|/)|/(?:Users|home|Volumes|mnt|media|private|var|tmp)/)"
+_PATH_SEG = r"[^/\\\s\"'\]\)}>,;]+(?: [^/\\\s\"'\]\)}>,;]+){0,2}"
+_PHOTO_PATH_QUOTED_RE = re.compile(
+    rf"""(?P<q>["'])(?P<p>{_PATH_PREFIX}[^"'\r\n\t]+?\.({_PHOTO_EXTS}))(?=(?P=q))""",
+    re.IGNORECASE,
+)
 _PHOTO_PATH_RE = re.compile(
-    rf"(?:[A-Za-z]:\\|/(?:Users|home|Volumes|mnt|media|private|var|tmp)/)[^\s\"'\]\)}}>,]+?\.({_PHOTO_EXTS})\b",
+    rf"{_PATH_PREFIX}(?:{_PATH_SEG}(?:\\\\|\\|/))*?{_PATH_SEG}\.({_PHOTO_EXTS})\b",
     re.IGNORECASE,
 )
 _GENERIC_HOME_RE = re.compile(
-    r"(?:/Users/[^/\s\"'`]+|/home/[^/\s\"'`]+|[A-Za-z]:\\Users\\[^\\\s\"'`]+)"
+    r"(?:/Users/[^/\s\"'`]+|/home/[^/\s\"'`]+|[A-Za-z]:(?:\\\\|\\|/)Users(?:\\\\|\\|/)[^\\/\s\"'`]+)"
 )
 _BEARER_RE = re.compile(r"\bBearer\s+[A-Za-z0-9._~+/-]{8,}", re.IGNORECASE)
 _QUERY_SECRET_RE = re.compile(
@@ -78,6 +84,7 @@ _QUERY_SECRET_RE = re.compile(
 )
 _HOME_STR = str(Path.home())
 _HOME_POSIX = _HOME_STR.replace("\\", "/")
+_HOME_JSON_ESCAPED = _HOME_STR.replace("\\", "\\\\")
 
 
 def anonymize_filename(path_or_name: str, device_id: str | None = None) -> str:
@@ -110,12 +117,30 @@ def redact_text(value: str, device_id: str | None = None) -> str:
     """Redact credentials, home directories, and photo filenames in log strings."""
     if not value:
         return value
+    # Fast-path: plain tokens without path separators, query params, or Bearer skip regexes.
+    if (
+        "/" not in value
+        and "\\" not in value
+        and "=" not in value
+        and "bearer" not in value.lower()
+    ):
+        return value
     out = _BEARER_RE.sub("Bearer [REDACTED]", value)
     out = _QUERY_SECRET_RE.sub(r"\1[REDACTED]", out)
+    out = _PHOTO_PATH_QUOTED_RE.sub(
+        lambda m: f"{m.group('q')}<photo>/{anonymize_filename(m.group('p'), device_id)}",
+        out,
+    )
     out = _PHOTO_PATH_RE.sub(
         lambda m: f"<photo>/{anonymize_filename(m.group(0), device_id)}",
         out,
     )
+    if (
+        len(_HOME_JSON_ESCAPED) > 1
+        and _HOME_JSON_ESCAPED != _HOME_STR
+        and _HOME_JSON_ESCAPED in out
+    ):
+        out = out.replace(_HOME_JSON_ESCAPED, "~")
     if len(_HOME_STR) > 1 and _HOME_STR in out:
         out = out.replace(_HOME_STR, "~")
     if len(_HOME_POSIX) > 1 and _HOME_POSIX != _HOME_STR and _HOME_POSIX in out:
@@ -147,6 +172,19 @@ def _sanitize_value(value: object, depth: int = 0) -> object:
         seq = cast(list[object] | tuple[object, ...], value)
         return [_sanitize_value(item, depth + 1) for item in seq[:30]]
     return redact_text(str(value))
+
+
+def _inject_runtime_identity(
+    _logger: Any,
+    _method_name: str,
+    event_dict: structlog.types.EventDict,
+) -> structlog.types.EventDict:
+    """Attach process-wide device_id/session_id across all asyncio tasks & worker threads."""
+    if _state.device_id and "device_id" not in event_dict:
+        event_dict["device_id"] = _state.device_id
+    if _state.session_id and "session_id" not in event_dict:
+        event_dict["session_id"] = _state.session_id
+    return event_dict
 
 
 def _redact_event_dict(
@@ -235,6 +273,7 @@ def setup_logging(
 
         shared_processors: list[structlog.types.Processor] = [
             structlog.contextvars.merge_contextvars,
+            _inject_runtime_identity,
             structlog.stdlib.add_log_level,
             structlog.stdlib.add_logger_name,
             structlog.processors.TimeStamper(fmt="iso"),
@@ -251,14 +290,6 @@ def setup_logging(
             wrapper_class=structlog.stdlib.BoundLogger,
             cache_logger_on_first_use=True,
         )
-
-        bind_fields: dict[str, Any] = {}
-        if device_id:
-            bind_fields["device_id"] = device_id
-        if session_id:
-            bind_fields["session_id"] = session_id
-        if bind_fields:
-            structlog.contextvars.bind_contextvars(**bind_fields)
 
         console_formatter = structlog.stdlib.ProcessorFormatter(
             processors=[
@@ -304,10 +335,8 @@ def reconfigure_logging(
         root_logger = logging.getLogger()
         if device_id:
             _state.device_id = device_id
-            structlog.contextvars.bind_contextvars(device_id=device_id)
         if session_id:
             _state.session_id = session_id
-            structlog.contextvars.bind_contextvars(session_id=session_id)
 
         if log_level:
             normalized = log_level.upper()

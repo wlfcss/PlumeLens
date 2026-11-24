@@ -182,8 +182,11 @@ class MemoryBoundLimiter:
         status = memory_status()
         if status is None:
             return self.maximum
-        spare = max(0, status.available - memory_reserve(status))
-        return min(self.maximum, spare // self.bytes_per_worker)
+        reserve = memory_reserve(status)
+        if status.available < reserve:
+            return 0
+        spare = status.available - reserve
+        return min(self.maximum, max(1, spare // self.bytes_per_worker))
 
     async def __aenter__(self) -> Self:
         # Free memory changes in other processes; there is no local event to await.
@@ -214,6 +217,6 @@ async def wait_for_memory() -> None:
     """Do not claim another queue task while Windows is under memory pressure."""
     while True:
         status = memory_status()
-        if status is None or status.available >= memory_reserve(status):
+        if status is None or status.available >= memory_reserve(status) + GIB:
             return
         await asyncio.sleep(0.5)

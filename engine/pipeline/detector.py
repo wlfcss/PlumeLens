@@ -71,9 +71,11 @@ class BirdDetector:
         # 300 是导出时的 top-k 槽位；NMS-free 但空槽位 conf≈0，由下游阈值过滤
         raw_dets: NDArray[np.float32] = outputs[0][0]  # [300, 6]
 
-        # Filter by confidence
+        # Filter by confidence (reject NaN/Inf from corrupted GPU/EP outputs)
         boxes: list[BoundingBox] = []
         for det in raw_dets:
+            if not bool(np.isfinite(det[:6]).all()):
+                continue
             conf = float(det[4])
             if conf < confidence_threshold:
                 continue

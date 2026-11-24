@@ -568,22 +568,42 @@ class PipelineManager:
         self._version_descriptor = {
             "schema": 2,
             "assets": dict(sorted(checksums.items())),
+            # 显式白名单：仅包含影响推理结果的字段，避免新增运维/日志/会话字段
+            # (如 session_id / device_id / logging_enabled) 意外破坏 pipeline_version 缓存。
             "parameters": self._settings.model_dump(
                 mode="json",
-                exclude={
-                    "host",
-                    "port",
-                    "parent_pid",
-                    "log_level",
-                    "data_dir",
-                    "api_token",
-                    "require_api_token",
-                    "models_dir",
-                    "analysis_concurrency",
-                    "worker_threads",
-                    "thumbnail_concurrency",
-                    "onnx_threads",
-                    "require_iqa",
+                include={
+                    "yolo_provider",
+                    "iqa_provider",
+                    "pose_provider",
+                    "species_provider",
+                    "yolo_confidence",
+                    "yolo_input_size",
+                    "yolo_iou_dedup_threshold",
+                    "crop_expand_ratio",
+                    "crop_padding_ratio",
+                    "iqa_expand_ratio",
+                    "iqa_max_aspect_ratio",
+                    "clipiqa_weight",
+                    "hyperiqa_weight",
+                    "grade_thresholds",
+                    "pose_input_size",
+                    "pose_box_threshold",
+                    "pose_eye_threshold",
+                    "pose_head_threshold",
+                    "pose_head_eye_threshold",
+                    "pose_body_threshold",
+                    "pose_tail_threshold",
+                    "pose_wing_threshold",
+                    "pose_expanded_margin",
+                    "flight_classifier_input_size",
+                    "flight_classifier_threshold",
+                    "species_top_k",
+                    "species_min_confidence",
+                    "species_crop_margin",
+                    "species_crop_min_side_frac",
+                    "species_min_grade",
+                    "preprocess_version",
                 },
             ),
             "rules_digest": h.hexdigest(),
@@ -781,11 +801,12 @@ class PipelineManager:
                 except Exception:
                     logger.exception("Pose detection failed", photo_id=photo_id)
             pose_elapsed = (time.perf_counter() - _t) * 1000
-            flight_part = (
+            raw_flight_ms = (
                 pose_detector.last_flight_ms()
                 if pose_detector is not None and hasattr(pose_detector, "last_flight_ms")
                 else 0.0
             )
+            flight_part = float(raw_flight_ms) if isinstance(raw_flight_ms, (int, float)) else 0.0
             t_flight_ms += flight_part
             t_pose_ms += max(0.0, pose_elapsed - flight_part)
 
@@ -797,9 +818,15 @@ class PipelineManager:
                     technical_crop=technical_crop,
                 )
                 if hasattr(assessor, "last_timings_ms"):
-                    c_ms, h_ms = assessor.last_timings_ms()
-                    t_clipiqa_ms += c_ms
-                    t_hyperiqa_ms += h_ms
+                    timings = assessor.last_timings_ms()
+                    if (
+                        isinstance(timings, tuple)
+                        and len(timings) == 2
+                        and isinstance(timings[0], (int, float))
+                        and isinstance(timings[1], (int, float))
+                    ):
+                        t_clipiqa_ms += float(timings[0])
+                        t_hyperiqa_ms += float(timings[1])
             else:
                 # IQA 模型未加载 → 返回中性分数 0.5，grade 降级为 USABLE
                 from engine.pipeline.models import QualityScores

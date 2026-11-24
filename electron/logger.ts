@@ -101,7 +101,7 @@ export class ClientLogger {
   private pendingLines: string[] = []
   private pendingBytes = 0
   private flushTimer: ReturnType<typeof setTimeout> | null = null
-  private flushing = false
+  private flushPromise: Promise<void> | null = null
 
   // Write failure backoff state (disk full / AV lock).
   private writeBlockedUntil = 0
@@ -559,12 +559,23 @@ export class ClientLogger {
     }
   }
 
-  async flush(): Promise<void> {
-    if (this.flushing || this.pendingLines.length === 0) return
-    const now = Date.now()
-    if (now < this.writeBlockedUntil) return
+  private scheduleFlush(delayMs = FLUSH_INTERVAL_MS): void {
+    if (this.flushTimer) return
+    this.flushTimer = setTimeout(() => {
+      this.flushTimer = null
+      void this.flush()
+    }, Math.max(0, delayMs))
+  }
 
-    this.flushing = true
+  async flush(): Promise<void> {
+    if (this.flushPromise) return this.flushPromise
+    if (this.pendingLines.length === 0) return
+    const now = Date.now()
+    if (now < this.writeBlockedUntil) {
+      this.scheduleFlush(this.writeBlockedUntil - now)
+      return
+    }
+
     if (this.flushTimer) {
       clearTimeout(this.flushTimer)
       this.flushTimer = null
@@ -593,27 +604,53 @@ export class ClientLogger {
       this.droppedOnWriteError = 0
     }
 
-    try {
-      if (!this.ensureDirs()) throw new Error('logs directory unavailable')
-      this.rotateIfNeededSync()
-      await appendFile(this.logFilePath, lines.join(''), { encoding: 'utf-8', mode: 0o600 })
-      this.consecutiveWriteErrors = 0
-      this.writeBlockedUntil = 0
-    } catch {
-      // Back off on ENOSPC or Windows AV locks without throwing.
-      this.consecutiveWriteErrors += 1
-      const delay = Math.min(
-        WRITE_BACKOFF_BASE_MS * 2 ** (this.consecutiveWriteErrors - 1),
-        WRITE_BACKOFF_MAX_MS,
-      )
-      this.writeBlockedUntil = Date.now() + delay
-      // Re-queue up to 500 recent lines; drop the rest.
-      const keep = lines.slice(-500)
-      this.droppedOnWriteError += Math.max(0, lines.length - keep.length)
-      this.pendingLines.unshift(...keep)
-      this.pendingBytes += Math.min(bytes, Buffer.byteLength(keep.join(''), 'utf-8'))
-    } finally {
-      this.flushing = false
+    const run = (async () => {
+      try {
+        if (!this.ensureDirs()) throw new Error('logs directory unavailable')
+        this.rotateIfNeededSync()
+        await appendFile(this.logFilePath, lines.join(''), { encoding: 'utf-8', mode: 0o600 })
+        this.consecutiveWriteErrors = 0
+        this.writeBlockedUntil = 0
+      } catch {
+        // Back off on ENOSPC or Windows AV locks without throwing.
+        this.consecutiveWriteErrors += 1
+        const delay = Math.min(
+          WRITE_BACKOFF_BASE_MS * 2 ** (this.consecutiveWriteErrors - 1),
+          WRITE_BACKOFF_MAX_MS,
+        )
+        this.writeBlockedUntil = Date.now() + delay
+        // Re-queue up to 500 recent lines; drop the rest.
+        const keep = lines.slice(-500)
+        this.droppedOnWriteError += Math.max(0, lines.length - keep.length)
+        this.pendingLines.unshift(...keep)
+        this.pendingBytes += Math.min(bytes, Buffer.byteLength(keep.join(''), 'utf-8'))
+        this.scheduleFlush(delay)
+      } finally {
+        this.flushPromise = null
+        if (this.pendingLines.length > 0 && Date.now() >= this.writeBlockedUntil) {
+          this.scheduleFlush(FLUSH_INTERVAL_MS)
+        }
+      }
+    })()
+
+    this.flushPromise = run
+    return run
+  }
+
+  /**
+   * Async drain for IPC / graceful shutdown paths: awaits any in-flight async
+   * write first so `clear` / `export` / `shutdown` never race with `appendFile`.
+   */
+  async drain(): Promise<void> {
+    if (this.flushTimer) {
+      clearTimeout(this.flushTimer)
+      this.flushTimer = null
+    }
+    if (this.flushPromise) {
+      await this.flushPromise
+    }
+    if (this.pendingLines.length > 0 && Date.now() >= this.writeBlockedUntil) {
+      await this.flush()
     }
   }
 

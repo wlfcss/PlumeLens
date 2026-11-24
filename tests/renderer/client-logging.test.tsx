@@ -147,6 +147,21 @@ describe('log redactor', () => {
     expect(sanitized.meta?.['amapKey']).toBe('[REDACTED]')
     expect(sanitized.meta?.['self']).toBe('[Circular]')
   })
+
+  it('redacts Windows JSON-escaped paths, forward slashes, and paths with spaces', () => {
+    const deviceId = 'pl-abcdef0123456789abcdef01'
+    const raw = JSON.stringify({
+      winEscaped: 'C:\\Users\\Alice\\Bird Photos\\IMG 001.CR3',
+      winForward: 'C:/Users/Alice/My Shots/IMG_002.JPG',
+      winHome: 'C:\\Users\\Alice\\AppData\\Local',
+    })
+    const clean = redactText(raw, { deviceId, homeDir: 'C:\\Users\\Alice' })
+    expect(clean).not.toContain('Alice')
+    expect(clean).not.toContain('Bird Photos')
+    expect(clean).not.toContain('IMG 001')
+    expect(clean).not.toContain('IMG_002')
+    expect((clean.match(/<photo>\/f_[0-9a-f]{12}\./g) ?? []).length).toBe(2)
+  })
 })
 
 describe('ClientLogger lifecycle, consent, rotation, and crash dumps', () => {
@@ -241,6 +256,24 @@ describe('ClientLogger lifecycle, consent, rotation, and crash dumps', () => {
     expect(dumpText).not.toContain('IMG_0001')
     expect(dumpText).not.toContain('/Users/bob')
     expect(dumpText).toContain('[REDACTED]')
+  })
+
+  it('awaits in-flight async flush cleanly via drain()', async () => {
+    const logsDir = join(makeTempDir(), 'logs')
+    const logger = new ClientLogger({
+      logsDir,
+      deviceId: 'pl-eeeeeeeeeeeeeeeeeeeeeeee',
+      consent: 'enabled',
+      enabled: true,
+    })
+    logger.child('test').info('queued_before_drain', { seq: 1 })
+    void logger.flush()
+    logger.child('test').info('queued_during_flush', { seq: 2 })
+    await logger.drain()
+
+    const content = readFileSync(join(logsDir, 'client.jsonl'), 'utf-8')
+    expect(content).toContain('queued_before_drain')
+    expect(content).toContain('queued_during_flush')
   })
 })
 

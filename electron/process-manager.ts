@@ -37,7 +37,14 @@ import { getClientLogger, getScopedLogger } from './logger'
  */
 
 const MAX_STARTUP_LOGS = 10
+const MAX_STDERR_LOG_BYTES = 10 * 1024 * 1024 // 10 MB cap per engine spawn
 const ENGINE_READY_TIMEOUT_MS = engineStartupTimeout(process.platform)
+
+interface StderrLogState {
+  stream: WriteStream | null
+  bytesWritten: number
+  truncated: boolean
+}
 
 export class ProcessManager extends EventEmitter {
   private process: ChildProcess | null = null
@@ -52,6 +59,8 @@ export class ProcessManager extends EventEmitter {
   // 防止应用关闭中残留的 setTimeout 触发 spawn 出孤儿 engine。
   private stopped = false
   private lifecycleGeneration = 0
+  private startInFlight: Promise<void> | null = null
+  private activeStderr: { proc: ChildProcess; state: StderrLogState } | null = null
   private readonly terminating = new Map<ChildProcess, Promise<void>>()
   // 持久化日志根目录（{userData}/logs），lazy 创建
   private readonly logsDir = join(app.getPath('userData'), 'logs')
@@ -218,10 +227,36 @@ export class ProcessManager extends EventEmitter {
     }
   }
 
+  /**
+   * 运行时热切换 engine.stderr.{ts}.log 写入流（用户开关日志或清空日志时调用）。
+   */
+  setStderrLoggingEnabled(enabled: boolean, reopen = false): void {
+    const active = this.activeStderr
+    if (!active) return
+    const closeStream = (): void => {
+      const stream = active.state.stream
+      active.state.stream = null
+      if (stream && !stream.writableEnded && !stream.destroyed) {
+        stream.end()
+      }
+    }
+    if (!enabled) {
+      closeStream()
+      return
+    }
+    if (reopen || !active.state.stream) {
+      closeStream()
+      this.pruneOldStderrLogs()
+      active.state.bytesWritten = 0
+      active.state.truncated = false
+      active.state.stream = this.openStderrLog(true)
+    }
+  }
+
   /** 为本次 spawn 新建 engine.stderr.{startup_ts}.log 写入流（仅当用户开启日志时落盘）。 */
-  private openStderrLog(): WriteStream | null {
+  private openStderrLog(forceEnabled = false): WriteStream | null {
     const logger = getClientLogger()
-    if (logger && !logger.isEnabled()) return null
+    if (!forceEnabled && logger && !logger.isEnabled()) return null
     if (!this.ensureLogsDir()) return null
     const ts = new Date().toISOString().replace(/[-:.]/g, '')
     const path = join(this.logsDir, `engine.stderr.${ts}.log`)
@@ -246,29 +281,48 @@ export class ProcessManager extends EventEmitter {
   }
 
   async start(): Promise<void> {
+    if (this.startInFlight) return this.startInFlight
+    if (this.stopped || this.process !== null) return
+    const run = this.startInternal().finally(() => {
+      if (this.startInFlight === run) this.startInFlight = null
+    })
+    this.startInFlight = run
+    return run
+  }
+
+  private async startInternal(): Promise<void> {
     if (this.stopped || this.process !== null) return
     const generation = this.lifecycleGeneration
     const isDev = !app.isPackaged
 
-    // 持久化日志：本次 spawn 一个新 engine.stderr.log（保留最近 10 个）。
-    // 用闭包局部变量而不是 class field — 防止 restart() 时新 spawn 覆盖
-    // 老 spawn 的 stream ref,导致老 proc exit 写到错误的文件。
-    this.pruneOldStderrLogs()
-    const stderrStream: WriteStream | null = this.openStderrLog()
+    const clientLog = getClientLogger()
+    const loggingEnabled = clientLog ? clientLog.isEnabled() : false
+    const logLevel = clientLog ? clientLog.getLevel().toUpperCase() : 'INFO'
+    const deviceId = clientLog?.getDeviceId()
+    const sessionId = clientLog?.getSessionId()
+
+    // 持久化日志：仅在用户开启日志后创建 logs/ 目录并打开 engine.stderr.log（保留最近 10 个）。
+    // 用闭包局部 stderrState 而不是覆盖全局 stream — 防止 restart() 时老 proc exit
+    // 关掉新 proc 的文件流。
+    if (loggingEnabled) {
+      this.pruneOldStderrLogs()
+    }
+    const stderrState: StderrLogState = {
+      stream: loggingEnabled ? this.openStderrLog(true) : null,
+      bytesWritten: 0,
+      truncated: false,
+    }
     const closeStderrStream = (): void => {
-      if (stderrStream && !stderrStream.writableEnded && !stderrStream.destroyed) {
-        stderrStream.end()
+      const stream = stderrState.stream
+      stderrState.stream = null
+      if (stream && !stream.writableEnded && !stream.destroyed) {
+        stream.end()
       }
     }
 
     let command: string
     let args: string[]
     let cwd: string
-    const clientLog = getClientLogger()
-    const loggingEnabled = clientLog ? clientLog.isEnabled() : false
-    const logLevel = clientLog ? clientLog.getLevel().toUpperCase() : 'INFO'
-    const deviceId = clientLog?.getDeviceId()
-    const sessionId = clientLog?.getSessionId()
 
     const env: NodeJS.ProcessEnv = {
       ...process.env,
@@ -379,12 +433,24 @@ export class ProcessManager extends EventEmitter {
       return
     }
     this.process = proc
+    this.activeStderr = { proc, state: stderrState }
     const writeStderr = (data: string | Buffer): void => {
-      if (stderrStream && !stderrStream.writableEnded && !stderrStream.destroyed)
-        stderrStream.write(data)
+      const stream = stderrState.stream
+      if (!stream || stream.writableEnded || stream.destroyed || stderrState.truncated) return
+      const chunkBytes = typeof data === 'string' ? Buffer.byteLength(data, 'utf-8') : data.length
+      if (stderrState.bytesWritten + chunkBytes > MAX_STDERR_LOG_BYTES) {
+        stderrState.truncated = true
+        stream.write(`\n# === stderr log truncated at ${MAX_STDERR_LOG_BYTES} bytes ===\n`)
+        return
+      }
+      stderrState.bytesWritten += chunkBytes
+      stream.write(data)
     }
     // 'exit' can precede trailing stdout/stderr. Close the log only after both pipes close.
     proc.once('close', () => {
+      if (this.activeStderr?.proc === proc) {
+        this.activeStderr = null
+      }
       closeStderrStream()
     })
 
@@ -538,7 +604,8 @@ export class ProcessManager extends EventEmitter {
         restartCount: 1,
         maxRestarts: this.maxRestarts,
       })
-      await this.killCurrentProcess('settings changed, restart')
+      const stopped = this.killCurrentProcess('settings changed, restart')
+      await Promise.all([stopped, ...this.terminating.values()])
       if (this.stopped) return
       this.restartCount = 0
       await this.start()

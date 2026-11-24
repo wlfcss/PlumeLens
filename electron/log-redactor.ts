@@ -28,14 +28,25 @@ const SENSITIVE_KEY_PATTERN =
 const PHOTO_EXT_PATTERN =
   '(?:cr2|cr3|nef|nrw|arw|srf|sr2|orf|rw2|pef|dng|raf|srw|3fr|iiq|jpg|jpeg|png|webp|tif|tiff|heic|heif|avif)'
 
-// Matches absolute POSIX or Windows paths that end in a photo file extension.
-const PHOTO_PATH_RE = new RegExp(
-  `(?:[A-Za-z]:\\\\|/(?:Users|home|Volumes|mnt|media|private|var|tmp)/)[^\\s"'\\])}>,]+?\\.${PHOTO_EXT_PATTERN}\\b`,
+const PATH_PREFIX_PATTERN =
+  '(?:[A-Za-z]:(?:\\\\\\\\|\\\\|/)|/(?:Users|home|Volumes|mnt|media|private|var|tmp)/)'
+const PATH_SEG_PATTERN = `[^/\\\\\\s"'\\])}>,;]+(?: [^/\\\\\\s"'\\])}>,;]+){0,2}`
+
+// Matches quoted absolute POSIX/Windows paths (including spaces and JSON-escaped `\\`) ending in a photo ext.
+const PHOTO_PATH_QUOTED_RE = new RegExp(
+  `(["'])(${PATH_PREFIX_PATTERN}[^"'\\r\\n\\t]+?\\.${PHOTO_EXT_PATTERN})(?=\\1)`,
   'gi',
 )
 
-// Matches generic user home paths (macOS / Linux / Windows) even if os.homedir differs.
-const GENERIC_USER_HOME_RE = /(?:\/Users\/[^/\s"'`]+|\/home\/[^/\s"'`]+|[A-Za-z]:\\Users\\[^\\\s"'`]+)/g
+// Matches unquoted absolute POSIX/Windows paths (linear-time segment grammar; supports `\\`, `/`, and spaces).
+const PHOTO_PATH_RE = new RegExp(
+  `${PATH_PREFIX_PATTERN}(?:${PATH_SEG_PATTERN}(?:\\\\\\\\|\\\\|/))*${PATH_SEG_PATTERN}\\.${PHOTO_EXT_PATTERN}\\b`,
+  'gi',
+)
+
+// Matches generic user home paths (macOS / Linux / Windows including `\\` and `/`) even if os.homedir differs.
+const GENERIC_USER_HOME_RE =
+  /(?:\/Users\/[^/\s"'`]+|\/home\/[^/\s"'`]+|[A-Za-z]:(?:\\\\|\\|\/)Users(?:\\\\|\\|\/)[^\\/\s"'`]+)/g
 
 const BEARER_RE = /\bBearer\s+[A-Za-z0-9._~+/-]{8,}/gi
 const QUERY_SECRET_RE = /([?&](?:token|key|ak|api_key|apikey|secret|access_token)=)([^&\s"'`]+)/gi
@@ -74,9 +85,17 @@ export function redactText(input: string, options: RedactorOptions = {}): string
     .replace(JSON_SECRET_RE, '$1[REDACTED]$3')
 
   // Replace photo file paths with deterministic anonymized filename before generic home replacement.
+  out = out.replace(
+    PHOTO_PATH_QUOTED_RE,
+    (_full, quote: string, pathPart: string) => `${quote}<photo>/${anonymizeFileName(pathPart, deviceId)}`,
+  )
   out = out.replace(PHOTO_PATH_RE, (matched) => `<photo>/${anonymizeFileName(matched, deviceId)}`)
 
   if (home && home.length > 1) {
+    const homeJsonEscaped = home.replace(/\\/g, '\\\\')
+    if (homeJsonEscaped !== home) {
+      out = out.replace(new RegExp(escapeRegExp(homeJsonEscaped), 'g'), '~')
+    }
     const homeRe = new RegExp(escapeRegExp(home), 'g')
     out = out.replace(homeRe, '~')
     const homeForward = home.replace(/\\/g, '/')

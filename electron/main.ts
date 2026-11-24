@@ -311,10 +311,18 @@ function isTrustedAppNavigation(target: string, isDev: boolean): boolean {
 }
 
 function assertTrustedIpcSender(event: Electron.IpcMainInvokeEvent | Electron.IpcMainEvent): void {
-  if (!mainWindow || mainWindow.isDestroyed() || event.sender !== mainWindow.webContents) {
+  if (
+    !mainWindow ||
+    mainWindow.isDestroyed() ||
+    event.sender !== mainWindow.webContents ||
+    (event.senderFrame && event.senderFrame !== mainWindow.webContents.mainFrame)
+  ) {
     throw new Error('Unauthorized IPC sender')
   }
 }
+
+const MACOS_EXECUTABLE_BUNDLE_RE =
+  /\.(app|pkg|mpkg|bundle|workflow|action|prefpane|plugin|framework|command)$/i
 
 function getLogsDirPath(): string {
   return join(app.getPath('userData'), 'logs')
@@ -332,7 +340,7 @@ async function ensureDeviceRecord(persist: boolean): Promise<DeviceIdRecord> {
 
 async function ensureSystemProfile(forceRefresh = false): Promise<SystemProfileSnapshot | null> {
   if (!forceRefresh && cachedSystemProfile) return cachedSystemProfile
-  if (!forceRefresh && systemProfilePromise) return systemProfilePromise
+  if (systemProfilePromise) return systemProfilePromise
 
   const job = (async (): Promise<SystemProfileSnapshot | null> => {
     try {
@@ -351,7 +359,7 @@ async function ensureSystemProfile(forceRefresh = false): Promise<SystemProfileS
       })
       cachedSystemProfile = profile
       if (clientLog?.isEnabled()) {
-        saveSystemProfileCache(getLogsDirPath(), profile)
+        saveSystemProfileCache(getLogsDirPath(), profile, device.deviceId)
         clientLog.child('system-profile').info('system_profile_collected', {
           os: `${profile.os.platform} ${profile.os.arch}`,
           cpu: profile.cpu.model,
@@ -374,13 +382,27 @@ async function ensureSystemProfile(forceRefresh = false): Promise<SystemProfileS
     }
   })()
 
-  if (!forceRefresh) {
-    systemProfilePromise = job.finally(() => {
-      systemProfilePromise = null
-    })
-    return systemProfilePromise
+  systemProfilePromise = job.finally(() => {
+    systemProfilePromise = null
+  })
+  return systemProfilePromise
+}
+
+async function refreshEngineRuntimeInProfile(): Promise<void> {
+  if (!cachedSystemProfile) {
+    await ensureSystemProfile(false)
+    return
   }
-  return job
+  const engineRuntime = processManager ? await processManager.fetchEngineJson('/health', 2500) : null
+  if (!engineRuntime) return
+  cachedSystemProfile = {
+    ...cachedSystemProfile,
+    engineRuntime,
+  }
+  const clientLog = getClientLogger()
+  if (clientLog?.isEnabled()) {
+    saveSystemProfileCache(getLogsDirPath(), cachedSystemProfile, clientLog.getDeviceId())
+  }
 }
 
 function buildLoggingStatusSnapshot(): LoggingStatusSnapshot {
@@ -864,11 +886,15 @@ ipcMain.handle('get-backend-auth-token', (event) => {
   return processManager?.getAuthToken() ?? null
 })
 
-ipcMain.handle('get-app-version', () => {
+ipcMain.handle('get-app-version', (event) => {
+  assertTrustedIpcSender(event)
   return app.getVersion()
 })
 
-ipcMain.handle('check-for-updates', () => checkForUpdates())
+ipcMain.handle('check-for-updates', (event) => {
+  assertTrustedIpcSender(event)
+  return checkForUpdates()
+})
 
 ipcMain.handle('dialog:open-folder', async (event) => {
   assertTrustedIpcSender(event)
@@ -1043,7 +1069,8 @@ function spawnDetached(command: string, args: string[]): Promise<void> {
   })
 }
 
-ipcMain.handle('list-editors', () => {
+ipcMain.handle('list-editors', (event) => {
+  assertTrustedIpcSender(event)
   return {
     topaz: EDITOR_REGISTRY.topaz.resolved,
     photoshop: EDITOR_REGISTRY.photoshop.resolved,
@@ -1114,9 +1141,9 @@ ipcMain.handle('open-path-in-finder', async (event, targetPath: unknown) => {
     return { ok: false, reason: 'path_missing' as const }
   }
 
-  // Never call shell.openPath() on regular files (which executes them);
-  // reveal files in Finder/Explorer instead.
-  if (!isDirectory) {
+  // Never call shell.openPath() on regular files or macOS executable bundles (.app/.pkg/.workflow...);
+  // reveal them in Finder/Explorer instead.
+  if (!isDirectory || (process.platform === 'darwin' && MACOS_EXECUTABLE_BUNDLE_RE.test(canonicalPath))) {
     shell.showItemInFolder(canonicalPath)
     return { ok: true as const }
   }
@@ -1128,7 +1155,10 @@ ipcMain.handle('open-path-in-finder', async (event, targetPath: unknown) => {
   return { ok: true as const }
 })
 
-ipcMain.handle('open-external-url', (_event, targetUrl: unknown) => openExternalUrl(targetUrl))
+ipcMain.handle('open-external-url', (event, targetUrl: unknown) => {
+  assertTrustedIpcSender(event)
+  return openExternalUrl(targetUrl)
+})
 
 // 用户设置(reverse geocoding API keys 等)— 持久化到 userData/settings.json,
 // 落盘前每个 key 都过 Electron safeStorage 异步加密(macOS Keychain / Win DPAPI /
@@ -1202,8 +1232,9 @@ ipcMain.handle('logs:set-consent', async (event, enabled: unknown) => {
     enabled: saved.enabled,
     level: saved.level,
   })
+  processManager?.setStderrLoggingEnabled(saved.enabled)
   if (allow) {
-    void ensureSystemProfile(true)
+    void ensureSystemProfile(false)
   }
   if (processManager) {
     await processManager.syncLoggingToEngine({
@@ -1236,8 +1267,9 @@ ipcMain.handle('logs:set-enabled', async (event, enabled: unknown) => {
     enabled: saved.enabled,
     level: saved.level,
   })
+  processManager?.setStderrLoggingEnabled(saved.enabled)
   if (allow) {
-    void ensureSystemProfile(true)
+    void ensureSystemProfile(false)
   }
   if (processManager) {
     await processManager.syncLoggingToEngine({
@@ -1276,11 +1308,13 @@ ipcMain.handle('logs:set-level', async (event, level: unknown) => {
 ipcMain.handle('logs:clear', async (event): Promise<ClearLogsResult> => {
   assertTrustedIpcSender(event)
   const clientLog = getClientLogger()
-  clientLog?.drainSync()
+  await clientLog?.drain()
+  processManager?.setStderrLoggingEnabled(false)
   const result = clearLogFiles(getLogsDirPath())
   if (result.ok && clientLog?.isEnabled()) {
+    processManager?.setStderrLoggingEnabled(true, true)
     if (cachedSystemProfile) {
-      saveSystemProfileCache(getLogsDirPath(), cachedSystemProfile)
+      saveSystemProfileCache(getLogsDirPath(), cachedSystemProfile, clientLog.getDeviceId())
     }
     if (processManager) {
       await processManager.syncLoggingToEngine({
@@ -1328,7 +1362,7 @@ ipcMain.handle('logs:export-bundle', async (event): Promise<ExportDiagnosticsRes
   }
 
   try {
-    clientLog?.drainSync()
+    await clientLog?.drain()
     const [profile, dbSummary, userSettings] = await Promise.all([
       ensureSystemProfile(true),
       processManager ? processManager.fetchEngineJson('/diagnostics/db-summary', 4000) : Promise.resolve(null),
@@ -1370,7 +1404,8 @@ ipcMain.handle('logs:export-bundle', async (event): Promise<ExportDiagnosticsRes
 })
 
 // 让用户在 fatal 状态点 banner 直接打开 logs 目录(crash 自查 / 上报)
-ipcMain.handle('open-logs-dir', async () => {
+ipcMain.handle('open-logs-dir', async (event) => {
+  assertTrustedIpcSender(event)
   const logsDir = getLogsDirPath()
   try {
     mkdirSync(logsDir, { recursive: true })
@@ -1644,7 +1679,7 @@ app.whenReady().then(async () => {
         sessionId: activeLog.getSessionId(),
       })
       if (activeLog.isEnabled()) {
-        void ensureSystemProfile(true)
+        void refreshEngineRuntimeInProfile()
       }
     }
   })
@@ -1717,6 +1752,7 @@ app.on('before-quit', (event) => {
           allowWindowClose = true
           for (const window of BrowserWindow.getAllWindows()) window.destroy()
           await processManager?.stop()
+          await getClientLogger()?.drain()
           getClientLogger()?.shutdownSync('before_quit')
         })
         .finally(() => {

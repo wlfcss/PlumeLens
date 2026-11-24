@@ -60,7 +60,10 @@ def _sha256_of(path: Path) -> str:
     return h.hexdigest()
 
 
-_SENTINEL_ASSET = "yolo26l-bird-det.onnx"  # 必装核心模型,作为"环境是否带模型"的探针
+_SENTINEL_ASSETS = (
+    "yolo26l-bird-det.onnx",
+    "species/v4/seed42_adapter.pt",
+)  # 必装核心模型(含 pickle adapter),作为"环境是否带模型"的探针
 
 
 def _load_manifest_assets(manifest_path: Path) -> dict[str, _AssetEntry]:
@@ -126,11 +129,11 @@ def verify_manifest(
     # 模型是否存在 — 没有任何模型时,manifest 缺也合理(走 detection-only 降级或
     # strict mode 在 IQA 校验时报错);有模型却没 manifest 一定是出错或被动手脚。
     if manifest_sig is None:
-        sentinel = models_dir / _SENTINEL_ASSET
-        if sentinel.is_file():
+        present_sentinels = [rel for rel in _SENTINEL_ASSETS if (models_dir / rel).is_file()]
+        if present_sentinels:
             msg = (
-                f"Model manifest missing: {manifest_path} — but core model "
-                f"{_SENTINEL_ASSET} exists. Suspicious. Regenerate manifest via "
+                f"Model manifest missing: {manifest_path} — but core model(s) "
+                f"{', '.join(present_sentinels)} exist. Suspicious. Regenerate manifest via "
                 f"`uv run python scripts/build_model_manifest.py` if this is "
                 f"intentional."
             )
