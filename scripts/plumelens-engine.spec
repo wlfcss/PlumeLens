@@ -76,6 +76,18 @@ binaries: list[tuple[str, str]] = [
     *collect_dynamic_libs("torchvision"),
 ]
 
+# torchvision 0.25+ loads stable-ABI C++ op libraries (`_C_stable.so`/`_C_stable.pyd`,
+# `image_stable.so`/`image_stable.pyd`) dynamically via `torch.ops.load_library(...)`
+# instead of static Python imports, so `collect_dynamic_libs("torchvision")` misses them.
+# Without `_C_stable`, importing `transformers` / `DINOv3ViTModel` crashes with:
+#   RuntimeError: operator torchvision::nms does not exist
+import torchvision as _torchvision
+
+_torchvision_dir = Path(_torchvision.__file__).resolve().parent
+for _ext_pattern in ("*.so", "*.pyd", "*.dylib", "*.dll"):
+    for _ext_file in sorted(_torchvision_dir.glob(_ext_pattern)):
+        binaries.append((str(_ext_file), "torchvision"))
+
 if sys.platform == "win32":
     hidden_imports.extend(["windowsml", "windowsml._bindings"])
     binaries.extend(collect_dynamic_libs("windowsml"))

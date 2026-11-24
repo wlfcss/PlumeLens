@@ -15,6 +15,7 @@ export default defineConfig({
   use: {
     baseURL: 'http://localhost:5173',
     trace: 'retain-on-failure',
+    timezoneId: 'Asia/Shanghai',
   },
   projects: [
     {

@@ -43,11 +43,12 @@ test('Packaged app: real inference, thumbnails, offline artwork, export and clea
     })
 
     // 1. 核验完整管线健康状态
-    const health = JSON.parse((await callEngine(handle.page, '/health')).body)
-    expect(health.pipeline.ready).toBe(true)
-    expect(health.pipeline.quality_available).toBe(true)
-    expect(health.pipeline.pose_available).toBe(true)
-    expect(health.pipeline.species_available).toBe(true)
+    const healthRaw = (await callEngine(handle.page, '/health')).body
+    const health = JSON.parse(healthRaw)
+    expect(health.pipeline.ready, healthRaw).toBe(true)
+    expect(health.pipeline.quality_available, healthRaw).toBe(true)
+    expect(health.pipeline.pose_available, healthRaw).toBe(true)
+    expect(health.pipeline.species_available, healthRaw).toBe(true)
 
     // 2. 导入确定性鸟图样本并执行真实批量分析
     const library = await importFixtureLibrary(handle.page, fixtureDir, 'Packaged Smoke Lib')
