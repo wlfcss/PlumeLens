@@ -22,9 +22,13 @@ IQA_INPUT_SIZE = 224
 IQA_NONFINITE_FALLBACK_SCORE = 0.5
 
 
-def _preprocess_for_iqa(crop: NDArray[np.float32]) -> NDArray[np.float32]:
+def _preprocess_for_iqa(crop: NDArray[np.float32] | NDArray[np.uint8]) -> NDArray[np.float32]:
     """Resize to 224×224 raw RGB 0-1 + CHW + batch → [1, 3, 224, 224]."""
-    pil = Image.fromarray((crop * 255).astype(np.uint8))
+    pil = (
+        Image.fromarray(crop)
+        if crop.dtype == np.uint8
+        else Image.fromarray((crop * 255).astype(np.uint8))
+    )
     pil = pil.resize((IQA_INPUT_SIZE, IQA_INPUT_SIZE), Image.Resampling.BICUBIC)
     arr = np.asarray(pil, dtype=np.float32) / 255.0
     chw = np.ascontiguousarray(arr.transpose(2, 0, 1))
@@ -68,8 +72,8 @@ class QualityAssessor:
 
     def assess(
         self,
-        semantic_crop: NDArray[np.float32],
-        technical_crop: NDArray[np.float32] | None = None,
+        semantic_crop: NDArray[np.float32] | NDArray[np.uint8],
+        technical_crop: NDArray[np.float32] | NDArray[np.uint8] | None = None,
     ) -> QualityScores:
         """Assess quality using separate semantic and technical crops.
 

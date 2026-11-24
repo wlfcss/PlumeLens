@@ -16,8 +16,16 @@ class ReviewSnapshotChanged extends ApiError {
 }
 
 /** Review data belongs to this modal and never enters the lightweight workspace. */
-export function usePhotoReview(summary: PhotoRecord, t: ReturnType<typeof useTranslation>['t']) {
-  const { id, folderId, groupId, inputRevision, reviewRevision, isNewSpecies } = summary
+export function usePhotoReview(
+  summary: PhotoRecord | null,
+  t: ReturnType<typeof useTranslation>['t'],
+) {
+  const id = summary?.id ?? ''
+  const folderId = summary?.folderId ?? ''
+  const groupId = summary?.groupId ?? ''
+  const inputRevision = summary?.inputRevision
+  const reviewRevision = summary?.reviewRevision
+  const isNewSpecies = summary?.isNewSpecies ?? false
   const qc = useQueryClient()
   const query = useQuery({
     queryKey: [...PHOTO_REVIEW_KEY(id), folderId, inputRevision, reviewRevision],
@@ -33,22 +41,24 @@ export function usePhotoReview(summary: PhotoRecord, t: ReturnType<typeof useTra
       }
       return photo
     },
+    enabled: Boolean(summary),
     // The review row may contain large EXIF and multiple detailed detections.
     gcTime: 0,
     staleTime: reviewRevision ? Infinity : 0,
   })
-  const data = query.isError ? undefined : query.data
+  const data = !summary || query.isError ? undefined : query.data
   const photo = useMemo(
     () => data && { ...buildPhotoRecordFromRow(data, folderId, groupId, t), isNewSpecies },
     [data, folderId, groupId, isNewSpecies, t],
   )
-  const revisionChanged = query.error instanceof ReviewSnapshotChanged
+  const revisionChanged = Boolean(summary) && query.error instanceof ReviewSnapshotChanged
   return {
     photo,
-    loading: query.isPending,
-    error: query.isError,
+    loading: Boolean(summary) && query.isPending,
+    error: Boolean(summary) && query.isError,
     revisionChanged,
     onRetry: () => {
+      if (!summary) return
       if (revisionChanged) {
         // A new summary identity will mount the corresponding review query.
         void qc.invalidateQueries(

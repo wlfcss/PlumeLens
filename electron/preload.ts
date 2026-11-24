@@ -89,14 +89,15 @@ function normalizeEnginePath(path: string): string {
 let cachedBackendUrl: string | null = null
 let cachedAuthToken: string | null = null
 let bootstrapPromise: Promise<void> | null = null
-// Generation 计数器:engine 每次 ready/crashed/fatal 都 ++。bootstrapAuth 在 IPC
-// 拉数据期间 capture 当前 generation,完成时如果 generation 已变,说明 engine 中
-// 途重启了,这次拿到的 url/token 已经是旧 process 的,丢弃不写回 cache。否则会
-// 出现"engine 重启完了 cache 却被旧 IPC 结果覆盖回 stale URL"的赛跑(audit-batch-2 P1)。
 let cacheGeneration = 0
 
+function invalidateAuthCache(): void {
+  cacheGeneration += 1
+  cachedBackendUrl = null
+  cachedAuthToken = null
+}
+
 async function bootstrapAuth(): Promise<void> {
-  // 加锁:多个并发 engineRequest 不会同时 invoke 两次 IPC。
   if (cachedBackendUrl !== null && cachedAuthToken !== null) return
   if (bootstrapPromise === null) {
     const generation = cacheGeneration
@@ -105,7 +106,6 @@ async function bootstrapAuth(): Promise<void> {
         ipcRenderer.invoke('get-backend-url') as Promise<string | null>,
         ipcRenderer.invoke('get-backend-auth-token') as Promise<string | null>,
       ])
-      // engine 重启过 → 抛弃 stale 结果,下一次请求会重新 bootstrap(因为 cache 还是 null)。
       if (generation !== cacheGeneration) return
       cachedBackendUrl = url
       cachedAuthToken = token
@@ -116,26 +116,30 @@ async function bootstrapAuth(): Promise<void> {
   await bootstrapPromise
 }
 
-// engine 重启 → 旧 url / token 失效。监听事件清缓存 + bump generation,
-// 让 in-flight bootstrap 不会把旧值覆盖回 cache。
 ipcRenderer.on('engine-status', (_event, payload: EngineStatusPayload) => {
   if (payload.kind === 'ready' || payload.kind === 'crashed' || payload.kind === 'fatal') {
-    cacheGeneration += 1
-    cachedBackendUrl = null
-    cachedAuthToken = null
+    invalidateAuthCache()
   }
 })
 
-async function ensureUrl(): Promise<string> {
+async function ensureAuth(): Promise<{ url: string; token: string | null }> {
   await bootstrapAuth()
   if (!cachedBackendUrl) {
-    // 兜底再拉一次(engine 还没 ready)。renderer api-client 会重试。
-    cachedBackendUrl = (await ipcRenderer.invoke('get-backend-url')) as string | null
+    const generation = cacheGeneration
+    const [url, token] = await Promise.all([
+      ipcRenderer.invoke('get-backend-url') as Promise<string | null>,
+      ipcRenderer.invoke('get-backend-auth-token') as Promise<string | null>,
+    ])
+    if (generation === cacheGeneration) {
+      cachedBackendUrl = url
+      cachedAuthToken = token
+    }
+    if (!url) {
+      throw new Error('Engine backend URL not available yet')
+    }
+    return { url, token }
   }
-  if (!cachedBackendUrl) {
-    throw new Error('Engine backend URL not available yet')
-  }
-  return cachedBackendUrl
+  return { url: cachedBackendUrl, token: cachedAuthToken }
 }
 
 async function performEngineRequest(
@@ -143,11 +147,11 @@ async function performEngineRequest(
   init: EngineRequestInit = {},
   receiveSummaryLine?: (line: string) => void,
 ): Promise<EngineResponse> {
-  const url = await ensureUrl()
+  const { url, token } = await ensureAuth()
   const enginePath = normalizeEnginePath(path)
   const headers = new Headers(init.headers ?? {})
-  if (cachedAuthToken && !headers.has('Authorization')) {
-    headers.set('Authorization', `Bearer ${cachedAuthToken}`)
+  if (token && !headers.has('Authorization')) {
+    headers.set('Authorization', `Bearer ${token}`)
   }
   if (init.body && !headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json')
@@ -162,10 +166,14 @@ async function performEngineRequest(
       body: init.body ?? undefined,
       signal: ctrl.signal,
     })
+    if (res.status === 401) {
+      invalidateAuthCache()
+    }
     const headersAt = benchmarkTraceEnabled ? performance.now() : undefined
     const contentType = res.headers.get('content-type')
+    const mediaType = contentType?.split(';', 1)[0]?.trim().toLowerCase() ?? null
     let body = ''
-    if (res.ok && contentType === LIBRARY_SUMMARY_BATCH_MEDIA_TYPE && receiveSummaryLine) {
+    if (res.ok && mediaType === LIBRARY_SUMMARY_BATCH_MEDIA_TYPE && receiveSummaryLine) {
       if (!res.body) throw new Error('Missing library summary stream')
       await readSummaryLines(res.body, receiveSummaryLine)
     } else {
@@ -235,21 +243,26 @@ async function readSseStream(
     if (field === 'data') dataLines.push(value)
   }
 
-  while (!isCancelled()) {
-    const { value, done } = await reader.read()
-    if (done) break
-    buffer += decoder.decode(value, { stream: true })
-    const lines = buffer.split('\n')
-    buffer = lines.pop() ?? ''
-    for (const line of lines) {
-      if (isCancelled()) break
-      processLine(line)
+  try {
+    while (!isCancelled()) {
+      const { value, done } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split('\n')
+      buffer = lines.pop() ?? ''
+      for (const line of lines) {
+        if (isCancelled()) break
+        processLine(line)
+      }
     }
-  }
 
-  buffer += decoder.decode()
-  if (!isCancelled() && buffer) processLine(buffer)
-  if (!isCancelled()) emitSseMessage(eventName, dataLines, onEvent)
+    buffer += decoder.decode()
+    if (!isCancelled() && buffer) processLine(buffer)
+    if (!isCancelled()) emitSseMessage(eventName, dataLines, onEvent)
+  } finally {
+    await reader.cancel().catch(() => undefined)
+    reader.releaseLock()
+  }
 }
 
 function performEngineSseSubscribe(
@@ -261,15 +274,19 @@ function performEngineSseSubscribe(
 
   void (async () => {
     try {
-      const url = await ensureUrl()
+      const { url, token } = await ensureAuth()
       const enginePath = normalizeEnginePath(path)
       const headers = new Headers({ Accept: 'text/event-stream' })
-      if (cachedAuthToken) headers.set('Authorization', `Bearer ${cachedAuthToken}`)
+      if (token) headers.set('Authorization', `Bearer ${token}`)
       const res = await fetch(`${url}${enginePath}`, {
         headers,
         signal: ctrl.signal,
       })
+      if (res.status === 401) {
+        invalidateAuthCache()
+      }
       if (!res.ok) {
+        await res.body?.cancel().catch(() => undefined)
         onEvent({ type: 'error', message: `SSE HTTP ${res.status}`, status: res.status })
         return
       }
@@ -277,7 +294,10 @@ function performEngineSseSubscribe(
         onEvent({ type: 'error', message: 'SSE response body is unavailable' })
         return
       }
-      if (cancelled) return
+      if (cancelled) {
+        await res.body.cancel().catch(() => undefined)
+        return
+      }
       onEvent({ type: 'open' })
       await readSseStream(res.body, onEvent, () => cancelled)
       if (!cancelled) {
@@ -298,18 +318,6 @@ function performEngineSseSubscribe(
   }
 }
 
-/**
- * Legacy fallback for vite-only runs that still construct native EventSource
- * in renderer. Packaged Electron uses engineSseSubscribe so the token stays in
- * preload and travels as an Authorization header instead of a query string.
- */
-async function performEngineSseUrl(path: string): Promise<string> {
-  const url = await ensureUrl()
-  const final = new URL(`${url}${normalizeEnginePath(path)}`)
-  if (cachedAuthToken) final.searchParams.set('token', cachedAuthToken)
-  return final.toString()
-}
-
 contextBridge.exposeInMainWorld('plumelens', {
   platform: process.platform,
   ...(benchmarkTraceEnabled && { benchmarkTraceEnabled }),
@@ -323,8 +331,6 @@ contextBridge.exposeInMainWorld('plumelens', {
     init?: EngineRequestInit,
     receiveSummaryLine?: (line: string) => void,
   ): Promise<EngineResponse> => performEngineRequest(path, init, receiveSummaryLine),
-  /** Legacy SSE URL fallback(可能包含 query token,native EventSource 限制)。 */
-  engineSseUrl: (path: string): Promise<string> => performEngineSseUrl(path),
   /** 订阅 engine SSE — fetch stream 在 preload 内注入 Authorization,token 不进 renderer。 */
   engineSseSubscribe: (
     path: string,

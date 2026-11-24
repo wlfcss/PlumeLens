@@ -54,7 +54,6 @@ import { useQueryClient } from '@tanstack/react-query'
 import {
   api,
   ApiError,
-  type DecisionValue,
   type SelectionQuery,
   type SpeciesOverrideBBox,
   type SpeciesOverrideValue,
@@ -236,6 +235,7 @@ export default function App() {
     activeQuickFilters,
     selectionSpeciesByFolder,
     setSelectionSpeciesFilter,
+    removeSelectionSpeciesFilter,
     setActiveQuickFilters,
     onlyFlying,
     activeSort,
@@ -265,6 +265,7 @@ export default function App() {
       activeQuickFilters: state.activeQuickFilters,
       selectionSpeciesByFolder: state.selectionSpeciesByFolder,
       setSelectionSpeciesFilter: state.setSelectionSpeciesFilter,
+      removeSelectionSpeciesFilter: state.removeSelectionSpeciesFilter,
       setActiveQuickFilters: state.setActiveQuickFilters,
       onlyFlying: state.onlyFlying,
       activeSort: state.activeSort,
@@ -339,18 +340,32 @@ export default function App() {
   const confirmRemoveFolder = useCallback(async () => {
     if (!pendingRemoval) return
     const removedId = pendingRemoval.id
+    const nextFolderId = workspace.folders.find((f) => f.id !== removedId)?.id ?? null
     try {
+      if (activeFolderId === removedId) {
+        setActiveFolderId(nextFolderId)
+      }
       await deleteLibrary.mutateAsync(removedId)
+      removeSelectionSpeciesFilter(removedId)
       // 该文件夹的导出面板要一并收掉 —— 留着会指向一个已经不存在的图库。
       setExportSessions((current) => current.filter((session) => session.folderId !== removedId))
       setPendingRemoval(null)
       setRemoveError(null)
-      // activeFolderId 由上面的 effect 自动纠正到剩余的第一个文件夹,这里不用管。
     } catch (err) {
+      if (activeFolderId === removedId) {
+        setActiveFolderId(removedId)
+      }
       logger.warn('Failed to remove library:', err)
       setRemoveError(err instanceof Error ? err.message : String(err))
     }
-  }, [deleteLibrary, pendingRemoval])
+  }, [
+    activeFolderId,
+    deleteLibrary,
+    pendingRemoval,
+    removeSelectionSpeciesFilter,
+    setActiveFolderId,
+    workspace.folders,
+  ])
   const openFolderInFinder = useCallback(async (folder: FolderRecord) => {
     setFolderContextMenu(null)
     try {
@@ -579,7 +594,10 @@ export default function App() {
   const archiveSpecies = useMemo(() => {
     if (!shouldLoadArchiveWorkspace) return EMPTY_SPECIES
     return speciesRecords.filter((species) =>
-      matchesQuery([species.name, species.latinName, species.summary], deferredSearch),
+      matchesQuery(
+        [species.name, species.latinName, species.englishName, species.familyName, species.summary],
+        deferredSearch,
+      ),
     )
   }, [deferredSearch, shouldLoadArchiveWorkspace, speciesRecords])
   const reviewSourcePhotos = route === 'archive' ? archivePhotos : flatSelectionPhotos
@@ -664,6 +682,7 @@ export default function App() {
   // 立即触发 detail fetch 也会冷启失败)。
   useEffect(() => {
     if (engineSseKey === 0) return // initial render,engine 还没发过 'ready' 事件
+    queryClient.invalidateQueries({ queryKey: ['backend-health'] })
     queryClient.invalidateQueries({ queryKey: LIBRARIES_KEY })
     queryClient.invalidateQueries({ queryKey: ['library'] })
     queryClient.invalidateQueries({ queryKey: ['decisions'] })
@@ -785,16 +804,17 @@ export default function App() {
   }
 
   async function handleRefreshFolder() {
-    if (!activeFolderId || activeSourceMissing || refreshing) return
+    if (!activeFolder || activeSourceMissing || refreshing) return
+    const folderId = activeFolder.id
     setOperationError(null)
     setRefreshing(true)
     try {
       await api.importLibrary({
-        root_path: activeFolder!.rootPath,
-        recursive: activeFolder!.recursive,
+        root_path: activeFolder.rootPath,
+        recursive: activeFolder.recursive,
       })
-      await queryClient.invalidateQueries({ queryKey: ['library', activeFolderId] })
-      await queryClient.invalidateQueries({ queryKey: ['selection', activeFolderId] })
+      await queryClient.invalidateQueries({ queryKey: ['library', folderId] })
+      await queryClient.invalidateQueries({ queryKey: ['selection', folderId] })
       await queryClient.invalidateQueries({ queryKey: LIBRARIES_KEY })
     } catch (err) {
       logger.warn('Failed to refresh folder:', err)
@@ -840,20 +860,21 @@ export default function App() {
     void setDecisionMutation
       .mutateAsync({
         photoId,
-        decision: decision as DecisionValue,
+        decision,
         libraryId: photoById.get(photoId)?.folderId,
       })
       .then(() => {
         refreshUnversionedReview(photoId)
-        setSaveFeedback((current) => {
-          if (current && current.requestId !== requestId) return current
-          return {
-            photoId,
-            requestId,
-            status: 'saved',
-            grade: decision ?? undefined,
-          }
+        if (saveRequestSeqRef.current !== requestId) return
+        setSaveFeedback({
+          photoId,
+          requestId,
+          status: 'saved',
+          grade: decision ?? undefined,
         })
+        if (saveFeedbackTimerRef.current !== null) {
+          window.clearTimeout(saveFeedbackTimerRef.current)
+        }
         saveFeedbackTimerRef.current = window.setTimeout(() => {
           setSaveFeedback((current) => (current?.requestId === requestId ? null : current))
           saveFeedbackTimerRef.current = null
@@ -865,10 +886,8 @@ export default function App() {
           file: photoById.get(photoId)?.fileName ?? photoId,
         })
         setOperationError(message)
-        setSaveFeedback((current) => {
-          if (current && current.requestId !== requestId) return current
-          return { photoId, requestId, status: 'error', message }
-        })
+        if (saveRequestSeqRef.current !== requestId) return
+        setSaveFeedback({ photoId, requestId, status: 'error', message })
       })
   }
 
@@ -896,10 +915,11 @@ export default function App() {
       })
       .then(() => {
         refreshUnversionedReview(photoId)
-        setSaveFeedback((current) => {
-          if (current && current.requestId !== requestId) return current
-          return { photoId, requestId, status: 'saved' }
-        })
+        if (saveRequestSeqRef.current !== requestId) return
+        setSaveFeedback({ photoId, requestId, status: 'saved' })
+        if (saveFeedbackTimerRef.current !== null) {
+          window.clearTimeout(saveFeedbackTimerRef.current)
+        }
         saveFeedbackTimerRef.current = window.setTimeout(() => {
           setSaveFeedback((current) => (current?.requestId === requestId ? null : current))
           saveFeedbackTimerRef.current = null
@@ -911,10 +931,8 @@ export default function App() {
           file: photoById.get(photoId)?.fileName ?? photoId,
         })
         setOperationError(message)
-        setSaveFeedback((current) => {
-          if (current && current.requestId !== requestId) return current
-          return { photoId, requestId, status: 'error', message }
-        })
+        if (saveRequestSeqRef.current !== requestId) return
+        setSaveFeedback({ photoId, requestId, status: 'error', message })
       })
   }
 
@@ -978,6 +996,15 @@ export default function App() {
   ].join(':')
   const exportErrorResetKey = exportSessions.map((session) => session.id).join('|')
 
+  const exportDisabledReason = !activeFolder || activeFolderPhotos.length === 0
+    ? t('export.disabled.noPhotos')
+    : activeSourceMissing
+      ? t('selection.sourceMissing.exportDisabled')
+      : route === 'selection' && !selectionExportable
+        ? t('export.disabled.updating')
+        : undefined
+  const searchDisabledOnMap = route === 'archive' && archiveTab === 'map'
+
   return (
     <AppShell
       onNavigate={handleNavigate}
@@ -985,11 +1012,13 @@ export default function App() {
       onOpenSettings={() => setSettingsOpen(true)}
       onSearchChange={setSearchQuery}
       route={route}
+      searchDisabled={searchDisabledOnMap}
       searchQuery={searchQuery}
       settingsOpen={settingsOpen}
       t={t}
       controlsDisabled={!appInteractive}
-      exportDisabled={Boolean(activeSourceMissing)}
+      exportDisabled={Boolean(exportDisabledReason)}
+      exportDisabledTitle={exportDisabledReason}
     >
       {benchmarkTrace && (
         <SelectionCommitTrace
@@ -1023,21 +1052,26 @@ export default function App() {
           ) : null}
         </div>
       ) : null}
-      {operationError && !reviewPhoto ? (
-        <div className="operation-feedback" role="alert">
-          <span>{operationError}</span>
-          <button
-            type="button"
-            className="button-ghost button-compact"
-            onClick={() => setOperationError(null)}
-          >
-            {t('common.close')}
-          </button>
-        </div>
-      ) : null}
-      {!reviewPhoto && (setDecisionMutation.isPending || setSpeciesOverrideMutation.isPending) ? (
-        <div className="operation-feedback" role="status">
-          {t('selection.saving')}
+      {(operationError || setDecisionMutation.isPending || setSpeciesOverrideMutation.isPending) &&
+      !reviewPhoto ? (
+        <div className="operation-feedback-stack">
+          {operationError ? (
+            <div className="operation-feedback" role="alert">
+              <span>{operationError}</span>
+              <button
+                type="button"
+                className="button-ghost button-compact"
+                onClick={() => setOperationError(null)}
+              >
+                {t('common.close')}
+              </button>
+            </div>
+          ) : null}
+          {setDecisionMutation.isPending || setSpeciesOverrideMutation.isPending ? (
+            <div className="operation-feedback" role="status">
+              {t('selection.saving')}
+            </div>
+          ) : null}
         </div>
       ) : null}
       <ErrorBoundary resetKey={routeErrorResetKey} t={t}>
@@ -1119,15 +1153,19 @@ export default function App() {
           ) : (
             <StartScreen
               backendData={backendData}
+              controlsDisabled={!appInteractive}
               folders={visibleFolders}
+              hasAnyFolders={workspace.folders.length > 0}
               importError={importError}
               isError={isError}
               isReady={isReady}
               onChooseFolder={handleChooseFolder}
+              onClearSearch={() => setSearchQuery('')}
               onContinueLatest={() => handleNavigate('selection')}
               onDismissImportError={() => setImportError(null)}
               onOpenFolderContextMenu={openFolderContextMenu}
               onOpenFolder={handleSelectFolder}
+              searchQuery={deferredSearch}
               t={t}
             />
           )}
@@ -1209,11 +1247,13 @@ function AppShell({
   children,
   controlsDisabled,
   exportDisabled,
+  exportDisabledTitle,
   onNavigate,
   onOpenExport,
   onOpenSettings,
   onSearchChange,
   route,
+  searchDisabled,
   searchQuery,
   settingsOpen,
   t,
@@ -1221,19 +1261,28 @@ function AppShell({
   children: ReactNode
   controlsDisabled: boolean
   exportDisabled: boolean
+  exportDisabledTitle?: string
   onNavigate: (route: AppRoute) => void
   onOpenExport: () => void
   onOpenSettings: () => void
   onSearchChange: (value: string) => void
   route: AppRoute
+  searchDisabled: boolean
   searchQuery: string
   settingsOpen: boolean
   t: ReturnType<typeof useTranslation>['t']
 }) {
   const disabledTitle = controlsDisabled ? t('nav.loadingDisabled') : undefined
-  const exportDisabledTitle = exportDisabled
-    ? t('selection.sourceMissing.exportDisabled')
-    : undefined
+  const isSearchDisabled = controlsDisabled || searchDisabled
+  const searchPlaceholder = searchDisabled
+    ? t('nav.searchMapDisabled')
+    : t(
+        route === 'selection'
+          ? 'nav.searchSelection'
+          : route === 'archive'
+            ? 'nav.searchArchive'
+            : 'nav.searchStart',
+      )
   return (
     <div className="app-shell">
       <header className="command-bar">
@@ -1257,6 +1306,7 @@ function AppShell({
             const Icon = routeIcons[item]
             return (
               <button
+                aria-current={route === item ? 'page' : undefined}
                 className={cn(
                   'route-switcher__item',
                   route === item && 'route-switcher__item--active',
@@ -1276,33 +1326,19 @@ function AppShell({
 
         <div className="command-actions">
           <label
-            className={cn('search-pill', controlsDisabled && 'search-pill--disabled')}
-            title={disabledTitle}
+            className={cn('search-pill', isSearchDisabled && 'search-pill--disabled')}
+            title={disabledTitle ?? (searchDisabled ? t('nav.searchMapDisabled') : undefined)}
           >
             <Search className="h-4 w-4" />
-            <span className="sr-only">
-              {t(
-                route === 'selection'
-                  ? 'nav.searchSelection'
-                  : route === 'archive'
-                    ? 'nav.searchArchive'
-                    : 'nav.searchStart',
-              )}
-            </span>
+            <span className="sr-only">{searchPlaceholder}</span>
             <input
               type="search"
               name="photo-search"
               autoComplete="off"
               spellCheck={false}
               onChange={(event) => onSearchChange(event.target.value)}
-              disabled={controlsDisabled}
-              placeholder={t(
-                route === 'selection'
-                  ? 'nav.searchSelection'
-                  : route === 'archive'
-                    ? 'nav.searchArchive'
-                    : 'nav.searchStart',
-              )}
+              disabled={isSearchDisabled}
+              placeholder={searchPlaceholder}
               value={searchQuery}
             />
           </label>

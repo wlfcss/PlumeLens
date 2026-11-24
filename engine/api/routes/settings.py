@@ -225,6 +225,11 @@ async def clear_local_history(request: Request, body: ClearHistoryRequest) -> Cl
 
     db = await _db(request)
     from engine.api.routes.analysis import cancel_all_workers
+    from engine.services.exporter import (
+        cancel_all_export_jobs,
+        clear_export_job_history,
+        wait_for_export_jobs,
+    )
 
     workers_stopped = await cancel_all_workers()
     if not workers_stopped:
@@ -232,6 +237,8 @@ async def clear_local_history(request: Request, body: ClearHistoryRequest) -> Cl
             status_code=409,
             detail="Analysis workers are still stopping. Please try again shortly.",
         )
+    cancel_all_export_jobs()
+    await wait_for_export_jobs()
 
     counts = {
         "libraries": await _count_rows(db, "libraries"),
@@ -250,11 +257,16 @@ async def clear_local_history(request: Request, body: ClearHistoryRequest) -> Cl
         await db.conn.execute("DELETE FROM photos")
         await db.conn.execute("DELETE FROM libraries")
     archive_cache.invalidate()
+    projections = getattr(request.app.state, "selection_projections", None)
+    if projections is not None:
+        projections.clear()
+    await asyncio.to_thread(clear_export_job_history, settings.data_dir)
 
     cache_root = thumbnail_cache_root(settings.data_dir)
-    thumbnails_deleted = cache_root.exists()
-    if thumbnails_deleted:
+    had_thumbnails = cache_root.exists()
+    if had_thumbnails:
         await asyncio.to_thread(shutil.rmtree, cache_root, ignore_errors=True)
+    thumbnails_deleted = had_thumbnails and not cache_root.exists()
 
     await logger.ainfo("Local recognition history cleared", **counts)
     return ClearHistoryResponse(

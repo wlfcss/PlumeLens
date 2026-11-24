@@ -51,7 +51,8 @@ function KeyField({
           {label}
         </label>
         <button
-          aria-label={show ? hideLabel : showLabel}
+          aria-label={`${show ? hideLabel : showLabel} (${label})`}
+          aria-pressed={show}
           className="settings-field__toggle"
           onClick={() => setShow((v) => !v)}
           type="button"
@@ -120,11 +121,12 @@ function clearHistorySummary(result: ClearHistoryResponse): string {
 export function SettingsModal(): ReactElement | null {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
-  const { open, setOpen, setActiveFolderId } = useUIStore(
+  const { open, setOpen, setActiveFolderId, clearSelectionSpeciesFilters } = useUIStore(
     useShallow((s) => ({
       open: s.settingsOpen,
       setOpen: s.setSettingsOpen,
       setActiveFolderId: s.setActiveFolderId,
+      clearSelectionSpeciesFilters: s.clearSelectionSpeciesFilters,
     })),
   )
 
@@ -145,6 +147,7 @@ export function SettingsModal(): ReactElement | null {
   const [clearResult, setClearResult] = useState<ClearHistoryResponse | null>(null)
   const [clearError, setClearError] = useState<string | null>(null)
   const savedHintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const updateCheckSeqRef = useRef(0)
 
   const clearSavedHintTimer = useCallback(() => {
     if (savedHintTimerRef.current !== null) {
@@ -158,11 +161,14 @@ export function SettingsModal(): ReactElement | null {
   }, [])
 
   const handleCheckUpdates = useCallback(async () => {
+    const seq = ++updateCheckSeqRef.current
     setCheckingUpdate(true)
     try {
       const result = await window.plumelens?.checkForUpdates?.()
+      if (updateCheckSeqRef.current !== seq) return
       setUpdateCheck(result ?? null)
     } catch (err) {
+      if (updateCheckSeqRef.current !== seq) return
       setUpdateCheck({
         ok: false,
         currentVersion: '0.0.0',
@@ -170,7 +176,9 @@ export function SettingsModal(): ReactElement | null {
         message: err instanceof Error ? err.message : String(err),
       })
     } finally {
-      setCheckingUpdate(false)
+      if (updateCheckSeqRef.current === seq) {
+        setCheckingUpdate(false)
+      }
     }
   }, [])
 
@@ -209,6 +217,7 @@ export function SettingsModal(): ReactElement | null {
     void handleCheckUpdates()
     return () => {
       cancelled = true
+      updateCheckSeqRef.current += 1
     }
   }, [clearSavedHintTimer, handleCheckUpdates, open])
 
@@ -238,7 +247,11 @@ export function SettingsModal(): ReactElement | null {
         return
       }
       // 让新 key 立刻生效:重启 engine。expensive 但用户配 key 是低频操作。
-      await window.plumelens?.restartEngine?.()
+      const restarted = await window.plumelens?.restartEngine?.()
+      if (restarted === false) {
+        setSaveError(t('settings.error.restartFailed'))
+        return
+      }
       clearSavedHintTimer()
       setSavedHint(true)
       savedHintTimerRef.current = setTimeout(() => {
@@ -263,6 +276,7 @@ export function SettingsModal(): ReactElement | null {
       setClearResult(result)
       setClearConfirming(false)
       setActiveFolderId(null)
+      clearSelectionSpeciesFilters()
       await queryClient.invalidateQueries()
     } catch (err) {
       const message =
@@ -271,7 +285,7 @@ export function SettingsModal(): ReactElement | null {
     } finally {
       setClearingHistory(false)
     }
-  }, [queryClient, setActiveFolderId])
+  }, [clearSelectionSpeciesFilters, queryClient, setActiveFolderId])
 
   if (!open) return null
 
@@ -457,14 +471,14 @@ export function SettingsModal(): ReactElement | null {
                   <strong>{t('settings.history.confirmTitle')}</strong>
                   <span>{t('settings.history.confirmBody')}</span>
                 </div>
-                <button
-                  className="button-ghost"
-                  disabled={clearingHistory}
-                  onClick={() => setClearConfirming(false)}
-                  type="button"
-                >
-                  {t('common.close')}
-                </button>
+                  <button
+                    className="button-ghost"
+                    disabled={clearingHistory}
+                    onClick={() => setClearConfirming(false)}
+                    type="button"
+                  >
+                    {t('common.cancel')}
+                  </button>
                 <button
                   className="button-danger"
                   disabled={clearingHistory}

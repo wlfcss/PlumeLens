@@ -223,9 +223,21 @@ async def _analyze_photo(
             companion=str(companion_path),
         )
 
-    source_hash = await asyncio.to_thread(_sha256_file, analyzed_source)
-    if before != await asyncio.to_thread(source_fingerprint, file_path, companion_path):
+    after = await asyncio.to_thread(source_fingerprint, file_path, companion_path)
+    if before != after:
         raise SourceChangedError(photo_id, revision, "Photo changed during inference")
+    recorded_hash = str(row["file_hash"]) if row["file_hash"] else ""
+    if (
+        analyzed_source == file_path
+        and len(recorded_hash) == 64
+        and all(c in "0123456789abcdef" for c in recorded_hash.lower())
+    ):
+        # Primary file size/mtime matched the scanned row before inference and its
+        # stat fingerprint did not change during inference; reuse the persisted SHA-256
+        # instead of re-reading a 50 MB RAW file from disk a second time.
+        source_hash = recorded_hash
+    else:
+        source_hash = await asyncio.to_thread(_sha256_file, analyzed_source)
     await store_result(
         db,
         photo_id,

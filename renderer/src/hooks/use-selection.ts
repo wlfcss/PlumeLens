@@ -87,9 +87,15 @@ export function useCoherentSelection(
   }, [matches, query, selection, target])
 
   useEffect(() => {
-    if (pair) setRetained(pair)
-    else if (retained && retained.detail.library.id !== libraryId) setRetained(undefined)
-  }, [libraryId, pair, retained])
+    if (pair) {
+      setRetained(pair)
+      setRecovery((current) =>
+        current && current.libraryId === libraryId && current.query === query ? undefined : current,
+      )
+    } else if (retained && retained.detail.library.id !== libraryId) {
+      setRetained(undefined)
+    }
+  }, [libraryId, pair, query, retained])
 
   const invalidSnapshot =
     Boolean(selection && !matches) || isSelectionSnapshotExpired(selectionQuery.error)

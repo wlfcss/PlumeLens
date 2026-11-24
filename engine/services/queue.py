@@ -191,13 +191,8 @@ async def enqueue_photos(
             run = await cur.fetchone()
         run_id = str(run["id"]) if run else str(uuid.uuid4())
         status = "paused" if run and run["desired_state"] == "paused" else "pending"
-        if run is None:
-            await conn.execute(
-                "INSERT INTO analysis_runs(id,library_id,pipeline_version,force_rerun,created_at) "
-                "VALUES(?,?,?,?,?)",
-                (run_id, library_id, current_pipeline_version, int(force_rerun), _now_iso()),
-            )
         inserted = 0
+        run_created = run is not None
         for pid in dict.fromkeys(photo_ids):
             if current_pipeline_version and not force_rerun:
                 async with conn.execute(
@@ -209,6 +204,14 @@ async def enqueue_photos(
                 ) as cur:
                     if await cur.fetchone() is not None:
                         continue
+            if not run_created:
+                await conn.execute(
+                    "INSERT INTO analysis_runs"
+                    "(id,library_id,pipeline_version,force_rerun,created_at) "
+                    "VALUES(?,?,?,?,?)",
+                    (run_id, library_id, current_pipeline_version, int(force_rerun), _now_iso()),
+                )
+                run_created = True
             async with conn.execute(
                 "INSERT INTO task_queue(id,photo_id,library_id,status,priority,attempts,created_at,"
                 "run_id,input_revision) SELECT ?,id,library_id,?,?,0,?,?,input_revision "
@@ -218,6 +221,8 @@ async def enqueue_photos(
                 (str(uuid.uuid4()), status, priority, _now_iso(), run_id, pid, library_id),
             ) as cur:
                 inserted += int(await cur.fetchone() is not None)
+        if run is None and run_created and inserted == 0:
+            await conn.execute("DELETE FROM analysis_runs WHERE id=?", (run_id,))
     await logger.ainfo(
         "Enqueued analysis tasks",
         library_id=library_id,
@@ -547,14 +552,18 @@ async def reset_transient_tasks(db: Database, *, reason: str) -> int:
             "AND (o.status IN ('pending','processing','paused') "
             "OR (o.status='failed' AND o.rowid<t.rowid)))"
         )
+        now_iso = _now_iso()
         async with conn.execute(
             "UPDATE task_queue "
             "SET status = CASE (SELECT desired_state FROM analysis_runs WHERE id=run_id) "
             "WHEN 'paused' THEN 'paused' WHEN 'cancelled' THEN 'cancelled' ELSE 'pending' END, "
-            "started_at = NULL, completed_at = NULL, "
+            "started_at = NULL, "
+            "completed_at = CASE (SELECT desired_state FROM analysis_runs WHERE id=run_id) "
+            "WHEN 'cancelled' THEN ? ELSE NULL END, "
             "    attempts = 0, error_message = NULL "
             "WHERE status IN ('processing', 'failed') "
             "RETURNING id, status",
+            (now_iso,),
         ) as cur:
             rows = list(await cur.fetchall())
         recovered = len(rows)

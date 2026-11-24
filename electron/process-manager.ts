@@ -52,6 +52,7 @@ export class ProcessManager extends EventEmitter {
   // 关停标志：stop() 设为 true，handleCrash 与 setTimeout 都会检查，
   // 防止应用关闭中残留的 setTimeout 触发 spawn 出孤儿 engine。
   private stopped = false
+  private lifecycleGeneration = 0
   private readonly terminating = new Map<ChildProcess, Promise<void>>()
   // 持久化日志根目录（{userData}/logs），lazy 创建
   private readonly logsDir = join(app.getPath('userData'), 'logs')
@@ -182,6 +183,8 @@ export class ProcessManager extends EventEmitter {
   }
 
   async start(): Promise<void> {
+    if (this.stopped || this.process !== null) return
+    const generation = this.lifecycleGeneration
     const isDev = !app.isPackaged
 
     // 持久化日志：本次 spawn 一个新 engine.stderr.log（保留最近 10 个）。
@@ -189,6 +192,11 @@ export class ProcessManager extends EventEmitter {
     // 老 spawn 的 stream ref,导致老 proc exit 写到错误的文件。
     this.pruneOldStderrLogs()
     const stderrStream: WriteStream | null = this.openStderrLog()
+    const closeStderrStream = (): void => {
+      if (stderrStream && !stderrStream.writableEnded && !stderrStream.destroyed) {
+        stderrStream.end()
+      }
+    }
 
     let command: string
     let args: string[]
@@ -219,16 +227,21 @@ export class ProcessManager extends EventEmitter {
     }
 
     // 用户自带的 reverse geocoding API keys — 通过 user-settings 模块读,内部走
-    // safeStorage 解密(macOS Keychain / Win DPAPI / Linux libsecret)。注入 env
+    // safeStorage 异步解密(macOS Keychain / Win DPAPI / Linux libsecret)。注入 env
     // 给后端 geocoder chain 使用(amap → baidu → tencent → nominatim → offline)。
     // 失败/缺失静默忽略 — 走离线 cities1000 兜底,不影响启动。
     try {
-      const userSettings = readUserSettings()
+      const userSettings = await readUserSettings()
       if (userSettings.amapKey) env.PLUMELENS_AMAP_KEY = userSettings.amapKey
       if (userSettings.baiduAk) env.PLUMELENS_BAIDU_AK = userSettings.baiduAk
       if (userSettings.tencentKey) env.PLUMELENS_TENCENT_KEY = userSettings.tencentKey
     } catch (err) {
       this.writeElectronLog(`failed to read user settings: ${(err as Error).message}`)
+    }
+
+    if (this.stopped || this.process !== null || generation !== this.lifecycleGeneration) {
+      closeStderrStream()
+      return
     }
 
     if (isDev) {
@@ -261,13 +274,22 @@ export class ProcessManager extends EventEmitter {
     // 闭包局部 proc — 关键防 restart 竞态:老 proc exit handler 闭包到自己的 proc,
     // 触发时检查 `this.process !== proc` 就能判断"是否已被新 spawn 替换",
     // 防止老 proc 的 exit 把新 spawn 的 url/state 给清掉(误报 fatal banner)。
-    const proc = spawn(command, args, {
-      cwd,
-      env,
-      stdio: ['pipe', 'pipe', 'pipe'],
-      detached: true,
-      windowsHide: true,
-    })
+    let proc: ChildProcess
+    try {
+      proc = spawn(command, args, {
+        cwd,
+        env,
+        stdio: ['pipe', 'pipe', 'pipe'],
+        detached: true,
+        windowsHide: true,
+      })
+    } catch (err) {
+      closeStderrStream()
+      const message = err instanceof Error ? err.message : String(err)
+      this.writeElectronLog(`engine spawn threw: ${message}`)
+      this.emit('error', `Engine spawn 失败: ${message}`)
+      return
+    }
     this.process = proc
     const writeStderr = (data: string | Buffer): void => {
       if (stderrStream && !stderrStream.writableEnded && !stderrStream.destroyed)
@@ -275,36 +297,36 @@ export class ProcessManager extends EventEmitter {
     }
     // 'exit' can precede trailing stdout/stderr. Close the log only after both pipes close.
     proc.once('close', () => {
-      if (stderrStream && !stderrStream.writableEnded && !stderrStream.destroyed) stderrStream.end()
+      closeStderrStream()
     })
 
-    let pendingUrl: string | null = null
-    const readyTimer = setTimeout(() => {
-      if (this.readyTimer?.proc === proc) this.readyTimer = null
-      if (this.process !== proc || this.url) return
-      const message = `Engine 启动超时（${Math.round(ENGINE_READY_TIMEOUT_MS / 1000)} 秒内未就绪），请打开诊断日志查看模型加载或初始化卡死原因。`
-      this.writeElectronLog(
-        `engine startup timeout waiting for PLUMELENS_READY pendingUrl=${pendingUrl ?? 'none'}`,
-      )
-      writeStderr(
-        `\n# === startup timeout @ ${new Date().toISOString()} pendingUrl=${pendingUrl ?? 'none'} ===\n`,
-      )
-      this.killCurrentProcess('startup timeout')
-      this.url = null
-      this.emit('error', message)
-    }, ENGINE_READY_TIMEOUT_MS)
-    this.readyTimer = { proc, timer: readyTimer }
-    const clearReadyTimer = (): void => this.clearReadyTimer(proc)
     const protocol = new EngineStartupProtocol((url) => {
       if (this.process !== proc || this.url || this.stopped) return
-      pendingUrl = url
-      clearReadyTimer()
+      this.clearReadyTimer(proc)
       this.url = url
       this.restartCount = 0
       this.writeElectronLog(`engine ready url=${url}`)
       this.emit('ready', url)
       this.startHealthCheck()
     })
+    const readyTimer = setTimeout(() => {
+      if (this.readyTimer?.proc === proc) this.readyTimer = null
+      if (this.process !== proc || this.url) return
+      const discoveredPort = protocol.getPort()
+      const pendingUrl = discoveredPort ? `http://127.0.0.1:${discoveredPort}` : 'none'
+      const message = `Engine 启动超时（${Math.round(ENGINE_READY_TIMEOUT_MS / 1000)} 秒内未就绪），请打开诊断日志查看模型加载或初始化卡死原因。`
+      this.writeElectronLog(
+        `engine startup timeout waiting for PLUMELENS_READY pendingUrl=${pendingUrl}`,
+      )
+      writeStderr(
+        `\n# === startup timeout @ ${new Date().toISOString()} pendingUrl=${pendingUrl} ===\n`,
+      )
+      void this.killCurrentProcess('startup timeout')
+      this.url = null
+      this.emit('error', message)
+    }, ENGINE_READY_TIMEOUT_MS)
+    this.readyTimer = { proc, timer: readyTimer }
+    const clearReadyTimer = (): void => this.clearReadyTimer(proc)
     const handleChunk = (stream: 'stdout' | 'stderr', data: Buffer): void => {
       writeStderr(data)
       if (this.process === proc) protocol.feed(stream, data)
@@ -350,13 +372,15 @@ export class ProcessManager extends EventEmitter {
       // 之前只看 code !== null 把 signal 退出全漏掉,导致 native 崩溃完全不触发重启。
       const abnormal = (code !== null && code !== 0) || signal !== null
       if (abnormal && wasReady) {
-        // 已就绪后崩溃 → 进入重启,UI 显示 "正在重连"
-        this.emit('crashed', {
-          code,
-          signal,
-          restartCount: this.restartCount + 1,
-          maxRestarts: this.maxRestarts,
-        })
+        if (this.restartCount < this.maxRestarts) {
+          // 已就绪后崩溃 → 进入重启,UI 显示 "正在重连"
+          this.emit('crashed', {
+            code,
+            signal,
+            restartCount: this.restartCount + 1,
+            maxRestarts: this.maxRestarts,
+          })
+        }
         this.handleCrash()
       } else if (abnormal) {
         // 启动期 fail(端口未广播) → 立即报错,UI 显示致命错误
@@ -367,6 +391,7 @@ export class ProcessManager extends EventEmitter {
 
     proc.on('error', (err) => {
       clearReadyTimer()
+      closeStderrStream()
       this.writeElectronLog(`engine spawn error: ${err.message}`)
       // ENOENT(binary 不存在) / EACCES 之类 — 'error' 触发后 'exit' 不一定到。
       // 必须主动清状态:否则 this.process 还指向僵死引用,下次 start() 跳过 logsDir
@@ -382,6 +407,7 @@ export class ProcessManager extends EventEmitter {
 
   async stop(): Promise<void> {
     this.stopped = true
+    this.lifecycleGeneration += 1
     this.stopHealthCheck()
     this.clearReadyTimer()
     if (this.restartTimer) {
@@ -393,26 +419,27 @@ export class ProcessManager extends EventEmitter {
     await Promise.all([stopped, ...this.terminating.values()])
   }
 
-  /** 显式重启 engine — 用户改 settings(key 注入)后调,让新 env var 生效。
-   * 与 stop() 不同:复位 stopped flag,清掉老 url,然后 spawn 新进程。
-   * In-flight guard:用户连点保存 → 多次 IPC 触发 restart;第一次还在 await
-   * start() 期间,第二次进来会杀掉刚 spawn 的 procB,触发 procB 的 exit handler
-   * 走 abnormal && !wasReady 路径 emit('error') → UI 假性 fatal banner。
-   * 用 _restartInFlight 串行化:第二次直接 return,不重叠。 */
+  /** 显式重启 engine — 用户改 settings(key 注入)后调,让新 env var 生效。 */
   private _restartInFlight = false
   async restart(): Promise<void> {
-    if (this._restartInFlight) return
+    if (this._restartInFlight || this.stopped) return
     this._restartInFlight = true
+    this.lifecycleGeneration += 1
     try {
       this.stopHealthCheck()
       if (this.restartTimer) {
         clearTimeout(this.restartTimer)
         this.restartTimer = null
       }
+      this.url = null
+      this.emit('crashed', {
+        code: null,
+        signal: 'RESTART',
+        restartCount: 1,
+        maxRestarts: this.maxRestarts,
+      })
       await this.killCurrentProcess('settings changed, restart')
       if (this.stopped) return
-      this.url = null
-      this.stopped = false
       this.restartCount = 0
       await this.start()
     } finally {
@@ -474,16 +501,17 @@ export class ProcessManager extends EventEmitter {
     const delays = [2000, 5000, 10000]
     if (this.restartCount < this.maxRestarts) {
       const delay = delays[this.restartCount] ?? 10000
+      const generation = this.lifecycleGeneration
       this.restartCount++
       this.writeElectronLog(
         `restart scheduled in ${delay}ms (attempt ${this.restartCount}/${this.maxRestarts})`,
       )
-      // 记录 timer，stop() 能取消；timer 触发时再次检查 stopped 防竞态
+      // 记录 timer，stop() 能取消；timer 触发时再次检查 stopped 与 generation 防竞态
       this.restartTimer = setTimeout(() => {
         this.restartTimer = null
-        if (this.stopped) return
+        if (this.stopped || generation !== this.lifecycleGeneration) return
         void terminated.then(() => {
-          if (!this.stopped) return this.start()
+          if (!this.stopped && generation === this.lifecycleGeneration) return this.start()
         })
       }, delay)
     } else {
@@ -529,12 +557,14 @@ export class ProcessManager extends EventEmitter {
           this.writeElectronLog(
             `engine connected ${FAIL_THRESHOLD} health failures, triggering restart`,
           )
-          this.emit('crashed', {
-            code: null,
-            signal: 'HEALTH_FAILURE',
-            restartCount: this.restartCount + 1,
-            maxRestarts: this.maxRestarts,
-          })
+          if (this.restartCount < this.maxRestarts) {
+            this.emit('crashed', {
+              code: null,
+              signal: 'HEALTH_FAILURE',
+              restartCount: this.restartCount + 1,
+              maxRestarts: this.maxRestarts,
+            })
+          }
           this.handleCrash()
         }
       } finally {

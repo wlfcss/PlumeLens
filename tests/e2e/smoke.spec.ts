@@ -238,6 +238,45 @@ test.describe('App shell', () => {
     await page.goto('/')
     await expect(page.getByRole('button', { name: /选择照片文件夹/ })).toBeVisible()
   })
+
+  test('start screen stays viewport-locked with no vertical scroll and pinned pipeline bar', async ({
+    page,
+  }) => {
+    await page.goto('/')
+    const startScreen = page.locator('.start-screen')
+    const pipelineBar = page.locator('.pipeline-bar')
+    await expect(startScreen).toBeVisible()
+    await expect(pipelineBar).toBeVisible()
+
+    // 等待进场位移动画结束，确保 getBoundingClientRect() 测量的是最终静止位置
+    await startScreen.evaluate((el) => Promise.all(el.getAnimations().map((a) => a.finished)))
+
+    // 尝试在首页主体滚动，首页与根文档都不应出现纵向滚动（底部装饰鸟图须被裁切）
+    await page.mouse.move(640, 360)
+    await page.mouse.wheel(0, 500)
+
+    const metrics = await page.evaluate(() => {
+      const start = document.querySelector<HTMLElement>('.start-screen')
+      if (start) start.scrollTop = 200
+      const bar = document.querySelector<HTMLElement>('.pipeline-bar')
+      const barRect = bar?.getBoundingClientRect()
+      return {
+        docScrollHeight: document.documentElement.scrollHeight,
+        innerHeight: window.innerHeight,
+        windowScrollY: window.scrollY,
+        startScrollHeight: start?.scrollHeight ?? 0,
+        startClientHeight: start?.clientHeight ?? 0,
+        startScrollTop: start?.scrollTop ?? 0,
+        barBottom: barRect?.bottom ?? 0,
+      }
+    })
+
+    expect(metrics.docScrollHeight).toBeLessThanOrEqual(metrics.innerHeight)
+    expect(metrics.windowScrollY).toBe(0)
+    expect(metrics.startScrollHeight).toBeLessThanOrEqual(metrics.startClientHeight)
+    expect(metrics.startScrollTop).toBe(0)
+    expect(Math.abs(metrics.barBottom - metrics.innerHeight)).toBeLessThanOrEqual(1)
+  })
 })
 
 test.describe('Start recent folders', () => {
@@ -257,11 +296,23 @@ test.describe('Start recent folders', () => {
     await expect(page.getByText('6 项')).toBeVisible()
     await expect(stack.locator('.folder-line')).toHaveCount(6)
 
-    const metrics = await stack.evaluate((node) => ({
-      clientHeight: node.clientHeight,
-      scrollHeight: node.scrollHeight,
-    }))
-    expect(metrics.scrollHeight).toBeGreaterThan(metrics.clientHeight)
+    const metrics = await page.evaluate(() => {
+      const list = document.querySelector<HTMLElement>('.start-list')
+      const bar = document.querySelector<HTMLElement>('.pipeline-bar')
+      const start = document.querySelector<HTMLElement>('.start-screen')
+      const folderStack = document.querySelector<HTMLElement>('[data-testid="recent-folder-stack"]')
+      return {
+        stackClientHeight: folderStack?.clientHeight ?? 0,
+        stackScrollHeight: folderStack?.scrollHeight ?? 0,
+        listBottom: list?.getBoundingClientRect().bottom ?? 0,
+        barTop: bar?.getBoundingClientRect().top ?? 0,
+        startScrollHeight: start?.scrollHeight ?? 0,
+        startClientHeight: start?.clientHeight ?? 0,
+      }
+    })
+    expect(metrics.stackScrollHeight).toBeGreaterThan(metrics.stackClientHeight)
+    expect(metrics.listBottom).toBeLessThanOrEqual(metrics.barTop)
+    expect(metrics.startScrollHeight).toBeLessThanOrEqual(metrics.startClientHeight)
   })
 })
 

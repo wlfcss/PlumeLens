@@ -27,6 +27,7 @@ import type { useTranslation } from 'react-i18next'
 
 import { SectionLabel } from '@/components/common/section-label'
 import { SpeciesInfoPopover, SpeciesNameAction } from '@/components/species/species-detail-popover'
+import { ThumbnailImage } from '@/components/thumbnail-image'
 import { gradeLabelKey, problemTagKey } from '@/lib/i18n-keys'
 import type {
   FolderRecord,
@@ -832,13 +833,25 @@ export function InspectorPanel({
   t: ReturnType<typeof useTranslation>['t']
 }) {
   const bestDetection = photo ? bestDetectionForInspector(photo) : null
+  const currentGrade = photo ? effectivePhotoGrade(photo) : null
   return (
     <aside className="inspector selection-scroll">
       <SectionLabel label={t('selection.inspector.label')} />
       {photo ? (
         <div className="inspector__content">
           <div className="inspector__body selection-scroll">
-            <div className="inspector-preview" style={{ backgroundImage: photo.previewGradient }} />
+            <div
+              className="inspector-preview"
+              style={{ backgroundImage: photo.placeholderGradient ?? photo.previewGradient }}
+            >
+              <ThumbnailImage
+                alt={photo.fileName}
+                className="inspector-preview__image"
+                highResSrc={photo.thumbPreviewUrl}
+                photoId={photo.id}
+                src={photo.thumbGridUrl}
+              />
+            </div>
             <InspectorHero photo={photo} t={t} />
             <InspectorSpeciesSection bestDetection={bestDetection} photo={photo} t={t} />
             <InspectorSubjectSection bestDetection={bestDetection} photo={photo} t={t} />
@@ -847,6 +860,7 @@ export function InspectorPanel({
           <div className="inspector-actions" aria-label={t('selection.actions.label')}>
             <div className="inspector-actions__grades">
               <button
+                aria-pressed={currentGrade === 'select'}
                 className="button-primary"
                 onClick={() => onSetDecision(photo.id, 'select')}
                 type="button"
@@ -855,6 +869,7 @@ export function InspectorPanel({
                 {t('selection.actions.select')}
               </button>
               <button
+                aria-pressed={currentGrade === 'usable'}
                 className="button-ghost"
                 onClick={() => onSetDecision(photo.id, 'usable')}
                 type="button"
@@ -863,6 +878,7 @@ export function InspectorPanel({
                 {t('selection.actions.usable')}
               </button>
               <button
+                aria-pressed={currentGrade === 'record'}
                 className="button-ghost"
                 onClick={() => onSetDecision(photo.id, 'record')}
                 type="button"
@@ -871,6 +887,7 @@ export function InspectorPanel({
                 {t('selection.actions.record')}
               </button>
               <button
+                aria-pressed={currentGrade === 'reject'}
                 className="button-danger"
                 onClick={() => onSetDecision(photo.id, 'reject')}
                 type="button"

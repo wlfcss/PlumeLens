@@ -54,13 +54,21 @@ export function useCancelAnalysis() {
   })
 }
 
-/** Poll queue stats every 2 s when an analysis is potentially active. */
+/** Poll queue stats every 2 s only while a run is actively running or paused. */
 export function useQueueStats(libraryId: string | null | undefined, enabled = true) {
   return useQuery<QueueStatsResponse>({
     queryKey: QUEUE_STATS_KEY(libraryId ?? ''),
     queryFn: () => api.getQueueStats(libraryId!),
     enabled: Boolean(libraryId) && enabled,
-    refetchInterval: 2_000,
+    refetchInterval: (query) => {
+      const data = query.state.data
+      if (!data) return false
+      const active =
+        data.desired_state === 'running' ||
+        data.desired_state === 'paused' ||
+        (data.stats?.pending ?? 0) + (data.stats?.processing ?? 0) > 0
+      return active ? 2_000 : false
+    },
   })
 }
 
@@ -199,10 +207,20 @@ export function useAnalysisProgress(
       }
     }
 
+    const scheduleReconnect = (): void => {
+      if (cancelled) return
+      if (reconnectTimer !== null) clearTimeout(reconnectTimer)
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = null
+        connect()
+      }, 5000)
+    }
+
     const connect = (): void => {
       if (cancelled) return
       if (typeof window !== 'undefined' && window.plumelens?.engineSseSubscribe) {
-        unsubscribeBridge = window.plumelens.engineSseSubscribe(
+        let syncError = false
+        const unsub = window.plumelens.engineSseSubscribe(
           `/analysis/library/${libraryId}/progress`,
           (bridgeEvent) => {
             if (cancelled) return
@@ -216,11 +234,17 @@ export function useAnalysisProgress(
             }
             logger.warn('SSE bridge closed, retrying in 5s:', bridgeEvent.message)
             needsCatchUp = true
+            syncError = true
             unsubscribeBridge?.()
             unsubscribeBridge = null
-            reconnectTimer = setTimeout(connect, 5000)
+            scheduleReconnect()
           },
         )
+        if (syncError) {
+          unsub()
+        } else {
+          unsubscribeBridge = unsub
+        }
         return
       }
       api
@@ -232,10 +256,6 @@ export function useAnalysisProgress(
           source.onmessage = (msg) => {
             handleProgressFrame(msg.data)
           }
-          // 原生 EventSource 只对网络断开 / 5xx 做自动重连;对 4xx(本工程的 429
-          // SSE 限流)直接 readyState=CLOSED 不重试。这种 CLOSED 通过手动延时
-          // 重连兜底,避免 progress UI 静默卡死。CONNECTING(1) 表示浏览器自己
-          // 在重连,我们什么都不做。
           source.onerror = (e) => {
             if (cancelled || !source) return
             needsCatchUp = true
@@ -243,7 +263,7 @@ export function useAnalysisProgress(
               logger.warn('SSE closed (likely 4xx), retrying in 5s')
               source.close()
               source = null
-              reconnectTimer = setTimeout(connect, 5000)
+              scheduleReconnect()
             } else {
               logger.warn('SSE error (browser auto-reconnecting):', e)
             }
@@ -253,7 +273,7 @@ export function useAnalysisProgress(
           if (cancelled) return
           needsCatchUp = true
           logger.warn('Failed to resolve SSE URL, retrying in 5s:', e)
-          reconnectTimer = setTimeout(connect, 5000)
+          scheduleReconnect()
         })
     }
 

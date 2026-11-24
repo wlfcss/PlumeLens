@@ -612,61 +612,82 @@ const PhotoStackTile = memo(function PhotoStackTile({
   const displaySpecies = group.primarySpecies ?? formatPhotoSpeciesDisplay(photo, t)
   const tileSourceBadge = tileSpeciesSourceBadge(photo, t)
 
-  // 用 div+role="button" 而不是真 <button>,因为内部还要嵌一个真 button(数量
-  // badge 触发展开)。HTML 不允许 button 嵌 button(React DEV 模式会 warn,且
-  // 某些 a11y 工具栏会读错)。div+role+tabIndex+键盘事件 = 等价交互行为。
   const handleActivate = () => onFocusPhoto(photo.id)
   return (
     <article
       className={cn('photo-tile photo-tile--stack', focused && 'photo-tile--focused')}
       data-photo-id={photo.id}
     >
-      <div
-        aria-label={t('selection.group.stackAria', { count: photoCount, file: photo.fileName })}
-        aria-keyshortcuts="Space"
-        className="photo-preview photo-preview--stack"
-        data-selection-review-shortcut="true"
-        onClick={handleActivate}
-        onDoubleClick={() => onOpenReview(photo.id)}
-        onKeyDown={(event) => {
-          if (event.key === 'Enter') {
-            event.preventDefault()
-            handleActivate()
-            return
-          }
-          if (event.key === ' ' || event.key === 'Spacebar' || event.code === 'Space') {
-            event.preventDefault()
-            event.stopPropagation()
-            onOpenReview(photo.id)
-          }
-        }}
-        role="button"
-        style={{ backgroundImage: photo.placeholderGradient ?? photo.previewGradient }}
-        tabIndex={0}
-      >
-        <span className="photo-stack-pages" aria-hidden="true">
-          <span style={{ backgroundImage: photo.previewGradient }} />
-          <span style={{ backgroundImage: photo.previewGradient }} />
-        </span>
-        <ThumbnailImage
-          alt={photo.fileName}
-          className="photo-preview__image"
-          highResSrc={photo.thumbPreviewUrl}
-          onStatusChange={onThumbnailLoadStatus}
-          photoId={photo.id}
-          src={photo.thumbGridUrl}
-        />
-        <span className="photo-preview__top">
-          <StatusPill label={t(categoryLabelKey(category))} tone={categoryTone(category)} />
-        </span>
-        {/* 真 button — 现在外层是 div+role,允许内嵌 button。stopPropagation
-            阻止冒泡到外层 div onClick,展开操作不会再触发 focus。 */}
+      <div className="photo-preview-frame">
+        <button
+          aria-label={t('selection.group.stackAria', { count: photoCount, file: photo.fileName })}
+          aria-keyshortcuts="Space"
+          className="photo-preview photo-preview--stack"
+          data-selection-review-shortcut="true"
+          onClick={handleActivate}
+          onDoubleClick={() => onOpenReview(photo.id)}
+          onFocus={handleActivate}
+          onKeyDown={(event) => {
+            if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return
+            if (event.key === ' ' || event.key === 'Spacebar' || event.code === 'Space') {
+              try {
+                if (document.querySelector(':popover-open')) return
+              } catch {
+                /* ignore */
+              }
+              event.preventDefault()
+              event.stopPropagation()
+              onOpenReview(photo.id)
+            }
+          }}
+          style={{ backgroundImage: photo.placeholderGradient ?? photo.previewGradient }}
+          type="button"
+        >
+          <span className="photo-stack-pages" aria-hidden="true">
+            <span style={{ backgroundImage: photo.previewGradient }} />
+            <span style={{ backgroundImage: photo.previewGradient }} />
+          </span>
+          <ThumbnailImage
+            alt={photo.fileName}
+            className="photo-preview__image"
+            highResSrc={photo.thumbPreviewUrl}
+            onStatusChange={onThumbnailLoadStatus}
+            photoId={photo.id}
+            src={photo.thumbGridUrl}
+          />
+          <span className="photo-preview__top">
+            <StatusPill label={t(categoryLabelKey(category))} tone={categoryTone(category)} />
+          </span>
+          <span className="photo-preview__bottom">
+            <span>
+              <strong className="photo-preview__species">
+                <span>{displaySpecies}</span>
+                {photo.isNewSpecies ? (
+                  <em className="species-source-inline species-source-inline--new">
+                    {t('selection.quickFilters.new_species')}
+                  </em>
+                ) : null}
+                {tileSourceBadge ? (
+                  <em
+                    className={cn(
+                      'species-source-inline',
+                      `species-source-inline--${tileSourceBadge.kind}`,
+                    )}
+                  >
+                    {t('selection.speciesSource.inline', { source: tileSourceBadge.label })}
+                  </em>
+                ) : null}
+              </strong>
+              <small>{t('selection.group.stackHint')}</small>
+            </span>
+            <b>{formatScore(photo.finalScore)}</b>
+          </span>
+        </button>
         <button
           aria-label={t('selection.group.expandAria', { count: photoCount })}
           className="photo-stack-action photo-stack-action--expand"
           onClick={(event) => {
             event.stopPropagation()
-            event.preventDefault()
             onExpandSegment(segment)
           }}
           title={t('selection.group.expandTooltip', { count: photoCount })}
@@ -679,30 +700,6 @@ const PhotoStackTile = memo(function PhotoStackTile({
           </span>
           <span className="photo-stack-action__hint">{t('common.expand')}</span>
         </button>
-        <span className="photo-preview__bottom">
-          <span>
-            <strong className="photo-preview__species">
-              <span>{displaySpecies}</span>
-              {photo.isNewSpecies ? (
-                <em className="species-source-inline species-source-inline--new">
-                  {t('selection.quickFilters.new_species')}
-                </em>
-              ) : null}
-              {tileSourceBadge ? (
-                <em
-                  className={cn(
-                    'species-source-inline',
-                    `species-source-inline--${tileSourceBadge.kind}`,
-                  )}
-                >
-                  {t('selection.speciesSource.inline', { source: tileSourceBadge.label })}
-                </em>
-              ) : null}
-            </strong>
-            <small>{t('selection.group.stackHint')}</small>
-          </span>
-          <b>{formatScore(photo.finalScore)}</b>
-        </span>
       </div>
     </article>
   )

@@ -29,6 +29,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } 
 import { useTranslation } from 'react-i18next'
 
 import { useGeoCities, useGeoProvinces, useGeoSpots, useGeoSummary } from '@/hooks/use-archive-geo'
+import { useModalDialog } from '@/hooks/use-modal-dialog'
 import type { GeoSpot, GeoSpotPhoto } from '@/lib/api-client'
 import { ThumbnailImage } from '@/components/thumbnail-image'
 import { cn } from '@/lib/utils'
@@ -169,6 +170,7 @@ export function ArchiveGeoMap({ onOpenPhoto }: ArchiveGeoMapProps): ReactElement
   const [activeCity, setActiveCity] = useState<string | null>(null)
   const [provinceGeoJSON, setProvinceGeoJSON] = useState<GeoJSONObject | null>(null)
   const [provinceLoading, setProvinceLoading] = useState(false)
+  const [provinceLoadError, setProvinceLoadError] = useState(false)
   const [selectedSpot, setSelectedSpot] = useState<GeoSpot | null>(null)
 
   const summary = useGeoSummary()
@@ -188,13 +190,17 @@ export function ArchiveGeoMap({ onOpenPhoto }: ArchiveGeoMapProps): ReactElement
   const openProvince = useCallback((province: string) => {
     const adcode = PROVINCE_TO_ADCODE.get(province)
     if (!adcode) return
+    setProvinceLoadError(false)
     setProvinceLoading(true)
     const myGen = ++loadGenRef.current
     void loadProvinceGeoJSON(adcode)
       .then((json) => {
         if (myGen !== loadGenRef.current) return
         setProvinceLoading(false)
-        if (!json) return
+        if (!json) {
+          setProvinceLoadError(true)
+          return
+        }
         setProvinceGeoJSON(json)
         setActiveProvince(province)
         setActiveCity(null)
@@ -202,7 +208,10 @@ export function ArchiveGeoMap({ onOpenPhoto }: ArchiveGeoMapProps): ReactElement
         setLevel('province')
       })
       .catch(() => {
-        if (myGen === loadGenRef.current) setProvinceLoading(false)
+        if (myGen === loadGenRef.current) {
+          setProvinceLoading(false)
+          setProvinceLoadError(true)
+        }
       })
   }, [])
 
@@ -602,7 +611,7 @@ export function ArchiveGeoMap({ onOpenPhoto }: ArchiveGeoMapProps): ReactElement
   return (
     <div className="archive-geo">
       <div className="archive-geo__head">
-        <nav className="archive-geo__crumbs" aria-label="breadcrumb">
+        <nav className="archive-geo__crumbs" aria-label={t('archive.geo.breadcrumbAria')}>
           {breadcrumbs.map((c, i) => (
             <span key={`${c.level}-${i}`} className="archive-geo__crumb-row">
               {i > 0 ? <ChevronRight className="h-3 w-3 opacity-40" /> : null}
@@ -708,21 +717,32 @@ export function ArchiveGeoMap({ onOpenPhoto }: ArchiveGeoMapProps): ReactElement
       </div>
 
       <p className="archive-geo__note">
-        {geoLoadFailed ? (
+        {geoLoadFailed || provinceLoadError ? (
           <span role="alert">
             {t('archive.geo.loadFailed')}{' '}
-            <button className="button-ghost button-compact" onClick={retryGeoQueries} type="button">
+            <button
+              className="button-ghost button-compact"
+              onClick={() => {
+                setProvinceLoadError(false)
+                retryGeoQueries()
+              }}
+              type="button"
+            >
               {t('common.retry')}
             </button>
           </span>
+        ) : summary.isLoading || !summary.data ? (
+          t('archive.geo.loadingSummary')
         ) : isOffline && pendingCount > 0 ? (
           t('archive.geo.offlinePending', { count: pendingCount })
-        ) : summary.data && noGpsCount > 0 && unresolvedCount > 0 ? (
+        ) : noGpsCount > 0 && unresolvedCount > 0 ? (
           t('archive.geo.unmappedMixed', { noGps: noGpsCount, unresolved: unresolvedCount })
-        ) : summary.data && unresolvedCount > 0 ? (
+        ) : unresolvedCount > 0 ? (
           t('archive.geo.unresolved', { count: unresolvedCount })
-        ) : summary.data && noGpsCount > 0 ? (
+        ) : noGpsCount > 0 ? (
           t('archive.geo.unmapped', { count: noGpsCount })
+        ) : summary.data.total_with_gps === 0 ? (
+          t('archive.geo.rankEmpty')
         ) : (
           t('archive.geo.allMapped')
         )}
@@ -744,6 +764,7 @@ interface SpotDetailProps {
 }
 
 function SpotDetail({ spot, onClose, onOpenPhoto, t }: SpotDetailProps): ReactElement {
+  const dialogRef = useModalDialog(true)
   const [activeSpeciesKey, setActiveSpeciesKey] = useState(ALL_SPECIES_FILTER)
   const speciesOptions = useMemo(
     () =>
@@ -767,13 +788,19 @@ function SpotDetail({ spot, onClose, onOpenPhoto, t }: SpotDetailProps): ReactEl
   const filterTotal = activeSpecies?.photoCount ?? spot.photo_count
 
   return (
-    <div className="archive-geo__spot-overlay" onClick={onClose}>
-      <div
-        className="archive-geo__spot-card"
-        onClick={(e) => e.stopPropagation()}
-        role="dialog"
-        aria-modal="true"
-      >
+    <dialog
+      ref={dialogRef}
+      aria-label={spot.place ?? t('archive.geo.unknownPlace')}
+      className="archive-geo__spot-overlay"
+      onCancel={(event) => {
+        event.preventDefault()
+        onClose()
+      }}
+      onPointerDown={(event) => {
+        if (event.target === event.currentTarget) onClose()
+      }}
+    >
+      <div className="archive-geo__spot-card" onPointerDown={(e) => e.stopPropagation()}>
         <div className="archive-geo__spot-sticky">
           <header className="archive-geo__spot-head">
             <div>
@@ -870,7 +897,7 @@ function SpotDetail({ spot, onClose, onOpenPhoto, t }: SpotDetailProps): ReactEl
           )}
         </div>
       </div>
-    </div>
+    </dialog>
   )
 }
 

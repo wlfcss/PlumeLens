@@ -4,37 +4,40 @@ version = "0.7.8"
 description = "PlumeLens Python backend - hybrid ONNX + torch bird photo analysis"
 requires-python = ">=3.11"
 dependencies = [
-    "fastapi>=0.132.0",
-    "uvicorn[standard]>=0.34.0",
+    "fastapi>=0.165.0",
+    "uvicorn[standard]>=0.54.0",
     "aiosqlite>=0.22.0",
-    "onnxruntime>=1.25.0; sys_platform != 'win32'",
+    "onnxruntime>=1.32.0; sys_platform != 'win32'",
     "onnxruntime-windowsml==1.30.1.202610302006; sys_platform == 'win32'",
     "windowsml==2.5.96; sys_platform == 'win32'",
-    "numpy>=2.0.0",
-    "pillow>=12.0.0",
-    "rawpy>=0.23.0",
-    "pyarrow>=18.0.0",
-    "pydantic-settings>=2.13.0",
-    "structlog>=25.0.0",
+    "numpy>=2.4.0",
+    "pillow>=13.0.0",
+    "rawpy>=0.28.0",
+    "pyarrow>=24.0.0",
+    "pydantic-settings>=2.16.0",
+    "structlog>=26.1.0",
     # 场景分组：AKAZE 特征匹配 + HSV/LAB 颜色直方图（lingjian-v2 算法）
-    "opencv-python-headless>=4.10.0",
+    # 锁定 4.x，避免 OpenCV 5.x 主版本破坏性变更影响场景聚类。
+    "opencv-python-headless>=4.10.0,<5.0.0",
     # DINOv3 species v4：torch + transformers 直接 inference（safetensors backbone +
     # LoRA/reject adapter）。原 ONNX 路线已验证不可行（RoPE fp16 NaN + CoreML EP ViT 覆盖差，
     # 转 ONNX 后准确率显著下降）。bf16 on MPS/CUDA, fp32 on CPU。
-    "torch>=2.5.0",
-    "torchvision>=0.20.0",
-    "transformers>=4.57.0",
-    "safetensors>=0.4.0",
+    # 锁定 torch 2.14.x：获得 AOT Metal shaders / FlexAttention / bf16 GEMV 修复与 MPS 内存优化，
+    # 同时保持 macOS 14+ 兼容（torch 2.15 起 MPS 硬要求 macOS 15）。
+    "torch>=2.14.0,<2.15.0",
+    "torchvision>=0.29.1,<0.30.0",
+    "transformers>=5.10.0",
+    "safetensors>=0.8.0",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=8.0",
-    "pytest-asyncio>=0.25.0",
-    "ruff>=0.9.0",
-    "pyright>=1.1.390",
+    "pytest>=9.2.0",
+    "pytest-asyncio>=1.5.0",
+    "ruff>=0.17.0",
+    "pyright>=1.1.414",
     "httpx>=0.28.0",
-    "pyinstaller>=6.10.0",
+    "pyinstaller>=6.22.0",
 ]
 
 [build-system]
@@ -60,3 +63,4 @@ include = ["engine"]
 [tool.pytest.ini_options]
 testpaths = ["tests/engine"]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 from typing import Any
 
 import structlog
@@ -14,7 +15,13 @@ from engine.core.gpu import WINDOWS_GPU_LOCK
 logger = structlog.get_logger()
 
 
-def resolve_providers(requested: str, *, coreml_compute_units: str | None = None) -> list:
+def resolve_providers(
+    requested: str,
+    *,
+    coreml_compute_units: str | None = None,
+    coreml_model_format: str | None = None,
+    coreml_cache_dir: str | None = None,
+) -> list:
     import onnxruntime as ort
 
     available = set(ort.get_available_providers())
@@ -38,8 +45,16 @@ def resolve_providers(requested: str, *, coreml_compute_units: str | None = None
     if preferred not in available or preferred == names["cpu"]:
         return [names["cpu"]]
     entry: str | tuple[str, dict[str, str]] = preferred
-    if preferred == names["coreml"] and coreml_compute_units:
-        entry = (preferred, {"MLComputeUnits": coreml_compute_units})
+    if preferred == names["coreml"]:
+        coreml_opts: dict[str, str] = {}
+        if coreml_model_format:
+            coreml_opts["ModelFormat"] = coreml_model_format
+        if coreml_compute_units:
+            coreml_opts["MLComputeUnits"] = coreml_compute_units
+        if coreml_cache_dir:
+            coreml_opts["ModelCacheDirectory"] = coreml_cache_dir
+        if coreml_opts:
+            entry = (preferred, coreml_opts)
     return [entry, names["cpu"]]
 
 
@@ -58,12 +73,32 @@ class _SerializedSession:
             return self._session.run(*args, **kwargs)
 
 
+def _strip_coreml_cache_dir(providers: list) -> list:
+    stripped: list = []
+    for entry in providers:
+        if isinstance(entry, tuple) and entry[0] == "CoreMLExecutionProvider":
+            opts = {k: v for k, v in entry[1].items() if k != "ModelCacheDirectory"}
+            stripped.append((entry[0], opts) if opts else entry[0])
+        else:
+            stripped.append(entry)
+    return stripped
+
+
+def _has_coreml_cache_dir(providers: list) -> str | None:
+    for entry in providers:
+        if isinstance(entry, tuple) and entry[0] == "CoreMLExecutionProvider":
+            cache_dir = entry[1].get("ModelCacheDirectory")
+            if cache_dir:
+                return str(cache_dir)
+    return None
+
+
 def create_session(path: str, *, providers: list) -> Any:
     import onnxruntime as ort
 
     names = [entry[0] if isinstance(entry, tuple) else entry for entry in providers]
     options = ort.SessionOptions()
-    if sys.platform == "win32":
+    if sys.platform in ("win32", "darwin"):
         # Multiple model sessions and photo workers must not each spin up a
         # full-machine CPU thread pool, even when GPU graph fragments fall back.
         options.intra_op_num_threads = settings.onnx_threads
@@ -83,4 +118,21 @@ def create_session(path: str, *, providers: list) -> Any:
         options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
         session = ort.InferenceSession(path, sess_options=options, providers=providers)
         return _SerializedSession(session)
+    cache_dir = _has_coreml_cache_dir(providers)
+    if cache_dir:
+        try:
+            Path(cache_dir).mkdir(parents=True, exist_ok=True)
+            return ort.InferenceSession(path, sess_options=options, providers=providers)
+        except Exception as error:
+            logger.warning(
+                "CoreML cached session failed; retrying without ModelCacheDirectory",
+                path=path,
+                cache_dir=cache_dir,
+                error=str(error),
+            )
+            return ort.InferenceSession(
+                path,
+                sess_options=options,
+                providers=_strip_coreml_cache_dir(providers),
+            )
     return ort.InferenceSession(path, sess_options=options, providers=providers)

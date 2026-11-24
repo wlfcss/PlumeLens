@@ -6,7 +6,7 @@ export function useModalDialog(open = true) {
   useLayoutEffect(() => {
     const dialog = ref.current
     if (!open || !dialog) return
-    dialog.showModal()
+    if (!dialog.open) dialog.showModal()
     return () => {
       if (dialog.open) dialog.close()
     }

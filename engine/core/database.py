@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from pathlib import Path
 
 import aiosqlite
@@ -199,7 +199,7 @@ class Database:
         self._savepoint_counter = 0
 
     @contextlib.asynccontextmanager
-    async def transaction(self) -> AsyncIterator[aiosqlite.Connection]:
+    async def transaction(self) -> AsyncGenerator[aiosqlite.Connection, None]:
         """Own a short write transaction; nested calls in the same task use savepoints.
 
         Every production writer participates in this API. Do not call commit or
@@ -238,7 +238,7 @@ class Database:
                 self._transaction_owner = None
 
     @contextlib.asynccontextmanager
-    async def read_snapshot(self) -> AsyncIterator[aiosqlite.Connection]:
+    async def read_snapshot(self) -> AsyncGenerator[aiosqlite.Connection, None]:
         """Read across queries without joining another task's write transaction."""
         task = asyncio.current_task()
         if task is None:
@@ -569,10 +569,13 @@ class Database:
         return int(row[0]) if row else 0
 
     async def close(self) -> None:
-        """Close the snapshot and write connections after in-flight read scopes finish."""
-        if self._read_owner is not None and self._read_owner is asyncio.current_task():
+        """Close the snapshot and write connections after in-flight scopes finish."""
+        current = asyncio.current_task()
+        if self._read_owner is not None and self._read_owner is current:
             raise RuntimeError("Cannot close the database from inside its read snapshot")
-        async with self._read_lock:
+        if self._transaction_owner is not None and self._transaction_owner is current:
+            raise RuntimeError("Cannot close the database from inside its write transaction")
+        async with self._write_lock, self._read_lock:
             if self._conn is None:
                 return
             try:

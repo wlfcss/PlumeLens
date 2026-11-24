@@ -91,21 +91,35 @@ export function SpeciesFilter({
       )
     return rows
   }, [facets, filter.keys, open])
-  const visible = options.filter((option) => {
-    const syllables = pinyin(option.name, { toneType: 'none', type: 'array' })
-    return [
-      option.name,
-      option.latin_name,
-      option.english_name,
-      ...option.search_aliases,
-      syllables.join(''),
-      syllables.map((part) => part[0]).join(''),
-    ]
-      .filter(Boolean)
-      .join(' ')
-      .toLowerCase()
-      .includes(query.trim().toLowerCase())
-  })
+  const indexedOptions = useMemo(
+    () =>
+      options.map((option) => {
+        const syllables = pinyin(option.name, { toneType: 'none', type: 'array' })
+        const haystack = [
+          option.name,
+          option.latin_name,
+          option.english_name,
+          ...option.search_aliases,
+          syllables.join(''),
+          syllables.map((part) => part[0]).join(''),
+        ]
+          .filter(Boolean)
+          .join(' ')
+          .toLowerCase()
+        return { option, haystack }
+      }),
+    [options],
+  )
+  const normalizedQuery = query.trim().toLowerCase()
+  const visible = useMemo(
+    () =>
+      normalizedQuery
+        ? indexedOptions
+            .filter((entry) => entry.haystack.includes(normalizedQuery))
+            .map((entry) => entry.option)
+        : options,
+    [indexedOptions, normalizedQuery, options],
+  )
   function handleToggle(event: ToggleEvent<HTMLDivElement>) {
     const next = event.newState === 'open'
     if (next) {

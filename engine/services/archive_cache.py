@@ -26,6 +26,12 @@ GEO_CACHE_TTL_SECONDS = 10.0
 GEO_CACHE_MAX_ENTRIES = 64
 
 _geo_cache: dict[str, tuple[float, Any]] = {}
+_generation: int = 0
+
+
+def generation() -> int:
+    """Monotonic cache generation; bumped on every invalidate() to block stale write-backs."""
+    return _generation
 
 
 def get(key: str) -> Any | None:
@@ -40,8 +46,14 @@ def get(key: str) -> Any | None:
     return value
 
 
-def put(key: str, value: Any) -> Any:
-    """写入并返回 value(便于链式调用)。超上限时踢最旧条目。"""
+def put(key: str, value: Any, *, expected_generation: int | None = None) -> Any:
+    """写入并返回 value(便于链式调用)。超上限时踢最旧条目。
+
+    If `expected_generation` is supplied and `invalidate()` ran since the caller
+    started querying SQLite, skip inserting so stale data cannot poison the cache.
+    """
+    if expected_generation is not None and expected_generation != _generation:
+        return value
     _geo_cache[key] = (monotonic(), value)
     if len(_geo_cache) > GEO_CACHE_MAX_ENTRIES:
         oldest = min(_geo_cache.items(), key=lambda item: item[1][0])[0]
@@ -55,6 +67,8 @@ def invalidate() -> None:
     粒度故意做粗 — archive 聚合跨 library / 跨 photo,精确 invalidate 单个键
     成本 > 简单全清,且 10s TTL 已限定缓存命中窗口很短。
     """
+    global _generation
+    _generation += 1
     _geo_cache.clear()
 
 

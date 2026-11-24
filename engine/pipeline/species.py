@@ -52,6 +52,10 @@ BBOX_MARGIN = 0.15
 # Top-K 展示下限；最终是否自动入物种结论由 v4 calibration policy 决定。
 DEFAULT_MIN_CONFIDENCE: float = 0.01
 
+# 周期性释放 MPS 缓存池的推理间隔：避免每只鸟都 empty_cache() 把 Metal 显存池
+# 归还系统再重新申请（并发下实测可提速 +20%），同时在数千张大库分析中维持内存上界。
+_MPS_EMPTY_CACHE_INTERVAL: int = 64
+
 
 @dataclass(frozen=True)
 class SpeciesPolicy:
@@ -155,11 +159,14 @@ def expand_bbox_to_square(
 
 
 def preprocess_for_dinov3(
-    image: NDArray[np.float32], size: int = DEFAULT_IMAGE_SIZE
+    image: NDArray[np.float32] | NDArray[np.uint8], size: int = DEFAULT_IMAGE_SIZE
 ) -> torch.Tensor:
     """Resize(short edge=size) + CenterCrop(size) + ImageNet norm → [1,3,size,size]."""
-    image = np.clip(image, 0.0, 1.0)
-    pil = Image.fromarray((image * 255).astype(np.uint8))
+    if image.dtype == np.uint8:
+        pil = Image.fromarray(image)
+    else:
+        image_f32 = np.clip(image, 0.0, 1.0)
+        pil = Image.fromarray((image_f32 * 255).astype(np.uint8))
     w, h = pil.size
     if w < h:
         new_w, new_h = size, int(round(h * size / w))
@@ -365,6 +372,7 @@ class SpeciesClassifier:
         self._infer_lock = (
             WINDOWS_GPU_LOCK if sys.platform == "win32" and torch.version.hip else threading.Lock()
         )
+        self._infer_count: int = 0
 
         self._taxonomy = SpeciesTaxonomy(self.deploy_dir)
         self._trained_mask = self._taxonomy.trained_mask
@@ -459,7 +467,7 @@ class SpeciesClassifier:
         return device, torch.float32
 
     @torch.inference_mode()
-    def classify(self, crop: NDArray[np.float32]) -> list[SpeciesCandidate]:
+    def classify(self, crop: NDArray[np.float32] | NDArray[np.uint8]) -> list[SpeciesCandidate]:
         """Classify a square-cropped bird image.
 
         Returns:
@@ -468,13 +476,15 @@ class SpeciesClassifier:
                 model_unconfirmed and excludes them from archive effective species.
             unrecognized: [].
         """
+        # Run CPU PIL resize + normalization outside the GPU lock so concurrent workers
+        # never stall MPS/CUDA inference while preparing their next crop tensor.
+        x_cpu = preprocess_for_dinov3(crop, self.image_size)
         tensors: dict[str, object] = {}
         probs: NDArray[np.float32] | None = None
         reject_score: float | None = None
         with self._infer_lock:
             try:
-                x = preprocess_for_dinov3(crop, self.image_size)
-                x = x.to(self.device).to(self._dtype)
+                x = x_cpu.to(self.device).to(self._dtype)
                 tensors["x"] = x
 
                 feat = self._model.forward_features(x).float()
@@ -491,9 +501,13 @@ class SpeciesClassifier:
                 reject_score = float(torch.sigmoid(reject_logits.float())[0].cpu().item())
             finally:
                 tensors.clear()
+                infer_count = getattr(self, "_infer_count", 0) + 1
+                self._infer_count = infer_count
                 if self.device == "mps":
-                    torch.mps.synchronize()
-                    torch.mps.empty_cache()
+                    # `.cpu()` above already synchronizes the MPS command buffer for the result.
+                    # Only flush the Metal allocator pool periodically to avoid per-bird OS realloc.
+                    if infer_count % _MPS_EMPTY_CACHE_INTERVAL == 0:
+                        torch.mps.empty_cache()
                 elif self.device == "cuda":
                     torch.cuda.synchronize()
                     torch.cuda.empty_cache()

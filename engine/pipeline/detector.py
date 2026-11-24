@@ -43,7 +43,7 @@ class BirdDetector:
 
     def detect(
         self,
-        image: NDArray[np.float32],
+        image: NDArray[np.float32] | NDArray[np.uint8],
         confidence_threshold: float = 0.5,
     ) -> list[BoundingBox]:
         """Run bird detection on an image.

@@ -21,6 +21,7 @@ import type {
   SelectionDecision,
   SpeciesCandidate,
 } from '@/lib/workspace-types'
+import { gradeLabelKey } from '@/lib/i18n-keys'
 import { resolveSpeciesCanonicalSci } from '@/lib/species-wiki'
 
 type Translate = (key: string, options?: Record<string, unknown>) => string
@@ -223,22 +224,21 @@ function withConsensusCandidate(row: PhotoRow, candidates: SpeciesCandidate[]): 
 function buildDetectionCandidates(
   row: PhotoRow,
   detection: BestDetection | null,
+  includeConsensus = true,
 ): SpeciesCandidate[] {
   if (!detection?.species_candidates) return []
-  return withConsensusCandidate(
-    row,
-    detection.species_candidates
-      .map((candidate) => ({
-        name: candidate.canonical_zh ?? candidate.canonical_sci ?? '',
-        latinName: candidate.canonical_sci ?? null,
-        englishName: candidate.canonical_en ?? null,
-        confidence: candidate.confidence ?? 0,
-        recognitionState: candidate.recognition_state,
-        rejectScore: candidate.reject_score,
-        top1Top2Margin: candidate.top1_top2_margin,
-      }))
-      .filter((candidate) => candidate.name.length > 0),
-  )
+  const candidates = detection.species_candidates
+    .map((candidate) => ({
+      name: candidate.canonical_zh ?? candidate.canonical_sci ?? '',
+      latinName: candidate.canonical_sci ?? null,
+      englishName: candidate.canonical_en ?? null,
+      confidence: candidate.confidence ?? 0,
+      recognitionState: candidate.recognition_state,
+      rejectScore: candidate.reject_score,
+      top1Top2Margin: candidate.top1_top2_margin,
+    }))
+    .filter((candidate) => candidate.name.length > 0)
+  return includeConsensus ? withConsensusCandidate(row, candidates) : candidates
 }
 
 /**
@@ -248,7 +248,7 @@ function buildDetectionCandidates(
 function deriveProblemTags(row: PhotoRow): ProblemTagId[] {
   const tags: ProblemTagId[] = []
   if (row.bird_count === 0 || row.bird_count === null) tags.push('no_bird')
-  if (row.grade === 'reject') tags.push('subject_small')
+  if (row.grade === 'reject' && (row.bird_count ?? 0) > 0) tags.push('subject_small')
   if (row.species === null && (row.bird_count ?? 0) > 0) {
     tags.push('low_species_confidence')
   }
@@ -401,7 +401,7 @@ export function buildPhotoRecordFromRow(
     caption: isAnalyzed
       ? t('selection.photo.analysisCaption', {
           species: row.species ?? t('selection.photo.unidentified'),
-          grade,
+          grade: t(gradeLabelKey(grade)),
           score: formatScore(finalScore),
         })
       : t('selection.photo.pendingCaption'),
@@ -449,7 +449,7 @@ function buildBirdDetections(row: PhotoRow): PhotoRecord['birdDetections'] {
       speciesName: useConsensus ? row.group_species! : d.species,
       speciesLatinName: useConsensus ? row.group_species_latin! : d.species_latin,
       speciesEnglishName: d.species_english ?? null,
-      speciesCandidates: buildDetectionCandidates(row, d),
+      speciesCandidates: buildDetectionCandidates(row, d, Boolean(useConsensus)),
       candidateConfidence: useConsensus
         ? (row.group_species_confidence ?? d.candidate_confidence)
         : d.candidate_confidence,

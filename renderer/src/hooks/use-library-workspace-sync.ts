@@ -76,7 +76,7 @@ export function useLibraryWorkspaceSync({
   useEffect(() => {
     const latestDetails = allDetailsRef.current
     if (latestDetails.length === 0) return
-    const fragments = latestDetails.map((detail) => buildFragmentFromDetail(detail, t))
+    const fragments = latestDetails.map((detail) => buildFragmentFromDetail(detail, t, photoCache))
     const realFolderIdsInDetails = new Set(fragments.map((fragment) => fragment.folder.id))
     setWorkspace((current) => {
       const merged = applyNewSpeciesMarkers(
@@ -105,7 +105,7 @@ export function useLibraryWorkspaceSync({
             : undefined,
       }
     })
-  }, [allDetailsKey, setWorkspace, t])
+  }, [allDetailsKey, photoCache, setWorkspace, t])
 
   const fragment = useMemo(() => {
     if (!activeDetail) return undefined

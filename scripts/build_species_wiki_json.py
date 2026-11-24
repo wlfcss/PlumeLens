@@ -1,6 +1,8 @@
-"""Build renderer/src/lib/species-wiki.json from model taxonomy + Wikipedia cache.
+"""Build split species catalog + lazy wiki body JSON from model taxonomy + Wikipedia cache.
 
-The frontend imports this JSON directly (no HTTP call, no backend dependency).
+The frontend imports the lightweight `species-catalog.json` eagerly for O(1)
+taxonomy/name/alias lookup and lazy-loads `species-wiki-bodies.json` on demand
+when viewing a species detail card or the Archive detail panel.
 Run this whenever species_wiki.parquet is regenerated.
 
 Usage:
@@ -16,7 +18,8 @@ import pyarrow.parquet as pq
 SOURCE = Path("engine/models/species_wiki.parquet")
 CANONICAL = Path("engine/models/species/canonical_extended.parquet")
 TRAINED = Path("engine/models/species/species_list_1301.parquet")
-OUTPUT = Path("renderer/src/lib/species-wiki.json")
+CATALOG_OUTPUT = Path("renderer/src/lib/species-catalog.json")
+BODIES_OUTPUT = Path("renderer/src/lib/species-wiki-bodies.json")
 
 
 def _as_bool(value: object, default: bool = True) -> bool:
@@ -71,12 +74,16 @@ def main() -> None:
         china_listed_by_sci = {}
         print(f"WARNING: {TRAINED} not found; is_trained will default to false")
 
-    # 编译成索引结构：{ canonical_sci: {...} }，按 sci 直接 O(1) 查询
-    index: dict[str, dict] = {}
+    # 拆分为两份 JSON：
+    # 1. species-catalog.json：轻量分类元数据 + 别名 + 训练/名录标记（随主包同步加载）
+    # 2. species-wiki-bodies.json：中/英维基正文与来源链接（按需 dynamic import 拆包）
+    #    image_url 不再打入前端运行包（运行时离线图走 plumelens://species-artwork/）
+    catalog: dict[str, dict] = {}
+    bodies: dict[str, dict] = {}
     for canonical in canonical_rows:
         sci = canonical["canonical_sci"]
         wiki = wiki_rows.get(sci, {})
-        index[sci] = {
+        catalog[sci] = {
             "canonical_zh": canonical.get("canonical_zh"),
             "canonical_en": canonical.get("canonical_en"),
             "family_sci": canonical.get("family_sci"),
@@ -85,26 +92,38 @@ def main() -> None:
             "iucn": canonical.get("iucn"),
             "protect_level": canonical.get("protect_level"),
             "zh_title": wiki.get("zh_title"),
-            "zh_extract": wiki.get("zh_extract"),
-            "zh_url": wiki.get("zh_url"),
             "en_title": wiki.get("en_title"),
-            "en_extract": wiki.get("en_extract"),
-            "en_url": wiki.get("en_url"),
-            "image_url": wiki.get("image_url"),
             # True = 可被自动识别；False = 名录收录但训练样本不足，仅支持手动标注
             "is_trained": sci in trained_set,
             # False = 模型增补物种，不属于中国观鸟年报 v12.0 主名录。
             "in_china_v12": china_listed_by_sci.get(sci, True),
         }
+        zh_extract = wiki.get("zh_extract")
+        zh_url = wiki.get("zh_url")
+        en_extract = wiki.get("en_extract")
+        en_url = wiki.get("en_url")
+        if zh_extract or zh_url or en_extract or en_url:
+            bodies[sci] = {
+                "zh_extract": zh_extract,
+                "zh_url": zh_url,
+                "en_extract": en_extract,
+                "en_url": en_url,
+            }
 
-    OUTPUT.parent.mkdir(parents=True, exist_ok=True)
+    CATALOG_OUTPUT.parent.mkdir(parents=True, exist_ok=True)
     # 紧凑输出（减小 bundle 体积，仍保持有效 JSON）
-    OUTPUT.write_text(
-        json.dumps(index, ensure_ascii=False, separators=(",", ":")),
+    CATALOG_OUTPUT.write_text(
+        json.dumps(catalog, ensure_ascii=False, separators=(",", ":")),
         encoding="utf-8",
     )
-    size_kb = OUTPUT.stat().st_size / 1024
-    print(f"Wrote {len(index)} species to {OUTPUT} ({size_kb:.1f} KB)")
+    BODIES_OUTPUT.write_text(
+        json.dumps(bodies, ensure_ascii=False, separators=(",", ":")),
+        encoding="utf-8",
+    )
+    catalog_kb = CATALOG_OUTPUT.stat().st_size / 1024
+    bodies_kb = BODIES_OUTPUT.stat().st_size / 1024
+    print(f"Wrote {len(catalog)} species to {CATALOG_OUTPUT} ({catalog_kb:.1f} KB)")
+    print(f"Wrote {len(bodies)} wiki bodies to {BODIES_OUTPUT} ({bodies_kb:.1f} KB)")
 
 
 if __name__ == "__main__":

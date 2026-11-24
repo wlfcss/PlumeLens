@@ -76,8 +76,6 @@ interface PlumeLensAPI {
   ) => Promise<EngineResponse>
   /** 订阅 engine SSE；Electron packaged 路径下 token 留在 preload Authorization header。 */
   engineSseSubscribe?: (path: string, onEvent: (event: EngineSseBridgeEvent) => void) => () => void
-  /** Legacy fallback:构造 SSE URL(可能包含 query token,native EventSource 限制)。 */
-  engineSseUrl?: (path: string) => Promise<string>
   getAppVersion(): Promise<string>
   checkForUpdates(): Promise<UpdateCheckResult>
   openFolder(): Promise<string | null>

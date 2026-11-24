@@ -13,7 +13,8 @@
     "loadingDisabled": "本地引擎加载完成后可用",
     "searchSelection": "搜索当前文件夹的照片或鸟种",
     "searchStart": "搜索工作集文件夹",
-    "searchArchive": "搜索鸟种或个人记录"
+    "searchArchive": "搜索鸟种或个人记录",
+    "searchMapDisabled": "足迹地图暂不支持顶栏搜索"
   },
   "common": {
     "export": "导出",
@@ -22,7 +23,8 @@
     "settings": "设置",
     "close": "关闭",
     "cancel": "取消",
-    "retry": "重试"
+    "retry": "重试",
+    "listSeparator": "、"
   },
   "errors": {
     "renderFailed": {
@@ -59,7 +61,8 @@
     "savedRestarted": "已保存，后端正在重启…",
     "saveFailed": "保存失败：{{error}}",
     "error": {
-      "safeStorageUnavailable": "当前系统不支持安全存储（macOS Keychain / Windows DPAPI / Linux libsecret）。为避免 API Key 以明文保存，未写入设置。请安装对应的密钥服务或在受支持的平台上重试。"
+      "safeStorageUnavailable": "当前系统不支持安全存储（macOS Keychain / Windows DPAPI / Linux libsecret）。为避免 API Key 以明文保存，未写入设置。请安装对应的密钥服务或在受支持的平台上重试。",
+      "restartFailed": "设置已保存，但引擎重启失败，请手动重启应用使配置生效。"
     },
     "geocoding": {
       "title": "地理信息提供商",
@@ -141,6 +144,7 @@
     "importErrorTitle": "导入失败",
     "importErrorBody": "请确认后端引擎已就绪、路径有效后重试。{{detail}}",
     "recentFolders": "最近文件夹",
+    "searchEmpty": "没有匹配「{{query}}」的文件夹",
     "resumeTitle": "从上次处理的位置继续",
     "emptyRecentTitle": "首次使用，从导入开始",
     "emptyRecentLead": "还没有最近处理记录",
@@ -236,9 +240,13 @@
       "recursive": "递归扫描已开启",
       "lastScan": "最近扫描",
       "update": "更新文件夹",
+      "updating": "更新中…",
       "resume": "继续分析",
       "startAnalysis": "开始分析",
       "starting": "启动中…",
+      "paused": "已暂停",
+      "pausedProgress": "已暂停 {{progress}}",
+      "progressAria": "分析进度",
       "analyzingProgress": "分析中 {{progress}}",
       "analyzedProgress": "已分析 {{progress}}",
       "analyzingPercent": "分析中… {{percent}}%",
@@ -507,14 +515,27 @@
       "previous": "上一张",
       "next": "下一张",
       "original": "原图",
-      "originalHint": "点击放大 · 拖动平移",
+      "originalHint": "按住放大 · 拖动平移",
       "iqaCrop": "IQA 裁切 · 2.5×",
       "cropHint": "画质评分依据",
       "cropNeedsSubject": "需先识别",
       "zoomLabel": "放大倍率",
       "zoomScale": "{{scale}} 倍放大",
       "fullscreen": "全屏查看",
-      "fullscreenHint": "点击放大 · 拖动平移 · Esc 退出",
+      "fullscreenHint": "按住放大 · 拖动平移 · Esc 退出",
+      "keypoints": {
+        "bill": "喙尖",
+        "crown": "头顶",
+        "nape": "后颈",
+        "left_eye": "左眼",
+        "right_eye": "右眼",
+        "belly": "腹部",
+        "breast": "胸部",
+        "back": "背部",
+        "tail": "尾部",
+        "left_wing": "左翼",
+        "right_wing": "右翼"
+      },
       "sequenceSingle": "单张照片",
       "sequenceBest": "本组最佳",
       "sequenceLabel": "连拍",
@@ -708,6 +729,7 @@
       "label": "鸟志",
       "title": "当前物种详情",
       "empty": "选择一个物种",
+      "loadingExtract": "正在加载物种简介…",
       "noChineseExtract": "暂无中文物种介绍。",
       "source": "中文维基百科 →"
     },
@@ -784,6 +806,8 @@
         "city": "城市图层"
       },
       "loadingProvince": "加载省级地图中…",
+      "loadingSummary": "正在加载地理统计…",
+      "breadcrumbAria": "地图层级导航",
       "backfillProgress": "解析地理位置 {{resolved}}/{{total}}…",
       "unmapped": "{{count}} 张照片缺少 GPS，未在地图中展示",
       "unresolved": "{{count}} 张照片坐标无法解析，未在地图中展示",
@@ -814,6 +838,10 @@
     "label": "导出",
     "title": "准备出片",
     "confirm": "开始导出",
+    "disabled": {
+      "noPhotos": "当前文件夹暂无可导出的照片",
+      "updating": "正在更新当前筛选结果，请稍候"
+    },
     "presets": {
       "label": "导出预设",
       "lrStandard": "Lightroom 标准导入",

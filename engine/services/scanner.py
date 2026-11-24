@@ -892,6 +892,11 @@ async def scan_library(
                     "SELECT * FROM photos WHERE file_path=?", (path_key,)
                 ) as cur:
                     current = await cur.fetchone()
+                if current is not None and str(current["library_id"]) != library_id:
+                    report.errors.append(
+                        (path_key, f"belongs to another library ({current['library_id']})")
+                    )
+                    continue
                 if current is None:
                     meta = meta or {}
                     await conn.execute(
@@ -1030,21 +1035,31 @@ async def backfill_companion_for_library(db: Database, library_id: str) -> int:
         new_size = comp.size if comp else None
         from engine.services.photo_input import invalidate_derived_input
 
-        companion_mtime = (
-            (await asyncio.to_thread(_light_fingerprint, comp.path))[1] if comp else None
-        )
+        try:
+            companion_mtime = (
+                (await asyncio.to_thread(_light_fingerprint, comp.path))[1] if comp else None
+            )
+        except OSError:
+            continue
         async with db.transaction() as tx:
             await tx.execute(
                 "UPDATE photos SET companion_path=?,companion_format=?,companion_size=?,"
-                "companion_mtime=?,input_revision=input_revision+1 WHERE file_path=?",
-                (new_comp_path, new_format, new_size, companion_mtime, path_str),
+                "companion_mtime=?,input_revision=input_revision+1 "
+                "WHERE library_id=? AND file_path=? AND companion_path IS ?",
+                (new_comp_path, new_format, new_size, companion_mtime, library_id, path_str, prev),
             )
-            async with tx.execute("SELECT id FROM photos WHERE file_path=?", (path_str,)) as cur:
+            async with tx.execute(
+                "SELECT id FROM photos WHERE library_id=? AND file_path=?",
+                (library_id, path_str),
+            ) as cur:
                 changed = await cur.fetchone()
             if changed is not None:
                 await invalidate_derived_input(tx, str(changed["id"]))
-        updated += 1
+                updated += 1
     if updated > 0:
+        from engine.services import archive_cache
+
+        archive_cache.invalidate()
         await logger.ainfo(
             "Companion backfill done",
             library_id=library_id,
@@ -1064,31 +1079,21 @@ async def _backfill_hashes_impl(db: Database, library_id: str, batch_size: int =
     """
     conn = db.conn
     total = 0
-    # 防死循环：本次调用内已尝试但跳过的 id 集合（文件消失 / 读取失败时进入）。
-    # 数据库层仍保留 file_hash = NULL，由上层 missing 清理流程决定如何处理。
-    skipped_ids: set[str] = set()
+    skipped_count = 0
+    # Use monotonic rowid cursor pagination so unreadable/missing files never
+    # trigger SQLite's max variable limit (`NOT IN (...)`) or O(N^2) rescans.
+    last_rowid = 0
     while True:
-        # 用 NOT IN 排除本次已跳过的 id；若没有跳过则等价于原查询
-        if skipped_ids:
-            placeholders = ",".join("?" * len(skipped_ids))
-            query = (
-                "SELECT id, file_path, input_revision FROM photos "
-                "WHERE library_id = ? AND input_needs_scan=0 AND file_hash IS NULL "
-                f"AND id NOT IN ({placeholders}) "
-                "LIMIT ?"
-            )
-            params: tuple = (library_id, *skipped_ids, batch_size)
-        else:
-            query = (
-                "SELECT id, file_path, input_revision FROM photos "
-                "WHERE library_id = ? AND input_needs_scan=0 AND file_hash IS NULL "
-                "LIMIT ?"
-            )
-            params = (library_id, batch_size)
-        async with conn.execute(query, params) as cur:
-            rows = await cur.fetchall()
+        query = (
+            "SELECT rowid, id, file_path, input_revision FROM photos "
+            "WHERE library_id = ? AND input_needs_scan=0 AND file_hash IS NULL "
+            "AND rowid > ? ORDER BY rowid ASC LIMIT ?"
+        )
+        async with conn.execute(query, (library_id, last_rowid, batch_size)) as cur:
+            rows = list(await cur.fetchall())
         if not rows:
             break
+        last_rowid = int(rows[-1]["rowid"])
 
         for row in rows:
             photo_id = str(row["id"])
@@ -1099,10 +1104,10 @@ async def _backfill_hashes_impl(db: Database, library_id: str, batch_size: int =
                 before = await asyncio.to_thread(source_fingerprint, file_path)
                 sha = await asyncio.to_thread(_sha256_file, file_path)
                 if before != await asyncio.to_thread(source_fingerprint, file_path):
-                    skipped_ids.add(photo_id)
+                    skipped_count += 1
                     continue
             except FileNotFoundError:
-                skipped_ids.add(photo_id)
+                skipped_count += 1
                 continue
             except Exception as e:
                 logger.warning(
@@ -1111,11 +1116,11 @@ async def _backfill_hashes_impl(db: Database, library_id: str, batch_size: int =
                     path=str(file_path),
                     error=str(e),
                 )
-                skipped_ids.add(photo_id)
+                skipped_count += 1
                 continue
             async with db.transaction() as tx:
                 if before != source_fingerprint(file_path):
-                    skipped_ids.add(photo_id)
+                    skipped_count += 1
                     continue
                 async with tx.execute(
                     "UPDATE photos SET file_hash=? WHERE id=? AND input_revision=? "
@@ -1128,7 +1133,7 @@ async def _backfill_hashes_impl(db: Database, library_id: str, batch_size: int =
         "Hash backfill completed",
         library_id=library_id,
         hashed=total,
-        skipped=len(skipped_ids),
+        skipped=skipped_count,
     )
     return total
 

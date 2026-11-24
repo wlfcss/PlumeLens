@@ -389,22 +389,32 @@ export function ExportDrawer({
       }
 
       // vite-only / 无 preload 的兜底路径
+      let streamCancelled = false
+      let activeSource: EventSource | null = null
+      unsubscribeRef.current = () => {
+        streamCancelled = true
+        activeSource?.close()
+        activeSource = null
+      }
       void api
         .exportJobEventsUrl(jobId)
         .then((url) => {
+          if (streamCancelled) return
           const es = new EventSource(url)
+          activeSource = es
           es.onmessage = (msg) => handleFrame(msg.data)
           es.onerror = () => {
             es.close()
+            if (streamCancelled) return
             setStreamLost(true)
             void api
               .exportJobSnapshot(jobId)
               .then(applySnapshot)
               .catch((e: unknown) => logger.warn('导出快照回查失败:', e))
           }
-          unsubscribeRef.current = () => es.close()
         })
         .catch((e: unknown) => {
+          if (streamCancelled) return
           setStreamLost(true)
           logger.warn('导出进度流订阅失败:', e)
         })
@@ -547,7 +557,6 @@ export function ExportDrawer({
     } catch (err) {
       const fallback = err instanceof Error ? err.message : String(err)
       const detail = parseExportError(err)
-      setPhase('failed')
       setCollapsed(false)
       if (detail?.code === 'selection_changed' && selection) {
         try {
@@ -578,9 +587,6 @@ export function ExportDrawer({
               .map((row) => buildPhotoRecordFromRow(row, sourceFolder.id, '', t)),
           })
           setError(describeError(detail, fallback))
-          setLockedOptions(null)
-          setLockedSource(null)
-          setPhase('idle')
         } catch (refreshError) {
           logger.warn('Failed to refresh export selection:', refreshError)
           setError(t('selection.speciesFilter.error'))
@@ -588,6 +594,11 @@ export function ExportDrawer({
       } else {
         setError(describeError(detail, fallback))
       }
+      // Pre-flight failure never started a job — keep controls unlocked so user can
+      // immediately fix the target directory / formats / filters and retry.
+      setLockedOptions(null)
+      setLockedSource(null)
+      setPhase('idle')
     }
   }
 
@@ -849,7 +860,7 @@ export function ExportDrawer({
                 <div className="export-preset-chip" key={preset.id}>
                   <button
                     aria-pressed={active}
-                    className={cn('chip-button', active && 'is-active')}
+                    className={cn('chip', active && 'chip--active')}
                     disabled={controlsLocked}
                     onClick={() => applyPreset(preset)}
                     type="button"
@@ -876,6 +887,7 @@ export function ExportDrawer({
                 aria-label={t('export.presets.namePlaceholder')}
                 onChange={(event) => setPresetNameInput(event.target.value)}
                 onKeyDown={(event) => {
+                  if (event.nativeEvent.isComposing || event.keyCode === 229) return
                   if (event.key === 'Enter') {
                     event.preventDefault()
                     handleSaveCustomPreset()
@@ -904,6 +916,7 @@ export function ExportDrawer({
           <div className="export-layout-grid" role="group" aria-label={t('export.content.label')}>
             {(['files', 'files_xmp', 'xmp_only'] as ExportContentMode[]).map((mode) => (
               <button
+                aria-pressed={activeOptions.contentMode === mode}
                 className={cn(
                   'export-layout-button',
                   activeOptions.contentMode === mode && 'is-active',
@@ -989,6 +1002,7 @@ export function ExportDrawer({
           <SectionLabel label={t('export.layout.label')} />
           <div className="export-layout-grid" role="group" aria-label={t('export.layout.label')}>
             <button
+              aria-pressed={activeOptions.layout === 'merged'}
               className={cn(
                 'export-layout-button',
                 activeOptions.layout === 'merged' && 'is-active',
@@ -1004,6 +1018,7 @@ export function ExportDrawer({
               </span>
             </button>
             <button
+              aria-pressed={activeOptions.layout === 'by_grade'}
               className={cn(
                 'export-layout-button',
                 activeOptions.layout === 'by_grade' && 'is-active',
@@ -1048,7 +1063,9 @@ export function ExportDrawer({
           <div className="export-scope-summary">
             <p>
               {t('export.scope.selectionSummary', {
-                species: selection.labels.join('、') || t('selection.speciesFilter.all'),
+                species:
+                  selection.labels.join(t('common.listSeparator')) ||
+                  t('selection.speciesFilter.all'),
                 flight: t(
                   selection.query.only_flying
                     ? 'selection.featureFilters.onlyFlying'
@@ -1059,7 +1076,9 @@ export function ExportDrawer({
                     ? 'selection.speciesFilter.includeReview'
                     : 'export.scope.confirmedOnly',
                 ),
-                grades: selection.query.grades.map((grade) => t(gradeLabelKey(grade))).join('、'),
+                grades: selection.query.grades
+                  .map((grade) => t(gradeLabelKey(grade)))
+                  .join(t('common.listSeparator')),
               })}
             </p>
             <p>{t('export.scope.selectionHint')}</p>
@@ -1112,7 +1131,11 @@ export function ExportDrawer({
                   value={maxScore}
                 />
               </div>
-              {invalidScoreRange ? <p role="alert">{t('export.error.invalidScoreRange')}</p> : null}
+              {invalidScoreRange ? (
+                <p className="export-error" role="alert">
+                  {t('export.error.invalidScoreRange')}
+                </p>
+              ) : null}
             </div>
           </>
         )}
@@ -1153,9 +1176,12 @@ export function ExportDrawer({
 
         {job && (running || phase === 'cancelled') ? (
           <div className="export-progress">
-            <div className="export-progress__bar">
-              <span style={{ width: `${progressPercent}%` }} />
-            </div>
+            <progress
+              aria-label={t('export.status.running')}
+              className="export-progress__bar"
+              max={100}
+              value={progressPercent}
+            />
             <small>
               {t('export.progress.photos', { processed: job.processed, total: progressTotal })}
               {' · '}

@@ -1,16 +1,20 @@
 import type { ChildProcess } from 'node:child_process'
-import { execFileSync } from 'node:child_process'
+import { execFile, execFileSync } from 'node:child_process'
 import { join } from 'node:path'
 
 export const ENGINE_SHUTDOWN_GRACE_MS = 15_000
 
+function windowsTaskkillPath(): string {
+  return join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'taskkill.exe')
+}
+
 export function forceTerminateEngineTreeSync(pid: number, platform = process.platform): void {
   if (platform === 'win32') {
-    execFileSync(
-      join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'taskkill.exe'),
-      ['/PID', String(pid), '/T', '/F'],
-      { windowsHide: true, stdio: 'ignore', timeout: 5_000 },
-    )
+    execFileSync(windowsTaskkillPath(), ['/PID', String(pid), '/T', '/F'], {
+      windowsHide: true,
+      stdio: 'ignore',
+      timeout: 5_000,
+    })
   } else {
     try {
       process.kill(-pid, 'SIGKILL')
@@ -18,6 +22,15 @@ export function forceTerminateEngineTreeSync(pid: number, platform = process.pla
       process.kill(pid, 'SIGKILL')
     }
   }
+}
+
+function forceTerminateEngineTreeAsync(pid: number, onDone: () => void): void {
+  execFile(
+    windowsTaskkillPath(),
+    ['/PID', String(pid), '/T', '/F'],
+    { windowsHide: true, timeout: 5_000 },
+    () => onDone(),
+  )
 }
 
 /** Wait for actual exit, not ChildProcess.killed (which only means a signal was sent). */
@@ -45,9 +58,16 @@ export function terminateEngine(
       if (platform === 'win32') {
         try {
           if (value === 'SIGTERM' && proc.stdin?.writable) {
+            if (typeof proc.stdin.on === 'function') {
+              proc.stdin.on('error', () => {
+                /* ignore EPIPE if child closed stdin while exiting */
+              })
+            }
             proc.stdin.end('PLUMELENS_SHUTDOWN\n')
           } else {
-            forceTerminateEngineTreeSync(proc.pid!, platform)
+            forceTerminateEngineTreeAsync(proc.pid!, () => {
+              if (proc.exitCode !== null || proc.signalCode !== null) finish()
+            })
           }
         } catch {
           finish()

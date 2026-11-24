@@ -17,15 +17,27 @@ const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
 
 export const REPO_ROOT = join(__dirname, '..', '..', '..')
+function resolveDevElectronBinary(): string {
+  const electronPkgDir = join(REPO_ROOT, 'node_modules', 'electron')
+  const pathTxt = join(electronPkgDir, 'path.txt')
+  if (existsSync(pathTxt)) {
+    const relPath = readFileSync(pathTxt, 'utf-8').trim()
+    if (relPath) return join(electronPkgDir, 'dist', relPath)
+  }
+  return join(
+    electronPkgDir,
+    'dist',
+    process.platform === 'win32'
+      ? 'electron.exe'
+      : process.platform === 'darwin'
+        ? join('Electron.app', 'Contents', 'MacOS', 'Electron')
+        : 'electron',
+  )
+}
+
 export const APP_PATH =
   process.env.PLUMELENS_E2E_DEV === '1'
-    ? join(
-        REPO_ROOT,
-        'node_modules',
-        'electron',
-        'dist',
-        process.platform === 'win32' ? 'electron.exe' : 'electron',
-      )
+    ? resolveDevElectronBinary()
     : process.platform === 'win32'
       ? join(REPO_ROOT, 'release', 'win-unpacked', 'PlumeLens.exe')
       : join(REPO_ROOT, 'release', 'mac-arm64', 'PlumeLens.app', 'Contents', 'MacOS', 'PlumeLens')
@@ -78,6 +90,20 @@ export async function launchApp(
   options: LaunchOptions = {},
 ): Promise<LaunchHandle> {
   const disableCloseConfirm = options.disableCloseConfirm ?? true
+  const launchEnv: Record<string, string> = {}
+  for (const [key, value] of Object.entries(process.env)) {
+    // Strip ELECTRON_RUN_AS_NODE if inherited from an Electron-based IDE/harness,
+    // otherwise Electron boots as plain Node and rejects Chromium debugging flags.
+    if (key === 'ELECTRON_RUN_AS_NODE' || value === undefined) continue
+    launchEnv[key] = value
+  }
+  // 防止 engine lifespan 的 _kill_orphan_engines 通过 pgrep -f 误杀用户正在跑
+  // 的 PlumeLens engine(那个 engine 跑在不同 data dir,但 binary 名一致)。
+  launchEnv.PLUMELENS_SKIP_ORPHAN_KILL = '1'
+  // 默认自动化关闭应用时跳过二次确认;需要覆盖真实确认弹窗的 spec 可显式关闭。
+  if (disableCloseConfirm) {
+    launchEnv.PLUMELENS_E2E_DISABLE_CLOSE_CONFIRM = '1'
+  }
   const app = await _electron.launch({
     executablePath: APP_PATH,
     args: [
@@ -87,14 +113,7 @@ export async function launchApp(
       `--user-data-dir=${dataDir}`,
       ...(options.extraArgs ?? []),
     ],
-    env: {
-      ...process.env,
-      // 防止 engine lifespan 的 _kill_orphan_engines 通过 pgrep -f 误杀用户正在跑
-      // 的 PlumeLens engine(那个 engine 跑在不同 data dir,但 binary 名一致)。
-      PLUMELENS_SKIP_ORPHAN_KILL: '1',
-      // 默认自动化关闭应用时跳过二次确认;需要覆盖真实确认弹窗的 spec 可显式关闭。
-      ...(disableCloseConfirm ? { PLUMELENS_E2E_DISABLE_CLOSE_CONFIRM: '1' } : {}),
-    },
+    env: launchEnv,
     timeout: 30_000,
   })
   // stdout/stderr 透出来便于 CI 失败时定位

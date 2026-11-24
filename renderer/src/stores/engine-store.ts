@@ -1,20 +1,5 @@
 import { create } from 'zustand'
-
-// 与 electron/preload.ts 的 EngineStatusPayload 保持一致 — 改动需同步。
-// 避免从 env.d.ts import(声明文件作 module 在某些 tsconfig 配置下不稳定),
-// 这里就近重声明,有差异 typecheck 会爆。
-type EngineStatusPayload =
-  | { kind: 'ready'; url: string }
-  | { kind: 'unhealthy'; consecutiveFailures: number; threshold: number }
-  | {
-      kind: 'crashed'
-      code: number | null
-      signal: string | null
-      restartCount: number
-      maxRestarts: number
-    }
-  | { kind: 'fatal'; message: string }
-  | { kind: 'cpu-fallback' }
+import type { EngineStatusPayload } from '@/env'
 
 /** 引擎运行状态(产品语义,非技术分类):
  * - ready    正常分析中 / idle
@@ -80,12 +65,14 @@ export const useEngineStore = create<EngineStore>()((set, get) => ({
   applyStatus: (payload) => {
     switch (payload.kind) {
       case 'ready': {
-        const wasUnhealthy = get().state !== 'ready' && get().state !== 'degraded'
+        const current = get()
+        const wasUnhealthy = current.state !== 'ready' && current.state !== 'degraded'
+        const urlChanged = current.backendUrl !== null && current.backendUrl !== payload.url
         set((s) => ({
           state: s.cpuFallback ? 'degraded' : 'ready',
           backendUrl: payload.url,
-          // 从 reconnecting/fatal 恢复 → bump key 让 SSE 重建(端口可能变了)
-          sseRestartKey: wasUnhealthy ? s.sseRestartKey + 1 : s.sseRestartKey,
+          // 从 reconnecting/fatal 恢复或后端端口切换 → bump key 让 SSE 重建
+          sseRestartKey: wasUnhealthy || urlChanged ? s.sseRestartKey + 1 : s.sseRestartKey,
           // restart 流程结束,reset 计数(但保留 totalCrashes 累计)
           restartCount: 0,
         }))
@@ -99,17 +86,20 @@ export const useEngineStore = create<EngineStore>()((set, get) => ({
         break
       }
       case 'crashed': {
+        const isIntentionalRestart = payload.signal === 'RESTART'
         set((s) => ({
           state: 'reconnecting',
           backendUrl: null,
           restartCount: payload.restartCount,
           maxRestarts: payload.maxRestarts,
-          totalCrashes: s.totalCrashes + 1,
-          lastCrash: {
-            at: new Date().toISOString(),
-            signal: payload.signal,
-            code: payload.code,
-          },
+          totalCrashes: isIntentionalRestart ? s.totalCrashes : s.totalCrashes + 1,
+          lastCrash: isIntentionalRestart
+            ? s.lastCrash
+            : {
+                at: new Date().toISOString(),
+                signal: payload.signal,
+                code: payload.code,
+              },
         }))
         break
       }
@@ -146,7 +136,7 @@ export function subscribeEngineStatus(): () => void {
   let disposed = false
   let eventGeneration = 0
   const unsubscribe = bridge.onEngineStatus((payload) => {
-    eventGeneration += 1
+    if (payload.kind !== 'cpu-fallback') eventGeneration += 1
     useEngineStore.getState().applyStatus(payload)
   })
   // A renderer reload does not restart the engine, so its original ready event

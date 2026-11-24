@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import TypedDict
+from typing import Any, TypedDict
 
 import aiosqlite
 import structlog
@@ -111,24 +111,23 @@ async def set_decision(db: Database, photo_id: str, decision: Decision | None) -
 
         if decision is None:
             await db.conn.execute("DELETE FROM photo_decisions WHERE photo_id = ?", (photo_id,))
-            # 用户清除决策影响 archive 聚合(grade=NULL → 不进精选/可用/记录桶)
-            archive_cache.invalidate()
-            await logger.ainfo("Decision cleared", photo_id=photo_id)
-            return None
-
-        now = _now_iso()
-        # UPSERT: INSERT ... ON CONFLICT DO UPDATE
-        await db.conn.execute(
-            "INSERT INTO photo_decisions (photo_id, decision, updated_at) "
-            "VALUES (?, ?, ?) "
-            "ON CONFLICT(photo_id) DO UPDATE SET decision = excluded.decision, "
-            "updated_at = excluded.updated_at",
-            (photo_id, decision.value, now),
-        )
-        # decision 影响 ARCHIVE_GRADES 过滤,需 invalidate 让羽迹立即反映新评级
-        archive_cache.invalidate()
-        await logger.ainfo("Decision set", photo_id=photo_id, decision=decision.value)
-        return decision
+        else:
+            now = _now_iso()
+            # UPSERT: INSERT ... ON CONFLICT DO UPDATE
+            await db.conn.execute(
+                "INSERT INTO photo_decisions (photo_id, decision, updated_at) "
+                "VALUES (?, ?, ?) "
+                "ON CONFLICT(photo_id) DO UPDATE SET decision = excluded.decision, "
+                "updated_at = excluded.updated_at",
+                (photo_id, decision.value, now),
+            )
+    # Invalidate after COMMIT so concurrent archive readers never repopulate stale state.
+    archive_cache.invalidate()
+    if decision is None:
+        await logger.ainfo("Decision cleared", photo_id=photo_id)
+        return None
+    await logger.ainfo("Decision set", photo_id=photo_id, decision=decision.value)
+    return decision
 
 
 async def set_decisions_batch(
@@ -141,13 +140,15 @@ async def set_decisions_batch(
 
     Returns: 成功写入的行数。
     """
+    if not updates:
+        return 0
+    # Deduplicate keeping last-write-wins semantics per photo_id.
+    deduped = dict(updates)
     async with db.transaction():
-        if not updates:
-            return 0
-        await _ensure_photos_exist(db, [pid for pid, _ in updates])
+        await _ensure_photos_exist(db, list(deduped.keys()))
         now = _now_iso()
-        rows = [(pid, d.value, now) for pid, d in updates if d is not None]
-        clear_ids = [(pid,) for pid, d in updates if d is None]
+        rows = [(pid, d.value, now) for pid, d in deduped.items() if d is not None]
+        clear_ids = [(pid,) for pid, d in deduped.items() if d is None]
         if rows:
             await db.conn.executemany(
                 "INSERT INTO photo_decisions (photo_id, decision, updated_at) "
@@ -161,10 +162,9 @@ async def set_decisions_batch(
                 "DELETE FROM photo_decisions WHERE photo_id = ?",
                 clear_ids,
             )
-        # 批量决策(连拍组"keep best 1")会大量翻 grade,必须 invalidate 否则
-        # 用户切到羽迹页面看到的还是 10s TTL 内的旧聚合。
-        archive_cache.invalidate()
-        return len(updates)
+    # Invalidate after COMMIT so concurrent archive readers see the committed grades.
+    archive_cache.invalidate()
+    return len(deduped)
 
 
 async def list_decisions(
@@ -230,22 +230,26 @@ _SET_OVERRIDE_MATCH_IOU = 0.3
 async def _resolve_db_bird_index(
     db: Database,
     photo_id: str,
+    input_revision: int,
     caller_bird_index: int,
     bbox: tuple[float, float, float, float] | None,
-) -> int:
+    *,
+    for_clear: bool = False,
+) -> int | None:
     """Find the actual DB row's bird_index for this physical bird.
 
-    bbox 给了 → IoU 反查已存在的 override 行(read-time stable matching 的写入侧对偶);
-    没匹配上(或 bbox=None)→ 用 caller 传入的 bird_index。
-
-    用途:pipeline_version bump 后 caller 看到的 bird_index 是新数组下标,但 DB 行
-    用的是写入时的旧下标。无此反查则 Clear/Update 会删错行 / 留 stale 行。
+    bbox 给了 → 在当前 input_revision 内按 IoU 反查已存在的 override 行;
+    未匹配上时:
+    - 清除路径(for_clear=True):仅当 caller_bird_index 是旧版无 bbox 行时删除,
+      绝不误删另一只鸟的 override。
+    - 写入路径(for_clear=False):若 caller_bird_index 已被另一只带不同 bbox 的鸟占用,
+      分配未占用的新 bird_index 避免覆盖另一只鸟的标注。
     """
     if bbox is None:
         return caller_bird_index
 
     async with db.conn.execute(
-        "SELECT bird_index, bbox_x1, bbox_y1, bbox_x2, bbox_y2 "
+        "SELECT bird_index, bbox_x1, bbox_y1, bbox_x2, bbox_y2, input_revision "
         "FROM photo_species_overrides WHERE photo_id = ?",
         (photo_id,),
     ) as cur:
@@ -253,17 +257,46 @@ async def _resolve_db_bird_index(
 
     best_iou = 0.0
     best_bi: int | None = None
+    existing_indices: set[int] = set()
+    caller_row: Any = None
     for row in rows:
+        bi = int(row["bird_index"])
+        existing_indices.add(bi)
+        if int(row["input_revision"]) != input_revision:
+            continue
+        if bi == caller_bird_index:
+            caller_row = row
         x1, y1, x2, y2 = row["bbox_x1"], row["bbox_y1"], row["bbox_x2"], row["bbox_y2"]
         if x1 is None or y1 is None or x2 is None or y2 is None:
             continue
         iou = _iou_xyxy(bbox, (float(x1), float(y1), float(x2), float(y2)))
         if iou > best_iou:
             best_iou = iou
-            best_bi = int(row["bird_index"])
+            best_bi = bi
     if best_iou >= _SET_OVERRIDE_MATCH_IOU and best_bi is not None:
         return best_bi
-    return caller_bird_index
+
+    if for_clear:
+        if caller_row is not None and caller_row["bbox_x1"] is None:
+            return caller_bird_index
+        return None
+
+    # Writing a new override: avoid colliding with a stale revision row or a
+    # completely disjoint bird occupying the same index after reorder.
+    if caller_bird_index not in existing_indices:
+        return caller_bird_index
+    if caller_row is not None:
+        cx1, cy1, cx2, cy2 = (
+            caller_row["bbox_x1"],
+            caller_row["bbox_y1"],
+            caller_row["bbox_x2"],
+            caller_row["bbox_y2"],
+        )
+        if cx1 is None or cy1 is None or cx2 is None or cy2 is None:
+            return caller_bird_index
+        if _iou_xyxy(bbox, (float(cx1), float(cy1), float(cx2), float(cy2))) > 0.0:
+            return caller_bird_index
+    return max(existing_indices) + 1
 
 
 async def set_species_override(
@@ -281,6 +314,7 @@ async def set_species_override(
     给了 bbox → 后端先 IoU 反查 DB 已存在的 override 行,以稳定身份 UPSERT/DELETE,
     避免 bump 后删错行 / 留 stale 行。bbox=None 兼容老调用方(v5 schema)。
     """
+    target_bird_index: int | None = None
     async with db.transaction():
         if bird_index < 0:
             msg = f"Invalid bird index: {bird_index}"
@@ -297,68 +331,76 @@ async def set_species_override(
             input_revision = int(photo["input_revision"])
 
         # bbox 给了就 IoU 反查 DB 行的稳定 bird_index;否则按 caller 传入的处理
-        target_bird_index = await _resolve_db_bird_index(db, photo_id, bird_index, bbox)
+        target_bird_index = await _resolve_db_bird_index(
+            db,
+            photo_id,
+            input_revision,
+            bird_index,
+            bbox,
+            for_clear=species is None,
+        )
 
         if species is None:
+            if target_bird_index is not None:
+                await db.conn.execute(
+                    "DELETE FROM photo_species_overrides WHERE photo_id = ? AND bird_index = ?",
+                    (photo_id, target_bird_index),
+                )
+        else:
+            assert target_bird_index is not None
+            now = _now_iso()
+            bbox_x1 = bbox[0] if bbox else None
+            bbox_y1 = bbox[1] if bbox else None
+            bbox_x2 = bbox[2] if bbox else None
+            bbox_y2 = bbox[3] if bbox else None
             await db.conn.execute(
-                "DELETE FROM photo_species_overrides WHERE photo_id = ? AND bird_index = ?",
-                (photo_id, target_bird_index),
+                "INSERT INTO photo_species_overrides "
+                "(photo_id, bird_index, canonical_sci, canonical_zh, canonical_en, "
+                " bbox_x1, bbox_y1, bbox_x2, bbox_y2, updated_at, input_revision) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(photo_id, bird_index) DO UPDATE SET "
+                "canonical_sci = excluded.canonical_sci, "
+                "canonical_zh = excluded.canonical_zh, "
+                "canonical_en = excluded.canonical_en, "
+                "bbox_x1 = excluded.bbox_x1, "
+                "bbox_y1 = excluded.bbox_y1, "
+                "bbox_x2 = excluded.bbox_x2, "
+                "bbox_y2 = excluded.bbox_y2, "
+                "updated_at = excluded.updated_at, input_revision = excluded.input_revision",
+                (
+                    photo_id,
+                    target_bird_index,
+                    species["canonical_sci"],
+                    species.get("canonical_zh"),
+                    species.get("canonical_en"),
+                    bbox_x1,
+                    bbox_y1,
+                    bbox_x2,
+                    bbox_y2,
+                    now,
+                    input_revision,
+                ),
             )
-            # species 修正影响 archive 物种墙 + 三级地图聚合,清缓存让下次请求重算。
-            archive_cache.invalidate()
-            await logger.ainfo(
-                "Species override cleared",
-                photo_id=photo_id,
-                caller_bird_index=bird_index,
-                db_bird_index=target_bird_index,
-            )
-            return None
 
-        now = _now_iso()
-        bbox_x1 = bbox[0] if bbox else None
-        bbox_y1 = bbox[1] if bbox else None
-        bbox_x2 = bbox[2] if bbox else None
-        bbox_y2 = bbox[3] if bbox else None
-        await db.conn.execute(
-            "INSERT INTO photo_species_overrides "
-            "(photo_id, bird_index, canonical_sci, canonical_zh, canonical_en, "
-            " bbox_x1, bbox_y1, bbox_x2, bbox_y2, updated_at, input_revision) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
-            "ON CONFLICT(photo_id, bird_index) DO UPDATE SET "
-            "canonical_sci = excluded.canonical_sci, "
-            "canonical_zh = excluded.canonical_zh, "
-            "canonical_en = excluded.canonical_en, "
-            "bbox_x1 = excluded.bbox_x1, "
-            "bbox_y1 = excluded.bbox_y1, "
-            "bbox_x2 = excluded.bbox_x2, "
-            "bbox_y2 = excluded.bbox_y2, "
-            "updated_at = excluded.updated_at, input_revision = excluded.input_revision",
-            (
-                photo_id,
-                target_bird_index,
-                species["canonical_sci"],
-                species.get("canonical_zh"),
-                species.get("canonical_en"),
-                bbox_x1,
-                bbox_y1,
-                bbox_x2,
-                bbox_y2,
-                now,
-                input_revision,
-            ),
-        )
-        # 手动鸟种修正后 archive 聚合需要 reflect — 用户改完一只鸟种后切到羽迹
-        # 应该立即看到新分类,不能等 10s TTL。
-        archive_cache.invalidate()
+    # Invalidate after COMMIT so concurrent archive reads see the committed override.
+    archive_cache.invalidate()
+    if species is None:
         await logger.ainfo(
-            "Species override set",
+            "Species override cleared",
             photo_id=photo_id,
             caller_bird_index=bird_index,
             db_bird_index=target_bird_index,
-            canonical_sci=species["canonical_sci"],
-            has_bbox=bbox is not None,
         )
-        return species
+        return None
+    await logger.ainfo(
+        "Species override set",
+        photo_id=photo_id,
+        caller_bird_index=bird_index,
+        db_bird_index=target_bird_index,
+        canonical_sci=species["canonical_sci"],
+        has_bbox=bbox is not None,
+    )
+    return species
 
 
 async def list_species_overrides(

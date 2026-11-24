@@ -13,7 +13,8 @@
     "loadingDisabled": "Available after the local engine finishes loading",
     "searchSelection": "Search photos or species in this folder",
     "searchStart": "Search workspace folders",
-    "searchArchive": "Search species or personal records"
+    "searchArchive": "Search species or personal records",
+    "searchMapDisabled": "Header search is unavailable on the map view"
   },
   "common": {
     "export": "Export",
@@ -22,7 +23,8 @@
     "settings": "Settings",
     "close": "Close",
     "cancel": "Cancel",
-    "retry": "Retry"
+    "retry": "Retry",
+    "listSeparator": ", "
   },
   "errors": {
     "renderFailed": {
@@ -59,7 +61,8 @@
     "savedRestarted": "Saved. Engine restarting…",
     "saveFailed": "Save failed: {{error}}",
     "error": {
-      "safeStorageUnavailable": "Secure storage is unavailable on this system (macOS Keychain / Windows DPAPI / Linux libsecret). API keys were NOT saved to avoid writing them in plain text. Please install a keyring service or use a supported platform."
+      "safeStorageUnavailable": "Secure storage is unavailable on this system (macOS Keychain / Windows DPAPI / Linux libsecret). API keys were NOT saved to avoid writing them in plain text. Please install a keyring service or use a supported platform.",
+      "restartFailed": "Settings were saved, but the engine failed to restart. Restart the app to apply them."
     },
     "geocoding": {
       "title": "Geocoding providers",
@@ -141,6 +144,7 @@
     "importErrorTitle": "Import failed",
     "importErrorBody": "Please confirm the backend engine is ready and the path is valid, then try again. {{detail}}",
     "recentFolders": "Recent folders",
+    "searchEmpty": "No folders match \"{{query}}\"",
     "resumeTitle": "Resume right where you left off.",
     "emptyRecentTitle": "Start with an import",
     "emptyRecentLead": "No recent workspace yet",
@@ -236,9 +240,13 @@
       "recursive": "Recursive scan enabled",
       "lastScan": "Last scan",
       "update": "Update folder",
+      "updating": "Updating…",
       "resume": "Resume analysis",
       "startAnalysis": "Start analysis",
       "starting": "Starting…",
+      "paused": "Paused",
+      "pausedProgress": "Paused {{progress}}",
+      "progressAria": "Analysis progress",
       "analyzingProgress": "Analyzing {{progress}}",
       "analyzedProgress": "Analyzed {{progress}}",
       "analyzingPercent": "Analyzing… {{percent}}%",
@@ -440,7 +448,7 @@
       "frameLabel": "Frame",
       "speciesTimes": "{{name}} × {{count}}",
       "speciesPlus": "{{a}} + {{b}}",
-      "speciesEtc": "{{name}} +{{count}} species",
+      "speciesEtc": "{{name}} ({{count}} species)",
       "analysisCaption": "{{species}} · {{grade}} · score {{score}}",
       "pendingCaption": "Waiting for analysis"
     },
@@ -507,14 +515,27 @@
       "previous": "Previous photo",
       "next": "Next photo",
       "original": "Original",
-      "originalHint": "Click to zoom · drag to pan",
+      "originalHint": "Hold to zoom · drag to pan",
       "iqaCrop": "IQA crop · 2.5×",
       "cropHint": "Quality scoring view",
       "cropNeedsSubject": "Subject required",
       "zoomLabel": "Zoom scale",
       "zoomScale": "{{scale}}x zoom",
       "fullscreen": "Fullscreen",
-      "fullscreenHint": "Click to zoom · drag to pan · Esc to exit",
+      "fullscreenHint": "Hold to zoom · drag to pan · Esc to exit",
+      "keypoints": {
+        "bill": "Bill",
+        "crown": "Crown",
+        "nape": "Nape",
+        "left_eye": "Left eye",
+        "right_eye": "Right eye",
+        "belly": "Belly",
+        "breast": "Breast",
+        "back": "Back",
+        "tail": "Tail",
+        "left_wing": "Left wing",
+        "right_wing": "Right wing"
+      },
       "sequenceSingle": "Single photo",
       "sequenceBest": "Best in group",
       "sequenceLabel": "Burst",
@@ -708,6 +729,7 @@
       "label": "Bird log",
       "title": "Current species detail",
       "empty": "Choose a species",
+      "loadingExtract": "Loading species summary…",
       "noChineseExtract": "No Chinese species introduction is available yet.",
       "source": "Chinese Wikipedia →"
     },
@@ -784,6 +806,8 @@
         "city": "City layer"
       },
       "loadingProvince": "Loading provincial map…",
+      "loadingSummary": "Loading location stats…",
+      "breadcrumbAria": "Map level breadcrumb",
       "backfillProgress": "Resolving locations {{resolved}}/{{total}}…",
       "unmapped": "{{count}} photos lack GPS and are hidden from the map",
       "unresolved": "{{count}} photos have unresolved coordinates and are hidden from the map",
@@ -814,6 +838,10 @@
     "label": "Export",
     "title": "Prepare output",
     "confirm": "Start export",
+    "disabled": {
+      "noPhotos": "No photos available to export in this folder",
+      "updating": "Updating current selection; please wait"
+    },
     "presets": {
       "label": "Export presets",
       "lrStandard": "Lightroom standard",

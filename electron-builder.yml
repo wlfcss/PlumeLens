@@ -71,6 +71,8 @@ extraResources:
   - from: LICENSE
     to: LICENSE
 mac:
+  # PyTorch 2.14+ MPS requires macOS 14 (Sonoma) or later (Electron 45+ requires macOS 13+).
+  minimumSystemVersion: '14.0'
   # target 用 dir：electron-builder 的 dmg-builder 在打包时**丢失 Electron Framework
   # binary**（157MB 的核心库），导致从 dmg 装机后启动 dyld 报 Library missing。
   # 我们在 afterAllArtifactBuild 里用系统 hdiutil 自己打 dmg（保留所有文件 + 签名）。

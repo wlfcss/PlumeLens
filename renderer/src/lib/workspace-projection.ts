@@ -11,9 +11,7 @@ import type {
   WorkspaceSnapshot,
 } from '@/lib/workspace-types'
 
-const speciesCatalog = listAllSpecies()
-
-type SpeciesCatalogItem = (typeof speciesCatalog)[number]
+type SpeciesCatalogItem = ReturnType<typeof listAllSpecies>[number]
 type MapRegionId =
   | 'northeast'
   | 'north'
@@ -53,8 +51,10 @@ export function buildFolderSummary(photos: PhotoRecord[]): FolderSummary {
       }
       const category = photoCategory(photo)
       if (category !== 'no_bird') acc.gradeCounts[category] += 1
-      if (photo.birdCount > 0) acc.birdPhotoCount += 1
-      if (photo.birdCount === 0) acc.noBirdCount += 1
+      if (photo.analysisStatus === 'done') {
+        if (photo.birdCount > 0) acc.birdPhotoCount += 1
+        else acc.noBirdCount += 1
+      }
       return acc
     },
     {
@@ -179,19 +179,30 @@ function hashStableValue(seed: number, value: unknown): number {
   return Math.imul(hash ^ 31, 16777619) >>> 0
 }
 
+const detailContentHashCache = new WeakMap<LibraryDetail, string>()
+
 export function libraryDetailContentHash(detail: LibraryDetail): string {
+  const cached = detailContentHashCache.get(detail)
+  if (cached !== undefined) return cached
+
   let hash = 2166136261
+  hash = hashStableValue(hash, detail.projection_revision)
   for (const photo of detail.photos) {
     hash = hashStableValue(hash, photo.id)
     hash = hashStableValue(hash, photo.input_revision)
     hash = hashStableValue(hash, photo.review_revision)
     hash = hashStableValue(hash, photo.pipeline_version)
+    hash = hashStableValue(hash, photo.analysis_status)
+    hash = hashStableValue(hash, photo.analysis_error_code)
+    hash = hashStableValue(hash, photo.analysis_error)
     hash = hashStableValue(hash, photo.grade)
     hash = hashStableValue(hash, photo.quality_score)
     hash = hashStableValue(hash, photo.bird_count)
     hash = hashStableValue(hash, photo.species)
     hash = hashStableValue(hash, photo.species_latin)
+    hash = hashStableValue(hash, photo.manual_species)
     hash = hashStableValue(hash, photo.species_source)
+    hash = hashStableValue(hash, photo.species_conflict)
     hash = hashStableValue(hash, photo.model_species)
     hash = hashStableValue(hash, photo.model_species_latin)
     hash = hashStableValue(hash, photo.group_species)
@@ -201,11 +212,20 @@ export function libraryDetailContentHash(detail: LibraryDetail): string {
     hash = hashStableValue(hash, photo.thumb_grid)
     hash = hashStableValue(hash, photo.thumb_preview)
     hash = hashStableValue(hash, photo.scene_id)
+    hash = hashStableValue(hash, photo.companion_path)
+    hash = hashStableValue(hash, photo.companion_format)
+    hash = hashStableValue(hash, photo.country)
+    hash = hashStableValue(hash, photo.province)
+    hash = hashStableValue(hash, photo.city)
+    hash = hashStableValue(hash, photo.district)
+    hash = hashStableValue(hash, photo.place)
     hash = hashStableValue(hash, photo.exif)
     hash = hashStableValue(hash, photo.best_detection)
     hash = hashStableValue(hash, photo.detections)
   }
-  return hash.toString(36)
+  const encoded = hash.toString(36)
+  detailContentHashCache.set(detail, encoded)
+  return encoded
 }
 
 function speciesRecordId(latinName: string, fallbackName = ''): string {
@@ -287,6 +307,7 @@ export function deriveSpeciesRecords(workspace: WorkspaceSnapshot): SpeciesRecor
     return null
   }
 
+  const speciesCatalog = listAllSpecies()
   const catalogRecords: SpeciesRecord[] = speciesCatalog.map((item) => {
     const captured = resolveCaptured(item)
     const hue = stableHue(item.canonical_sci)
@@ -303,7 +324,7 @@ export function deriveSpeciesRecords(workspace: WorkspaceSnapshot): SpeciesRecor
       bestScore: captured?.bestScore ?? null,
       newSightings: 0,
       regions: [],
-      summary: item.zh_extract ?? item.en_extract ?? '',
+      summary: '',
       collected: Boolean(captured),
       protectLevel: item.protect_level,
       iucn: item.iucn,

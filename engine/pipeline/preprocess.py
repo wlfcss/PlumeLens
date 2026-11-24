@@ -44,20 +44,42 @@ IMAGE_EXTENSIONS: frozenset[str] = frozenset(
 SUPPORTED_EXTENSIONS: frozenset[str] = IMAGE_EXTENSIONS | RAW_EXTENSIONS
 
 
+def load_image_u8(path: Path) -> NDArray[np.uint8]:
+    """Load an image file in display orientation as uint8 RGB [H, W, 3] in [0, 255].
+
+    Keeps full-resolution 24-45 MP photos in compact uint8 (134 MB vs 536 MB float32),
+    converting to float32 lazily only on resized 1280px tensors and small bird crops.
+    """
+    suffix = path.suffix.lower()
+
+    if suffix in RAW_EXTENSIONS:
+        return _load_raw_u8(path)
+    if suffix in IMAGE_EXTENSIONS:
+        return _load_pillow_u8(path)
+
+    msg = f"Unsupported image format: {suffix}"
+    raise ValueError(msg)
+
+
 def load_image(path: Path) -> NDArray[np.float32]:
     """Load an image file and return as float32 RGB array [H, W, 3] in range [0, 1].
 
     Supports JPEG/PNG/TIFF/BMP/WebP via Pillow, and RAW formats via rawpy.
     """
-    suffix = path.suffix.lower()
+    pixels = load_image_u8(path).astype(np.float32)
+    # Normalize in place instead of allocating a second 45 MP float32 buffer.
+    pixels /= 255.0
+    return pixels
 
-    if suffix in RAW_EXTENSIONS:
-        return _load_raw(path)
-    if suffix in IMAGE_EXTENSIONS:
-        return _load_pillow(path)
 
-    msg = f"Unsupported image format: {suffix}"
-    raise ValueError(msg)
+def _load_pillow_u8(path: Path) -> NDArray[np.uint8]:
+    """Load standard image via Pillow，应用 EXIF Orientation，返回 uint8 RGB。"""
+    from PIL import ImageOps
+
+    with Image.open(path) as img:
+        img = ImageOps.exif_transpose(img) or img
+        img = img.convert("RGB")
+        return np.asarray(img, dtype=np.uint8).copy()
 
 
 def _load_pillow(path: Path) -> NDArray[np.float32]:
@@ -67,18 +89,13 @@ def _load_pillow(path: Path) -> NDArray[np.float32]:
     都是按"拍出来人眼看到的方向"处理。如果这里不转，inference 在原始像素方向跑，
     YOLO/pose 输出的坐标就和前端展示的旋转后的图对不上 → bbox/姿态点偏移。
     """
-    from PIL import ImageOps
-
-    with Image.open(path) as img:
-        img = ImageOps.exif_transpose(img) or img
-        img = img.convert("RGB")
-        arr: NDArray[np.float32] = np.asarray(img, dtype=np.float32)
-        arr /= 255.0
+    arr = _load_pillow_u8(path).astype(np.float32)
+    arr /= 255.0
     return arr
 
 
-def _load_raw(path: Path) -> NDArray[np.float32]:
-    """Load RAW image via rawpy，应用 EXIF Orientation。
+def _load_raw_u8(path: Path) -> NDArray[np.uint8]:
+    """Load RAW image via rawpy，应用 EXIF Orientation，返回 uint8 RGB。
 
     禁用 rawpy 自动旋转，再由公共方向函数转换一次。
     Pillow 无法读取 RAW EXIF 时，使用 LibRaw sizes.flip 保留相机方向。
@@ -95,9 +112,12 @@ def _load_raw(path: Path) -> NDArray[np.float32]:
             user_flip=0,
         )
     oriented = orient_image(Image.fromarray(rgb), orientation)
-    pixels = np.asarray(oriented, dtype=np.float32)
-    # A 45 MP float32 RGB buffer is about 536 MB. Normalize in place instead
-    # of allocating a second buffer for each concurrent Windows RAW worker.
+    return np.asarray(oriented, dtype=np.uint8).copy()
+
+
+def _load_raw(path: Path) -> NDArray[np.float32]:
+    """Load RAW image via rawpy，应用 EXIF Orientation。"""
+    pixels = _load_raw_u8(path).astype(np.float32)
     pixels /= 255.0
     return pixels
 
@@ -107,7 +127,7 @@ YOLO_LETTERBOX_FILL: float = 114.0 / 255.0
 
 
 def resize_letterbox(
-    image: NDArray[np.float32],
+    image: NDArray[np.float32] | NDArray[np.uint8],
     target_size: int,
 ) -> tuple[NDArray[np.float32], float, tuple[int, int]]:
     """Resize image with letterboxing — 严格对齐 yolo26l-bird MODEL_CARD §5.5 参考实现。
@@ -120,12 +140,11 @@ def resize_letterbox(
     - 114/255 灰度填充（YOLO 系列约定）
     - 居中放置缩放后的图
 
-    为何重要：早期版本用 PIL LANCZOS + int 截断，与训练 pipeline 不一致，
-    CoreML EP 推理时 bbox 会"飘"到图像边缘。改回 cv2 + round 后，CoreML EP
-    输出和 CPU EP 在 95% 图片上一致（剩余 5% 偏差 < 250px，对摄影裁切无碍）。
+    支持 uint8 [0, 255] 与 float32 [0, 1] 两种输入：uint8 路径先用 SIMD
+    cv2.resize 缩到目标尺寸再转 float32/255，避免对整张 45 MP 原图分配 536 MB float32。
 
     Args:
-        image: Input image [H, W, 3] float32 0-1.
+        image: Input image [H, W, 3] float32 0-1 or uint8 0-255.
         target_size: Target square dimension (e.g. 1280).
 
     Returns:
@@ -141,16 +160,11 @@ def resize_letterbox(
     new_h = int(round(h * scale))
     new_w = int(round(w * scale))
 
-    # cv2 INTER_LINEAR 与 Ultralytics 训练 pipeline 一致。直接对 float32 输入
-    # resize（cv2.resize 原生支持 float32），避免 float32→uint8→float32 的双向
-    # 量化损失（每次 round-trip 引入 ±1/255 ≈ 0.004 噪声，对 CoreML EP 精度敏感）。
-    # cv2.resize 接收 (W, H) 顺序，注意不是 (H, W)。
-    # cv2.resize 类型签名是 MatLike（dtype 不严格），但实际 float32 输入 → float32
-    # 输出。np.asarray 包一层让 pyright 类型收紧到 NDArray[float32]。
-    resized: NDArray[np.float32] = np.asarray(
-        cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_LINEAR),
-        dtype=np.float32,
-    )
+    resized_raw = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+    if image.dtype == np.uint8:
+        resized: NDArray[np.float32] = np.asarray(resized_raw, dtype=np.float32) * (1.0 / 255.0)
+    else:
+        resized = np.asarray(resized_raw, dtype=np.float32)
 
     # 114/255 灰度填充
     canvas = np.full((target_size, target_size, 3), YOLO_LETTERBOX_FILL, dtype=np.float32)
@@ -162,14 +176,14 @@ def resize_letterbox(
 
 
 def expand_for_iqa(
-    image: NDArray[np.float32],
+    image: NDArray[np.float32] | NDArray[np.uint8],
     x1: float,
     y1: float,
     x2: float,
     y2: float,
     expand: float = 2.5,
     max_aspect_ratio: float = 2.0,
-) -> NDArray[np.float32]:
+) -> NDArray[np.float32] | NDArray[np.uint8]:
     """For IQA: 同比例放大 bbox，限制纵横比，保不出原图。
 
     与 crop_bbox 的紧裁切不同，此函数让 IQA 模型看到"鸟 + 周边构图（背景虚化、
@@ -246,13 +260,13 @@ def expand_for_iqa(
 
 
 def crop_bbox(
-    image: NDArray[np.float32],
+    image: NDArray[np.float32] | NDArray[np.uint8],
     x1: float,
     y1: float,
     x2: float,
     y2: float,
     expand_ratio: float = 1.0,
-) -> NDArray[np.float32]:
+) -> NDArray[np.float32] | NDArray[np.uint8]:
     """Crop a bounding box region from image.
 
     Args:

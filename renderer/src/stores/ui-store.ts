@@ -19,6 +19,8 @@ export interface SelectionSpeciesFilter {
 interface UIState {
   selectionSpeciesByFolder: Record<string, SelectionSpeciesFilter>
   setSelectionSpeciesFilter: (folderId: string, filter: SelectionSpeciesFilter) => void
+  removeSelectionSpeciesFilter: (folderId: string) => void
+  clearSelectionSpeciesFilters: () => void
   route: AppRoute
   archiveTab: ArchiveTab
   activeFolderId: string | null
@@ -56,6 +58,14 @@ export const useUIStore = create<UIState>()((set) => ({
     set((state) => ({
       selectionSpeciesByFolder: { ...state.selectionSpeciesByFolder, [folderId]: filter },
     })),
+  removeSelectionSpeciesFilter: (folderId) =>
+    set((state) => {
+      if (!(folderId in state.selectionSpeciesByFolder)) return {}
+      const next = { ...state.selectionSpeciesByFolder }
+      delete next[folderId]
+      return { selectionSpeciesByFolder: next }
+    }),
+  clearSelectionSpeciesFilters: () => set({ selectionSpeciesByFolder: {} }),
   route: 'start',
   archiveTab: 'species',
   activeFolderId: null,
@@ -73,11 +83,15 @@ export const useUIStore = create<UIState>()((set) => ({
   setRoute: (route) => set((state) => (state.route === route ? {} : { route, searchQuery: '' })),
   setArchiveTab: (archiveTab) => set({ archiveTab }),
   setActiveFolderId: (activeFolderId) =>
-    set({
-      activeFolderId,
-      focusedPhotoId: null,
-      reviewPhotoId: null,
-    }),
+    set((state) =>
+      state.activeFolderId === activeFolderId
+        ? {}
+        : {
+            activeFolderId,
+            focusedPhotoId: null,
+            reviewPhotoId: null,
+          },
+    ),
   setActiveSpeciesId: (activeSpeciesId) => set({ activeSpeciesId }),
   setActiveQuickFilter: (filter) =>
     set((state) => {

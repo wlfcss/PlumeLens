@@ -2,7 +2,12 @@ import { replaceEqualDeep } from '@tanstack/react-query'
 
 import { logger } from '@/lib/logger'
 import { benchmarkTrace, type BenchmarkApiArea } from '@/lib/benchmark-trace'
-import { LIBRARY_SUMMARY_BATCH_MEDIA_TYPE } from '../../../shared/library-summary-stream'
+import {
+  hydrateCompactSummaryRow,
+  LIBRARY_SUMMARY_BATCH_MEDIA_TYPE,
+  LIBRARY_SUMMARY_COMPACT_FORMAT,
+  normalizeLibraryRootPrefix,
+} from '../../../shared/library-summary-stream'
 import { engineRequestTimeout, engineStartupTimeout } from '../../../shared/engine-request-timeout'
 
 /**
@@ -83,6 +88,9 @@ export interface SelectionQueryResult {
   failed_count: number
   no_bird_count: number
   facets: SelectionSpeciesFacet[]
+  offset?: number
+  limit?: number | null
+  next_offset?: number | null
 }
 
 // 默认 60s 超时 — 大库 detail/SSE setup 可能需要 30s+,留足余量。
@@ -151,6 +159,7 @@ async function request<T>(
   const headers = _normalizeHeaders(init.headers)
 
   if (typeof window !== 'undefined' && window.plumelens?.engineRequest) {
+    init.signal?.throwIfAborted()
     let res: import('@/env').EngineResponse
     try {
       let firstRecord = true
@@ -450,6 +459,31 @@ export interface LibraryDetail {
   photo_offset?: number
   photo_limit?: number | null
   next_offset?: number | null
+  summary_format?: 'full' | 'compact-v1' | null
+}
+
+export interface PhotoBatchResponse {
+  library_id: string
+  projection_revision?: string | null
+  photos: PhotoRow[]
+}
+
+export interface ArchiveSpeciesSummaryRow {
+  key: string
+  name: string
+  latin_name: string | null
+  english_name: string | null
+  photo_count: number
+  best_score: number | null
+  first_seen_at: string | null
+  latest_seen_at: string | null
+  library_count: number
+}
+
+export interface ArchiveSpeciesSummaryResponse {
+  total_species: number
+  total_photos: number
+  species: ArchiveSpeciesSummaryRow[]
 }
 
 export interface PhotoReviewResponse {
@@ -478,6 +512,8 @@ async function requestLibrarySummary(
   previousPhotos: readonly PhotoRow[],
 ): Promise<LibraryDetail> {
   let detail: Omit<LibraryDetail, 'photos'> | undefined
+  let rootPrefix = ''
+  let isCompact = false
   let completed = false
   const photos: PhotoRow[] = []
   const buffered = await request<LibraryDetail>(
@@ -487,13 +523,18 @@ async function requestLibrarySummary(
       signal?.throwIfAborted()
       const frame: unknown = JSON.parse(line)
       if (!completed && Array.isArray(frame) && detail) {
-        for (const row of frame as PhotoRow[]) {
+        for (const rawRow of frame as Record<string, unknown>[]) {
+          const row = isCompact
+            ? hydrateCompactSummaryRow<PhotoRow>(rawRow, rootPrefix)
+            : (rawRow as unknown as PhotoRow)
           // Share before retaining the next frame. Query's final structural
           // comparison can then reuse these rows by reference.
           photos.push(replaceEqualDeep(previousPhotos[photos.length], row))
         }
       } else if (!detail && frame && typeof frame === 'object' && 'library' in frame) {
         detail = frame as Omit<LibraryDetail, 'photos'>
+        isCompact = detail.summary_format === LIBRARY_SUMMARY_COMPACT_FORMAT
+        rootPrefix = isCompact ? normalizeLibraryRootPrefix(detail.library?.root_path) : ''
       } else if (detail && !completed && frame === photos.length) {
         completed = true
       } else {
@@ -712,9 +753,14 @@ export const api = {
     query: SelectionQuery,
     signal?: AbortSignal,
     projectionRevision?: string,
+    pagination?: { limit?: number; offset?: number },
   ) => {
     const params = new URLSearchParams()
     if (projectionRevision) params.set('projection_revision', projectionRevision)
+    if (pagination?.limit !== undefined) params.set('limit', String(pagination.limit))
+    if (pagination?.offset !== undefined && pagination.offset > 0) {
+      params.set('offset', String(pagination.offset))
+    }
     const search = params.toString()
     return request<SelectionQueryResult>(
       `/library/${libraryId}/selection/query${search ? `?${search}` : ''}`,
@@ -725,6 +771,25 @@ export const api = {
       },
     )
   },
+  photoBatch: (
+    libraryId: string,
+    photoIds: string[],
+    options: { view?: 'summary' | 'full'; projectionRevision?: string; signal?: AbortSignal } = {},
+  ) => {
+    const params = new URLSearchParams()
+    if (options.projectionRevision) params.set('projection_revision', options.projectionRevision)
+    const search = params.toString()
+    return request<PhotoBatchResponse>(
+      `/library/${libraryId}/photos/batch${search ? `?${search}` : ''}`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ photo_ids: photoIds, view: options.view ?? 'summary' }),
+        signal: options.signal,
+      },
+    )
+  },
+  archiveSpeciesSummary: (signal?: AbortSignal) =>
+    request<ArchiveSpeciesSummaryResponse>('/archive/species/summary', { signal }),
   // Settings / maintenance
   modelVersions: () => request<ModelVersionsResponse>('/settings/models'),
   clearLocalHistory: () =>
@@ -754,7 +819,9 @@ export const api = {
       typeof window !== 'undefined' &&
       window.plumelens?.engineRequest
     ) {
-      return requestLibrarySummary(path, options.signal, options.previousPhotos ?? [])
+      params.set('summary_format', LIBRARY_SUMMARY_COMPACT_FORMAT)
+      const compactPath = `/library/${id}?${params.toString()}`
+      return requestLibrarySummary(compactPath, options.signal, options.previousPhotos ?? [])
     }
     return request<LibraryDetail>(path, { signal: options.signal })
   },
@@ -780,12 +847,7 @@ export const api = {
   buildPhotoThumbnail: (photoId: string) =>
     request<PhotoThumbnailResponse>(`/library/photo/${photoId}/thumbnail`, { method: 'POST' }),
   libraryEventsUrl: async (libraryId: string): Promise<string> => {
-    // Legacy fallback only. Electron runtime 优先用 window.plumelens.engineSseSubscribe，
-    // 这个 URL builder 只服务 vite-only/旧 native EventSource 调用面。
-    if (typeof window !== 'undefined' && window.plumelens?.engineSseUrl) {
-      return window.plumelens.engineSseUrl(`/library/${libraryId}/events`)
-    }
-    // Fallback: vite dev / 测试无 preload — 直连无 token。
+    // Vite-only / test fallback without Electron preload (no bearer token).
     const base = await getBackendUrl()
     return `${base}/library/${libraryId}/events`
   },
@@ -805,11 +867,8 @@ export const api = {
   getQueueStats: (libraryId: string) =>
     request<QueueStatsResponse>(`/analysis/library/${libraryId}/stats`),
 
-  // Legacy SSE URL fallback — Electron runtime should prefer engineSseSubscribe.
+  // Vite-only / test fallback — Electron runtime always uses engineSseSubscribe.
   progressUrl: async (libraryId: string): Promise<string> => {
-    if (typeof window !== 'undefined' && window.plumelens?.engineSseUrl) {
-      return window.plumelens.engineSseUrl(`/analysis/library/${libraryId}/progress`)
-    }
     const base = await getBackendUrl()
     const url = new URL(`${base}/analysis/library/${libraryId}/progress`)
     return url.toString()
@@ -871,9 +930,6 @@ export const api = {
       method: 'POST',
     }),
   exportJobEventsUrl: async (jobId: string): Promise<string> => {
-    if (typeof window !== 'undefined' && window.plumelens?.engineSseUrl) {
-      return window.plumelens.engineSseUrl(`/export/jobs/${jobId}/events`)
-    }
     const base = await getBackendUrl()
     return `${base}/export/jobs/${jobId}/events`
   },

@@ -48,7 +48,7 @@ _HASH_CHUNK = 1 << 20
 
 # 同进程内幂等:manager 启动期已验证后,species.py 再次调用走 cache fast path,
 # 不重复哈希(总成本 ~3-5s 对 1.3 GB 模型集),避免 cold-load 单图被阻塞。
-_verify_cache: dict[tuple[str, str], dict[str, str]] = {}
+_verify_cache: dict[tuple[str, str, tuple[int, int] | None], dict[str, str]] = {}
 _verify_lock = threading.Lock()
 
 
@@ -110,17 +110,22 @@ def verify_manifest(
         missing = sorted(set(required_assets) - declared.keys())
         if missing:
             raise ManifestError(f"Required assets absent from trusted manifest: {missing}")
-    cache_key = (str(manifest_path.resolve()), str(models_dir.resolve()))
-    with _verify_lock:
-        cached = _verify_cache.get(cache_key)
-    if cached is not None:
-        return dict(cached)
+    manifest_stat = manifest_path.stat() if manifest_path.is_file() else None
+    manifest_sig = (manifest_stat.st_size, manifest_stat.st_mtime_ns) if manifest_stat else None
+    cache_key = (str(manifest_path.resolve()), str(models_dir.resolve()), manifest_sig)
+    if manifest_sig is not None:
+        with _verify_lock:
+            cached = _verify_cache.get(cache_key)
+        if cached is not None and (
+            required_assets is None or set(required_assets).issubset(cached.keys())
+        ):
+            return dict(cached)
 
     # 处理 manifest 缺失:区分 empty environment(测试 / fresh clone 无模型) 与
     # suspicious tampering(攻击者删 manifest 留下篡改的模型)。判据是 sentinel
     # 模型是否存在 — 没有任何模型时,manifest 缺也合理(走 detection-only 降级或
     # strict mode 在 IQA 校验时报错);有模型却没 manifest 一定是出错或被动手脚。
-    if not manifest_path.is_file():
+    if manifest_sig is None:
         sentinel = models_dir / _SENTINEL_ASSET
         if sentinel.is_file():
             msg = (
@@ -134,10 +139,7 @@ def verify_manifest(
             "Model manifest missing — skipping integrity check (no core models present)",
             manifest_path=str(manifest_path),
         )
-        empty: dict[str, str] = {}
-        with _verify_lock:
-            _verify_cache[cache_key] = empty
-        return empty
+        return {}
 
     assets = _load_manifest_assets(manifest_path)
     verified: dict[str, str] = {}

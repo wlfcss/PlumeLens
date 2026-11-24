@@ -27,6 +27,7 @@ export function useThumbnailRepair({
   const activePhotoIdsRef = useRef(new Set<string>())
   const lastRepairAtRef = useRef(new Map<string, number>())
   const missingTimersRef = useRef(new Map<string, number>())
+  const invalidateTimerRef = useRef<number | null>(null)
   const failedResourcesRef = useRef(new Set<string>())
   const attemptsRef = useRef(new Map<string, { src: string | null | undefined; count: number }>())
   const photosRef = useRef(photos)
@@ -37,11 +38,16 @@ export function useThumbnailRepair({
     return () => {
       for (const id of timers.values()) window.clearTimeout(id)
       timers.clear()
+      if (invalidateTimerRef.current !== null) {
+        window.clearTimeout(invalidateTimerRef.current)
+        invalidateTimerRef.current = null
+      }
       queueRef.current = []
       repairingRef.current.clear()
+      activePhotoIdsRef.current.clear()
       activeCountRef.current = 0
     }
-  }, [])
+  }, [libraryId])
 
   const drainQueue = useCallback(() => {
     while (activeCountRef.current < THUMBNAIL_REPAIR_MAX_CONCURRENT) {
@@ -112,8 +118,11 @@ export function useThumbnailRepair({
         if (!photo) return
         if (photo.analysisStatus !== 'done' && photo.analysisStatus !== 'failed') return
         if (missingTimersRef.current.has(photoId)) return
-        if (libraryId) {
-          queryClient.invalidateQueries({ queryKey: LIBRARY_DETAIL_KEY(libraryId) })
+        if (libraryId && invalidateTimerRef.current === null) {
+          invalidateTimerRef.current = window.setTimeout(() => {
+            invalidateTimerRef.current = null
+            void queryClient.invalidateQueries({ queryKey: LIBRARY_DETAIL_KEY(libraryId) })
+          }, 250)
         }
         const timerId = window.setTimeout(() => {
           missingTimersRef.current.delete(photoId)

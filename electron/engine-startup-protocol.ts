@@ -13,7 +13,12 @@ export class EngineStartupProtocol {
 
   constructor(private readonly onReady: (url: string) => void) {}
 
+  getPort(): number | null {
+    return this.port
+  }
+
   feed(stream: 'stdout' | 'stderr', data: Buffer): void {
+    if (this.emitted) return
     const text = this.buffers[stream] + this.decoders[stream].write(data)
     const lines = text.split('\n')
     this.buffers[stream] = (lines.pop() ?? '').slice(-65_536)
@@ -35,7 +40,10 @@ export class EngineStartupProtocol {
       }
       if (this.ready && this.port && !this.emitted) {
         this.emitted = true
+        this.buffers.stdout = ''
+        this.buffers.stderr = ''
         this.onReady(`http://127.0.0.1:${this.port}`)
+        return
       }
     }
   }

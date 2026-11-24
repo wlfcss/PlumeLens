@@ -117,6 +117,54 @@ def configure_windows(settings: Settings, *, native_gpu: bool = False) -> dict[s
     }
 
 
+def _macos_total_memory_bytes() -> int | None:
+    if sys.platform != "darwin":
+        return None
+    try:
+        page_size = os.sysconf("SC_PAGE_SIZE")
+        phys_pages = os.sysconf("SC_PHYS_PAGES")
+        if page_size > 0 and phys_pages > 0:
+            return int(page_size * phys_pages)
+    except (AttributeError, OSError, ValueError):
+        return None
+    return None
+
+
+def recommended_macos_workers(total_bytes: int, logical_cpus_count: int | None = None) -> int:
+    """Choose macOS concurrent photo analysis workers by unified memory and core count."""
+    gib = total_bytes / GIB
+    cpus = logical_cpus_count or os.cpu_count() or 1
+    if gib >= 32 and cpus >= 10:
+        return 4
+    if gib >= 16 and cpus >= 8:
+        return 3
+    return 2
+
+
+def configure_macos(settings: Settings) -> dict[str, object]:
+    """Select bounded Apple Silicon / macOS defaults; explicit env overrides always win."""
+    total_bytes = _macos_total_memory_bytes()
+    if total_bytes is None:
+        return {}
+    cpus = logical_cpus()
+    analysis_concurrency = recommended_macos_workers(total_bytes, cpus)
+    defaults = {
+        "analysis_concurrency": analysis_concurrency,
+        "worker_threads": min(16, max(8, analysis_concurrency * 3)),
+        "onnx_threads": min(4, max(2, cpus // 4)),
+    }
+    for name, value in defaults.items():
+        if name not in settings.model_fields_set:
+            object.__setattr__(settings, name, value)
+    return {
+        "platform": "darwin",
+        "logical_cpus": cpus,
+        "physical_memory_bytes": total_bytes,
+        "configuration": {name: getattr(settings, name) for name in defaults},
+        "manual_overrides": sorted(set(defaults) & settings.model_fields_set),
+    }
+
+
 def memory_reserve(status: MemoryStatus) -> int:
     return max(2 * GIB, int(status.total * 0.15))
 

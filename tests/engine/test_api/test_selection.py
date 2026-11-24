@@ -783,7 +783,10 @@ async def test_archive_projection_cannot_cache_another_tasks_uncommitted_grade(s
     reader = asyncio.create_task(_load_geo_photos(db, "p.library_id=?", ("folder",)))
     try:
         await asyncio.sleep(0.02)
-        assert not reader.done(), "Archive read an uncommitted writer's grade"
+        if reader.done():
+            # Non-blocking WAL snapshot read may complete immediately, but it
+            # must observe only committed state (never the uncommitted reject).
+            assert "p1" in {photo.photo.id for photo in reader.result()}
     finally:
         release.set()
     await writer

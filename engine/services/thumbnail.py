@@ -15,7 +15,10 @@ RAW 文件优化（TECHNICAL_SPEC §9.4）：优先用 rawpy.extract_thumb() 读
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import io
+import os
+import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -104,10 +107,17 @@ def _resize_long_edge(img: Image.Image, long_edge: int) -> Image.Image:
 
 
 def _save_jpeg(img: Image.Image, out: Path, quality: int) -> None:
-    """Ensure RGB + save JPEG."""
+    """Ensure RGB + save JPEG atomically via temp file and os.replace."""
     out.parent.mkdir(parents=True, exist_ok=True)
     rgb = img.convert("RGB") if img.mode != "RGB" else img
-    rgb.save(out, "JPEG", quality=quality, optimize=True)
+    tmp = out.with_name(f".{out.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
+    try:
+        rgb.save(tmp, "JPEG", quality=quality, optimize=True)
+        os.replace(tmp, out)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink(missing_ok=True)
+        raise
 
 
 def _decode_preview(image: Image.Image) -> Image.Image:
@@ -171,9 +181,12 @@ def _load_raw_with_embedded_preview(path: Path) -> Image.Image:
             elif thumb.format == thumb_format.BITMAP:
                 import numpy as np
 
-                bitmap: np.ndarray = thumb.data
-                if bitmap.ndim == 3 and bitmap.shape[2] == 3:
-                    return orient_image(Image.fromarray(bitmap.astype("uint8")), orientation)
+                if (
+                    isinstance(thumb.data, np.ndarray)
+                    and thumb.data.ndim == 3
+                    and thumb.data.shape[2] == 3
+                ):
+                    return orient_image(Image.fromarray(thumb.data.astype("uint8")), orientation)
     except Exception as e:
         logger.warning(
             "extract_thumb failed, falling back to full decode",

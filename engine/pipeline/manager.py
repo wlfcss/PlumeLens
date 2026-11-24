@@ -31,7 +31,7 @@ from engine.pipeline.pose import (
     FlightClassifier,
     PoseDetector,
 )
-from engine.pipeline.preprocess import crop_bbox, expand_for_iqa, load_image
+from engine.pipeline.preprocess import crop_bbox, expand_for_iqa, load_image_u8
 from engine.pipeline.quality import IQA_NONFINITE_FALLBACK_SCORE, QualityAssessor
 from engine.pipeline.runtime import create_session, resolve_providers
 from engine.pipeline.species import (
@@ -74,6 +74,11 @@ _GRADE_ORDER: dict[str, int] = {
 # IQA（CLIPIQA+ / HyperIQA）是不同架构（CLIP / HyperNet），无 advanced indexing，
 # ANE 安全（实测与 CPU diff < 0.2 px），不需要此选项。
 _COREML_NO_ANE: str = "CPUAndGPU"
+# CoreML 5+ MLProgram 格式（macOS 14+ 基线原生支持）：
+#   - 将 YOLO / Pose CoreML 分区从 11 段压减至 3 段（596/605 与 630/640 节点），
+#     TopK / GatherElements 后处理自动留 CPU（仅 0.27 ms），兼得 2.4-5.5× 提速与 0 漂移。
+#   - 配合持久化 ModelCacheDirectory，二次启动跳过重编译，6 模型初始化从 ~4.5s 降至 ~1.5s。
+_COREML_MODEL_FORMAT: str = "MLProgram"
 
 
 def _file_checksum(path: Path) -> str:
@@ -147,6 +152,12 @@ class PipelineManager:
             digest = verified.get(path.relative_to(models_dir).as_posix())
             return digest if digest is not None else _file_checksum(path)
 
+        import onnxruntime as ort
+
+        coreml_cache_dir = str(
+            self._settings.data_dir / "cache" / "coreml" / f"ort-{ort.__version__}"
+        )
+
         # ---- YOLO detector ----
         yolo_path = models_dir / "yolo26l-bird-det.onnx"
         if yolo_path.exists():
@@ -156,6 +167,8 @@ class PipelineManager:
             providers = resolve_providers(
                 self._settings.yolo_provider,
                 coreml_compute_units=_COREML_NO_ANE,
+                coreml_model_format=_COREML_MODEL_FORMAT,
+                coreml_cache_dir=coreml_cache_dir,
             )
             # The shipped 1280px detector is slower with DirectML graph
             # partitioning on RX 7900 XTX. Keep auto detection on CPU; the
@@ -213,6 +226,8 @@ class PipelineManager:
             providers = resolve_providers(
                 self._settings.pose_provider,
                 coreml_compute_units=_COREML_NO_ANE,
+                coreml_model_format=_COREML_MODEL_FORMAT,
+                coreml_cache_dir=coreml_cache_dir,
             )
             await logger.ainfo(
                 "Loading bird flight classifier v1",
@@ -252,6 +267,8 @@ class PipelineManager:
             providers = resolve_providers(
                 self._settings.pose_provider,
                 coreml_compute_units=_COREML_NO_ANE,
+                coreml_model_format=_COREML_MODEL_FORMAT,
+                coreml_cache_dir=coreml_cache_dir,
             )
             await logger.ainfo("Loading pose detector v2", path=str(pose_path))
             try:
@@ -283,7 +300,11 @@ class PipelineManager:
         clipiqa_path = models_dir / "clipiqa_plus.onnx"
         clipiqa_session = None
         if clipiqa_path.exists():
-            providers = resolve_providers(self._settings.iqa_provider)
+            providers = resolve_providers(
+                self._settings.iqa_provider,
+                coreml_model_format=_COREML_MODEL_FORMAT,
+                coreml_cache_dir=coreml_cache_dir,
+            )
             await logger.ainfo("Loading CLIPIQA+", path=str(clipiqa_path))
             try:
                 clipiqa_session = create_session(str(clipiqa_path), providers=providers)
@@ -301,7 +322,11 @@ class PipelineManager:
         hyperiqa_path = models_dir / "hyperiqa.onnx"
         hyperiqa_session = None
         if hyperiqa_path.exists():
-            providers = resolve_providers(self._settings.iqa_provider)
+            providers = resolve_providers(
+                self._settings.iqa_provider,
+                coreml_model_format=_COREML_MODEL_FORMAT,
+                coreml_cache_dir=coreml_cache_dir,
+            )
             await logger.ainfo("Loading HyperIQA", path=str(hyperiqa_path))
             try:
                 hyperiqa_session = create_session(str(hyperiqa_path), providers=providers)
@@ -336,6 +361,8 @@ class PipelineManager:
             self._model_status["hyperiqa"] = False
             self._model_providers.pop("clipiqa", None)
             self._model_providers.pop("hyperiqa", None)
+            self._provider_details.pop("clipiqa", None)
+            self._provider_details.pop("hyperiqa", None)
             checksums.pop("clipiqa", None)
             checksums.pop("hyperiqa", None)
 
@@ -414,15 +441,19 @@ class PipelineManager:
                 missing=missing,
             )
 
-        from engine.core.windows_resources import MemoryBoundLimiter, configure_windows
+        from engine.core.windows_resources import (
+            MemoryBoundLimiter,
+            configure_macos,
+            configure_windows,
+        )
 
         self.resource_profile = configure_windows(
             self._settings,
             native_gpu=self._model_providers.get("yolo") == "AMDGPUExecutionProvider",
-        )
+        ) or configure_macos(self._settings)
         self._analysis_slots = MemoryBoundLimiter(self._settings.analysis_concurrency)
         if self.resource_profile:
-            await logger.ainfo("Configured Windows processing pipelines", **self.resource_profile)
+            await logger.ainfo("Configured platform processing pipelines", **self.resource_profile)
         self._pipeline_version = self._compute_version(checksums)
         await logger.ainfo(
             "Pipeline initialized",
@@ -438,6 +469,7 @@ class PipelineManager:
         # A cache location changes startup performance, not model results.
         for values in options.values():
             values.pop("cache_dir", None)
+            values.pop("ModelCacheDirectory", None)
         self._provider_details[model_id] = {
             "chain": list(session.get_providers()),
             "options": options,
@@ -510,9 +542,10 @@ class PipelineManager:
         h.update(f"ort:{ort.__version__}".encode())
         ep_str = ",".join(sorted(self._model_providers.values()))
         h.update(f"ep:{ep_str}".encode())
-        # CoreML EP compute_units（"CPUAndGPU" 关 ANE）— 改这个会改推理结果
-        # （ANE bug 路径 vs Metal GPU 路径），必须进 hash 让 cache 失效。
+        # CoreML EP compute_units（"CPUAndGPU" 关 ANE）与 ModelFormat（"MLProgram"）
+        # 会影响图划分与数值精度，必须进 hash 让旧版本 cache 失效。
         h.update(f"cml_no_ane:{_COREML_NO_ANE}".encode())
+        h.update(f"cml_fmt:{_COREML_MODEL_FORMAT}".encode())
         runtime: dict[str, str] = {"onnxruntime": ort.__version__}
         for package in ("torch", "transformers", "numpy", "pillow", "rawpy"):
             try:
@@ -635,7 +668,14 @@ class PipelineManager:
 
     def _analyze_sync(self, image_path: Path, photo_id: str) -> PipelineResult:
         """Synchronous pipeline execution (runs in thread pool)."""
-        assert self._detector is not None
+        # Snapshot model handles locally so a concurrent shutdown/close() cannot null them mid-run.
+        detector = self._detector
+        detector_cpu_fallback = self._detector_cpu_fallback
+        pose_detector = self._pose
+        assessor = self._assessor
+        species_classifier = self._species
+        if detector is None:
+            raise RuntimeError("Pipeline closed before analysis started")
 
         # 各阶段耗时（debug 用，info 级日志）
         t_load_ms = 0.0
@@ -645,27 +685,27 @@ class PipelineManager:
         t_species_ms = 0.0
 
         _t = time.perf_counter()
-        # Full-resolution image in display orientation. Every downstream crop is cut from
-        # this original image array. Letterbox-resized tensors are only transient model
-        # inputs; their coordinates are always mapped back before cropping.
-        image = load_image(image_path)
+        # Full-resolution uint8 image in display orientation (134 MB vs 536 MB float32 for 45 MP).
+        # Every downstream crop is cut from this original image array; float32 conversion happens
+        # lazily only on the resized 1280px/640px/224px/384px model inputs.
+        image = load_image_u8(image_path)
         t_load_ms = (time.perf_counter() - _t) * 1000
         img_h, img_w = image.shape[:2]
 
         # Step 1: YOLO detection on full image（CoreML EP 偶发 GatherElements 崩 → fallback CPU）
         _t = time.perf_counter()
         try:
-            boxes = self._detector.detect(
+            boxes = detector.detect(
                 image, confidence_threshold=self._settings.yolo_confidence
             )
         except Exception as e:
-            if self._detector_cpu_fallback is not None:
+            if detector_cpu_fallback is not None:
                 logger.warning(
                     "YOLO GPU failed, falling back to CPU",
                     photo_id=photo_id,
                     error=str(e)[:120],
                 )
-                boxes = self._detector_cpu_fallback.detect(
+                boxes = detector_cpu_fallback.detect(
                     image,
                     confidence_threshold=self._settings.yolo_confidence,
                 )
@@ -717,9 +757,9 @@ class PipelineManager:
             crop_origin = (round(pad_x1), round(pad_y1))
             pose_info = None
             _t = time.perf_counter()
-            if self._pose is not None:
+            if pose_detector is not None:
                 try:
-                    pose_info = self._pose.detect(
+                    pose_info = pose_detector.detect(
                         technical_crop,
                         crop_origin=crop_origin,
                     )
@@ -729,8 +769,8 @@ class PipelineManager:
 
             # Step 3b: quality assessment (降级：IQA 模型缺失时用固定分数)
             _t = time.perf_counter()
-            if self._assessor is not None:
-                scores = self._assessor.assess(
+            if assessor is not None:
+                scores = assessor.assess(
                     semantic_crop=semantic_crop,
                     technical_crop=technical_crop,
                 )
@@ -747,13 +787,12 @@ class PipelineManager:
             # Step 4: species classification (gated)
             species_candidates: list[SpeciesCandidate] = []
             _t = time.perf_counter()
-            if self._should_run_species(pose_info, bird_grade):
-                assert self._species is not None
+            if species_classifier is not None and self._should_run_species(pose_info, bird_grade):
                 species_crop = self._prepare_species_crop(
                     image, box.x1, box.y1, box.x2, box.y2, img_w, img_h
                 )
                 try:
-                    species_candidates = self._species.classify(species_crop)
+                    species_candidates = species_classifier.classify(species_crop)
                 except Exception:
                     logger.exception("Species classification failed", photo_id=photo_id)
             t_species_ms += (time.perf_counter() - _t) * 1000

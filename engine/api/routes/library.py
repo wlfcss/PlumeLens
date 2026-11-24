@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
+import time
 import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
@@ -14,7 +15,7 @@ from typing import Any, Literal, cast
 
 import aiosqlite
 import structlog
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import TypeAdapter
 
@@ -23,6 +24,8 @@ from engine.api.schemas.library import (
     LibraryDetail,
     LibraryStatus,
     LibrarySummary,
+    PhotoBatchRequest,
+    PhotoBatchResponse,
     PhotoReview,
     PhotoSummary,
     RelinkLibraryRequest,
@@ -30,6 +33,12 @@ from engine.api.schemas.library import (
     UpdateLibraryRequest,
 )
 from engine.api.schemas.selection import SelectionQueryRequest, SelectionQueryResponse
+from engine.core.budgets import (
+    MAX_LIBRARY_PAGE_LIMIT,
+    MAX_SELECTION_PAGE_LIMIT,
+    SUMMARY_ROWS_PER_CHUNK,
+    SUMMARY_STREAM_THRESHOLD,
+)
 from engine.core.config import settings as app_settings
 from engine.core.database import Database
 from engine.services import archive_cache
@@ -42,6 +51,7 @@ from engine.services.event_bus import (
 from engine.services.library_projection import (
     LibraryProjectionNotFound,
     load_library_photos,
+    load_library_photos_by_ids,
     load_photo_review,
     projection_revision,
 )
@@ -55,7 +65,11 @@ from engine.services.library_projection import (
     _match_overrides_to_detections as _match_overrides_to_detections,
 )
 from engine.services.library_relink import RelinkAnalysis, RelinkedPhoto, verify_relinked_photo
-from engine.services.library_summary import prepare_library_summary
+from engine.services.library_summary import (
+    dump_compact_summary_row,
+    normalize_root_prefix,
+    prepare_library_summary,
+)
 from engine.services.photo_input import invalidate_derived_input
 from engine.services.scanner import backfill_hashes, scan_library
 from engine.services.selection import (
@@ -645,8 +659,8 @@ async def update_library(
 
 
 _SUMMARY_BATCH_MEDIA_TYPE = "application/x-ndjson"
-_SUMMARY_STREAM_THRESHOLD = 2_048
-_SUMMARY_ROWS_PER_CHUNK = 256
+_SUMMARY_STREAM_THRESHOLD = SUMMARY_STREAM_THRESHOLD
+_SUMMARY_ROWS_PER_CHUNK = SUMMARY_ROWS_PER_CHUNK
 _SUMMARY_ROWS = TypeAdapter(list[PhotoSummary])
 
 
@@ -654,21 +668,36 @@ def _encode_summary_rows(photos: list[PhotoSummary]) -> bytes:
     return _SUMMARY_ROWS.dump_json(photos)[1:-1]
 
 
+def _encode_compact_summary_rows(photos: list[PhotoSummary], root_prefix: str) -> bytes:
+    return b",".join(dump_compact_summary_row(photo, root_prefix) for photo in photos)
+
+
 async def _stream_library_summary(
-    detail: LibraryDetail, photos: list[PhotoSummary], *, batches: bool = False
+    detail: LibraryDetail,
+    photos: list[PhotoSummary],
+    *,
+    batches: bool = False,
+    compact: bool = False,
 ) -> AsyncIterator[bytes]:
     # The nested models have already been validated by library projection.
     # Reuse their serializers and the envelope fields used by the buffered path.
+    root_prefix = normalize_root_prefix(detail.library.root_path) if compact else ""
     if batches:
         yield detail.model_dump_json(exclude={"photos"}).encode() + b"\n"
     else:
         yield b'{"library":' + detail.library.model_dump_json().encode() + b',"photos":['
     for start in range(0, len(photos), _SUMMARY_ROWS_PER_CHUNK):
         await asyncio.sleep(0)
-        rows = _encode_summary_rows(photos[start : start + _SUMMARY_ROWS_PER_CHUNK])
+        chunk = photos[start : start + _SUMMARY_ROWS_PER_CHUNK]
         if batches:
+            rows = (
+                _encode_compact_summary_rows(chunk, root_prefix)
+                if compact
+                else _encode_summary_rows(chunk)
+            )
             yield b"[" + rows + b"]\n"
         else:
+            rows = _encode_summary_rows(chunk)
             yield (b"," if start else b"") + rows
     if batches:
         # The count is from the same photo snapshot. Library metadata can be
@@ -691,17 +720,20 @@ async def _stream_prepared_summary(
 @router.get("/{library_id}", response_model=LibraryDetail)
 async def library_detail(
     request: Request,
+    response: Response,
     library_id: str,
-    limit: int | None = Query(default=None, ge=1, le=1000),
+    limit: int | None = Query(default=None, ge=1, le=MAX_LIBRARY_PAGE_LIMIT),
     offset: int = Query(default=0, ge=0),
     include_selection_snapshot: bool = Query(default=False),
     view: Literal["full", "summary"] = Query(default="full"),
+    summary_format: Literal["compact-v1"] | None = Query(default=None),
 ) -> LibraryDetail | StreamingResponse:
     """GET /library/{id} — summary + photos.
 
     默认保持旧契约一次返回全量照片。传入 limit/offset 时按
     `(library_id, file_mtime)` 索引分页,为大图库前端逐步迁移做准备。
     """
+    started = time.perf_counter()
     db = await _db(request)
     summary = await _fetch_library_summary(db, library_id)
     if summary is None:
@@ -709,6 +741,7 @@ async def library_detail(
     photo_total = summary.total_count
 
     batches = request.headers.get("accept") == _SUMMARY_BATCH_MEDIA_TYPE
+    use_compact = batches and summary_format == "compact-v1"
     try:
         if (
             batches
@@ -722,6 +755,8 @@ async def library_detail(
                 library_id,
                 include_selection_snapshot,
                 projections.latest(library_id) if include_selection_snapshot else None,
+                root_path=summary.root_path,
+                compact=use_compact,
             )
             if prepared.selection is not None:
                 projections.store(library_id, prepared.selection)
@@ -731,11 +766,20 @@ async def library_detail(
                 projection_revision=prepared.revision,
                 photo_total=photo_total,
                 photo_offset=offset,
+                summary_format="compact-v1" if use_compact else None,
             )
+            elapsed_ms = (time.perf_counter() - started) * 1000.0
+            payload_bytes = sum(len(r) for r in prepared.rows)
             return StreamingResponse(
                 _stream_prepared_summary(detail, prepared.rows),
                 media_type=_SUMMARY_BATCH_MEDIA_TYPE,
-                headers={"Vary": "Accept", "Cache-Control": "no-store"},
+                headers={
+                    "Vary": "Accept",
+                    "Cache-Control": "no-store",
+                    "X-PlumeLens-Projection-Ms": f"{elapsed_ms:.1f}",
+                    "X-PlumeLens-Photo-Count": str(len(prepared.rows)),
+                    "X-PlumeLens-Payload-Bytes": str(payload_bytes),
+                },
             )
         photos = await load_library_photos(
             db, library_id, limit=limit, offset=offset, summary=view == "summary"
@@ -767,14 +811,59 @@ async def library_detail(
         photo_offset=offset,
         photo_limit=limit,
         next_offset=next_offset,
+        summary_format="compact-v1" if (stream and use_compact) else None,
     )
+    elapsed_ms = (time.perf_counter() - started) * 1000.0
     if stream:
         return StreamingResponse(
-            _stream_library_summary(detail, cast("list[PhotoSummary]", photos), batches=batches),
+            _stream_library_summary(
+                detail,
+                cast("list[PhotoSummary]", photos),
+                batches=batches,
+                compact=use_compact,
+            ),
             media_type=_SUMMARY_BATCH_MEDIA_TYPE if batches else "application/json",
-            headers={"Vary": "Accept", "Cache-Control": "no-store"},
+            headers={
+                "Vary": "Accept",
+                "Cache-Control": "no-store",
+                "X-PlumeLens-Projection-Ms": f"{elapsed_ms:.1f}",
+                "X-PlumeLens-Photo-Count": str(len(photos)),
+            },
         )
+    response.headers["X-PlumeLens-Projection-Ms"] = f"{elapsed_ms:.1f}"
+    response.headers["X-PlumeLens-Photo-Count"] = str(len(photos))
     return detail
+
+
+@router.post("/{library_id}/photos/batch", response_model=PhotoBatchResponse)
+async def library_photos_batch(
+    request: Request,
+    response: Response,
+    library_id: str,
+    body: PhotoBatchRequest,
+    projection_revision: str | None = Query(default=None, pattern=r"^[0-9a-f]{64}$"),
+) -> PhotoBatchResponse:
+    """Hydrate a bounded page of photo summaries/rows by ID with scene-consistent consensus."""
+    started = time.perf_counter()
+    db = await _db(request)
+    if projection_revision is not None:
+        projections: SelectionProjectionCache = request.app.state.selection_projections
+        if projections.get(library_id, projection_revision) is None:
+            raise HTTPException(status_code=409, detail="Selection snapshot expired")
+    try:
+        photos = await load_library_photos_by_ids(
+            db, library_id, body.photo_ids, summary=body.view == "summary"
+        )
+    except LibraryProjectionNotFound as exc:
+        raise HTTPException(status_code=404, detail="Library not found") from exc
+    elapsed_ms = (time.perf_counter() - started) * 1000.0
+    response.headers["X-PlumeLens-Projection-Ms"] = f"{elapsed_ms:.1f}"
+    response.headers["X-PlumeLens-Photo-Count"] = str(len(photos))
+    return PhotoBatchResponse(
+        library_id=library_id,
+        projection_revision=projection_revision,
+        photos=photos,
+    )
 
 
 @router.get("/photo/{photo_id}/review", response_model=PhotoReview)
@@ -791,11 +880,15 @@ async def photo_review(request: Request, photo_id: str) -> PhotoReview:
 @router.post("/{library_id}/selection/query", response_model=SelectionQueryResponse)
 async def selection_query(
     request: Request,
+    response: Response,
     library_id: str,
     body: SelectionQueryRequest,
     projection_revision: str | None = Query(default=None, pattern=r"^[0-9a-f]{64}$"),
+    limit: int | None = Query(default=None, ge=1, le=MAX_SELECTION_PAGE_LIMIT),
+    offset: int = Query(default=0, ge=0),
 ) -> SelectionQueryResponse:
     """Read-only authoritative filters, effective identities and deduplicated facets."""
+    started = time.perf_counter()
     db = await _db(request)
     projection = None
     if projection_revision is not None:
@@ -804,9 +897,15 @@ async def selection_query(
         if projection is None:
             raise HTTPException(status_code=409, detail="Selection snapshot expired")
     try:
-        return await query_selection(db, library_id, body, projection=projection)
+        result = await query_selection(
+            db, library_id, body, projection=projection, limit=limit, offset=offset
+        )
     except SelectionLibraryNotFound as exc:
         raise HTTPException(status_code=404, detail="Library not found") from exc
+    elapsed_ms = (time.perf_counter() - started) * 1000.0
+    response.headers["X-PlumeLens-Projection-Ms"] = f"{elapsed_ms:.1f}"
+    response.headers["X-PlumeLens-Photo-Count"] = str(len(result.matched_photo_ids))
+    return result
 
 
 @router.post("/photo/{photo_id}/thumbnail", status_code=200)

@@ -1676,7 +1676,7 @@ test.describe('Photo decision flow (mock backend)', () => {
     await clearButton.click()
     const confirm = page.locator('.settings-confirm')
     await expect(confirm).toContainText('确认清理本地识别记录')
-    await confirm.getByRole('button', { name: '关闭' }).click()
+    await confirm.getByRole('button', { name: '取消' }).click()
     await expect(confirm).toHaveCount(0)
 
     await clearButton.click()

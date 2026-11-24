@@ -16,7 +16,6 @@ import {
   useMemo,
   useRef,
   useState,
-  type RefObject,
 } from 'react'
 import type { useTranslation } from 'react-i18next'
 import { useVirtualizer } from '@tanstack/react-virtual'
@@ -43,8 +42,9 @@ import type { ArchiveTab, PhotoRecord, SpeciesRecord } from '@/lib/workspace-typ
 import { formatRatio, formatScore, type Tone } from '@/lib/photo-helpers'
 import { speciesArtworkAssetUrl } from '@/lib/species-artwork'
 import { formatSpeciesPinyin } from '@/lib/species-pinyin'
-import { getSpeciesWiki } from '@/lib/species-wiki'
+import { useSpeciesWikiBody } from '@/lib/species-wiki'
 import { cn } from '@/lib/utils'
+import { useModalDialog } from '@/hooks/use-modal-dialog'
 import {
   useResponsiveGridLayout,
   useVirtualScrollMargin,
@@ -118,13 +118,13 @@ function VirtualizedCollectionBoard({
   activeSpeciesId,
   groups,
   onSelectSpecies,
-  scrollRef,
+  scrollElement,
   t,
 }: {
   activeSpeciesId: string | null
   groups: SpeciesCollectionGroup[]
   onSelectSpecies: (speciesId: string | null) => void
-  scrollRef: RefObject<HTMLElement | null>
+  scrollElement: HTMLElement | null
   t: ReturnType<typeof useTranslation>['t']
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null)
@@ -139,7 +139,7 @@ function VirtualizedCollectionBoard({
     COLLECTION_GRID_GAP,
   )
   const columns = gridLayout.columns
-  const scrollMargin = useVirtualScrollMargin(containerRef, scrollRef.current)
+  const scrollMargin = useVirtualScrollMargin(containerRef, scrollElement, containerElement)
   const rows = useMemo<CollectionVirtualRow[]>(() => {
     const nextRows: CollectionVirtualRow[] = []
     groups.forEach((group, groupIndex) => {
@@ -167,7 +167,7 @@ function VirtualizedCollectionBoard({
       if (row.type === 'heading') return `heading:${row.group.id}`
       return `cards:${row.groupId}:${row.species[0]?.id ?? index}`
     },
-    getScrollElement: () => scrollRef.current,
+    getScrollElement: () => scrollElement,
     estimateSize: (index) =>
       rows[index]?.type === 'heading'
         ? COLLECTION_HEADING_ESTIMATED_HEIGHT
@@ -248,6 +248,7 @@ function SpeciesPhotosModal({
   species: SpeciesRecord
   t: ReturnType<typeof useTranslation>['t']
 }) {
+  const dialogRef = useModalDialog()
   const [selectedPhotoId, setSelectedPhotoId] = useState<string | null>(photos[0]?.id ?? null)
 
   useEffect(() => {
@@ -257,8 +258,20 @@ function SpeciesPhotosModal({
   const selectedPhoto = photos.find((photo) => photo.id === selectedPhotoId) ?? photos[0] ?? null
 
   return (
-    <div className="overlay-backdrop">
-      <div className="species-photo-panel">
+    <dialog
+      ref={dialogRef}
+      aria-label={`${species.name} — ${t('archive.photos.label')}`}
+      className="overlay-backdrop"
+      onCancel={(event) => {
+        event.preventDefault()
+        event.stopPropagation()
+        onClose()
+      }}
+      onPointerDown={(event) => {
+        if (event.target === event.currentTarget) onClose()
+      }}
+    >
+      <div className="species-photo-panel" onPointerDown={(event) => event.stopPropagation()}>
         <div className="modal-heading">
           <div>
             <SectionLabel label={t('archive.photos.label')} />
@@ -336,7 +349,7 @@ function SpeciesPhotosModal({
           <p className="archive-map-empty">{t('archive.photos.empty')}</p>
         )}
       </div>
-    </div>
+    </dialog>
   )
 }
 
@@ -405,6 +418,11 @@ export function ArchiveScreen({
   t: ReturnType<typeof useTranslation>['t']
 }) {
   const archiveScrollRef = useRef<HTMLElement | null>(null)
+  const [archiveScrollElement, setArchiveScrollElement] = useState<HTMLElement | null>(null)
+  const setArchiveScrollNode = useCallback((node: HTMLElement | null) => {
+    archiveScrollRef.current = node
+    setArchiveScrollElement(node)
+  }, [])
   const collectedSpeciesCount = archiveSpecies.filter((species) => species.collected).length
   const [userSelectedFilter, setUserSelectedFilter] = useState<SpeciesCollectionFilter | null>(null)
   const collectionFilter: SpeciesCollectionFilter =
@@ -465,9 +483,8 @@ export function ArchiveScreen({
         null,
     )
   }, [archiveTab, displayedActiveSpecies, filteredArchiveSpecies, onSelectSpecies])
-  const activeSpeciesWiki = useMemo(
-    () => (displayedActiveSpecies ? getSpeciesWiki(displayedActiveSpecies.latinName) : null),
-    [displayedActiveSpecies?.latinName],
+  const { body: activeSpeciesWikiBody, loading: activeSpeciesWikiLoading } = useSpeciesWikiBody(
+    displayedActiveSpecies?.latinName,
   )
   const activeSpeciesImageUrl = speciesArtworkAssetUrl(displayedActiveSpecies?.latinName)
   const activeSpeciesArtworkAspect = useSpeciesArtworkAspect(activeSpeciesImageUrl)
@@ -489,7 +506,7 @@ export function ArchiveScreen({
     <main className={cn('archive-screen', archiveTab === 'map' && 'archive-screen--map')}>
       <section
         className={cn('archive-main selection-scroll', archiveTab === 'map' && 'archive-main--map')}
-        ref={archiveScrollRef}
+        ref={setArchiveScrollNode}
       >
         <div className="archive-heading">
           <div>
@@ -499,6 +516,7 @@ export function ArchiveScreen({
           <div className="mini-segment">
             {archiveTabs.map((tab) => (
               <button
+                aria-pressed={archiveTab === tab}
                 className={cn(archiveTab === tab && 'is-active')}
                 key={tab}
                 onClick={() => onSetArchiveTab(tab)}
@@ -534,7 +552,7 @@ export function ArchiveScreen({
               activeSpeciesId={displayedActiveSpecies?.id ?? null}
               groups={collectionGroups}
               onSelectSpecies={onSelectSpecies}
-              scrollRef={archiveScrollRef}
+              scrollElement={archiveScrollElement}
               t={t}
             />
             {collectionGroups.length === 0 ? (
@@ -578,9 +596,14 @@ export function ArchiveScreen({
         >
           {displayedActiveSpecies ? (
             (() => {
-              const wiki = activeSpeciesWiki
-              const extract = wiki?.zh_extract ?? t('archive.detail.noChineseExtract')
-              const sourceUrl = wiki?.zh_url ?? null
+              const wiki = activeSpeciesWikiBody
+              const extract = activeSpeciesWikiLoading
+                ? t('archive.detail.loadingExtract')
+                : (wiki?.zh_extract ?? wiki?.en_extract ?? t('archive.detail.noChineseExtract'))
+              const sourceUrl = wiki?.zh_url ?? wiki?.en_url ?? null
+              const sourceLabel = wiki?.zh_url
+                ? t('archive.detail.source')
+                : t('speciesDetail.sourceEn')
               const pinyinText = formatSpeciesPinyin(displayedActiveSpecies.name)
               return (
                 <div className="archive-detail__content">
@@ -612,7 +635,7 @@ export function ArchiveScreen({
                         target="_blank"
                         rel="noreferrer"
                       >
-                        {t('archive.detail.source')}
+                        {sourceLabel}
                       </a>
                     ) : null}
                     <div className="stat-stack">

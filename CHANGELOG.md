@@ -9,8 +9,26 @@
 - 深度复核新增同组 A/B 两帧并排对照（快捷键 `C` 开关），支持同步放大平移、`A`/`B` 焦点切换独立评级、帧 B 前后步进及 `Esc` 返回原复核位置；同时在复核面板直观解释当前有效档位、姿态升降档、人工覆盖及无鸟/失败原因。
 - 导出面板新增面向 Lightroom 的内置导出预设（标准导入 / 精选分档 / 仅 XMP 边车）及自定义命名预设管理。
 - 新增后端全局羽迹物种聚合接口 `/archive/species/summary`；羽迹页在已有个人确认记录时默认优先展示个人收集视图，保留一键切换完整图鉴，地图补齐离线待解析与加载失败重试状态。
+- 新增按 ID 批量水合接口 `POST /library/{id}/photos/batch`、服务端选片查询分页参数（`limit`/`offset`/`next_offset`）以及 `compact-v1` 紧凑摘要编码，并统一服务端响应预算与观测头（`X-PlumeLens-Projection-Ms`/`Photo-Count`/`Payload-Bytes`）。
+
+### 升级与兼容
+
+- 升级 Electron 运行时至 `45.4.1`（Chromium 156 / Node 24.22），并将 macOS 最低系统版本基线提升至 **`14.0`（Sonoma）**以支持 PyTorch 2.14.x MPS 加速：
+  - 适配 Electron 42+ 取消 postinstall 下载机制，新增 `npm run ensure:electron` 与 CI 显式安装步骤，修复开发态 Electron 二进制路径解析。
+  - 适配 Electron 43+ 原生文件夹选择器默认目录变化，独立持久化导入/导出最近路径并传入 `defaultPath`。
+  - 迁移 `electron/user-settings.ts` 至 Electron 45+ 异步 `safeStorage` API（`isAsyncEncryptionAvailable` / `encryptStringAsync` / `decryptStringAsync` 及 `shouldReEncrypt` 自动重加密），并改为 `0o600` 原子写盘与损坏容错。
+  - 启用 `electron-vite` main/preload/renderer `esbuild` 压缩与显式 `node24`/`chrome156` 编译目标。
+- 全面升级 Python 与前端依赖（OSV 复扫 Python 73 个包 **0 漏洞**，前端生产依赖 **0 漏洞**）：
+  - **图像与相机解码**：升级 `pillow 12.2.0 → 13.0.0`（修复数十个图像解码器 Critical/High 漏洞）、`rawpy 0.26.1 → 0.28.0`（底层 LibRaw `0.22.2`，新增 Nikon Z6 III/Z8/Z9 HE*、Canon R6 Mark III、Sony A7 V/A7R VI、OM-3 与 DNG 1.7 等机身格式支持）。
+  - **推理引擎**：升级 `onnxruntime 1.25.0 → 1.32.0`（macOS/Linux CoreML 初始化与内存优化）、`torch 2.11.0 → 2.14.1` + `torchvision 0.26.0 → 0.29.2`（锁定 `<2.15` 保持 macOS 14+ 兼容，获得 AOT Metal shaders / FlexAttention / `bf16` GEMV 与 MPS allocator 优化）、`transformers 5.6.2 → 5.24.0`、`safetensors 0.7.0 → 0.8.0`。
+  - **Web / 安全 / 序列化栈**：升级 `fastapi 0.165.0`、`starlette 1.10.0`、`anyio 4.16.0`、`pydantic 2.14.4`、`pydantic-core 2.50.5`、`pydantic-settings 2.16.3`、`certifi 2026.11.20`、`idna 3.20`、`filelock 4.3.1`、`uvicorn 0.54.0`、`structlog 26.1.0`、`pyinstaller 6.22.3`。
+  - **前端与工具链**：升级 `echarts 6.1.0`（修复 tooltip XSS 并优化轴缩放性能）、`i18next 26.7.2`、`react 19.3.1`、`@tanstack/react-query 5.108.4`、`@tanstack/react-virtual 3.14.28`、`zustand 5.1.0`、`tailwindcss 4.3.5`、`vite 7.3.8`、`vitest 4.1.12`、`electron-builder 26.18.0`、`@playwright/test 1.65.1`、`@types/node 24`。
 
 ### 修复
+
+- **安全与主进程加固**：彻底移除向渲染层泄露 Bearer Token 的 `window.plumelens.engineSseUrl`；收紧 `isTrustedAppNavigation` 仅允许应用 `index.html`、`open-path-in-finder` 对文件改走 `showItemInFolder`、`open-in-editor` 校验常规文件；校验敏感 IPC sender；修复 `preload.ts` `ensureAuth()` 竞态、401 缓存失效与 SSE reader 清理；修复 `ProcessManager.restart()` 与崩溃重启竞态及日志流句柄泄漏；修复最小化窗口触发关闭确认弹窗卡死问题；收紧 macOS CI workflow 权限并将发布拆分至独立 `publish` job。
+- **后端全量审计修复**：修复并发数据库关闭锁顺序与停机清理顺序；修复多线程推理器热重载/关闭空指针；修复多鸟重排时清除人工物种误删他鸟标注；为羽迹缓存加入代际版本号防陈旧快照回写，并将地理聚合切换至非阻塞 WAL 只读快照；修复导出目标重名拼接、缺图/未使用同伴文件误中断与 XMP XML 1.0 控制字符清洗；修复清空本地历史残留 `selection_projections` 与导出任务；修复扫描器跨库路径冲突与大库哈希补算游标分页；修复批处理启动锁、暂停态库状态与 SSE 心跳/断连退出。
+- **前端逻辑与 UI/UX 优化**：修复首页因 `.start-screen` 纵向滚动与底部装饰鸟图负边距溢出导致页面可竖滚及 `.pipeline-bar` 脱离底边问题（改用 `overflow: clip` + 独立裁切容器 + 最近文件夹自适应内滚）；修复删除当前图库 404/SSE 残留、健康检查与队列轮询频率控制、物种墙与选片网格虚拟列表滚动偏移重排；修复导出预设样式、导出前检失败锁死表单、未定义 CSS 变量与动画名；修复深度复核 A/B 对照右栏未跟随帧 B 与双栏头高度错位、羽迹窄屏右侧详栏截断不可滚动、堆叠卡片嵌套按钮键盘陷阱；将全屏复核与地图点位详卡统一迁移至原生 `<dialog>`；补齐 IME 组合态保护、焦点环、ARIA 状态与中英文 i18n 文案。
 
 - 重新关联图库时验证照片及同伴文件的身份。同内容迁移可继续复用已有分析和人工修正，内容变化或身份无法核验的条目需要重扫。
 - 导出 JPEG 与 RAW `.xmp` 边车时均安全合并已有标准 XMP，保留原有 Lightroom 调色、关键词与编辑字段；遇到扩展、超限或损坏 XMP 时原样保留原文件/原边车，并在导出清单明确标注未写入新元数据。
@@ -22,6 +40,12 @@
 
 ### 性能
 
+- **macOS Apple Silicon 推理管线大幅提速与冷启动优化**：
+  - CoreML Execution Provider 全面切换为 CoreML 5+ `ModelFormat=MLProgram`（保持 YOLO/Pose/Flight `CPUAndGPU` 关 ANE，IQA 默认 `ALL`），将 YOLO 与 Pose 的 CoreML 子图分区从 11 段压减至 3 段（596/605 与 630/640 节点覆盖），同时 TopK/GatherElements 后处理自动留 CPU（仅 0.27 ms），单模型提速 **2.4×–5.5×** 且与 CPU 基准零漂移（YOLO IoU `1.0000` / Pose 关键点误差 `0.00 px`）；新增按 ORT 版本隔离的持久化 `ModelCacheDirectory`（损坏自愈回退），二次冷启动从 ~4.5s 缩短至 **~1.5s（-66%）**。
+  - 优化 `SpeciesClassifier.classify`：将 CPU 侧 PIL 缩放归一化移出 `_infer_lock` 锁，取消每只鸟都触发 `torch.mps.empty_cache()` 改为每 64 次周期性清理，并发下额外提速 **+20%** 且输出比特级一致。
+  - 新增 macOS 统一内存与核心数自适应并发（`configure_macos`：≥32 GB 且 ≥10 核默认 4 并发、16–31 GB 默认 3 并发），并限制 macOS 并发下 ONNX CPU 回退线程自旋。
+  - 全链路改用 `uint8` 惰性转 `float32` 图像管线（45 MP 照片单图内存从 536 MB 降至 **134 MB**，解码+letterbox 提速 **38%**），并在 `analyzer.py` 复用未变更主文件的已存 SHA-256 避免重复全盘读盘哈希；Apple M5 Max 实测常规鸟图吞吐从 ~212–224 提升至 **~390 张/分（+75%）**，24 MP 大分辨率 JPEG 从 148 提升至 **236 张/分（+59%）**。
+- 拆离 1,591 种鸟类百科正文为按需动态加载 chunk（`species-wiki-bodies.json`），首屏主 bundle 从 4.2 MB 缩减至 1.36 MB（-68%）；结合 `compact-v1` 紧凑 NDJSON 摘要大幅降低 5 万张大库首屏传输体积。
 - 图库投影使用独立 SQLite 只读快照，减少大库读取占用写锁时对分析入库的阻塞。
 - 合并后台分析引起的图库详情刷新。选片按所显示的图库修订计算筛选成员和计数，导出时继续校验实时修订。
 - 图库首屏读取轻量摘要，保留筛选、分组与列表展示所需信息。进入深度复核时按照片加载完整 EXIF、关键点和鸟种候选。

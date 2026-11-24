@@ -71,3 +71,6 @@ class SelectionQueryResponse(BaseModel):
     failed_count: int
     no_bird_count: int
     facets: list[SelectionSpeciesFacet]
+    offset: int = 0
+    limit: int | None = None
+    next_offset: int | None = None

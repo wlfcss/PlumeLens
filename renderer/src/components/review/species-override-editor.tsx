@@ -131,9 +131,14 @@ export function SpeciesOverrideEditor({
       {/* 多鸟图 bird tabs 在折叠头里 — 不展开就能切鸟,看不同 detection 的物种。
           切鸟按钮 stopPropagation 阻止冒泡到外层折叠 toggle。 */}
       {birds.length > 1 ? (
-        <div className="species-editor__birds" role="tablist">
+        <div
+          aria-label={t('selection.speciesEditor.bird')}
+          className="species-editor__birds"
+          role="group"
+        >
           {birds.map((bird) => (
             <button
+              aria-pressed={bird.index === activeBird.index}
               className={cn(
                 'species-editor__bird',
                 bird.index === activeBird.index && 'species-editor__bird--active',
@@ -218,6 +223,14 @@ export function SpeciesOverrideEditor({
             <input
               aria-label={t('selection.speciesEditor.search')}
               onChange={(event) => setQuery(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.nativeEvent.isComposing || event.keyCode === 229) return
+                if (event.key === 'Escape' && query) {
+                  event.preventDefault()
+                  event.stopPropagation()
+                  setQuery('')
+                }
+              }}
               placeholder={t('selection.speciesEditor.search')}
               value={query}
             />

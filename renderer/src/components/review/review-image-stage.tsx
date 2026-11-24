@@ -339,7 +339,7 @@ export function ReviewImageStage({
             )}
             key={`pose-${key}`}
             style={{ left: `${p.left}%`, top: `${p.top}%` }}
-            title={`${key}  ${(kp.confidence * 100).toFixed(0)}%`}
+            title={`${t(`selection.review.keypoints.${key}`)}  ${(kp.confidence * 100).toFixed(0)}%`}
           />,
         )
       }
@@ -354,7 +354,7 @@ export function ReviewImageStage({
             className="pose-point pose-point--torso"
             key={`pose-${key}`}
             style={{ left: `${p.left}%`, top: `${p.top}%` }}
-            title={`${key}  ${(kp.confidence * 100).toFixed(0)}%`}
+            title={`${t(`selection.review.keypoints.${key}`)}  ${(kp.confidence * 100).toFixed(0)}%`}
           />,
         )
       }
@@ -449,6 +449,7 @@ export function ReviewImageStage({
         {zoomOptions.map((option) => (
           <button
             aria-label={t('selection.review.zoomScale', { scale: option })}
+            aria-pressed={option === zoomScale}
             className={cn(option === zoomScale && 'review-zoom-control__item--active')}
             key={option}
             onClick={() => onZoomScaleChange(option)}

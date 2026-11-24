@@ -1,12 +1,13 @@
 import { resolve } from 'path'
-import { defineConfig, externalizeDepsPlugin } from 'electron-vite'
+import { defineConfig } from 'electron-vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 
 export default defineConfig({
   main: {
-    plugins: [externalizeDepsPlugin()],
     build: {
+      minify: 'esbuild',
+      target: 'node24',
       rollupOptions: {
         input: {
           index: resolve(__dirname, 'electron/main.ts'),
@@ -15,8 +16,9 @@ export default defineConfig({
     },
   },
   preload: {
-    plugins: [externalizeDepsPlugin()],
     build: {
+      minify: 'esbuild',
+      target: 'node24',
       rollupOptions: {
         input: {
           index: resolve(__dirname, 'electron/preload.ts'),
@@ -33,6 +35,8 @@ export default defineConfig({
   renderer: {
     root: resolve(__dirname, 'renderer'),
     build: {
+      minify: 'esbuild',
+      target: 'chrome156',
       rollupOptions: {
         input: {
           index: resolve(__dirname, 'renderer/index.html'),

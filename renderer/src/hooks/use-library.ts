@@ -9,7 +9,7 @@
  * - useBuildThumbnails: 构建缩略图
  */
 import { useMutation, useQueries, useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query'
-import { useEffect } from 'react'
+import { useEffect, useRef } from 'react'
 
 import {
   api,
@@ -125,14 +125,24 @@ export function useLibraryDetail(libraryId: string | null | undefined) {
  * 单独 useLibraryDetail 只对 active folder 生效，archive 页要看到所有物种就得这个。
  */
 export function useAllLibraryDetails(libraryIds: string[], enabled = true): LibraryDetail[] {
-  const results = useQueries({
+  const prevRef = useRef<LibraryDetail[]>([])
+  const details = useQueries({
     queries: (enabled ? libraryIds : []).map((id) => ({
       queryKey: LIBRARY_DETAIL_KEY(id),
       queryFn: ({ client, signal }) => limitedLibraryDetail(id, client, signal),
       staleTime: 2_000,
     })),
+    combine: (results) =>
+      results.map((r) => r.data).filter((d): d is LibraryDetail => d !== undefined),
   })
-  return results.map((r) => r.data).filter((d): d is LibraryDetail => d !== undefined)
+  if (
+    prevRef.current.length === details.length &&
+    prevRef.current.every((item, index) => item === details[index])
+  ) {
+    return prevRef.current
+  }
+  prevRef.current = details
+  return details
 }
 
 export function useLibraryEvents(libraryId: string | null | undefined, enabled = true) {
@@ -174,10 +184,20 @@ export function useLibraryEvents(libraryId: string | null | undefined, enabled =
       scheduleRefresh()
     }
 
+    const scheduleReconnect = (): void => {
+      if (cancelled) return
+      if (reconnectTimer !== null) clearTimeout(reconnectTimer)
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = null
+        connect()
+      }, 5000)
+    }
+
     const connect = (): void => {
       if (cancelled) return
       if (typeof window !== 'undefined' && window.plumelens?.engineSseSubscribe) {
-        unsubscribeBridge = window.plumelens.engineSseSubscribe(
+        let syncError = false
+        const unsub = window.plumelens.engineSseSubscribe(
           `/library/${libraryId}/events`,
           (bridgeEvent) => {
             if (cancelled) return
@@ -191,11 +211,17 @@ export function useLibraryEvents(libraryId: string | null | undefined, enabled =
             }
             logger.warn('Library event bridge closed, retrying in 5s:', bridgeEvent.message)
             needsCatchUp = true
+            syncError = true
             unsubscribeBridge?.()
             unsubscribeBridge = null
-            reconnectTimer = setTimeout(connect, 5000)
+            scheduleReconnect()
           },
         )
+        if (syncError) {
+          unsub()
+        } else {
+          unsubscribeBridge = unsub
+        }
         return
       }
       api
@@ -225,7 +251,7 @@ export function useLibraryEvents(libraryId: string | null | undefined, enabled =
               logger.warn('Library event stream closed (likely 4xx), retrying in 5s')
               source.close()
               source = null
-              reconnectTimer = setTimeout(connect, 5000)
+              scheduleReconnect()
             } else {
               logger.warn('Library event stream error (browser auto-reconnecting):', event)
             }
@@ -235,7 +261,7 @@ export function useLibraryEvents(libraryId: string | null | undefined, enabled =
           if (cancelled) return
           needsCatchUp = true
           logger.warn('Failed to resolve library event URL, retrying in 5s:', error)
-          reconnectTimer = setTimeout(connect, 5000)
+          scheduleReconnect()
         })
     }
 
@@ -310,8 +336,12 @@ export function useDeleteLibrary() {
   return useMutation({
     mutationFn: (libraryId: string) => api.deleteLibrary(libraryId),
     onSuccess: (_data, libraryId) => {
-      qc.invalidateQueries({ queryKey: LIBRARIES_KEY })
+      void qc.cancelQueries({ queryKey: LIBRARY_DETAIL_KEY(libraryId) })
+      void qc.cancelQueries({ queryKey: ['selection', libraryId] })
       qc.removeQueries({ queryKey: LIBRARY_DETAIL_KEY(libraryId) })
+      qc.removeQueries({ queryKey: ['selection', libraryId] })
+      qc.removeQueries({ queryKey: ['queue-stats', libraryId] })
+      qc.invalidateQueries({ queryKey: LIBRARIES_KEY })
     },
   })
 }
@@ -334,27 +364,30 @@ export function useBuildPhotoThumbnail(libraryId: string | null | undefined) {
     onSuccess: (data: PhotoThumbnailResponse) => {
       const targetLibraryId = data.library_id || libraryId
       if (targetLibraryId) {
+        let patched = false
         qc.setQueryData<LibraryDetail | undefined>(
           LIBRARY_DETAIL_KEY(targetLibraryId),
           (current) => {
             if (!current || !data.thumb_grid || !data.thumb_preview) return current
-            return {
-              ...current,
-              photos: current.photos.map((photo) =>
-                photo.id === data.photo_id
-                  ? {
-                      ...photo,
-                      thumb_grid: data.thumb_grid,
-                      thumb_preview: data.thumb_preview,
-                    }
-                  : photo,
-              ),
-            }
+            let matched = false
+            const photos = current.photos.map((photo) => {
+              if (photo.id !== data.photo_id) return photo
+              matched = true
+              return {
+                ...photo,
+                thumb_grid: data.thumb_grid,
+                thumb_preview: data.thumb_preview,
+              }
+            })
+            if (!matched) return current
+            patched = true
+            return { ...current, photos }
           },
         )
-        qc.invalidateQueries({ queryKey: LIBRARY_DETAIL_KEY(targetLibraryId) })
+        if (!patched) {
+          void qc.invalidateQueries({ queryKey: LIBRARY_DETAIL_KEY(targetLibraryId) })
+        }
       }
-      qc.invalidateQueries({ queryKey: LIBRARIES_KEY })
     },
   })
 }

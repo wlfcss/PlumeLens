@@ -507,6 +507,7 @@ function FolderRail({
             {sectionFolders.map((folder) => {
               return (
                 <button
+                  aria-current={folder.id === activeFolderId ? 'true' : undefined}
                   className={cn(
                     'folder-rail-item',
                     folder.id === activeFolderId && 'folder-rail-item--active',
@@ -583,7 +584,13 @@ function SelectionCompactHeader({
 }) {
   const sourceMissing = activeFolder.status === 'path_missing'
   const hasProgress = progressEvent !== null && progressEvent.total > 0
-  const running = progressEvent ? progressEvent.pending + progressEvent.processing > 0 : false
+  const paused = progressEvent?.desired_state === 'paused'
+  const running = Boolean(
+    progressEvent &&
+      progressEvent.pending + progressEvent.processing > 0 &&
+      progressEvent.desired_state !== 'paused' &&
+      progressEvent.desired_state !== 'cancelled',
+  )
   const ratio = hasProgress
     ? Math.min(1, progressEvent.completed / Math.max(progressEvent.total, 1))
     : 0
@@ -665,22 +672,24 @@ function SelectionCompactHeader({
         </span>
         <button
           className="button-primary button-compact selection-compact-start"
-          disabled={analysisStarting || running || sourceMissing}
+          disabled={analysisStarting || running || paused || sourceMissing}
           onClick={onStartAnalysis}
           title={sourceDisabledTitle}
           type="button"
         >
           <Sparkles className="h-4 w-4" />
-          {running
-            ? t('selection.folderHeader.analyzingPercent', { percent: Math.round(ratio * 100) })
-            : analysisStarting
-              ? t('selection.folderHeader.starting')
-              : t('selection.folderHeader.startAnalysis')}
+          {paused
+            ? t('selection.folderHeader.paused')
+            : running
+              ? t('selection.folderHeader.analyzingPercent', { percent: Math.round(ratio * 100) })
+              : analysisStarting
+                ? t('selection.folderHeader.starting')
+                : t('selection.folderHeader.startAnalysis')}
         </button>
         <div className="selection-compact-more" ref={compactMoreRef}>
           <button
             aria-expanded={compactMoreOpen}
-            aria-haspopup="menu"
+            aria-haspopup="true"
             className="button-ghost button-compact selection-compact-more__trigger"
             onClick={() => setCompactMoreOpen(!compactMoreOpen)}
             type="button"
@@ -689,7 +698,11 @@ function SelectionCompactHeader({
             {t('selection.compact.more')}
           </button>
           {compactMoreOpen ? (
-            <div className="selection-compact-menu" role="menu">
+            <div
+              aria-label={t('selection.compact.more')}
+              className="selection-compact-menu"
+              role="region"
+            >
               <div className="selection-compact-menu__section selection-compact-menu__primary">
                 <span>{t('selection.compact.primaryFilters')}</span>
                 <div className="selection-compact-menu__chips">
@@ -707,6 +720,7 @@ function SelectionCompactHeader({
                       {t(quickFilterLabelKey(filter))}
                     </button>
                   ))}
+                  <SpeciesFilter {...speciesFilterProps} />
                 </div>
               </div>
               <div className="selection-compact-menu__section">
@@ -828,8 +842,13 @@ function FolderTopline({
   const [aliasEditing, setAliasEditing] = useState(false)
   const [aliasSaving, setAliasSaving] = useState(false)
   const [aliasError, setAliasError] = useState<string | null>(null)
-  // 是否正在跑：pending/processing 还有任务
-  const running = progressEvent ? progressEvent.pending + progressEvent.processing > 0 : false
+  const paused = progressEvent?.desired_state === 'paused'
+  const running = Boolean(
+    progressEvent &&
+      progressEvent.pending + progressEvent.processing > 0 &&
+      progressEvent.desired_state !== 'paused' &&
+      progressEvent.desired_state !== 'cancelled',
+  )
   const hasProgress = progressEvent !== null && progressEvent.total > 0
   const ratio = hasProgress
     ? Math.min(1, progressEvent.completed / Math.max(progressEvent.total, 1))
@@ -916,6 +935,7 @@ function FolderTopline({
               maxLength={120}
               onChange={(event) => setAliasDraft(event.target.value)}
               onKeyDown={(event) => {
+                if (event.nativeEvent.isComposing || event.keyCode === 229) return
                 if (event.key === 'Escape') {
                   event.preventDefault()
                   cancelAliasEditing()
@@ -999,30 +1019,34 @@ function FolderTopline({
             "已分析 0 / 3" 会让用户误以为还有 N 张待分析,实际可能是 N 张全部永久失
             败 (broken_image / 解码错)。永久失败的照片由 metric-strip 的"失败"cell
             统一展示;quickFilter 切到"失败"能查看具体哪些。 */}
-        {hasProgress && running ? (
+        {hasProgress && (running || paused) ? (
           <span
             className="folder-status"
             style={{ minWidth: 120, justifyContent: 'flex-end' }}
-            aria-label="analysis-progress"
+            aria-label={t('selection.folderHeader.progressAria')}
           >
             <span className="text-[11px] text-white/60">
-              {t('selection.folderHeader.analyzingProgress', { progress: progressLabel })}
+              {paused
+                ? t('selection.folderHeader.pausedProgress', { progress: progressLabel })
+                : t('selection.folderHeader.analyzingProgress', { progress: progressLabel })}
             </span>
           </span>
         ) : null}
         <button
           className="button-primary button-compact"
-          disabled={analysisStarting || running || sourceMissing}
+          disabled={analysisStarting || running || paused || sourceMissing}
           onClick={onStartAnalysis}
           title={sourceDisabledTitle}
           type="button"
         >
           <Sparkles className="h-4 w-4" />
-          {running
-            ? t('selection.folderHeader.analyzingPercent', { percent: Math.round(ratio * 100) })
-            : analysisStarting
-              ? t('selection.folderHeader.starting')
-              : t('selection.folderHeader.startAnalysis')}
+          {paused
+            ? t('selection.folderHeader.paused')
+            : running
+              ? t('selection.folderHeader.analyzingPercent', { percent: Math.round(ratio * 100) })
+              : analysisStarting
+                ? t('selection.folderHeader.starting')
+                : t('selection.folderHeader.startAnalysis')}
         </button>
         <button
           className="button-ghost button-compact"
@@ -1041,8 +1065,8 @@ function FolderTopline({
           title={sourceDisabledTitle}
           type="button"
         >
-          <RefreshCw className="h-4 w-4" />
-          {t(refreshing ? 'selection.speciesFilter.updating' : 'selection.folderHeader.update')}
+          <RefreshCw className={cn('h-4 w-4', refreshing && 'animate-spin')} />
+          {t(refreshing ? 'selection.folderHeader.updating' : 'selection.folderHeader.update')}
         </button>
         <AnalysisControls libraryId={activeFolder.id} />
       </div>

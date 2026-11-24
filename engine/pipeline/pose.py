@@ -91,7 +91,9 @@ class FlightClassifier:
     def threshold(self) -> float:
         return self._threshold
 
-    def classify(self, crop_image: NDArray[np.float32]) -> tuple[str, float, str] | None:
+    def classify(
+        self, crop_image: NDArray[np.float32] | NDArray[np.uint8]
+    ) -> tuple[str, float, str] | None:
         """Return (posture, P(fly), method) or None if classifier output is unusable."""
         if crop_image.size == 0:
             return None
@@ -132,14 +134,18 @@ class FlightClassifier:
             return None
         return np.asarray(exp / total, dtype=np.float32)
 
-    def _preprocess(self, crop_image: NDArray[np.float32]) -> NDArray[np.float32]:
+    def _preprocess(
+        self, crop_image: NDArray[np.float32] | NDArray[np.uint8]
+    ) -> NDArray[np.float32]:
         """Mimic Ultralytics classify_transforms(size=224, mean=0, std=1)."""
         if crop_image.ndim != 3 or crop_image.shape[2] != 3:
             msg = f"flight classifier expects RGB HWC image, got shape={crop_image.shape}"
             raise ValueError(msg)
 
         arr = np.asarray(crop_image)
-        if np.issubdtype(arr.dtype, np.floating):
+        if arr.dtype == np.uint8:
+            arr_u8 = arr
+        elif np.issubdtype(arr.dtype, np.floating):
             arr_u8 = np.clip(arr, 0.0, 1.0)
             arr_u8 = np.rint(arr_u8 * 255.0).astype(np.uint8)
         else:
@@ -223,7 +229,7 @@ class PoseDetector:
 
     def detect(
         self,
-        crop_image: NDArray[np.float32],
+        crop_image: NDArray[np.float32] | NDArray[np.uint8],
         crop_origin: tuple[float, float] = (0.0, 0.0),
     ) -> PoseInfo | None:
         """Run pose detection on a single-bird crop, return full PoseInfo or None.
@@ -550,7 +556,7 @@ class PoseDetector:
 
     def _derive_posture_with_classifier(
         self,
-        crop_image: NDArray[np.float32],
+        crop_image: NDArray[np.float32] | NDArray[np.uint8],
         bbox: tuple[float, float, float, float],
         kpts: dict[str, tuple[float, float, float]],
     ) -> tuple[str, float, str]:

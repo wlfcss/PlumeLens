@@ -38,7 +38,14 @@ export function useBackendHealth() {
       // 轮询 IPC：engine 启动初期可能返回 null，每 500ms 拉一次直到拿到 URL
       const plumelens = window.plumelens
       let cancelled = false
+      let pollTimer: ReturnType<typeof setTimeout> | null = null
+      const schedulePoll = (): void => {
+        if (cancelled) return
+        if (pollTimer !== null) clearTimeout(pollTimer)
+        pollTimer = setTimeout(poll, 500)
+      }
       const poll = (): void => {
+        pollTimer = null
         if (cancelled) return
         plumelens
           .getBackendUrl()
@@ -47,25 +54,30 @@ export function useBackendHealth() {
             if (url) {
               setBackendUrl(url)
             } else {
-              setTimeout(poll, 500)
+              schedulePoll()
             }
           })
           .catch((err) => {
-            // IPC reject(main 进程 crash / electron HMR 断接)— 不要让链断掉永久
-            // 卡 null,继续 backoff 重试。否则 EnginePanel 永远 loading,backendUrl
-            // 永远 null,所有走 IPC 的 query 都接不上后端。
             if (cancelled) return
             logger.warn('getBackendUrl IPC failed, retrying:', err)
-            setTimeout(poll, 500)
+            schedulePoll()
           })
       }
       poll()
       const unsubscribeReady = plumelens.onBackendReady((url) => {
         cancelled = true
+        if (pollTimer !== null) {
+          clearTimeout(pollTimer)
+          pollTimer = null
+        }
         setBackendUrl(url)
       })
       return () => {
         cancelled = true
+        if (pollTimer !== null) {
+          clearTimeout(pollTimer)
+          pollTimer = null
+        }
         if (typeof unsubscribeReady === 'function') unsubscribeReady()
       }
     }
@@ -91,10 +103,8 @@ export function useBackendHealth() {
       return res.json() as Promise<BackendHealth>
     },
     enabled: !!backendUrl,
-    // 30s 轮询 /health(只用于读 pipeline ready / 模型加载状态)。
-    // 引擎崩溃 / 重启等状态变化由 engineStore 的 SSE 通道实时推送,这里不需要 10s 高
-    // 频拉。模型加载完成后 /health 输出基本稳定不变,30s 足够。
-    refetchInterval: 30000,
+    // 模型未就绪或请求报错时 2s 轮询快速恢复；模型就绪后降频到 30s。
+    refetchInterval: (q) => (q.state.data?.pipeline.ready ? 30_000 : 2_000),
     retry: false,
   })
 

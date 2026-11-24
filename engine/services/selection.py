@@ -106,6 +106,9 @@ class SelectionProjectionCache:
             if key[0] == library_id:
                 del self._entries[key]
 
+    def clear(self) -> None:
+        self._entries.clear()
+
 
 def _bird_identity(bird: BestDetection | DetectionSummary) -> BirdIdentity:
     latin = " ".join((bird.species_latin or "").split())
@@ -285,7 +288,12 @@ async def _load_photos(db: Database, library_id: str) -> list[PhotoRow]:
 
 
 def _project_selection(
-    library_id: str, projection: SelectionProjection, query: SelectionQueryRequest
+    library_id: str,
+    projection: SelectionProjection,
+    query: SelectionQueryRequest,
+    *,
+    limit: int | None = None,
+    offset: int = 0,
 ) -> SelectionQueryResponse:
     photos = projection.photos
     keyword = query.photo_query.casefold()
@@ -345,12 +353,22 @@ def _project_selection(
         for key, bird in metadata.items()
     ]
     facets.sort(key=lambda facet: (-facet.photo_count, facet.name.casefold(), facet.key))
+    total_matched = len(matched)
+    if limit is not None:
+        page = matched[offset : offset + limit]
+        next_offset = offset + len(page) if offset + len(page) < total_matched else None
+    elif offset > 0:
+        page = matched[offset:]
+        next_offset = None
+    else:
+        page = matched
+        next_offset = None
     return SelectionQueryResponse(
         library_id=library_id,
         projection_revision=projection.revision,
         query=query,
-        matched_photo_ids=[photo.id for photo in matched],
-        matched_count=len(matched),
+        matched_photo_ids=[photo.id for photo in page],
+        matched_count=total_matched,
         total_count=len(photos),
         pending_count=sum(photo.analysis_status == "pending" for photo in photos),
         failed_count=sum(photo.analysis_status == "failed" for photo in photos),
@@ -358,13 +376,27 @@ def _project_selection(
             photo.analysis_status == "done" and photo.bird_count == 0 for photo in photos
         ),
         facets=facets,
+        offset=offset,
+        limit=limit,
+        next_offset=next_offset,
     )
 
 
 def _project_live_selection(
-    library_id: str, photos: Sequence[ProjectedPhoto], query: SelectionQueryRequest
+    library_id: str,
+    photos: Sequence[ProjectedPhoto],
+    query: SelectionQueryRequest,
+    *,
+    limit: int | None = None,
+    offset: int = 0,
 ) -> SelectionQueryResponse:
-    return _project_selection(library_id, build_selection_projection(library_id, photos), query)
+    return _project_selection(
+        library_id,
+        build_selection_projection(library_id, photos),
+        query,
+        limit=limit,
+        offset=offset,
+    )
 
 
 async def query_selection(
@@ -373,15 +405,21 @@ async def query_selection(
     query: SelectionQueryRequest,
     *,
     projection: SelectionProjection | None = None,
+    limit: int | None = None,
+    offset: int = 0,
 ) -> SelectionQueryResponse:
     """Return one consistent folder projection, membership and facets."""
     if projection is not None:
-        return await asyncio.to_thread(_project_selection, library_id, projection, query)
+        return await asyncio.to_thread(
+            _project_selection, library_id, projection, query, limit=limit, offset=offset
+        )
     try:
         photos = await load_library_photos(db, library_id, summary=True)
     except LibraryProjectionNotFound as exc:
         raise SelectionLibraryNotFound(library_id) from exc
-    return await asyncio.to_thread(_project_live_selection, library_id, photos, query)
+    return await asyncio.to_thread(
+        _project_live_selection, library_id, photos, query, limit=limit, offset=offset
+    )
 
 
 async def freeze_selection(

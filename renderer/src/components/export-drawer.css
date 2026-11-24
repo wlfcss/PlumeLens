@@ -67,7 +67,7 @@
 }
 
 .export-preset-chip__delete:hover {
-  background: var(--pl-surface-3);
+  background: var(--pl-bg-3);
   color: var(--pl-fg-0);
 }
 
@@ -84,7 +84,7 @@
   padding: 6px 10px;
   border: 1px solid var(--pl-border-1);
   border-radius: 6px;
-  background: var(--pl-surface-1);
+  background: var(--pl-bg-1);
   color: var(--pl-fg-0);
   font-size: 12px;
 }

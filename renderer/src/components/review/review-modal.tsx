@@ -209,7 +209,6 @@ export function ReviewModal({
   // bbox / pose 优先用 activeBird 的，fallback 到 photo-level 兼容老数据 / 单鸟无 detections 数组场景
   const bbox = activeBird?.bbox ?? photo.bestBbox ?? null
   const pose = activeBird?.pose ?? photo.bestPose ?? null
-  const hasBirdSubject = Boolean(activeBird || bbox || photo.birdCount > 0)
   // AF 覆盖层是 photo-level（机身只写一份 EXIF AFInfo，不分鸟），切换 activeBird 不影响。
   // Canon 官方语义中，单点 / 扩展 / Zone / Whole area 的呈现不同。
   // 新数据使用结构化 af_area；旧数据退回 legacy af_point。
@@ -300,7 +299,28 @@ export function ReviewModal({
     outsideSelection,
   ])
   const compareActive = compareOpen && comparePhoto !== null
-  const compareTargetPhoto = compareActive && compareFocus === 'b' ? comparePhoto : photo
+  const compareReview = usePhotoReview(
+    compareActive && compareFocus === 'b' ? comparePhoto : null,
+    t,
+  )
+  const hydratedComparePhoto =
+    compareActive && compareFocus === 'b' ? (compareReview.photo ?? comparePhoto) : comparePhoto
+  const compareTargetPhoto =
+    compareActive && compareFocus === 'b' && hydratedComparePhoto ? hydratedComparePhoto : photo
+  const detailReview = compareActive && compareFocus === 'b' ? compareReview : review
+  const detailReady =
+    compareActive && compareFocus === 'b' ? Boolean(compareReview.photo) : detailsReady
+  const detailBestBird = useMemo(() => {
+    const dets = compareTargetPhoto.birdDetections ?? []
+    return dets.find((d) => d.isBest) ?? dets[0] ?? null
+  }, [compareTargetPhoto.birdDetections])
+  const detailActiveBird =
+    compareActive && compareFocus === 'b' ? detailBestBird : activeBird
+  const detailBbox = detailActiveBird?.bbox ?? compareTargetPhoto.bestBbox ?? null
+  const detailPose = detailActiveBird?.pose ?? compareTargetPhoto.bestPose ?? null
+  const detailHasBirdSubject = Boolean(
+    detailActiveBird || detailBbox || compareTargetPhoto.birdCount > 0,
+  )
   const comparePhotoRank = useMemo(
     () => (comparePhoto ? rankPhotoInGroup(reviewGroupPhotos, comparePhoto.id) : null),
     [comparePhoto, reviewGroupPhotos],
@@ -310,8 +330,8 @@ export function ReviewModal({
     [compareCandidates, comparePhoto],
   )
   const gradeExplanation = useMemo(
-    () => describePhotoGradeExplanation(photo, pose, t),
-    [photo, pose, t],
+    () => describePhotoGradeExplanation(compareTargetPhoto, compareTargetPhoto.bestPose ?? detailPose, t),
+    [compareTargetPhoto, detailPose, t],
   )
 
   useEffect(() => {
@@ -371,6 +391,10 @@ export function ReviewModal({
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.defaultPrevented || hasOpenPopover()) return
+      const openDialogs = document.querySelectorAll('dialog[open]')
+      if (openDialogs.length > 0 && openDialogs[openDialogs.length - 1] !== dialogRef.current) {
+        return
+      }
       if (
         event.target instanceof Node &&
         event.target !== document.body &&
@@ -456,10 +480,10 @@ export function ReviewModal({
     compareActive,
     compareFocus,
     compareTargetPhoto.id,
+    dialogRef,
     flashHud,
     fullscreenOpen,
     isSequence,
-    onClose,
     onSetDecision,
     outsideSelection,
     selectRelativePhoto,
@@ -873,15 +897,15 @@ export function ReviewModal({
 
         <aside className="review-detail review-detail--compact">
           <div className="review-detail__body">
-            {review.loading ? (
+            {detailReview.loading ? (
               <div className="review-detail__notice" role="status">
                 {t('selection.review.loadingDetails')}
               </div>
-            ) : review.error ? (
+            ) : detailReview.error ? (
               <div className="review-detail__notice" role="alert">
                 <span>
                   {t(
-                    review.revisionChanged
+                    detailReview.revisionChanged
                       ? 'selection.review.detailsChanged'
                       : 'selection.review.detailsFailed',
                   )}
@@ -889,7 +913,7 @@ export function ReviewModal({
                 <button
                   type="button"
                   className="button-ghost button-compact"
-                  onClick={review.onRetry}
+                  onClick={detailReview.onRetry}
                 >
                   {t('common.retry')}
                 </button>
@@ -897,9 +921,9 @@ export function ReviewModal({
             ) : null}
             {/* 顶部：分数 + 物种 + 分级 */}
             <ScoreHeader
-              photo={photo}
-              activeBird={activeBird}
-              totalBirds={photo.birdDetections?.length ?? 0}
+              photo={compareTargetPhoto}
+              activeBird={detailActiveBird}
+              totalBirds={compareTargetPhoto.birdDetections?.length ?? 0}
               t={t}
             />
             <div className="review-grade-explain" data-explain-kind={gradeExplanation.kind}>
@@ -912,27 +936,23 @@ export function ReviewModal({
             <div className="review-stats-grid review-stats-grid--cols-3">
               <CompactStat
                 label={t('selection.metrics.semanticScore')}
-                value={formatScore(photo.semanticScore)}
+                value={formatScore(compareTargetPhoto.semanticScore)}
               />
               <CompactStat
                 label={t('selection.metrics.technicalScore')}
-                value={formatScore(photo.technicalScore)}
+                value={formatScore(compareTargetPhoto.technicalScore)}
               />
               <CompactStat
                 label={t('selection.metrics.confidence')}
-                value={bbox ? `${Math.round((bbox.confidence ?? 0) * 100)}%` : '--'}
+                value={detailBbox ? `${Math.round((detailBbox.confidence ?? 0) * 100)}%` : '--'}
               />
             </div>
 
-            {/* 姿态/标签语义紧凑组:5 项 visibility chip + 姿态提示 + 主体条件 tags 紧跟。
-                老结构里 TagCluster 被 EXIF 拆到底部,语义脱节;主体条件本身就是 pose
-                派生(见 backend-adapter derivePoseTags),归位到 pose 组。
-                只要有鸟主体就展示此组;pose=null 时显示"暂无结果",避免右栏信息随机消失。 */}
-            {hasBirdSubject ? (
+            {detailHasBirdSubject ? (
               <>
-                <PoseChipsRow pose={pose} t={t} />
+                <PoseChipsRow pose={detailPose} t={t} />
                 {(() => {
-                  const { text, isFlying } = formatPostureLabel(pose, t)
+                  const { text, isFlying } = formatPostureLabel(detailPose, t)
                   return (
                     <CompactKV
                       label={t('selection.metrics.posture')}
@@ -946,14 +966,18 @@ export function ReviewModal({
               </>
             ) : null}
 
-            <TagCluster photo={photo} t={t} />
+            <TagCluster photo={compareTargetPhoto} t={t} />
 
             <SpeciesOverrideEditor
-              activeBirdIndex={activeBirdIndex}
-              detailsReady={detailsReady}
+              activeBirdIndex={
+                compareActive && compareFocus === 'b'
+                  ? (detailActiveBird?.index ?? 0)
+                  : activeBirdIndex
+              }
+              detailsReady={detailReady}
               onSetActiveBirdIndex={setActiveBirdIndex}
               onSetSpeciesOverride={onSetSpeciesOverride}
-              photo={photo}
+              photo={compareTargetPhoto}
               t={t}
             />
 
@@ -961,17 +985,19 @@ export function ReviewModal({
 
             <CompactKV label={t('selection.review.sequenceLabel')} value={sequenceDetailValue} />
 
-            {photo.companionFormat && photo.companionPath ? (
+            {compareTargetPhoto.companionFormat && compareTargetPhoto.companionPath ? (
               <CompactKV
                 label={t('selection.review.companion')}
                 value={t('selection.review.companionValue', {
-                  format: photo.companionFormat,
-                  size: formatBytes(photo.companionSize ?? 0),
+                  format: compareTargetPhoto.companionFormat,
+                  size: formatBytes(compareTargetPhoto.companionSize ?? 0),
                 })}
               />
             ) : null}
 
-            {detailsReady ? <ExifPanel exif={photo.exif} location={photo} t={t} /> : null}
+            {detailReady ? (
+              <ExifPanel exif={compareTargetPhoto.exif} location={compareTargetPhoto} t={t} />
+            ) : null}
 
             <div className="review-shortcuts" aria-label={t('selection.review.shortcutsLabel')}>
               <span>{t('selection.review.shortcuts.grade')}</span>
@@ -1001,6 +1027,7 @@ export function ReviewModal({
             ) : null}
             <div className="inspector-actions inspector-actions--compact">
               <button
+                aria-pressed={effectivePhotoGrade(compareTargetPhoto) === 'select'}
                 className="button-primary"
                 onClick={() => {
                   onSetDecision(compareTargetPhoto.id, 'select')
@@ -1012,6 +1039,7 @@ export function ReviewModal({
                 {t('selection.actions.select')}
               </button>
               <button
+                aria-pressed={effectivePhotoGrade(compareTargetPhoto) === 'usable'}
                 className="button-ghost"
                 onClick={() => {
                   onSetDecision(compareTargetPhoto.id, 'usable')
@@ -1023,6 +1051,7 @@ export function ReviewModal({
                 {t('selection.actions.usable')}
               </button>
               <button
+                aria-pressed={effectivePhotoGrade(compareTargetPhoto) === 'record'}
                 className="button-ghost"
                 onClick={() => {
                   onSetDecision(compareTargetPhoto.id, 'record')
@@ -1034,6 +1063,7 @@ export function ReviewModal({
                 {t('selection.actions.record')}
               </button>
               <button
+                aria-pressed={effectivePhotoGrade(compareTargetPhoto) === 'reject'}
                 className="button-danger"
                 onClick={() => {
                   onSetDecision(compareTargetPhoto.id, 'reject')
@@ -1105,9 +1135,17 @@ function ReviewFullscreenViewer({
   zoomOptions: readonly number[]
   zoomScale: number
 }) {
+  const fullscreenDialogRef = useModalDialog(true)
   return (
-    <div
+    <dialog
+      ref={fullscreenDialogRef}
+      aria-label={`${t('selection.review.fullscreen')} · ${fileName}`}
       className="review-fullscreen"
+      onCancel={(event) => {
+        event.preventDefault()
+        event.stopPropagation()
+        onClose()
+      }}
       onPointerDown={(event) => {
         if (event.target === event.currentTarget) onClose()
       }}
@@ -1122,6 +1160,7 @@ function ReviewFullscreenViewer({
             {zoomOptions.map((option) => (
               <button
                 aria-label={t('selection.review.zoomScale', { scale: option })}
+                aria-pressed={option === zoomScale}
                 className={cn(option === zoomScale && 'review-zoom-control__item--active')}
                 key={option}
                 onClick={() => onZoomScaleChange(option)}
@@ -1155,7 +1194,7 @@ function ReviewFullscreenViewer({
         variant="fullscreen"
         zoomScale={zoomScale}
       />
-    </div>
+    </dialog>
   )
 }
 
@@ -1556,7 +1595,7 @@ function ExifPanel({
           <span className="exif-exposure__value">{fmtAperture()}</span>
         </div>
         <div className="exif-exposure__cell">
-          <span className="exif-exposure__label">ISO</span>
+          <span className="exif-exposure__label">{t('selection.exif.iso')}</span>
           <span className="exif-exposure__value">{fmtIso()}</span>
         </div>
         <div className="exif-exposure__cell">

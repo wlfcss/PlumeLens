@@ -84,12 +84,13 @@ export function useResponsiveGridLayout(
 export function useVirtualScrollMargin(
   containerRef: RefObject<HTMLElement | null>,
   scrollElement: HTMLElement | null,
+  containerElement?: HTMLElement | null,
 ): number {
   const [scrollMargin, setScrollMargin] = useState(0)
   const scrollMarginRef = useRef(0)
 
   const updateScrollMargin = useCallback(() => {
-    const container = containerRef.current
+    const container = containerElement ?? containerRef.current
     if (!container || !scrollElement) {
       if (scrollMarginRef.current !== 0) {
         scrollMarginRef.current = 0
@@ -104,11 +105,11 @@ export function useVirtualScrollMargin(
     if (Math.abs(next - scrollMarginRef.current) < 0.5) return
     scrollMarginRef.current = next
     setScrollMargin(next)
-  }, [containerRef, scrollElement])
+  }, [containerElement, containerRef, scrollElement])
 
   useLayoutEffect(() => {
     updateScrollMargin()
-  })
+  }, [updateScrollMargin])
 
   useEffect(() => {
     let frame = 0
@@ -129,15 +130,19 @@ export function useVirtualScrollMargin(
     }
 
     const observer = new ResizeObserver(scheduleUpdate)
-    if (containerRef.current) observer.observe(containerRef.current)
+    const container = containerElement ?? containerRef.current
+    if (container) observer.observe(container)
     if (scrollElement) observer.observe(scrollElement)
+    if (scrollElement?.firstElementChild instanceof HTMLElement) {
+      observer.observe(scrollElement.firstElementChild)
+    }
     window.addEventListener('resize', scheduleUpdate)
     return () => {
       observer.disconnect()
       window.removeEventListener('resize', scheduleUpdate)
       if (frame !== 0) window.cancelAnimationFrame(frame)
     }
-  }, [containerRef, scrollElement, updateScrollMargin])
+  }, [containerElement, containerRef, scrollElement, updateScrollMargin])
 
   return scrollMargin
 }

@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   # Keep tests and the frozen backend on the same supported Python ABI.
@@ -79,6 +79,7 @@ jobs:
       - name: Install dependencies
         run: |
           npm ci
+          npx install-electron --no
           uv sync --locked --extra dev
           uv run python --version
           uv run pyinstaller --version
@@ -92,11 +93,11 @@ jobs:
           # The reviewed checkout is the trust root, never the downloaded bundle.
           cp engine/models/manifest.json "$RUNNER_TEMP/plumelens-trusted-manifest.json"
 
-          bundle="/tmp/plumelens-models"
+          bundle="$RUNNER_TEMP/plumelens-models"
           if [[ -n "${MODEL_BUNDLE_URL}" ]]; then
             curl --fail --location --retry 3 --output "$bundle" "${MODEL_BUNDLE_URL}"
           elif [[ -n "${MODEL_RELEASE_TAG}" ]]; then
-            bundle="/tmp/${MODEL_RELEASE_ASSET}"
+            bundle="$RUNNER_TEMP/${MODEL_RELEASE_ASSET}"
             gh release download "${MODEL_RELEASE_TAG}" \
               --repo "${GITHUB_REPOSITORY}" \
               --pattern "${MODEL_RELEASE_ASSET}" \
@@ -197,8 +198,25 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  publish:
+    name: Publish tagged macOS release asset
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: macos-15
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Download DMG artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: PlumeLens-macOS-arm64-${{ github.sha }}
+          path: release
+
       - name: Publish tagged release asset
-        if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -256,9 +274,7 @@ jobs:
             echo '```'
           } > release-notes.md
 
-          if gh release view "$tag" >/dev/null 2>&1; then
+          if ! gh release create "$tag" --title "PlumeLens ${version}" --notes-file release-notes.md 2>/dev/null; then
             gh release edit "$tag" --title "PlumeLens ${version}" --notes-file release-notes.md
-          else
-            gh release create "$tag" --title "PlumeLens ${version}" --notes-file release-notes.md
           fi
           gh release upload "$tag" "$dmg" "$sha256_path" --clobber

@@ -326,15 +326,18 @@ def _build_detection_detail(
 async def _list_overrides_for_photos(
     db: Database,
     photo_ids: list[str],
+    *,
+    connection: Any | None = None,
 ) -> dict[str, list[SpeciesOverrideRecord]]:
     out: dict[str, list[SpeciesOverrideRecord]] = {}
     if not photo_ids:
         return out
+    conn = connection if connection is not None else db.conn
     chunk_size = 500
     for start in range(0, len(photo_ids), chunk_size):
         chunk = photo_ids[start : start + chunk_size]
         placeholders = ",".join("?" for _ in chunk)
-        async with db.conn.execute(
+        async with conn.execute(
             "SELECT pso.photo_id, pso.bird_index, pso.canonical_sci, pso.canonical_zh, "
             "pso.canonical_en, pso.bbox_x1, pso.bbox_y1, pso.bbox_x2, pso.bbox_y2 "
             "FROM photo_species_overrides pso JOIN photos p ON p.id = pso.photo_id "
@@ -397,7 +400,9 @@ def _photo_from_row(row: Any, overrides: list[SpeciesOverrideRecord]) -> PhotoRo
         if details:
             best_detail = details[min(best_index, len(details) - 1)]
             best = BestDetection.model_validate(best_detail.model_dump())
-            effective_species = best.species or effective_species
+            effective_species = (
+                None if best.species_source == "none" else (best.species or effective_species)
+            )
             effective_species_latin = best.species_latin
             manual_species = bool(best.manual_species)
             species_source = best.species_source
@@ -441,60 +446,103 @@ def _photo_from_row(row: Any, overrides: list[SpeciesOverrideRecord]) -> PhotoRo
     )
 
 
+_ARCHIVE_PHOTO_SELECT = (
+    "SELECT p.id, p.library_id, p.file_path, p.file_name, p.format, p.width, p.height, "
+    "p.thumb_grid, p.thumb_preview, p.created_at, p.file_mtime, p.exif_json, "
+    "p.scene_id, p.companion_path, p.companion_format, p.companion_size, "
+    "p.province, p.city, p.district, p.place, "
+    "ar.pipeline_version, ar.grade, ar.quality_score, ar.bird_count, ar.species, "
+    "ar.result_json, pd.decision "
+    "FROM photos p "
+    "JOIN analysis_results ar ON ar.photo_id = p.id AND ar.is_active = 1 "
+    "AND ar.input_revision = p.input_revision "
+    "LEFT JOIN photo_decisions pd ON pd.photo_id = p.id "
+)
+
+
 async def _load_geo_photos(
     db: Database,
     where_sql: str,
     params: tuple[object, ...] = (),
 ) -> list[_GeoPhoto]:
-    async with db.transaction():
-        async with db.conn.execute(
-            "SELECT p.id, p.library_id, p.file_path, p.file_name, p.format, p.width, p.height, "
-            "p.thumb_grid, p.thumb_preview, p.created_at, p.file_mtime, p.exif_json, "
-            "p.scene_id, p.companion_path, p.companion_format, p.companion_size, "
-            "p.province, p.city, p.district, p.place, "
-            "ar.pipeline_version, ar.grade, ar.quality_score, ar.bird_count, ar.species, "
-            "ar.result_json, pd.decision "
-            "FROM photos p "
-            "JOIN analysis_results ar ON ar.photo_id = p.id AND ar.is_active = 1 "
-            "AND ar.input_revision = p.input_revision "
-            "LEFT JOIN photo_decisions pd ON pd.photo_id = p.id "
-            f"WHERE ({where_sql}) "
+    async with db.read_snapshot() as conn:
+        async with conn.execute(
+            _ARCHIVE_PHOTO_SELECT
+            + f"WHERE ({where_sql}) "
             "AND ar.pipeline_version IS NOT NULL "
             "AND ar.bird_count > 0 "
             "AND COALESCE(pd.decision, ar.grade) IN ('select', 'usable', 'record') "
             "ORDER BY p.library_id, p.file_mtime ASC, p.id ASC",
             params,
         ) as cur:
-            rows = await cur.fetchall()
+            target_rows = list(await cur.fetchall())
 
-        overrides = await _list_overrides_for_photos(db, [str(row["id"]) for row in rows])
-    photos = [
-        _GeoPhoto(
-            library_id=str(row["library_id"]),
-            photo=_photo_from_row(row, overrides.get(str(row["id"]), [])),
-            exif_json=(str(row["exif_json"]) if row["exif_json"] is not None else None),
-            province=(str(row["province"]) if row["province"] is not None else None),
-            city=(str(row["city"]) if row["city"] is not None else None),
-            district=(str(row["district"]) if row["district"] is not None else None),
-            place=(str(row["place"]) if row["place"] is not None else None),
-            thumb_grid=(str(row["thumb_grid"]) if row["thumb_grid"] is not None else None),
+        if not target_rows:
+            return []
+
+        # Expand touched (library_id, scene_id) groups across ALL analyzed photos in those
+        # scenes before computing group species consensus so filtering by grade/geo never
+        # alters scene consensus relative to the library/selection view.
+        target_ids = {str(r["id"]) for r in target_rows}
+        scenes_by_library: dict[str, set[int]] = {}
+        for r in target_rows:
+            if r["scene_id"] is not None:
+                scenes_by_library.setdefault(str(r["library_id"]), set()).add(int(r["scene_id"]))
+
+        context_by_id: dict[str, Any] = {str(r["id"]): r for r in target_rows}
+        for lib_id, scene_set in scenes_by_library.items():
+            scene_list = sorted(scene_set)
+            for start in range(0, len(scene_list), 500):
+                chunk = scene_list[start : start + 500]
+                placeholders = ",".join("?" for _ in chunk)
+                async with conn.execute(
+                    _ARCHIVE_PHOTO_SELECT
+                    + f"WHERE p.library_id = ? AND p.scene_id IN ({placeholders}) "
+                    "AND ar.pipeline_version IS NOT NULL "
+                    "ORDER BY p.file_mtime ASC, p.id ASC",
+                    (lib_id, *chunk),
+                ) as cur:
+                    for r in await cur.fetchall():
+                        context_by_id.setdefault(str(r["id"]), r)
+
+        all_context_rows = list(context_by_id.values())
+        overrides = await _list_overrides_for_photos(
+            db, [str(row["id"]) for row in all_context_rows], connection=conn
         )
-        for row in rows
-    ]
+
+    projected_by_id: dict[str, _GeoPhoto] = {}
     by_library: dict[str, list[PhotoRow]] = {}
-    for item in photos:
-        by_library.setdefault(item.library_id, []).append(item.photo)
+    for row in all_context_rows:
+        pid = str(row["id"])
+        photo = _photo_from_row(row, overrides.get(pid, []))
+        lib_id = str(row["library_id"])
+        by_library.setdefault(lib_id, []).append(photo)
+        if pid in target_ids:
+            projected_by_id[pid] = _GeoPhoto(
+                library_id=lib_id,
+                photo=photo,
+                exif_json=(str(row["exif_json"]) if row["exif_json"] is not None else None),
+                province=(str(row["province"]) if row["province"] is not None else None),
+                city=(str(row["city"]) if row["city"] is not None else None),
+                district=(str(row["district"]) if row["district"] is not None else None),
+                place=(str(row["place"]) if row["place"] is not None else None),
+                thumb_grid=(str(row["thumb_grid"]) if row["thumb_grid"] is not None else None),
+            )
     for library_photos in by_library.values():
         _apply_group_species_consensus(library_photos)
-    return photos
+    return [
+        projected_by_id[str(row["id"])]
+        for row in target_rows
+        if str(row["id"]) in projected_by_id
+    ]
 
 
 def _get_geo_cache(key: str) -> Any | None:
     return archive_cache.get(key)
 
 
-def _set_geo_cache(key: str, value: Any) -> Any:
-    return archive_cache.put(key, value)
+def _set_geo_cache(key: str, value: Any, *, expected_generation: int | None = None) -> Any:
+    return archive_cache.put(key, value, expected_generation=expected_generation)
 
 
 def _species_from_candidate(
@@ -611,15 +659,16 @@ async def geo_summary(request: Request) -> GeoSummary:
     这些照片要算作无坐标,否则进度条会永远显示 X/Y。
     """
     db = await _db(request)
-    async with db.conn.execute("SELECT COUNT(*) AS total FROM photos") as cur:
-        total_row = await cur.fetchone()
-    async with db.conn.execute(
-        "SELECT exif_json, country FROM photos "
-        "WHERE (exif_json LIKE '%\"GPSLatitude\"%' "
-        "AND exif_json LIKE '%\"GPSLongitude\"%') "
-        "OR country IS NOT NULL",
-    ) as cur:
-        rows = await cur.fetchall()
+    async with db.read_snapshot() as conn:
+        async with conn.execute("SELECT COUNT(*) AS total FROM photos") as cur:
+            total_row = await cur.fetchone()
+        async with conn.execute(
+            "SELECT exif_json, country FROM photos "
+            "WHERE (exif_json LIKE '%\"GPSLatitude\"%' "
+            "AND exif_json LIKE '%\"GPSLongitude\"%') "
+            "OR country IS NOT NULL",
+        ) as cur:
+            rows = await cur.fetchall()
 
     total = int(total_row["total"] or 0) if total_row is not None else 0
     has_gps = 0
@@ -640,7 +689,7 @@ async def geo_summary(request: Request) -> GeoSummary:
         resolved=resolved,
         pending=pending,
         unresolved_count=unresolved,
-        photos_without_gps=total - has_gps,
+        photos_without_gps=max(0, total - has_gps),
     )
 
 
@@ -653,6 +702,7 @@ async def geo_provinces(request: Request) -> list[GeoProvinceRow]:
     if cached is not None:
         return cached
 
+    cache_gen = archive_cache.generation()
     photos = await _load_geo_photos(db, "p.province IS NOT NULL")
     by_province: dict[str, dict[str, Any]] = {}
     for item in photos:
@@ -676,6 +726,7 @@ async def geo_provinces(request: Request) -> list[GeoProvinceRow]:
             )
             for prov, b in sorted(by_province.items(), key=lambda x: -int(x[1]["photos"]))
         ],
+        expected_generation=cache_gen,
     )
 
 
@@ -697,6 +748,7 @@ async def geo_cities(
     if cached is not None:
         return cached
 
+    cache_gen = archive_cache.generation()
     is_direct = province in _DIRECT_CONTROLLED_PROVINCES
     if is_direct:
         # 直辖市/特别行政区:按 district 聚合,放到 GeoCityRow.city 里返回。
@@ -731,6 +783,7 @@ async def geo_cities(
             )
             for name, b in sorted(by_bucket.items(), key=lambda x: -int(x[1]["photos"]))
         ],
+        expected_generation=cache_gen,
     )
 
 
@@ -756,15 +809,16 @@ async def geo_spots(
     if cached is not None:
         return cached
 
+    cache_gen = archive_cache.generation()
     if province in _DIRECT_CONTROLLED_PROVINCES:
         if city == province:
             # 兼容老调用方式(直辖市 city = province):返回该省所有照片,不做 district
             # 二级过滤。新前端会传 district 名作 city 实现真正的市级钻取。
             photos = await _load_geo_photos(db, "p.province = ?", (province,))
         elif city == "未知区域":
-            # geo_cities 把 district IS NULL 的归到"未知区域"桶,这里反向匹配
+            # geo_cities 把 district 为空或 NULL 的归到"未知区域"桶,这里反向匹配
             photos = await _load_geo_photos(
-                db, "p.province = ? AND p.district IS NULL", (province,)
+                db, "p.province = ? AND (p.district IS NULL OR p.district = '')", (province,)
             )
         else:
             photos = await _load_geo_photos(
@@ -841,6 +895,7 @@ async def geo_spots(
             )
             for b in sorted(spots.values(), key=lambda x: -int(x["photo_total"]))
         ],
+        expected_generation=cache_gen,
     )
 
 
@@ -861,6 +916,7 @@ async def archive_species_summary(request: Request) -> ArchiveSpeciesSummaryResp
     if cached is not None:
         return cached
 
+    cache_gen = archive_cache.generation()
     photos = await _load_geo_photos(db, "1=1", ())
     eligible_photo_ids: set[str] = set()
     aggregates: dict[str, dict[str, Any]] = {}
@@ -939,4 +995,5 @@ async def archive_species_summary(request: Request) -> ArchiveSpeciesSummaryResp
             total_photos=len(eligible_photo_ids),
             species=rows,
         ),
+        expected_generation=cache_gen,
     )

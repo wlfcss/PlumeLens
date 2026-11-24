@@ -1,8 +1,8 @@
 import { app, BrowserWindow, ipcMain, dialog, net, protocol, session, shell } from 'electron'
 import { spawn } from 'child_process'
 import { pathToFileURL } from 'url'
-import { chmodSync, existsSync, mkdirSync, readFileSync } from 'fs'
-import { realpath } from 'fs/promises'
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'fs'
+import { realpath, stat } from 'fs/promises'
 import { homedir, platform as osPlatform } from 'os'
 import { join, resolve } from 'path'
 import { BENCHMARK_TRACE_ARGUMENT } from '../shared/benchmark-trace'
@@ -115,7 +115,7 @@ function resolveCachedSpeciesArtworkPath(root: string, key: string): string | nu
 async function serveLocalCacheFile(
   filePath: string,
   rootResolved: string,
-  realRoot: string,
+  getRealRoot: () => Promise<string>,
   logPrefix: string,
 ): Promise<Response> {
   const resolved = resolve(filePath)
@@ -123,12 +123,17 @@ async function serveLocalCacheFile(
     return new Response('Forbidden (escape)', { status: 403 })
   }
   try {
-    const realFile = await cachedRealpath(resolved)
+    const [realRoot, realFile] = await Promise.all([getRealRoot(), cachedRealpath(resolved)])
     if (!isWithinDirectory(realRoot, realFile)) {
       return new Response('Forbidden (symlink escape)', { status: 403 })
     }
+    const fileStat = await stat(realFile)
+    if (!fileStat.isFile()) {
+      return new Response('Not found', { status: 404 })
+    }
     return await net.fetch(pathToFileURL(realFile).toString())
   } catch (err) {
+    realpathCache.delete(resolved)
     const message = err instanceof Error ? err.message : String(err)
     process.stderr.write(`[${logPrefix}] failed resolved=${resolved} error=${message}\n`)
     return new Response('Not found', { status: 404 })
@@ -245,10 +250,16 @@ async function checkForUpdates(): Promise<UpdateCheckResult> {
   }
 }
 
+const RENDERER_INDEX_URL = pathToFileURL(resolve(__dirname, '../renderer/index.html')).href
+
 function isTrustedAppNavigation(target: string, isDev: boolean): boolean {
   try {
     const url = new URL(target)
-    if (url.protocol === 'file:') return true
+    if (url.protocol === 'file:') {
+      const normalized = `${url.origin}${url.pathname}`
+      const expected = new URL(RENDERER_INDEX_URL)
+      return normalized === `${expected.origin}${expected.pathname}`
+    }
     if (isDev && process.env['ELECTRON_RENDERER_URL']) {
       const devUrl = new URL(process.env['ELECTRON_RENDERER_URL'])
       return url.origin === devUrl.origin
@@ -257,6 +268,64 @@ function isTrustedAppNavigation(target: string, isDev: boolean): boolean {
     return false
   }
   return false
+}
+
+function assertTrustedIpcSender(event: Electron.IpcMainInvokeEvent): void {
+  if (!mainWindow || mainWindow.isDestroyed() || event.sender !== mainWindow.webContents) {
+    throw new Error('Unauthorized IPC sender')
+  }
+}
+
+interface UiPreferences {
+  lastImportDir?: string
+  lastExportDir?: string
+}
+
+function uiPrefsPath(): string {
+  return join(app.getPath('userData'), 'ui-prefs.json')
+}
+
+function readUiPreferences(): UiPreferences {
+  const path = uiPrefsPath()
+  if (!existsSync(path)) return {}
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(path, 'utf-8'))
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return {}
+    const record = parsed as Record<string, unknown>
+    return {
+      ...(typeof record['lastImportDir'] === 'string'
+        ? { lastImportDir: record['lastImportDir'] }
+        : {}),
+      ...(typeof record['lastExportDir'] === 'string'
+        ? { lastExportDir: record['lastExportDir'] }
+        : {}),
+    }
+  } catch {
+    return {}
+  }
+}
+
+function saveUiPreference(key: keyof UiPreferences, dirPath: string): void {
+  try {
+    const current = readUiPreferences()
+    current[key] = dirPath
+    const path = uiPrefsPath()
+    mkdirSync(app.getPath('userData'), { recursive: true })
+    const tmp = `${path}.${process.pid}.${Date.now()}.tmp`
+    writeFileSync(tmp, JSON.stringify(current, null, 2), { encoding: 'utf-8', mode: 0o600 })
+    renameSync(tmp, path)
+  } catch {
+    /* non-critical UX preference */
+  }
+}
+
+function existingDirectoryOrUndefined(dirPath: string | undefined): string | undefined {
+  if (!dirPath) return undefined
+  try {
+    return existsSync(dirPath) ? dirPath : undefined
+  } catch {
+    return undefined
+  }
 }
 
 type ClosePromptContent = {
@@ -287,7 +356,7 @@ function buildClosePromptHtml(content: ClosePromptContent): string {
     <meta charset="utf-8" />
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'none'; style-src 'unsafe-inline'; navigate-to ${CLOSE_PROMPT_SCHEME};"
+      content="default-src 'none'; style-src 'unsafe-inline';"
     />
     <title>${title}</title>
     <style>
@@ -440,8 +509,23 @@ async function showClosePromptWindow(
   content: ClosePromptContent,
 ): Promise<boolean> {
   if (owner.isDestroyed()) return false
+  if (owner.isMinimized()) owner.restore()
+  if (!owner.isVisible()) owner.show()
 
   const bounds = owner.getBounds()
+  if (bounds.width < 320 || bounds.height < 200 || bounds.x < -10_000 || bounds.y < -10_000) {
+    const result = await dialog.showMessageBox(owner, {
+      type: 'question',
+      title: content.title,
+      message: content.title,
+      detail: content.detail,
+      buttons: ['继续使用', content.confirmLabel],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true,
+    })
+    return result.response === 1
+  }
   const promptWindow = new BrowserWindow({
     parent: owner,
     modal: true,
@@ -481,8 +565,9 @@ async function showClosePromptWindow(
     }
 
     promptWindow.webContents.on('will-navigate', (event, target) => {
-      if (!target.startsWith(CLOSE_PROMPT_SCHEME)) return
+      if (target.startsWith('data:text/html')) return
       event.preventDefault()
+      if (!target.startsWith(CLOSE_PROMPT_SCHEME)) return
       const action = new URL(target).host
       settle(action === 'confirm')
     })
@@ -612,34 +697,6 @@ function createWindow(): void {
     if (normalizeExternalUrl(url)) void openExternalUrl(url)
   })
 
-  // CSP
-  session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
-    const contentSecurityPolicy = isDev
-      ? [
-          "default-src 'self' http://localhost:5173 ws://localhost:5173;",
-          "script-src 'self' 'unsafe-inline' 'unsafe-eval' http://localhost:5173;",
-          "style-src 'self' 'unsafe-inline';",
-          "connect-src 'self' http://127.0.0.1:* http://localhost:5173 ws://localhost:5173 plumelens:;",
-          "img-src 'self' data: blob: plumelens:;",
-          "font-src 'self' data:;",
-        ].join(' ')
-      : [
-          "default-src 'self';",
-          "script-src 'self';",
-          "style-src 'self' 'unsafe-inline';",
-          "connect-src 'self' http://127.0.0.1:* plumelens:;",
-          "img-src 'self' data: blob: plumelens:;",
-          "font-src 'self' data:;",
-        ].join(' ')
-
-    callback({
-      responseHeaders: {
-        ...details.responseHeaders,
-        'Content-Security-Policy': [contentSecurityPolicy],
-      },
-    })
-  })
-
   if (isDev && process.env['ELECTRON_RENDERER_URL']) {
     mainWindow.loadURL(process.env['ELECTRON_RENDERER_URL'])
   } else {
@@ -664,11 +721,13 @@ function createWindow(): void {
 }
 
 // IPC handlers
-ipcMain.handle('get-backend-url', () => {
+ipcMain.handle('get-backend-url', (event) => {
+  assertTrustedIpcSender(event)
   return processManager?.getUrl() ?? null
 })
 
-ipcMain.handle('get-backend-auth-token', () => {
+ipcMain.handle('get-backend-auth-token', (event) => {
+  assertTrustedIpcSender(event)
   return processManager?.getAuthToken() ?? null
 })
 
@@ -678,21 +737,33 @@ ipcMain.handle('get-app-version', () => {
 
 ipcMain.handle('check-for-updates', () => checkForUpdates())
 
-ipcMain.handle('dialog:open-folder', async () => {
-  if (!mainWindow) return null
+ipcMain.handle('dialog:open-folder', async (event) => {
+  assertTrustedIpcSender(event)
+  if (!mainWindow || mainWindow.isDestroyed()) return null
+  const prefs = readUiPreferences()
+  const defaultPath = existingDirectoryOrUndefined(prefs.lastImportDir)
   const result = await dialog.showOpenDialog(mainWindow, {
+    ...(defaultPath ? { defaultPath } : {}),
     properties: ['openDirectory'],
   })
-  return result.canceled ? null : result.filePaths[0]
+  if (result.canceled || !result.filePaths[0]) return null
+  saveUiPreference('lastImportDir', result.filePaths[0])
+  return result.filePaths[0]
 })
 
-ipcMain.handle('dialog:select-export-directory', async () => {
-  if (!mainWindow) return null
+ipcMain.handle('dialog:select-export-directory', async (event) => {
+  assertTrustedIpcSender(event)
+  if (!mainWindow || mainWindow.isDestroyed()) return null
+  const prefs = readUiPreferences()
+  const defaultPath = existingDirectoryOrUndefined(prefs.lastExportDir)
   const result = await dialog.showOpenDialog(mainWindow, {
+    ...(defaultPath ? { defaultPath } : {}),
     buttonLabel: '选择导出位置',
     properties: ['openDirectory', 'createDirectory'],
   })
-  return result.canceled ? null : result.filePaths[0]
+  if (result.canceled || !result.filePaths[0]) return null
+  saveUiPreference('lastExportDir', result.filePaths[0])
+  return result.filePaths[0]
 })
 
 // 外部编辑器集成 — 信息抽屉 / 复核屏 "用 Topaz/PS 打开"
@@ -849,7 +920,8 @@ ipcMain.handle('list-editors', () => {
   }
 })
 
-ipcMain.handle('open-in-editor', async (_event, args: unknown) => {
+ipcMain.handle('open-in-editor', async (event, args: unknown) => {
+  assertTrustedIpcSender(event)
   const parsed = parseOpenInEditorArgs(args)
   if (!parsed) {
     return { ok: false, reason: 'invalid_args' as const }
@@ -862,6 +934,10 @@ ipcMain.handle('open-in-editor', async (_event, args: unknown) => {
   let canonicalPath: string
   try {
     canonicalPath = await realpath(filePath)
+    const fileStat = await stat(canonicalPath)
+    if (!fileStat.isFile()) {
+      return { ok: false, reason: 'file_missing' as const }
+    }
   } catch {
     return { ok: false, reason: 'file_missing' as const }
   }
@@ -893,16 +969,26 @@ ipcMain.handle('open-in-editor', async (_event, args: unknown) => {
   }
 })
 
-ipcMain.handle('open-path-in-finder', async (_event, targetPath: unknown) => {
+ipcMain.handle('open-path-in-finder', async (event, targetPath: unknown) => {
+  assertTrustedIpcSender(event)
   if (typeof targetPath !== 'string' || targetPath.trim() === '') {
     return { ok: false, reason: 'invalid_path' as const }
   }
 
   let canonicalPath: string
+  let isDirectory = false
   try {
     canonicalPath = await realpath(targetPath)
+    isDirectory = (await stat(canonicalPath)).isDirectory()
   } catch {
     return { ok: false, reason: 'path_missing' as const }
+  }
+
+  // Never call shell.openPath() on regular files (which executes them);
+  // reveal files in Finder/Explorer instead.
+  if (!isDirectory) {
+    shell.showItemInFolder(canonicalPath)
+    return { ok: true as const }
   }
 
   const error = await shell.openPath(canonicalPath)
@@ -915,20 +1001,19 @@ ipcMain.handle('open-path-in-finder', async (_event, targetPath: unknown) => {
 ipcMain.handle('open-external-url', (_event, targetUrl: unknown) => openExternalUrl(targetUrl))
 
 // 用户设置(reverse geocoding API keys 等)— 持久化到 userData/settings.json,
-// 落盘前每个 key 都过 Electron safeStorage 加密(macOS Keychain / Win DPAPI /
+// 落盘前每个 key 都过 Electron safeStorage 异步加密(macOS Keychain / Win DPAPI /
 // Linux libsecret),详见 ./user-settings.ts。process-manager 启动 engine 时
 // 读这个文件解密后注入 env var,保存后须 restart-engine 才生效。
 
-ipcMain.handle('get-user-settings', () => readUserSettings())
+ipcMain.handle('get-user-settings', async (event) => {
+  assertTrustedIpcSender(event)
+  return await readUserSettings()
+})
 
-// save-user-settings 返回 discriminated union:
-//   { ok: true, settings }              — 正常
-//   { ok: false, reason: 'safe_storage_unavailable', message } — Linux 无 libsecret 等
-//   { ok: false, reason: 'unknown', message } — 其他 IO 错误
-// 让 renderer 在 settings 弹窗里显式提示用户加密不可用,而不是 silently 继续以为已存。
-ipcMain.handle('save-user-settings', (_event, partial: UserSettings) => {
+ipcMain.handle('save-user-settings', async (event, partial: UserSettings) => {
+  assertTrustedIpcSender(event)
   try {
-    return { ok: true as const, settings: mergeUserSettings(partial) }
+    return { ok: true as const, settings: await mergeUserSettings(partial) }
   } catch (err) {
     if (err instanceof SafeStorageUnavailableError) {
       return {
@@ -944,7 +1029,8 @@ ipcMain.handle('save-user-settings', (_event, partial: UserSettings) => {
 })
 
 // 重启 engine — settings 修改后调,让新 key 生效
-ipcMain.handle('restart-engine', async () => {
+ipcMain.handle('restart-engine', async (event) => {
+  assertTrustedIpcSender(event)
   if (processManager) {
     await processManager.restart()
   }
@@ -1011,22 +1097,79 @@ app.whenReady().then(async () => {
   const speciesArtworkRootResolved = resolve(speciesArtworkRoot)
   // 首次启动也先创建缓存目录再取真实路径。Windows 的 RUNNER~1 等短路径
   // 或目录联接会在 realpath 时展开，不能拿未展开的根与真实文件路径比较。
-  let realThumbnailRootCache: string = thumbnailsRootResolved
+  let realThumbnailRootCache: string | null = null
   try {
     realThumbnailRootCache = await prepareCacheDirectory(thumbnailsRoot)
   } catch (err) {
     process.stderr.write(`[thumb] cache initialization failed: ${String(err)}\n`)
   }
-  let realSpeciesArtworkRootCache: string = speciesArtworkRootResolved
+  const getRealThumbnailRoot = async (): Promise<string> => {
+    if (realThumbnailRootCache) return realThumbnailRootCache
+    realThumbnailRootCache = await prepareCacheDirectory(thumbnailsRoot)
+    return realThumbnailRootCache
+  }
+  let realSpeciesArtworkRootCache: string | null = null
   try {
     realSpeciesArtworkRootCache = await realpath(speciesArtworkRoot)
   } catch {
     /* 开发期未下载物种图时目录可能不存在;请求会返回 404 并由 UI 渐变兜底。 */
   }
+  const getRealSpeciesArtworkRoot = async (): Promise<string> => {
+    if (realSpeciesArtworkRootCache) return realSpeciesArtworkRootCache
+    realSpeciesArtworkRootCache = await realpath(speciesArtworkRoot)
+    return realSpeciesArtworkRootCache
+  }
   process.stderr.write(`[main] userData=${app.getPath('userData')}\n`)
   process.stderr.write(`[main] thumbnailsRoot=${thumbnailsRoot}\n`)
   process.stderr.write(`[main] speciesArtworkRoot=${speciesArtworkRoot}\n`)
   resolveEditors()
+
+  // Register CSP header handler once for the default session (avoid stacking
+  // listeners on macOS window recreation).
+  const isDevSession = !app.isPackaged
+  let devHttpOrigin = 'http://localhost:5173'
+  let devWsOrigin = 'ws://localhost:5173'
+  if (isDevSession && process.env['ELECTRON_RENDERER_URL']) {
+    try {
+      const parsedDev = new URL(process.env['ELECTRON_RENDERER_URL'])
+      devHttpOrigin = parsedDev.origin
+      devWsOrigin = `${parsedDev.protocol === 'https:' ? 'wss:' : 'ws:'}//${parsedDev.host}`
+    } catch {
+      /* fallback to default Vite origin */
+    }
+  }
+  const contentSecurityPolicy = isDevSession
+    ? [
+        `default-src 'self' ${devHttpOrigin} ${devWsOrigin};`,
+        `script-src 'self' 'unsafe-inline' 'unsafe-eval' ${devHttpOrigin};`,
+        "style-src 'self' 'unsafe-inline';",
+        `connect-src 'self' http://127.0.0.1:* ${devHttpOrigin} ${devWsOrigin} plumelens:;`,
+        "img-src 'self' data: blob: plumelens:;",
+        "font-src 'self' data:;",
+      ].join(' ')
+    : [
+        "default-src 'self';",
+        "script-src 'self';",
+        "style-src 'self' 'unsafe-inline';",
+        "connect-src 'self' http://127.0.0.1:* plumelens:;",
+        "img-src 'self' data: blob: plumelens:;",
+        "font-src 'self' data:;",
+      ].join(' ')
+
+  session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
+    if (details.resourceType !== 'mainFrame' && details.resourceType !== 'subFrame') {
+      callback({ responseHeaders: details.responseHeaders })
+      return
+    }
+    const headers: Record<string, string[]> = {}
+    for (const [key, value] of Object.entries(details.responseHeaders ?? {})) {
+      if (key.toLowerCase() === 'content-security-policy') continue
+      headers[key] = value
+    }
+    headers['Content-Security-Policy'] = [contentSecurityPolicy]
+    callback({ responseHeaders: headers })
+  })
+
   protocol.handle('plumelens', async (request) => {
     const url = new URL(request.url)
     if (url.host === 'species-artwork') {
@@ -1043,7 +1186,7 @@ app.whenReady().then(async () => {
       return await serveLocalCacheFile(
         cachedPath,
         speciesArtworkRootResolved,
-        realSpeciesArtworkRootCache,
+        getRealSpeciesArtworkRoot,
         'species-artwork',
       )
     }
@@ -1071,7 +1214,7 @@ app.whenReady().then(async () => {
     return await serveLocalCacheFile(
       filePath,
       thumbnailsRootResolved,
-      realThumbnailRootCache,
+      getRealThumbnailRoot,
       'thumb',
     )
   })
@@ -1098,14 +1241,19 @@ app.whenReady().then(async () => {
     | { kind: 'fatal'; message: string }
     | { kind: 'cpu-fallback' }
 
+  const sendToMain = (channel: string, payload: unknown): void => {
+    if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed()) return
+    mainWindow.webContents.send(channel, payload)
+  }
+
   const sendStatus = (payload: EngineStatusPayload): void => {
-    mainWindow?.webContents.send('engine-status', payload)
+    sendToMain('engine-status', payload)
   }
 
   processManager.on('ready', (url: string) => {
     sendStatus({ kind: 'ready', url })
     // 兼容老 channel(早期 renderer 还在用)
-    mainWindow?.webContents.send('backend-ready', url)
+    sendToMain('backend-ready', url)
   })
 
   processManager.on('unhealthy', (info: { consecutiveFailures: number; threshold: number }) => {
@@ -1131,7 +1279,7 @@ app.whenReady().then(async () => {
 
   processManager.on('error', (msg: string) => {
     sendStatus({ kind: 'fatal', message: msg })
-    mainWindow?.webContents.send('backend-error', msg)
+    sendToMain('backend-error', msg)
   })
 
   createWindow()

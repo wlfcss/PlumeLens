@@ -21,6 +21,7 @@ from typing import Any
 
 import httpx
 
+SOURCE_PARQUET = Path("engine/models/species_wiki.parquet")
 SOURCE_JSON = Path("renderer/src/lib/species-wiki.json")
 OUTPUT_DIR = Path("resources/species-artwork")
 MANIFEST_PATH = OUTPUT_DIR / "manifest.json"
@@ -203,10 +204,18 @@ async def download_one(
 
 
 def load_rows(limit: int | None) -> list[tuple[str, str]]:
-    if not SOURCE_JSON.exists():
-        raise SystemExit(f"Missing {SOURCE_JSON}")
+    if SOURCE_PARQUET.exists():
+        import pyarrow.parquet as pq
 
-    raw_index = json.loads(SOURCE_JSON.read_text(encoding="utf-8"))
+        raw_index = {
+            str(row["canonical_sci"]): row
+            for row in pq.read_table(SOURCE_PARQUET).to_pylist()
+            if row.get("canonical_sci")
+        }
+    elif SOURCE_JSON.exists():
+        raw_index = json.loads(SOURCE_JSON.read_text(encoding="utf-8"))
+    else:
+        raise SystemExit(f"Missing {SOURCE_PARQUET} (and legacy {SOURCE_JSON})")
     rows: list[tuple[str, str]] = []
     seen_keys: dict[str, str] = {}
     for sci, item in sorted(raw_index.items()):

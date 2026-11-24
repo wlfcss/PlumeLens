@@ -21,20 +21,30 @@ type UnconfirmedSpeciesCause = 'uncertain' | 'head' | 'generic'
 function resolveSourceFor(
   photo: PhotoRecord,
   detection?: DetectionLike | null,
-): { source: PhotoRecord['speciesSource']; manualSpecies: boolean } {
+): { source: PhotoRecord['speciesSource']; manualSpecies: boolean; hasConflict: boolean } {
   if (detection) {
+    const manual = detection.manualSpecies
     const source =
-      photo.speciesSource === 'group_consensus' && detection.isBest && !detection.manualSpecies
+      photo.speciesSource === 'group_consensus' &&
+      photo.birdCount === 1 &&
+      detection.isBest &&
+      !manual
         ? photo.speciesSource
         : detection.speciesSource
+    const hasConflict =
+      !manual &&
+      (source === 'conflict' || (Boolean(photo.speciesConflict) && Boolean(detection.isBest)))
     return {
       source,
-      manualSpecies: detection.manualSpecies,
+      manualSpecies: manual,
+      hasConflict,
     }
   }
+  const manual = photo.manualSpecies ?? false
   return {
     source: photo.speciesSource,
-    manualSpecies: photo.manualSpecies ?? false,
+    manualSpecies: manual,
+    hasConflict: !manual && (Boolean(photo.speciesConflict) || photo.speciesSource === 'conflict'),
   }
 }
 
@@ -59,11 +69,11 @@ function speciesUnconfirmedCause(
 }
 
 export function speciesSourceTone(photo: PhotoRecord, detection?: DetectionLike | null): Tone {
-  const { source, manualSpecies } = resolveSourceFor(photo, detection)
-  if (source === 'group_consensus') return 'success'
-  if (photo.speciesConflict || source === 'conflict') return 'warning'
-  if (source === 'model_unconfirmed') return 'warning'
+  const { source, manualSpecies, hasConflict } = resolveSourceFor(photo, detection)
   if (source === 'manual' || manualSpecies) return 'accent'
+  if (source === 'group_consensus') return 'success'
+  if (hasConflict) return 'warning'
+  if (source === 'model_unconfirmed') return 'warning'
   return 'muted'
 }
 
@@ -71,11 +81,11 @@ export function speciesSourceKind(
   photo: PhotoRecord,
   detection?: DetectionLike | null,
 ): 'conflict' | 'correction' | 'manual' | 'unconfirmed' | null {
-  const { source, manualSpecies } = resolveSourceFor(photo, detection)
-  if (source === 'group_consensus') return 'correction'
-  if (photo.speciesConflict || source === 'conflict') return 'conflict'
-  if (source === 'model_unconfirmed') return 'unconfirmed'
+  const { source, manualSpecies, hasConflict } = resolveSourceFor(photo, detection)
   if (source === 'manual' || manualSpecies) return 'manual'
+  if (source === 'group_consensus') return 'correction'
+  if (hasConflict) return 'conflict'
+  if (source === 'model_unconfirmed') return 'unconfirmed'
   return null
 }
 
@@ -84,11 +94,14 @@ export function speciesSourceBadge(
   t: ReturnType<typeof useTranslation>['t'],
   detection?: DetectionLike | null,
 ): string | null {
-  const { source, manualSpecies } = resolveSourceFor(photo, detection)
+  const { source, manualSpecies, hasConflict } = resolveSourceFor(photo, detection)
+  if (source === 'manual' || manualSpecies) {
+    return t('selection.speciesSource.manual')
+  }
   if (source === 'group_consensus') {
     return t('selection.speciesSource.groupConsensus')
   }
-  if (photo.speciesConflict || source === 'conflict') {
+  if (hasConflict) {
     return t('selection.speciesSource.conflict')
   }
   if (source === 'model_unconfirmed') {
@@ -96,9 +109,6 @@ export function speciesSourceBadge(
     if (cause === 'uncertain') return t('selection.speciesSource.unconfirmedSpecies')
     if (cause === 'head') return t('selection.speciesSource.unconfirmedIncomplete')
     return t('selection.speciesSource.unconfirmedGeneric')
-  }
-  if (source === 'manual' || manualSpecies) {
-    return t('selection.speciesSource.manual')
   }
   return null
 }
@@ -108,7 +118,7 @@ export function speciesSourceDetail(
   t: ReturnType<typeof useTranslation>['t'],
   detection?: DetectionLike | null,
 ): string | null {
-  const { source, manualSpecies } = resolveSourceFor(photo, detection)
+  const { source, manualSpecies, hasConflict } = resolveSourceFor(photo, detection)
   const support =
     photo.groupSpeciesSupport !== null &&
     photo.groupSpeciesSupport !== undefined &&
@@ -119,13 +129,16 @@ export function speciesSourceDetail(
   const raw = photo.modelSpeciesName
   const effective = effectiveSpeciesName(photo)
 
+  if (source === 'manual' || manualSpecies) {
+    return t('selection.speciesSource.manualDetail')
+  }
   if (source === 'group_consensus') {
     if (raw && raw !== effective) {
       return t('selection.speciesSource.groupConsensusWithRaw', { species: raw, support })
     }
     return t('selection.speciesSource.groupConsensusDetail', { support })
   }
-  if (photo.speciesConflict || source === 'conflict') {
+  if (hasConflict) {
     return t('selection.speciesSource.conflictDetail')
   }
   if (source === 'model_unconfirmed') {
@@ -137,9 +150,6 @@ export function speciesSourceDetail(
       return t('selection.speciesSource.unconfirmedHeadDetail')
     }
     return t('selection.speciesSource.unconfirmedGenericDetail')
-  }
-  if (source === 'manual' || manualSpecies) {
-    return t('selection.speciesSource.manualDetail')
   }
   return null
 }

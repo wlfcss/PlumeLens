@@ -78,7 +78,9 @@ export function buildSpeciesCollectionGroups(
   const groups = new Map<SpeciesCollectionGroupId, SpeciesRecord[]>()
   for (const species of speciesRecords) {
     const groupId = speciesCollectionGroupId(species)
-    groups.set(groupId, [...(groups.get(groupId) ?? []), species])
+    const bucket = groups.get(groupId)
+    if (bucket) bucket.push(species)
+    else groups.set(groupId, [species])
   }
 
   return speciesCollectionGroupOrder.flatMap((id) => {

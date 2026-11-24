@@ -33,8 +33,10 @@ export type FolderContextMenuState = {
 
 const StartBirdVisual = memo(function StartBirdVisual() {
   return (
-    <div className="start-bird-visual" aria-hidden="true">
-      <img alt="" decoding="async" draggable={false} src={startBirdNeuralUrl} />
+    <div className="start-bird-backdrop" aria-hidden="true">
+      <div className="start-bird-visual">
+        <img alt="" decoding="async" draggable={false} src={startBirdNeuralUrl} />
+      </div>
     </div>
   )
 })
@@ -501,40 +503,50 @@ function EnginePanel({
 
 export function StartScreen({
   backendData,
+  controlsDisabled = false,
   folders,
+  hasAnyFolders = folders.length > 0,
   importError,
   isError,
   isReady,
   onChooseFolder,
+  onClearSearch,
   onContinueLatest,
   onDismissImportError,
   onOpenFolderContextMenu,
   onOpenFolder,
+  searchQuery = '',
   t,
 }: {
   backendData: BackendHealthData
+  controlsDisabled?: boolean
   folders: FolderRecord[]
+  hasAnyFolders?: boolean
   importError: string | null
   isError: boolean
   isReady: boolean
   onChooseFolder: () => void
+  onClearSearch?: () => void
   onContinueLatest: () => void
   onDismissImportError: () => void
   onOpenFolderContextMenu: (folder: FolderRecord, event: ReactMouseEvent<HTMLElement>) => void
   onOpenFolder: (folderId: string) => void
+  searchQuery?: string
   t: ReturnType<typeof useTranslation>['t']
 }) {
   const recentFolders = folders.toSorted((left, right) =>
     right.lastOpenedAt.localeCompare(left.lastOpenedAt),
   )
   const hasRecentFolders = recentFolders.length > 0
+  const searchNoMatches = hasAnyFolders && !hasRecentFolders && searchQuery.trim().length > 0
   const recentFoldersOverflow = recentFolders.length > 4
+  const disabledTitle = controlsDisabled ? t('nav.loadingDisabled') : undefined
 
   return (
     <main
       className={cn(
-        'start-screen selection-scroll',
-        !hasRecentFolders && 'start-screen--empty-history',
+        'start-screen',
+        !hasRecentFolders && !searchNoMatches && 'start-screen--empty-history',
       )}
     >
       <StartBirdVisual />
@@ -553,7 +565,13 @@ export function StartScreen({
           </h1>
           <p>{t('start.subtitle')}</p>
           <div className="action-row">
-            <button className="button-primary" onClick={onChooseFolder} type="button">
+            <button
+              className="button-primary"
+              disabled={controlsDisabled}
+              onClick={onChooseFolder}
+              title={disabledTitle}
+              type="button"
+            >
               <FolderSearch2 className="h-4 w-4" />
               {t('start.primaryAction')}
             </button>
@@ -587,38 +605,53 @@ export function StartScreen({
         </div>
       </section>
 
-      {hasRecentFolders ? (
+      {hasRecentFolders || searchNoMatches ? (
         <section className="start-workbench">
           <div className="start-list">
             <div className="start-list__heading">
               <h2>{t('start.recentFolders')}</h2>
               <span>{`${recentFolders.length} ${t('start.entries')}`}</span>
             </div>
-            <div
-              aria-label={t('start.recentFolders')}
-              className={cn('folder-stack', recentFoldersOverflow && 'folder-stack--scrollable')}
-              data-testid="recent-folder-stack"
-              tabIndex={recentFoldersOverflow ? 0 : undefined}
-            >
-              {recentFolders.map((folder) => (
-                <button
-                  className="folder-line"
-                  key={folder.id}
-                  onContextMenu={(event) => onOpenFolderContextMenu(folder, event)}
-                  onClick={() => onOpenFolder(folder.id)}
-                  type="button"
-                >
-                  <span>
-                    <strong>{folder.displayName}</strong>
-                    <small>{folder.parentPath}</small>
-                  </span>
-                  <span className="folder-line__status">
-                    <StatusDot tone={statusTone(folder.status)} />
-                    <span>{t(statusLabelKey(folder.status))}</span>
-                  </span>
-                </button>
-              ))}
-            </div>
+            {searchNoMatches ? (
+              <div className="start-search-empty" role="status">
+                <p>{t('start.searchEmpty', { query: searchQuery.trim() })}</p>
+                {onClearSearch ? (
+                  <button
+                    className="button-ghost button-compact"
+                    onClick={onClearSearch}
+                    type="button"
+                  >
+                    {t('selection.clearFilters')}
+                  </button>
+                ) : null}
+              </div>
+            ) : (
+              <div
+                aria-label={t('start.recentFolders')}
+                className={cn('folder-stack', recentFoldersOverflow && 'folder-stack--scrollable')}
+                data-testid="recent-folder-stack"
+                tabIndex={recentFoldersOverflow ? 0 : undefined}
+              >
+                {recentFolders.map((folder) => (
+                  <button
+                    className="folder-line"
+                    key={folder.id}
+                    onContextMenu={(event) => onOpenFolderContextMenu(folder, event)}
+                    onClick={() => onOpenFolder(folder.id)}
+                    type="button"
+                  >
+                    <span>
+                      <strong>{folder.displayName}</strong>
+                      <small>{folder.parentPath}</small>
+                    </span>
+                    <span className="folder-line__status">
+                      <StatusDot tone={statusTone(folder.status)} />
+                      <span>{t(statusLabelKey(folder.status))}</span>
+                    </span>
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
         </section>
       ) : null}

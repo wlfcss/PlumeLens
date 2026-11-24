@@ -8,6 +8,7 @@ import sys
 from collections.abc import AsyncGenerator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from typing import Any
 
 import structlog
@@ -43,10 +44,16 @@ async def _resume_pending_workers(app: FastAPI, db: Database) -> None:
     from engine.api.routes.analysis import start_library_worker
     from engine.core.config import settings
 
-    async with db.conn.execute(
-        "SELECT library_id, COUNT(*) AS n FROM task_queue "
-        "WHERE status = 'pending' GROUP BY library_id",
-    ) as cur:
+    async with (
+        db.read_snapshot() as conn,
+        conn.execute(
+            "SELECT tq.library_id, COUNT(*) AS n FROM task_queue tq "
+            "LEFT JOIN analysis_runs ar ON ar.id = tq.run_id "
+            "WHERE tq.status = 'pending' "
+            "AND (tq.run_id IS NULL OR ar.desired_state = 'running') "
+            "GROUP BY tq.library_id",
+        ) as cur,
+    ):
         rows = await cur.fetchall()
     for row in rows:
         library_id = str(row["library_id"])
@@ -137,10 +144,13 @@ async def _sweep_stuck_tasks(app: FastAPI, db: Database) -> None:
         # 才会动它。死 worker 配 PROCESSING 行可以判定为孤儿并立刻回收 — 不用等
         # 5 min 阈值,下面 step3 的 worker 重启接管。
         try:
-            async with db.conn.execute(
-                "SELECT library_id, COUNT(*) AS n FROM task_queue "
-                "WHERE status = 'processing' GROUP BY library_id",
-            ) as cur:
+            async with (
+                db.read_snapshot() as conn,
+                conn.execute(
+                    "SELECT library_id, COUNT(*) AS n FROM task_queue "
+                    "WHERE status = 'processing' GROUP BY library_id",
+                ) as cur,
+            ):
                 processing_rows = await cur.fetchall()
             for row in processing_rows:
                 library_id = str(row["library_id"])
@@ -148,29 +158,47 @@ async def _sweep_stuck_tasks(app: FastAPI, db: Database) -> None:
                 if worker is not None and not worker.done():
                     continue
                 count = int(row["n"])
-                async with db.transaction():
-                    await db.conn.execute(
+                now_iso = datetime.now(UTC).isoformat()
+                reset_rows = 0
+                async with db.transaction() as conn:
+                    # Re-check inside write lock so a newly started worker's task is never reset.
+                    live_worker = get_library_worker(library_id)
+                    if live_worker is not None and not live_worker.done():
+                        continue
+                    async with conn.execute(
                         "UPDATE task_queue SET status=CASE ("
                         "SELECT desired_state FROM analysis_runs WHERE id=run_id) "
                         "WHEN 'paused' THEN 'paused' WHEN 'cancelled' THEN 'cancelled' "
-                        "ELSE 'pending' END, started_at=NULL "
+                        "ELSE 'pending' END, "
+                        "started_at=NULL, "
+                        "completed_at=CASE ("
+                        "SELECT desired_state FROM analysis_runs WHERE id=run_id) "
+                        "WHEN 'cancelled' THEN ? ELSE completed_at END "
                         "WHERE library_id=? AND status='processing'",
-                        (library_id,),
+                        (now_iso, library_id),
+                    ) as cur:
+                        reset_rows = cur.rowcount or 0
+                if reset_rows > 0:
+                    await logger.awarning(
+                        "Sweeper: dead worker with PROCESSING tasks — fast-reset to pending",
+                        library_id=library_id,
+                        count=count,
                     )
-                await logger.awarning(
-                    "Sweeper: dead worker with PROCESSING tasks — fast-reset to pending",
-                    library_id=library_id,
-                    count=count,
-                )
         except Exception:
             logger.exception("Sweeper step2 (dead worker fast-reset) failed")
 
         # ---- step 3: 孤儿 PENDING (含 step 2 刚刚重置的) → 重启 worker ----
         try:
-            async with db.conn.execute(
-                "SELECT library_id, COUNT(*) AS n FROM task_queue "
-                "WHERE status = 'pending' GROUP BY library_id",
-            ) as cur:
+            async with (
+                db.read_snapshot() as conn,
+                conn.execute(
+                    "SELECT tq.library_id, COUNT(*) AS n FROM task_queue tq "
+                    "LEFT JOIN analysis_runs ar ON ar.id = tq.run_id "
+                    "WHERE tq.status = 'pending' "
+                    "AND (tq.run_id IS NULL OR ar.desired_state = 'running') "
+                    "GROUP BY tq.library_id",
+                ) as cur,
+            ):
                 rows = await cur.fetchall()
             for row in rows:
                 library_id = str(row["library_id"])
@@ -387,11 +415,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
 
     await logger.ainfo("PlumeLens Engine starting", data_dir=str(settings.data_dir))
 
-    from engine.core.windows_resources import configure_windows
+    from engine.core.windows_resources import configure_macos, configure_windows
 
-    resource_profile = configure_windows(settings)
+    resource_profile = configure_windows(settings) or configure_macos(settings)
     if resource_profile:
-        await logger.ainfo("Detected Windows resource profile", **resource_profile)
+        await logger.ainfo("Detected platform resource profile", **resource_profile)
     worker_threads = max(1, int(settings.worker_threads))
     thread_pool = ThreadPoolExecutor(
         max_workers=worker_threads,
@@ -468,12 +496,17 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     workers_cancelled = await cancel_all_workers(wait_seconds=10.0)
     if not workers_cancelled:
         await logger.awarning("Timed out cancelling analysis workers during shutdown")
+
+    # Export cancellation was requested before any shutdown wait.
+    await wait_for_export_jobs()
+
     reset_count = await reset_transient_tasks(db, reason="shutdown")
     if reset_count > 0:
         await logger.ainfo("Reset transient queue tasks during shutdown", count=reset_count)
 
-    # Export cancellation was requested before any shutdown wait.
-    await wait_for_export_jobs()
+    # Drain all thread-pool workers (including shielded inference threads) BEFORE
+    # closing ONNX/PyTorch sessions and SQLite so no worker accesses freed state.
+    thread_pool.shutdown(wait=True, cancel_futures=True)
 
     close_pipeline = getattr(app.state.pipeline, "close", None)
     if callable(close_pipeline):
@@ -482,4 +515,3 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
             await close_result
     await app.state.db.close()
     await logger.ainfo("PlumeLens Engine shutting down")
-    thread_pool.shutdown(wait=True, cancel_futures=True)

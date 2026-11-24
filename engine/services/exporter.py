@@ -383,6 +383,15 @@ def cancel_all_export_jobs() -> int:
     return len(running)
 
 
+def clear_export_job_history(data_dir: Path) -> None:
+    """Clear in-memory export job records and persisted job snapshots on disk."""
+    with _JOBS_LOCK:
+        _JOBS.clear()
+    jobs_dir = data_dir / "export_jobs"
+    if jobs_dir.exists():
+        shutil.rmtree(jobs_dir, ignore_errors=True)
+
+
 def _register_job(job: ExportJob, *, check_running: bool = False) -> None:
     with _JOBS_LOCK:
         if check_running:
@@ -691,13 +700,13 @@ def _unique_dest(output_dir: Path, rel: Path, used: set[Path]) -> Path:
     rel = Path(*[part for part in rel.parts if part not in ("", ".", "..")])
     if not rel.parts:
         rel = Path("exported-file")
+    base_stem = rel.stem
+    base_ext = rel.suffix
+    base_parent = rel.parent
     candidate = rel
     suffix = 1
     while candidate in used or (output_dir / candidate).exists():
-        stem = candidate.stem
-        ext = candidate.suffix
-        parent = candidate.parent
-        candidate = parent / f"{stem}-{suffix}{ext}"
+        candidate = base_parent / f"{base_stem}-{suffix}{base_ext}"
         suffix += 1
     used.add(candidate)
     return output_dir / candidate
@@ -943,21 +952,30 @@ def _xmp_keywords(photo: ExportPhoto) -> list[str]:
     return list(dict.fromkeys(keyword for keyword in keywords if keyword))
 
 
+_XML_CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+
+def _xml_safe(value: str) -> str:
+    return _XML_CONTROL_CHAR_RE.sub("", value)
+
+
 def _xmp_packet(photo: ExportPhoto, source: Path) -> str:
     grade = _effective_grade(photo)
     rating = str(_xmp_rating(grade))
     label = _xmp_label(grade)
     metadata_date = datetime.now(UTC).isoformat()
     subject_items = "\n".join(
-        f"        <rdf:li>{escape(keyword)}</rdf:li>" for keyword in _xmp_keywords(photo)
+        f"        <rdf:li>{escape(_xml_safe(keyword))}</rdf:li>" for keyword in _xmp_keywords(photo)
     )
     hierarchical_items = "\n".join(
-        f"        <rdf:li>{escape(keyword)}</rdf:li>"
+        f"        <rdf:li>{escape(_xml_safe(keyword))}</rdf:li>"
         for keyword in ["PlumeLens", f"PlumeLens|{_grade_label(grade) or '未评级'}"]
     )
-    description = f"PlumeLens 导出评级：{_grade_label(grade) or '未评级'}" + (
-        f"；鸟种：{photo.species}" if photo.species else ""
+    description = _xml_safe(
+        f"PlumeLens 导出评级：{_grade_label(grade) or '未评级'}"
+        + (f"；鸟种：{photo.species}" if photo.species else "")
     )
+    nickname = _xml_safe(source.name)
     return (
         '<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>\n'
         '<x:xmpmeta xmlns:x="adobe:ns:meta/">\n'
@@ -970,7 +988,7 @@ def _xmp_packet(photo: ExportPhoto, source: Path) -> str:
         f"      xmp:Label={quoteattr(label)}\n"
         f"      xmp:MetadataDate={quoteattr(metadata_date)}\n"
         f"      xmp:CreatorTool={quoteattr('PlumeLens')}\n"
-        f"      xmp:Nickname={quoteattr(source.name)}>\n"
+        f"      xmp:Nickname={quoteattr(nickname)}>\n"
         "      <dc:description>\n"
         "        <rdf:Alt>\n"
         f'          <rdf:li xml:lang="x-default">{escape(description)}</rdf:li>\n'
@@ -1295,15 +1313,22 @@ def _validate_analysis_inputs(photo: ExportPhoto, source: Path, companion: Path 
     """
     if not photo.analysis_source_fingerprint:
         return
-    current = analysis_input_fingerprint(source, companion)
+    # Missing files are handled per-photo during _run_export (source_missing /
+    # companion_missing) rather than aborting the whole export at preflight.
+    if not source.exists():
+        return
+    source_slot = _analysis_source_slot(photo)
+    active_companion = companion if (companion is not None and companion.exists()) else None
+    current = analysis_input_fingerprint(source, active_companion)
     try:
         previous_inputs = json.loads(photo.analysis_source_fingerprint)
         current_inputs = json.loads(current)
         if not isinstance(previous_inputs, list) or len(previous_inputs) != 2:
             raise ValueError("Invalid inference input identity")
-        for slot, (previous, present) in enumerate(
-            zip(previous_inputs, current_inputs, strict=True)
-        ):
+        slots_to_check = (source_slot,) if source_slot in (0, 1) else (0, 1)
+        for slot in slots_to_check:
+            previous = previous_inputs[slot]
+            present = current_inputs[slot]
             if previous == present:
                 continue
             if (
@@ -1312,13 +1337,21 @@ def _validate_analysis_inputs(photo: ExportPhoto, source: Path, companion: Path 
                 and previous[1:] == present[1:]
             ):
                 continue  # A renamed parent directory, with the same physical file.
-            path = source if slot == 0 else companion
+            path = source if slot == 0 else active_companion
+            if slot == 1 and path is None and previous is not None:
+                # Inference actually ran on the companion RAW which is now missing;
+                # let per-photo missing handling or source_changed apply.
+                if source_slot == 1:
+                    raise ExportError(
+                        "source_changed", "Inference input missing or changed; rescan before export"
+                    )
+                continue
             if path is None or not _hash_matches(path, _expected_copy_hash(photo, slot)):
                 raise ExportError("source_changed", "Inference input changed; rescan before export")
-        if current != analysis_input_fingerprint(source, companion):
+        if current != analysis_input_fingerprint(source, active_companion):
             raise ExportError("source_changed", "Inference input changed while freezing export")
         if (
-            _analysis_source_slot(photo) == 0
+            source_slot == 0
             and photo.analysis_source_hash
             and photo.file_hash
             and photo.analysis_source_hash != photo.file_hash
@@ -1722,10 +1755,12 @@ async def _load_export_context(
             )
 
 
-async def _load_export_photos(db: Database, library_id: str) -> list[ExportPhoto]:
+async def _load_export_photos(
+    db: Database, library_id: str, *, connection: Any | None = None
+) -> list[ExportPhoto]:
     """Read only database metadata; safe inside the caller's short snapshot transaction."""
-
-    async with db.conn.execute(
+    conn = connection if connection is not None else db.conn
+    async with conn.execute(
         "SELECT p.id, p.file_path, p.file_name, p.file_mtime, p.exif_json, "
         "p.companion_path, p.file_hash, p.input_revision, ar.pipeline_version, "
         "ar.source_path, ar.source_hash, ar.source_fingerprint AS analysis_source_fingerprint, "
@@ -1786,8 +1821,8 @@ async def _freeze_export_photos(
         freeze_selection,
     )
 
-    async with db.transaction():
-        async with db.conn.execute(
+    async with db.read_snapshot() as conn:
+        async with conn.execute(
             "SELECT display_name, root_path FROM libraries WHERE id = ?", (library_id,)
         ) as cursor:
             library = await cursor.fetchone()
@@ -1811,7 +1846,7 @@ async def _freeze_export_photos(
             ) from exc
         except SelectionLibraryNotFound as exc:
             raise ExportError("library_not_found", "Library not found") from exc
-        raw = {p.id: p for p in await _load_export_photos(db, library_id)}
+        raw = {p.id: p for p in await _load_export_photos(db, library_id, connection=conn)}
         effective = {p.id: p for p in projected}
         photos: list[ExportPhoto] = []
         for photo_id in ids:

@@ -4,10 +4,11 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 from pathlib import Path
 
 import structlog
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 
 from engine.api.schemas.analysis import (
@@ -20,7 +21,7 @@ from engine.api.schemas.analysis import (
 from engine.core.config import settings
 from engine.core.database import Database
 from engine.pipeline.manager import PipelineManager
-from engine.services.analyzer import analyze_photo
+from engine.services.analyzer import SourceChangedError, StalePhotoInputError, analyze_photo
 from engine.services.queue import (
     IllegalTransitionError,
     TaskStatus,
@@ -58,6 +59,7 @@ MAX_PROGRESS_SSE_PER_LIBRARY = 8
 
 # 单个 library 的 worker 状态（并发分析 + 取消标志）
 _workers: dict[str, asyncio.Task[None]] = {}
+_batch_locks: dict[str, asyncio.Lock] = {}
 
 # 当前各 library 活跃 progress SSE 连接计数 — incr / decr 都在协程内做,不需要 lock
 # (asyncio 单线程内修改 dict 是原子)。
@@ -233,6 +235,31 @@ async def _run_one_task(
         )
         await transition(db, task.id, TaskStatus.COMPLETED)
         return True
+    except SourceChangedError as e:
+        logger.warning(
+            "Task failed due to unscanned source change",
+            task_id=task.id,
+            photo_id=task.photo_id,
+            error=str(e),
+        )
+        try:
+            await mark_failed_with_retry(db, task.id, str(e))
+        except Exception:
+            with suppress(IllegalTransitionError):
+                await transition(db, task.id, TaskStatus.CANCELLED)
+        return True
+    except StalePhotoInputError as e:
+        logger.info(
+            "Task superseded by input change",
+            task_id=task.id,
+            photo_id=task.photo_id,
+            reason=str(e),
+        )
+        # Input invalidation may already have cancelled this task in task_queue;
+        # avoid attempting an illegal cancelled -> failed transition.
+        with suppress(IllegalTransitionError):
+            await transition(db, task.id, TaskStatus.CANCELLED)
+        return True
     except IllegalTransitionError:
         logger.exception("Illegal transition in worker", task_id=task.id)
         return True
@@ -342,81 +369,89 @@ async def start_batch(
     # 同步补哈希（幂等，已有哈希的 photo 直接跳过；空集时秒级返回）
     await backfill_hashes(db, body.library_id)
 
-    # 新一轮开始前清掉上轮终态队列，避免进度 total 被历史 completed/dead/cancelled
-    # 累加污染。若已有 active task，则保留当前 live ledger，继续复用 worker。
-    existing_stats = await get_stats(db, body.library_id)
-    existing_worker = _workers.get(body.library_id)
-    if existing_worker is not None and existing_worker.done():
-        _workers.pop(body.library_id, None)
-    elif existing_worker is not None and not _has_active_tasks(existing_stats):
-        try:
-            await asyncio.wait_for(asyncio.shield(existing_worker), timeout=2.0)
-        except TimeoutError:
-            logger.warning(
-                "Cancelling idle analysis worker before starting a new batch",
-                library_id=body.library_id,
-            )
-            existing_worker.cancel()
-            await asyncio.gather(existing_worker, return_exceptions=True)
-        except Exception as e:
-            logger.warning(
-                "Previous analysis worker finished with error before new batch",
-                library_id=body.library_id,
-                error=str(e),
-            )
-        finally:
+    # Serialize per-library batch startup so concurrent POST /analysis/batch calls
+    # cannot race between checking active tasks, clearing terminal rows, and spawning.
+    batch_lock = _batch_locks.setdefault(body.library_id, asyncio.Lock())
+    async with batch_lock:
+        # 新一轮开始前清掉上轮终态队列，避免进度 total 被历史 completed/dead/cancelled
+        # 累加污染。若已有 active task，则保留当前 live ledger，继续复用 worker。
+        existing_stats = await get_stats(db, body.library_id)
+        existing_worker = _workers.get(body.library_id)
+        if existing_worker is not None and existing_worker.done():
             _workers.pop(body.library_id, None)
+        elif existing_worker is not None and not _has_active_tasks(existing_stats):
+            try:
+                await asyncio.wait_for(asyncio.shield(existing_worker), timeout=2.0)
+            except TimeoutError:
+                logger.warning(
+                    "Cancelling idle analysis worker before starting a new batch",
+                    library_id=body.library_id,
+                )
+                existing_worker.cancel()
+                await asyncio.gather(existing_worker, return_exceptions=True)
+            except Exception as e:
+                logger.warning(
+                    "Previous analysis worker finished with error before new batch",
+                    library_id=body.library_id,
+                    error=str(e),
+                )
+            finally:
+                _workers.pop(body.library_id, None)
 
-    if body.force_rerun and _has_active_tasks(existing_stats):
-        raise HTTPException(
-            status_code=409,
-            detail="Cannot force rerun while this library already has active analysis tasks",
+        if body.force_rerun and _has_active_tasks(existing_stats):
+            raise HTTPException(
+                status_code=409,
+                detail="Cannot force rerun while this library already has active analysis tasks",
+            )
+        if not _has_active_tasks(existing_stats):
+            await clear_terminal_tasks(db, body.library_id)
+
+        # 传 pipeline_version 进 enqueue → 当前版本已分析过的 photo 跳过（去重）。
+        # 之前 bug：用户多次点开始分析（或 lifespan resume + 手动点）会让同一 photo
+        # 累积多个 task_queue 行 → 783 张照片产生 3173 个 task = 4× 膨胀。
+        # 现在按 (file_hash, pipeline_version) 单一来源去重。
+        inserted = await enqueue_library(
+            db,
+            body.library_id,
+            current_pipeline_version=pipeline.pipeline_version,
+            force_rerun=body.force_rerun,
         )
-    if not _has_active_tasks(existing_stats):
-        await clear_terminal_tasks(db, body.library_id)
 
-    # 传 pipeline_version 进 enqueue → 当前版本已分析过的 photo 跳过（去重）。
-    # 之前 bug：用户多次点开始分析（或 lifespan resume + 手动点）会让同一 photo
-    # 累积多个 task_queue 行 → 783 张照片产生 3173 个 task = 4× 膨胀。
-    # 现在按 (file_hash, pipeline_version) 单一来源去重。
-    inserted = await enqueue_library(
-        db,
-        body.library_id,
-        current_pipeline_version=pipeline.pipeline_version,
-        force_rerun=body.force_rerun,
-    )
+        stats = await get_stats(db, body.library_id)
+        if _has_active_tasks(stats):
+            await _mark_library_analyzing(db, body.library_id)
+        else:
+            await _mark_library_analysis_idle(db, body.library_id)
 
-    stats = await get_stats(db, body.library_id)
-    if _has_active_tasks(stats):
-        await _mark_library_analyzing(db, body.library_id)
-    else:
-        await _mark_library_analysis_idle(db, body.library_id)
+        # Kick off drain worker（不阻塞返回）
+        start_library_worker(
+            db,
+            pipeline,
+            body.library_id,
+            settings.analysis_concurrency,
+            force_rerun=body.force_rerun,
+        )
 
-    # Kick off drain worker（不阻塞返回）
-    start_library_worker(
-        db,
-        pipeline,
-        body.library_id,
-        settings.analysis_concurrency,
-        force_rerun=body.force_rerun,
-    )
-
-    stats = await get_stats(db, body.library_id)
-    return AnalysisBatchResponse(
-        library_id=body.library_id,
-        enqueued=inserted,
-        stats=stats,
-    )
+        stats = await get_stats(db, body.library_id)
+        return AnalysisBatchResponse(
+            library_id=body.library_id,
+            enqueued=inserted,
+            stats=stats,
+        )
 
 
 @router.post("/library/{library_id}/pause", response_model=QueueStats)
 async def pause(request: Request, library_id: str) -> QueueStats:
     db = await _db(request)
     await pause_library(db, library_id)
-    await _mark_library_analyzing(db, library_id)
+    current_stats = await get_stats(db, library_id)
+    if _has_active_tasks(current_stats):
+        await _mark_library_analyzing(db, library_id)
+    else:
+        await _mark_library_analysis_idle(db, library_id)
     return QueueStats(
         library_id=library_id,
-        stats=await get_stats(db, library_id),
+        stats=current_stats,
         **await get_library_control(db, library_id),
     )
 
@@ -466,11 +501,14 @@ async def library_tasks(
     request: Request,
     library_id: str,
     status: str | None = None,
-    limit: int = 200,
+    limit: int = Query(default=200, ge=1, le=2000),
 ) -> list[TaskRow]:
     """GET /analysis/library/{id}/tasks — list tasks filtered by status."""
     db = await _db(request)
-    status_enum = TaskStatus(status) if status else None
+    try:
+        status_enum = TaskStatus(status) if status else None
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid task status: {status}") from exc
     tasks = await list_tasks(db, library_id=library_id, status=status_enum, limit=limit)
     return [
         TaskRow(
@@ -489,25 +527,19 @@ async def library_tasks(
     ]
 
 
-async def _progress_stream(db: Database, library_id: str):
+async def _progress_stream(request: Request, db: Database, library_id: str):
     """Generator yielding SSE `data: ...` lines.
 
     推送策略：每 SSE_INTERVAL 秒一次状态快照；两次相邻状态相同时不重发（节省流量）。
-    **不会主动关闭** — 长连接保持到客户端断开。这样用户在 idle 状态下点击「开始
-    分析」后，新生成的 pending tasks 立即能被同一个 SSE 流推送出去。
-
-    历史 bug：之前发完 `event: done` 就 return，导致前端 EventSource 关闭；
-    用户点击「开始分析」后 task 入队但前端永远看不到（SSE 已死），button 卡在
-    "开始分析"。
+    **不会主动关闭** — 长连接保持到客户端断开，空闲时每 15 秒发送 keepalive 注释。
     """
-    # 限流计数 incr/decr 全部在 generator 内做 — 如果 ASGI 永远不 iterate
-    # generator (Starlette response writer 异常等极端边缘),incr 不发生,counter
-    # 不会泄漏。route handler 的 429 检查只读不写,有 race 时最多多放过 1-2 个连接,
-    # 远好于槽位永久泄漏。
     _progress_stream_counts[library_id] = _progress_stream_counts.get(library_id, 0) + 1
     last_payload: str | None = None
+    idle_ticks = 0
     try:
         while True:
+            if await request.is_disconnected():
+                break
             stats_dict = await get_stats(db, library_id)
             total = sum(stats_dict.values())
             completed = stats_dict.get("completed", 0)
@@ -530,8 +562,12 @@ async def _progress_stream(db: Database, library_id: str):
             if payload != last_payload:
                 yield f"data: {payload}\n\n"
                 last_payload = payload
-            # idle 状态（pending=0 且 processing=0）也保持流，不再主动 done。
-            # 用户随时可能点「开始分析」让 pending 变非 0；这条流要能马上推。
+                idle_ticks = 0
+            else:
+                idle_ticks += 1
+                if idle_ticks >= 15:
+                    yield ": keepalive\n\n"
+                    idle_ticks = 0
             await asyncio.sleep(SSE_INTERVAL)
     except asyncio.CancelledError:
         # 客户端断开，正常退出
@@ -549,10 +585,6 @@ async def _progress_stream(db: Database, library_id: str):
 async def progress_stream(request: Request, library_id: str) -> StreamingResponse:
     """GET /analysis/library/{id}/progress — SSE progress stream."""
     db = await _db(request)
-    # 限流: 单 library 最多 MAX_PROGRESS_SSE_PER_LIBRARY 个并发 progress 流。
-    # check 只读不写; 实际 incr 落在 generator 第一行,避免 StreamingResponse 因
-    # 异常未被 iterate 时 counter 永久泄漏(P1, audit-batch-2)。两个并发请求都
-    # 通过 check 时最多多放过 1 个连接,后续就稳定 reject — 可接受。
     if _progress_stream_counts.get(library_id, 0) >= MAX_PROGRESS_SSE_PER_LIBRARY:
         raise HTTPException(
             status_code=429,
@@ -560,7 +592,7 @@ async def progress_stream(request: Request, library_id: str) -> StreamingRespons
             headers={"Retry-After": "5"},
         )
     return StreamingResponse(
-        _progress_stream(db, library_id),
+        _progress_stream(request, db, library_id),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

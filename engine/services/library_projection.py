@@ -784,6 +784,47 @@ async def load_photo_review(db: Database, photo_id: str) -> tuple[str, PhotoRow]
     return library_id, cast(PhotoRow, photos[0])
 
 
+async def load_library_photos_by_ids(
+    db: Database,
+    library_id: str,
+    photo_ids: Sequence[str],
+    *,
+    summary: bool = True,
+) -> list[PhotoRow] | list[PhotoSummary]:
+    """Hydrate a bounded page of photo IDs with full scene-consensus consistency."""
+    unique_ids = list(dict.fromkeys(photo_ids))
+    if not unique_ids:
+        return []
+    async with db.read_snapshot() as conn:
+        async with conn.execute("SELECT 1 FROM libraries WHERE id = ?", (library_id,)) as cur:
+            if await cur.fetchone() is None:
+                raise LibraryProjectionNotFound(library_id)
+        fetched_by_id: dict[str, Row] = {}
+        for start in range(0, len(unique_ids), 500):
+            chunk = unique_ids[start : start + 500]
+            placeholders = ",".join("?" for _ in chunk)
+            async with conn.execute(
+                _SELECT_PHOTO_PROJECTION
+                + f"WHERE p.library_id = ? AND p.id IN ({placeholders})",
+                (library_id, *chunk),
+            ) as cur:
+                for row in await cur.fetchall():
+                    fetched_by_id[str(row["id"])] = row
+        ordered_rows = [fetched_by_id[pid] for pid in unique_ids if pid in fetched_by_id]
+        if not ordered_rows:
+            return []
+        context_rows = await _expand_scene_rows(conn, library_id, ordered_rows)
+        override_photo_ids = [str(r["id"]) for r in context_rows]
+        species_overrides = await list_species_overrides(
+            db, library_id, override_photo_ids, connection=conn
+        )
+
+    projected = await asyncio.to_thread(
+        project_library_photos, ordered_rows, context_rows, species_overrides, summary
+    )
+    return cast("list[PhotoRow] | list[PhotoSummary]", projected)
+
+
 def project_library_photos(
     rows: list[Row],
     context_rows: list[Row],

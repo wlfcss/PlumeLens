@@ -283,6 +283,22 @@ class LibraryDetail(BaseModel):
     photo_offset: int = 0
     photo_limit: int | None = None
     next_offset: int | None = None
+    summary_format: Literal["full", "compact-v1"] | None = None
+
+
+class PhotoBatchRequest(BaseModel):
+    """Request body for POST /library/{id}/photos/batch."""
+
+    photo_ids: list[str] = Field(..., min_length=1, max_length=1_000)
+    view: Literal["summary", "full"] = "summary"
+
+
+class PhotoBatchResponse(BaseModel):
+    """Scene-consistent batch photo hydration preserving requested ID order."""
+
+    library_id: str
+    projection_revision: str | None = None
+    photos: list[PhotoRow] | list[PhotoSummary]
 
 
 class PhotoReview(BaseModel):

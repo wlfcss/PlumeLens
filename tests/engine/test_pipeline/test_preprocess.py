@@ -110,3 +110,31 @@ class TestTransforms:
         img = np.random.rand(100, 200, 3).astype(np.float32)
         result = to_chw(img)
         assert result.flags["C_CONTIGUOUS"]
+
+
+class TestUint8FastPath:
+    """Ensure uint8 lazy-float32 pipeline matches legacy float32 preprocessing."""
+
+    def test_resize_letterbox_uint8_matches_float32(self) -> None:
+        rng = np.random.default_rng(42)
+        img_u8 = rng.integers(0, 256, size=(120, 200, 3), dtype=np.uint8)
+        img_f32 = img_u8.astype(np.float32) / 255.0
+        res_u8, scale_u8, pad_u8 = resize_letterbox(img_u8, 320)
+        res_f32, scale_f32, pad_f32 = resize_letterbox(img_f32, 320)
+        assert res_u8.dtype == np.float32
+        assert scale_u8 == scale_f32
+        assert pad_u8 == pad_f32
+        assert np.max(np.abs(res_u8 - res_f32)) < 0.005
+
+    def test_iqa_and_species_preprocess_accept_uint8(self) -> None:
+        from engine.pipeline.quality import _preprocess_for_iqa
+        from engine.pipeline.species import preprocess_for_dinov3
+
+        rng = np.random.default_rng(7)
+        crop_u8 = rng.integers(0, 256, size=(96, 128, 3), dtype=np.uint8)
+        crop_f32 = crop_u8.astype(np.float32) / 255.0
+        np.testing.assert_allclose(_preprocess_for_iqa(crop_u8), _preprocess_for_iqa(crop_f32))
+        np.testing.assert_allclose(
+            preprocess_for_dinov3(crop_u8, 64).numpy(),
+            preprocess_for_dinov3(crop_f32, 64).numpy(),
+        )

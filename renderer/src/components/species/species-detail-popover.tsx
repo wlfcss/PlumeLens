@@ -22,7 +22,11 @@ import { SectionLabel } from '@/components/common/section-label'
 import { openExternalLink } from '@/lib/external-link'
 import { speciesArtworkAssetUrl } from '@/lib/species-artwork'
 import { formatSpeciesPinyin } from '@/lib/species-pinyin'
-import { getSpeciesWiki, resolveSpeciesCanonicalSci } from '@/lib/species-wiki'
+import {
+  getSpeciesWiki,
+  resolveSpeciesCanonicalSci,
+  useSpeciesWikiBody,
+} from '@/lib/species-wiki'
 import { cn } from '@/lib/utils'
 import { useModalDialog } from '@/hooks/use-modal-dialog'
 
@@ -85,12 +89,15 @@ export function SpeciesInfoPopover({
 }) {
   const detail = resolveSpeciesDetail(identity)
   const dialogRef = useModalDialog()
+  const { body: wikiBody, loading: bodyLoading } = useSpeciesWikiBody(detail?.canonicalSci)
   if (!detail) return null
 
   const wiki = detail.wiki
-  const extract = wiki?.zh_extract ?? wiki?.en_extract ?? t('speciesDetail.noExtract')
-  const sourceUrl = wiki?.zh_url ?? wiki?.en_url ?? null
-  const sourceLabel = wiki?.zh_url ? t('speciesDetail.sourceZh') : t('speciesDetail.sourceEn')
+  const extract = bodyLoading
+    ? t('archive.detail.loadingExtract')
+    : (wikiBody?.zh_extract ?? wikiBody?.en_extract ?? t('speciesDetail.noExtract'))
+  const sourceUrl = wikiBody?.zh_url ?? wikiBody?.en_url ?? null
+  const sourceLabel = wikiBody?.zh_url ? t('speciesDetail.sourceZh') : t('speciesDetail.sourceEn')
   const imageUrl = speciesArtworkAssetUrl(detail.canonicalSci)
   const familyName = wiki?.family_zh ?? wiki?.family_sci ?? null
   const extractParagraphs = extract
