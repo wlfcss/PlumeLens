@@ -684,12 +684,17 @@ class PipelineManager:
         if detector is None:
             raise RuntimeError("Pipeline closed before analysis started")
 
-        # 各阶段耗时（debug 用，info 级日志）
+        # 各阶段耗时（ms）
         t_load_ms = 0.0
         t_yolo_ms = 0.0
+        t_crop_ms = 0.0
         t_pose_ms = 0.0
+        t_flight_ms = 0.0
+        t_clipiqa_ms = 0.0
+        t_hyperiqa_ms = 0.0
         t_iqa_ms = 0.0
         t_species_ms = 0.0
+        yolo_cpu_fallback = False
 
         _t = time.perf_counter()
         # Full-resolution uint8 image in display orientation (134 MB vs 536 MB float32 for 45 MP).
@@ -707,6 +712,7 @@ class PipelineManager:
             )
         except Exception as e:
             if detector_cpu_fallback is not None:
+                yolo_cpu_fallback = True
                 logger.warning(
                     "YOLO GPU failed, falling back to CPU",
                     photo_id=photo_id,
@@ -727,6 +733,7 @@ class PipelineManager:
             # Step 2a: pose / HyperIQA 用原图紧主体裁切（bbox + 10% padding）。
             # pose 需要定位精准；HyperIQA 负责主体技术画质，不能被 2.5x 大裁切里的
             # 背景/虚化/留白稀释。
+            _t_crop = time.perf_counter()
             bw = box.x2 - box.x1
             bh = box.y2 - box.y1
             px = bw * padding
@@ -755,6 +762,7 @@ class PipelineManager:
                 expand=self._settings.iqa_expand_ratio,
                 max_aspect_ratio=self._settings.iqa_max_aspect_ratio,
             )
+            t_crop_ms += (time.perf_counter() - _t_crop) * 1000
 
             # Step 3a: pose detection (crop-mode)
             # crop_origin 必须与 crop_bbox 内部 int(round(x))/int(round(y)) 取整一致 —
@@ -772,7 +780,14 @@ class PipelineManager:
                     )
                 except Exception:
                     logger.exception("Pose detection failed", photo_id=photo_id)
-            t_pose_ms += (time.perf_counter() - _t) * 1000
+            pose_elapsed = (time.perf_counter() - _t) * 1000
+            flight_part = (
+                pose_detector.last_flight_ms()
+                if pose_detector is not None and hasattr(pose_detector, "last_flight_ms")
+                else 0.0
+            )
+            t_flight_ms += flight_part
+            t_pose_ms += max(0.0, pose_elapsed - flight_part)
 
             # Step 3b: quality assessment (降级：IQA 模型缺失时用固定分数)
             _t = time.perf_counter()
@@ -781,6 +796,10 @@ class PipelineManager:
                     semantic_crop=semantic_crop,
                     technical_crop=technical_crop,
                 )
+                if hasattr(assessor, "last_timings_ms"):
+                    c_ms, h_ms = assessor.last_timings_ms()
+                    t_clipiqa_ms += c_ms
+                    t_hyperiqa_ms += h_ms
             else:
                 # IQA 模型未加载 → 返回中性分数 0.5，grade 降级为 USABLE
                 from engine.pipeline.models import QualityScores
@@ -821,18 +840,17 @@ class PipelineManager:
             )
 
         best = max(detections, key=lambda d: d.quality.combined) if detections else None
-
-        # 每张耗时分解日志（可在 stderr 看到，便于性能调优）
-        logger.info(
-            "Pipeline timing",
-            photo_id=photo_id,
-            birds=len(boxes),
-            load_ms=round(t_load_ms, 1),
-            yolo_ms=round(t_yolo_ms, 1),
-            pose_ms=round(t_pose_ms, 1),
-            iqa_ms=round(t_iqa_ms, 1),
-            species_ms=round(t_species_ms, 1),
-        )
+        stage_timings = {
+            "load_decode": round(t_load_ms, 1),
+            "yolo": round(t_yolo_ms, 1),
+            "crop": round(t_crop_ms, 1),
+            "pose": round(t_pose_ms, 1),
+            "flight": round(t_flight_ms, 1),
+            "clipiqa": round(t_clipiqa_ms, 1),
+            "hyperiqa": round(t_hyperiqa_ms, 1),
+            "iqa": round(t_iqa_ms, 1),
+            "species": round(t_species_ms, 1),
+        }
 
         return PipelineResult(
             photo_id=photo_id,
@@ -844,6 +862,8 @@ class PipelineManager:
             image_width=img_w,
             image_height=img_h,
             companion_used=False,
+            stage_timings=stage_timings,
+            yolo_cpu_fallback=yolo_cpu_fallback,
         )
 
     def _should_run_species(

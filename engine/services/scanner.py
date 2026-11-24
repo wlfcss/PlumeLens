@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -849,9 +850,18 @@ async def scan_library(
     from engine.services import archive_cache
     from engine.services.photo_input import invalidate_derived_input
 
+    scan_t0 = time.perf_counter()
     report = ScanReport()
+    t_walk = time.perf_counter()
     raw_files = await asyncio.to_thread(_walk_supported_files, root, recursive=recursive)
+    walk_ms = (time.perf_counter() - t_walk) * 1000
+    t_pair = time.perf_counter()
     files, companion_map = await asyncio.to_thread(_resolve_pairs, raw_files)
+    pair_ms = (time.perf_counter() - t_pair) * 1000
+    format_counts: dict[str, int] = {}
+    for p in files:
+        fmt = _file_format(p)
+        format_counts[fmt] = format_counts.get(fmt, 0) + 1
     now = _now_iso()
     for path in files:
         path_key = str(path)
@@ -968,14 +978,23 @@ async def scan_library(
             report.errors.append((path_key, f"scan failed: {exc}"))
     if report.added or report.updated:
         archive_cache.invalidate()
+    total_ms = (time.perf_counter() - scan_t0) * 1000
     await logger.ainfo(
-        "Library scan completed",
+        "library_scan_done",
+        category="task_metric",
         library_id=library_id,
-        root=str(root),
+        discovered=len(files),
+        companions=sum(1 for v in companion_map.values() if v is not None),
+        formats=format_counts,
         added=report.added,
         updated=report.updated,
         unchanged=report.unchanged,
         error_count=len(report.errors),
+        stages_ms={
+            "fs_walk": round(walk_ms, 1),
+            "companion_pairing": round(pair_ms, 1),
+            "total": round(total_ms, 1),
+        },
     )
     return report
 

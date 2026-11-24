@@ -79,6 +79,7 @@ test('packaged lifecycle: duplicate userData launch exits without replacing the 
       ...process.env,
       PLUMELENS_SKIP_ORPHAN_KILL: '1',
       PLUMELENS_E2E_DISABLE_CLOSE_CONFIRM: '1',
+      PLUMELENS_E2E_SKIP_LOG_CONSENT: '1',
     },
     stdio: 'ignore',
   })

@@ -1,11 +1,29 @@
-import { app, BrowserWindow, ipcMain, dialog, net, protocol, session, shell } from 'electron'
+import {
+  app,
+  BrowserWindow,
+  ipcMain,
+  dialog,
+  net,
+  powerMonitor,
+  protocol,
+  session,
+  shell,
+} from 'electron'
 import { spawn } from 'child_process'
 import { pathToFileURL } from 'url'
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'fs'
+import { chmodSync, existsSync, mkdirSync, readFileSync } from 'fs'
 import { realpath, stat } from 'fs/promises'
 import { homedir, platform as osPlatform } from 'os'
 import { join, resolve } from 'path'
 import { BENCHMARK_TRACE_ARGUMENT } from '../shared/benchmark-trace'
+import {
+  isValidConfigurableLogLevel,
+  LOG_CONSENT_VERSION,
+  type ClearLogsResult,
+  type ExportDiagnosticsResult,
+  type LoggingStatusSnapshot,
+  type SystemProfileSnapshot,
+} from '../shared/client-log'
 import { ProcessManager } from './process-manager'
 import { forceTerminateEngineTreeSync } from './engine-shutdown'
 import { findWindowsEditor } from './windows-editors'
@@ -16,6 +34,24 @@ import {
   SafeStorageUnavailableError,
   type UserSettings,
 } from './user-settings'
+import {
+  readLoggingPreferences,
+  readUiPreferences,
+  saveLoggingPreferences,
+  saveUiPreference,
+} from './ui-prefs'
+import { readExistingDeviceId, resolveDeviceId, type DeviceIdRecord } from './device-id'
+import { getClientLogger, getScopedLogger, initClientLogger } from './logger'
+import {
+  collectSystemProfile,
+  readSystemProfileCache,
+  saveSystemProfileCache,
+} from './system-profile'
+import {
+  buildAndWriteDiagnosticsZip,
+  clearLogFiles,
+  getLogsStorageStats,
+} from './log-diagnostics'
 
 // plumelens:// 协议必须在 app ready 之前注册 scheme（标准 + secure），
 // 之后在 ready 后通过 protocol.handle 真正接管请求。
@@ -37,6 +73,11 @@ let processManager: ProcessManager | null = null
 let allowAppQuit = false
 let allowWindowClose = false
 let closePromptOpen = false
+let cachedDeviceRecord: DeviceIdRecord | null = null
+let cachedSystemProfile: SystemProfileSnapshot | null = null
+let systemProfilePromise: Promise<SystemProfileSnapshot | null> | null = null
+const APP_BOOT_STARTED_AT = Date.now()
+const SKIP_LOG_CONSENT_PROMPT = process.env['PLUMELENS_E2E_SKIP_LOG_CONSENT'] === '1'
 const hasInstanceLock = app.requestSingleInstanceLock()
 if (!hasInstanceLock) app.exit(0)
 app.on('second-instance', () => {
@@ -134,8 +175,7 @@ async function serveLocalCacheFile(
     return await net.fetch(pathToFileURL(realFile).toString())
   } catch (err) {
     realpathCache.delete(resolved)
-    const message = err instanceof Error ? err.message : String(err)
-    process.stderr.write(`[${logPrefix}] failed resolved=${resolved} error=${message}\n`)
+    getScopedLogger(logPrefix).warn('serve_local_cache_failed', { logPrefix }, err)
     return new Response('Not found', { status: 404 })
   }
 }
@@ -270,53 +310,107 @@ function isTrustedAppNavigation(target: string, isDev: boolean): boolean {
   return false
 }
 
-function assertTrustedIpcSender(event: Electron.IpcMainInvokeEvent): void {
+function assertTrustedIpcSender(event: Electron.IpcMainInvokeEvent | Electron.IpcMainEvent): void {
   if (!mainWindow || mainWindow.isDestroyed() || event.sender !== mainWindow.webContents) {
     throw new Error('Unauthorized IPC sender')
   }
 }
 
-interface UiPreferences {
-  lastImportDir?: string
-  lastExportDir?: string
+function getLogsDirPath(): string {
+  return join(app.getPath('userData'), 'logs')
 }
 
-function uiPrefsPath(): string {
-  return join(app.getPath('userData'), 'ui-prefs.json')
+async function ensureDeviceRecord(persist: boolean): Promise<DeviceIdRecord> {
+  if (cachedDeviceRecord && cachedDeviceRecord.source !== 'fallback_random') {
+    return cachedDeviceRecord
+  }
+  const record = await resolveDeviceId(app.getPath('userData'), { persist })
+  cachedDeviceRecord = record
+  getClientLogger()?.setDeviceId(record.deviceId)
+  return record
 }
 
-function readUiPreferences(): UiPreferences {
-  const path = uiPrefsPath()
-  if (!existsSync(path)) return {}
-  try {
-    const parsed: unknown = JSON.parse(readFileSync(path, 'utf-8'))
-    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return {}
-    const record = parsed as Record<string, unknown>
-    return {
-      ...(typeof record['lastImportDir'] === 'string'
-        ? { lastImportDir: record['lastImportDir'] }
-        : {}),
-      ...(typeof record['lastExportDir'] === 'string'
-        ? { lastExportDir: record['lastExportDir'] }
-        : {}),
+async function ensureSystemProfile(forceRefresh = false): Promise<SystemProfileSnapshot | null> {
+  if (!forceRefresh && cachedSystemProfile) return cachedSystemProfile
+  if (!forceRefresh && systemProfilePromise) return systemProfilePromise
+
+  const job = (async (): Promise<SystemProfileSnapshot | null> => {
+    try {
+      const clientLog = getClientLogger()
+      const device = await ensureDeviceRecord(Boolean(clientLog?.isEnabled()))
+      const engineRuntime = processManager
+        ? await processManager.fetchEngineJson('/health', 2500)
+        : null
+      const profile = await collectSystemProfile({
+        deviceId: device.deviceId,
+        deviceIdSource: device.source,
+        sessionId: clientLog?.getSessionId() ?? 'unknown',
+        appInstallPath: app.getPath('exe'),
+        userDataPath: app.getPath('userData'),
+        engineRuntime,
+      })
+      cachedSystemProfile = profile
+      if (clientLog?.isEnabled()) {
+        saveSystemProfileCache(getLogsDirPath(), profile)
+        clientLog.child('system-profile').info('system_profile_collected', {
+          os: `${profile.os.platform} ${profile.os.arch}`,
+          cpu: profile.cpu.model,
+          logicalCores: profile.cpu.logicalCores,
+          totalMemGiB: Math.round((profile.memory.totalBytes / 1024 ** 3) * 10) / 10,
+          gpuCount: profile.gpus.length,
+          disks: profile.disks.map((d) => ({
+            role: d.role,
+            fs: d.filesystem,
+            media: d.mediaType,
+            bus: d.busProtocol,
+            freeGiB: d.availableBytes ? Math.round((d.availableBytes / 1024 ** 3) * 10) / 10 : null,
+          })),
+        })
+      }
+      return profile
+    } catch (err) {
+      getScopedLogger('system-profile').warn('system_profile_collect_failed', undefined, err)
+      return cachedSystemProfile ?? readSystemProfileCache(getLogsDirPath())
     }
-  } catch {
-    return {}
+  })()
+
+  if (!forceRefresh) {
+    systemProfilePromise = job.finally(() => {
+      systemProfilePromise = null
+    })
+    return systemProfilePromise
+  }
+  return job
+}
+
+function buildLoggingStatusSnapshot(): LoggingStatusSnapshot {
+  const prefs = readLoggingPreferences()
+  const clientLog = getClientLogger()
+  const logsDir = getLogsDirPath()
+  const stats = getLogsStorageStats(logsDir)
+  const existingDevice = cachedDeviceRecord ?? readExistingDeviceId(app.getPath('userData'))
+  const needsConsentPrompt =
+    !SKIP_LOG_CONSENT_PROMPT &&
+    (prefs.consent === 'unset' || prefs.consentVersion < LOG_CONSENT_VERSION)
+
+  return {
+    consent: prefs.consent,
+    consentVersion: prefs.consentVersion,
+    enabled: clientLog ? clientLog.isEnabled() : prefs.enabled,
+    level: clientLog ? clientLog.getLevel() : prefs.level,
+    deviceId: clientLog?.getDeviceId() ?? existingDevice?.deviceId ?? null,
+    sessionId: clientLog?.getSessionId() ?? 'unknown',
+    logsDir,
+    totalBytes: stats.totalBytes,
+    fileCount: stats.fileCount,
+    crashCount: stats.crashCount,
+    needsConsentPrompt,
   }
 }
 
-function saveUiPreference(key: keyof UiPreferences, dirPath: string): void {
-  try {
-    const current = readUiPreferences()
-    current[key] = dirPath
-    const path = uiPrefsPath()
-    mkdirSync(app.getPath('userData'), { recursive: true })
-    const tmp = `${path}.${process.pid}.${Date.now()}.tmp`
-    writeFileSync(tmp, JSON.stringify(current, null, 2), { encoding: 'utf-8', mode: 0o600 })
-    renameSync(tmp, path)
-  } catch {
-    /* non-critical UX preference */
-  }
+function broadcastLoggingState(): void {
+  if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed()) return
+  mainWindow.webContents.send('logging-state-changed', buildLoggingStatusSnapshot())
 }
 
 function existingDirectoryOrUndefined(dirPath: string | undefined): string | undefined {
@@ -697,6 +791,45 @@ function createWindow(): void {
     if (normalizeExternalUrl(url)) void openExternalUrl(url)
   })
 
+  // Capture renderer process crashes, hangs, and uncaught third-party console warnings.
+  let unresponsiveStartedAt: number | null = null
+  mainWindow.webContents.on('render-process-gone', (_event, details) => {
+    const logger = getClientLogger()
+    logger?.writeCrashDump(
+      'render_process_gone',
+      `reason=${details.reason} exitCode=${details.exitCode}`,
+      { reason: details.reason, exitCode: details.exitCode },
+    )
+  })
+  mainWindow.webContents.on('unresponsive', () => {
+    unresponsiveStartedAt = Date.now()
+    getScopedLogger('renderer-watchdog').warn('renderer_unresponsive')
+  })
+  mainWindow.webContents.on('responsive', () => {
+    const durationMs = unresponsiveStartedAt !== null ? Date.now() - unresponsiveStartedAt : null
+    unresponsiveStartedAt = null
+    getScopedLogger('renderer-watchdog').info('renderer_responsive', {
+      ...(durationMs !== null ? { durationMs } : {}),
+    })
+  })
+  mainWindow.webContents.on('console-message', (details) => {
+    // Capture only warning (2) / error (3) console messages that did not originate
+    // from our own renderer logger facade (which already batches via IPC).
+    if (details.level !== 'warning' && details.level !== 'error') return
+    if (details.message.startsWith('[pl-log]')) return
+    getClientLogger()?.log({
+      level: details.level === 'error' ? 'error' : 'warn',
+      process: 'renderer',
+      scope: 'console',
+      category: details.level === 'error' ? 'error' : 'general',
+      event: details.message,
+      meta: {
+        line: details.lineNumber,
+        sourceId: details.sourceId ? details.sourceId.split('/').pop() : undefined,
+      },
+    })
+  })
+
   if (isDev && process.env['ELECTRON_RENDERER_URL']) {
     mainWindow.loadURL(process.env['ELECTRON_RENDERER_URL'])
   } else {
@@ -862,13 +995,10 @@ function resolveEditors(): void {
       }
     }
   }
-  process.stderr.write(
-    `[main] editors detected: ${JSON.stringify(
-      Object.fromEntries(
-        Object.entries(EDITOR_REGISTRY).map(([k, v]) => [k, v.appPath ?? v.resolved]),
-      ),
-    )}\n`,
-  )
+  getScopedLogger('main').info('editors_detected', {
+    topaz: Boolean(EDITOR_REGISTRY.topaz.resolved),
+    photoshop: Boolean(EDITOR_REGISTRY.photoshop.resolved),
+  })
 }
 
 function findEditorExecutablePath(entry: EditorEntry): string | null {
@@ -964,7 +1094,7 @@ ipcMain.handle('open-in-editor', async (event, args: unknown) => {
     await spawnDetached('open', ['-a', appSpecifier, canonicalPath])
     return { ok: true, app: entry.resolved }
   } catch (err) {
-    process.stderr.write(`[main] open-in-editor failed: ${(err as Error).message}\n`)
+    getScopedLogger('main').warn('open_in_editor_failed', { tool }, err)
     return { ok: false, reason: 'spawn_failed' as const }
   }
 })
@@ -1023,7 +1153,7 @@ ipcMain.handle('save-user-settings', async (event, partial: UserSettings) => {
       }
     }
     const message = err instanceof Error ? err.message : String(err)
-    process.stderr.write(`[main] save-user-settings failed: ${message}\n`)
+    getScopedLogger('main').error('save_user_settings_failed', undefined, err)
     return { ok: false as const, reason: 'unknown' as const, message }
   }
 })
@@ -1037,11 +1167,211 @@ ipcMain.handle('restart-engine', async (event) => {
   return true
 })
 
+// ---- 客户端日志与诊断 IPC ----
+
+ipcMain.on('client-log:batch', (event, entries: unknown, sourceProcess?: unknown) => {
+  try {
+    assertTrustedIpcSender(event)
+  } catch {
+    return
+  }
+  const proc = sourceProcess === 'preload' ? 'preload' : 'renderer'
+  getClientLogger()?.ingestBatch(entries, proc)
+})
+
+ipcMain.handle('logs:get-status', (event) => {
+  assertTrustedIpcSender(event)
+  return buildLoggingStatusSnapshot()
+})
+
+ipcMain.handle('logs:set-consent', async (event, enabled: unknown) => {
+  assertTrustedIpcSender(event)
+  const allow = Boolean(enabled)
+  const saved = saveLoggingPreferences({
+    consent: allow ? 'enabled' : 'disabled',
+    consentVersion: LOG_CONSENT_VERSION,
+    enabled: allow,
+  })
+  const clientLog = getClientLogger()
+  if (allow) {
+    const device = await ensureDeviceRecord(true)
+    clientLog?.setDeviceId(device.deviceId)
+  }
+  clientLog?.configure({
+    consent: saved.consent,
+    enabled: saved.enabled,
+    level: saved.level,
+  })
+  if (allow) {
+    void ensureSystemProfile(true)
+  }
+  if (processManager) {
+    await processManager.syncLoggingToEngine({
+      enabled: saved.enabled,
+      level: saved.level,
+      deviceId: clientLog?.getDeviceId(),
+      sessionId: clientLog?.getSessionId(),
+    })
+  }
+  const snapshot = buildLoggingStatusSnapshot()
+  broadcastLoggingState()
+  return snapshot
+})
+
+ipcMain.handle('logs:set-enabled', async (event, enabled: unknown) => {
+  assertTrustedIpcSender(event)
+  const allow = Boolean(enabled)
+  const saved = saveLoggingPreferences({
+    consent: allow ? 'enabled' : 'disabled',
+    consentVersion: LOG_CONSENT_VERSION,
+    enabled: allow,
+  })
+  const clientLog = getClientLogger()
+  if (allow) {
+    const device = await ensureDeviceRecord(true)
+    clientLog?.setDeviceId(device.deviceId)
+  }
+  clientLog?.configure({
+    consent: saved.consent,
+    enabled: saved.enabled,
+    level: saved.level,
+  })
+  if (allow) {
+    void ensureSystemProfile(true)
+  }
+  if (processManager) {
+    await processManager.syncLoggingToEngine({
+      enabled: saved.enabled,
+      level: saved.level,
+      deviceId: clientLog?.getDeviceId(),
+      sessionId: clientLog?.getSessionId(),
+    })
+  }
+  const snapshot = buildLoggingStatusSnapshot()
+  broadcastLoggingState()
+  return snapshot
+})
+
+ipcMain.handle('logs:set-level', async (event, level: unknown) => {
+  assertTrustedIpcSender(event)
+  if (!isValidConfigurableLogLevel(level)) {
+    throw new Error('Invalid log level')
+  }
+  const saved = saveLoggingPreferences({ level })
+  const clientLog = getClientLogger()
+  clientLog?.setLevel(saved.level)
+  if (processManager) {
+    await processManager.syncLoggingToEngine({
+      enabled: saved.enabled,
+      level: saved.level,
+      deviceId: clientLog?.getDeviceId(),
+      sessionId: clientLog?.getSessionId(),
+    })
+  }
+  const snapshot = buildLoggingStatusSnapshot()
+  broadcastLoggingState()
+  return snapshot
+})
+
+ipcMain.handle('logs:clear', async (event): Promise<ClearLogsResult> => {
+  assertTrustedIpcSender(event)
+  const clientLog = getClientLogger()
+  clientLog?.drainSync()
+  const result = clearLogFiles(getLogsDirPath())
+  if (result.ok && clientLog?.isEnabled()) {
+    if (cachedSystemProfile) {
+      saveSystemProfileCache(getLogsDirPath(), cachedSystemProfile)
+    }
+    if (processManager) {
+      await processManager.syncLoggingToEngine({
+        enabled: true,
+        level: clientLog.getLevel(),
+        deviceId: clientLog.getDeviceId(),
+        sessionId: clientLog.getSessionId(),
+        reopen: true,
+      })
+    }
+    clientLog.child('logger').info('logs_cleared', {
+      freedBytes: result.freedBytes,
+      removedFiles: result.removedFiles,
+    })
+  }
+  broadcastLoggingState()
+  return result
+})
+
+ipcMain.handle('logs:export-bundle', async (event): Promise<ExportDiagnosticsResult> => {
+  assertTrustedIpcSender(event)
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return { ok: false, reason: 'unknown', message: 'Main window unavailable' }
+  }
+  const clientLog = getClientLogger()
+  // Resolve deviceId (without persisting if logging is currently disabled).
+  const device = await ensureDeviceRecord(Boolean(clientLog?.isEnabled()))
+  const stamp = new Date()
+    .toISOString()
+    .replace(/[-:]/g, '')
+    .replace('T', '-')
+    .slice(0, 15)
+  const shortId = device.deviceId.replace(/^pl-/, '').slice(0, 8)
+  const defaultFileName = `PlumeLens-logs-${shortId}-${stamp}.zip`
+  const defaultDir = app.getPath('downloads') || app.getPath('desktop')
+
+  const saveDialog = await dialog.showSaveDialog(mainWindow, {
+    title: '导出诊断日志包',
+    defaultPath: join(defaultDir, defaultFileName),
+    buttonLabel: '导出',
+    filters: [{ name: 'ZIP 诊断包', extensions: ['zip'] }],
+  })
+  if (saveDialog.canceled || !saveDialog.filePath) {
+    return { ok: false, canceled: true, reason: 'canceled' }
+  }
+
+  try {
+    clientLog?.drainSync()
+    const [profile, dbSummary, userSettings] = await Promise.all([
+      ensureSystemProfile(true),
+      processManager ? processManager.fetchEngineJson('/diagnostics/db-summary', 4000) : Promise.resolve(null),
+      readUserSettings().catch(() => ({}) as UserSettings),
+    ])
+    const extraSecrets = [
+      processManager?.getAuthToken(),
+      userSettings.amapKey,
+      userSettings.baiduAk,
+      userSettings.tencentKey,
+    ].filter((s): s is string => typeof s === 'string' && s.length >= 6)
+
+    const result = buildAndWriteDiagnosticsZip({
+      outputPath: saveDialog.filePath,
+      logsDir: getLogsDirPath(),
+      userDataDir: app.getPath('userData'),
+      deviceId: device.deviceId,
+      sessionId: clientLog?.getSessionId() ?? 'unknown',
+      loggingEnabled: Boolean(clientLog?.isEnabled()),
+      profile,
+      dbSummary,
+      extraSecrets,
+    })
+    clientLog?.child('diagnostics').info('diagnostics_bundle_exported', {
+      sizeBytes: result.sizeBytes,
+      fileCount: result.fileCount,
+    })
+    return {
+      ok: true,
+      path: saveDialog.filePath,
+      sizeBytes: result.sizeBytes,
+      fileCount: result.fileCount,
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    getScopedLogger('diagnostics').error('diagnostics_export_failed', undefined, err)
+    return { ok: false, reason: 'write_failed', message }
+  }
+})
+
 // 让用户在 fatal 状态点 banner 直接打开 logs 目录(crash 自查 / 上报)
 ipcMain.handle('open-logs-dir', async () => {
-  const logsDir = join(app.getPath('userData'), 'logs')
-  // 兜底:用户可能清过 ~/Library/Application Support/plumelens 目录,这里建空 dir
-  // 避免 shell.openPath 返回错误字符串而 banner 看上去"按了无反应"。
+  const logsDir = getLogsDirPath()
   try {
     mkdirSync(logsDir, { recursive: true })
   } catch {
@@ -1069,9 +1399,7 @@ function lockdownUserData(userDataDir: string): void {
   try {
     chmodSync(userDataDir, 0o700)
   } catch (err) {
-    // 不阻塞启动 — userData 目录可能在 NFS / 外置盘 chmod 不支持的情况下报错。
-    // 警告写到 stderr 让用户知道隐私保护没拿满。
-    process.stderr.write(`[main] failed to chmod userData to 0o700: ${(err as Error).message}\n`)
+    getScopedLogger('main').warn('chmod_userdata_failed', undefined, err)
   }
 }
 
@@ -1089,6 +1417,54 @@ app.whenReady().then(async () => {
   }
   lockdownUserData(userDataDir)
 
+  // 初始化客户端统一日志核心（未同意前绝不落盘，仅内存缓冲本次启动事件）
+  const loggingPrefs = readLoggingPreferences()
+  const existingDevice = readExistingDeviceId(userDataDir)
+  cachedDeviceRecord = existingDevice
+  const clientLog = initClientLogger({
+    logsDir: getLogsDirPath(),
+    deviceId: existingDevice?.deviceId ?? null,
+    consent: loggingPrefs.consent,
+    enabled: loggingPrefs.enabled,
+    level: loggingPrefs.level,
+    mirrorToStderr: !app.isPackaged || process.env['PLUMELENS_LOG_STDERR'] === '1',
+  })
+  const mainLog = clientLog.child('main')
+  mainLog.info('app_ready', {
+    version: app.getVersion(),
+    isPackaged: app.isPackaged,
+    platform: process.platform,
+    arch: process.arch,
+    electron: process.versions.electron,
+    loggingConsent: loggingPrefs.consent,
+    loggingEnabled: loggingPrefs.enabled,
+    readyMs: Date.now() - APP_BOOT_STARTED_AT,
+  })
+  if (loggingPrefs.enabled) {
+    void ensureDeviceRecord(true).then(() => ensureSystemProfile(false))
+  }
+
+  // 监听子进程崩溃与系统休眠/过热信号（排查长任务卡顿或中断）
+  app.on('child-process-gone', (_event, details) => {
+    clientLog.writeCrashDump(
+      'child_process_gone',
+      `type=${details.type} reason=${details.reason} exitCode=${details.exitCode} service=${details.serviceName ?? ''}`,
+      { type: details.type, reason: details.reason, exitCode: details.exitCode },
+    )
+  })
+  powerMonitor.on('suspend', () => {
+    clientLog.child('power').info('system_suspend')
+    clientLog.drainSync()
+  })
+  powerMonitor.on('resume', () => {
+    clientLog.child('power').info('system_resume')
+  })
+  if (process.platform === 'darwin') {
+    powerMonitor.on('thermal-state-change', (details) => {
+      clientLog.child('power').warn('thermal_state_change', { state: details.state })
+    })
+  }
+
   const thumbnailsRoot = join(userDataDir, 'derived', 'thumbnails')
   const speciesArtworkRoot = app.isPackaged
     ? join(process.resourcesPath, 'species-artwork')
@@ -1103,7 +1479,7 @@ app.whenReady().then(async () => {
   try {
     realThumbnailRootCache = await prepareCacheDirectory(thumbnailsRoot)
   } catch (err) {
-    process.stderr.write(`[thumb] cache initialization failed: ${String(err)}\n`)
+    clientLog.child('thumb').warn('cache_initialization_failed', undefined, err)
   }
   const getRealThumbnailRoot = async (): Promise<string> => {
     if (realThumbnailRootCache) return realThumbnailRootCache
@@ -1121,9 +1497,11 @@ app.whenReady().then(async () => {
     realSpeciesArtworkRootCache = await realpath(speciesArtworkRoot)
     return realSpeciesArtworkRootCache
   }
-  process.stderr.write(`[main] userData=${app.getPath('userData')}\n`)
-  process.stderr.write(`[main] thumbnailsRoot=${thumbnailsRoot}\n`)
-  process.stderr.write(`[main] speciesArtworkRoot=${speciesArtworkRoot}\n`)
+  mainLog.debug('paths_initialized', {
+    userData: app.getPath('userData'),
+    thumbnailsRoot,
+    speciesArtworkRoot,
+  })
   resolveEditors()
 
   // Register CSP header handler once for the default session (avoid stacking
@@ -1256,6 +1634,19 @@ app.whenReady().then(async () => {
     sendStatus({ kind: 'ready', url })
     // 兼容老 channel(早期 renderer 还在用)
     sendToMain('backend-ready', url)
+    // 若用户在引擎启动期间开启/切换了日志开关，在此补同步一次并补充 Engine 运行时档案
+    const activeLog = getClientLogger()
+    if (activeLog) {
+      void processManager?.syncLoggingToEngine({
+        enabled: activeLog.isEnabled(),
+        level: activeLog.getLevel(),
+        deviceId: activeLog.getDeviceId(),
+        sessionId: activeLog.getSessionId(),
+      })
+      if (activeLog.isEnabled()) {
+        void ensureSystemProfile(true)
+      }
+    }
   })
 
   processManager.on('unhealthy', (info: { consecutiveFailures: number; threshold: number }) => {
@@ -1326,6 +1717,7 @@ app.on('before-quit', (event) => {
           allowWindowClose = true
           for (const window of BrowserWindow.getAllWindows()) window.destroy()
           await processManager?.stop()
+          getClientLogger()?.shutdownSync('before_quit')
         })
         .finally(() => {
           engineShutdownComplete = true
@@ -1342,6 +1734,7 @@ app.on('before-quit', (event) => {
 // 异步 SIGTERM→SIGKILL 兜底链全部失效。这里走同步 process.kill(-pid, 'SIGKILL')
 // 直接杀进程组(spawn 时 detached:true,pgid == pid)。
 process.on('exit', () => {
+  getClientLogger()?.drainSync()
   for (const pid of processManager?.getEnginePids() ?? []) {
     try {
       forceTerminateEngineTreeSync(pid)
@@ -1358,7 +1751,12 @@ process.on('exit', () => {
 // uncaughtException / unhandledRejection 兜底 — 没这两个 handler 时崩溃路径
 // 不触发 before-quit / SIGTERM,stop() 永不调用,Python engine 残留。
 process.on('uncaughtException', (err) => {
-  process.stderr.write(`[main] uncaughtException: ${err.message}\n${err.stack ?? ''}\n`)
+  const logger = getClientLogger()
+  if (logger) {
+    logger.writeCrashDump('uncaught_exception', `${err.message}\n${err.stack ?? ''}`)
+  } else {
+    process.stderr.write(`[main] uncaughtException: ${err.message}\n${err.stack ?? ''}\n`)
+  }
   try {
     processManager?.stop()
   } catch {
@@ -1367,7 +1765,7 @@ process.on('uncaughtException', (err) => {
   quitWithoutConfirmation()
 })
 process.on('unhandledRejection', (reason) => {
-  process.stderr.write(`[main] unhandledRejection: ${String(reason)}\n`)
+  getScopedLogger('main').error('unhandled_rejection', undefined, reason)
 })
 
 process.on('SIGTERM', () => {

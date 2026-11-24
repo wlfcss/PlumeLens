@@ -38,6 +38,10 @@ export function EngineStatusBanner(): ReactElement | null {
     void window.plumelens?.openLogsDir?.()
   }
 
+  const handleExportLogs = (): void => {
+    void window.plumelens?.exportDiagnosticsBundle?.()
+  }
+
   if (state === 'reconnecting') {
     const message =
       restartCount > 0
@@ -69,6 +73,8 @@ export function EngineStatusBanner(): ReactElement | null {
   if (state === 'fatal') {
     // dev shell / 测试无 IPC 时按钮 disabled — 避免按了无反应。
     const canOpenLogs = typeof window !== 'undefined' && Boolean(window.plumelens?.openLogsDir)
+    const canExportLogs =
+      typeof window !== 'undefined' && Boolean(window.plumelens?.exportDiagnosticsBundle)
     return (
       <div role="alert" aria-live="assertive" className="engine-banner engine-banner--fatal">
         <AlertTriangle className="h-4 w-4" />
@@ -78,6 +84,15 @@ export function EngineStatusBanner(): ReactElement | null {
             ? t('engineBanner.totalCrashes', { count: totalCrashes })
             : null}
         </span>
+        {canExportLogs ? (
+          <button
+            className="engine-banner__action"
+            onClick={handleExportLogs}
+            type="button"
+          >
+            {t('engineBanner.exportLogs')}
+          </button>
+        ) : null}
         <button
           className="engine-banner__action"
           disabled={!canOpenLogs}

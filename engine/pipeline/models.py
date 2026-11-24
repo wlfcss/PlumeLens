@@ -2,7 +2,7 @@
 
 from enum import StrEnum
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class BoundingBox(BaseModel):
@@ -134,3 +134,6 @@ class PipelineResult(BaseModel):
     # True = 主文件读图失败,结果来自 companion(通常是 RAW)。诊断用,
     # 也是 analyzer 决定是否做坐标空间缩放的触发条件。
     companion_used: bool = False
+    # 细粒度管线节点耗时（ms），用于 task_metric 诊断日志；默认空 dict 兼容旧 cache
+    stage_timings: dict[str, float] = Field(default_factory=dict)
+    yolo_cpu_fallback: bool = False

@@ -15,14 +15,19 @@ Pipeline readiness 校验：analyzer 在 pipeline not ready 时抛 RuntimeError�
 from __future__ import annotations
 
 import asyncio
+import json
+import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import structlog
 
 from engine.core.database import Database
+from engine.core.logging import anonymize_filename
 from engine.pipeline.manager import PipelineManager
 from engine.pipeline.models import BirdAnalysis, PipelineResult, PoseInfo
+from engine.pipeline.preprocess import RAW_EXTENSIONS
 from engine.services.cache import get_result_for_version, store_result
 from engine.services.photo_input import (
     SourceChangedError,
@@ -33,6 +38,68 @@ from engine.services.photo_input import (
 from engine.services.scanner import _light_fingerprint, _sha256_file
 
 logger = structlog.stdlib.get_logger()
+
+
+def _build_anonymized_file_info(
+    row: Any,
+    file_path: Path,
+    companion_path: Path | None,
+    *,
+    width: int | None = None,
+    height: int | None = None,
+    companion_used: bool = False,
+) -> dict[str, Any]:
+    """Build privacy-safe technical metadata for an analyzed image."""
+    w = width if width and width > 0 else (int(row["width"]) if row["width"] else None)
+    h = height if height and height > 0 else (int(row["height"]) if row["height"] else None)
+    ext = file_path.suffix.lower().lstrip(".") or str(row["format"] or "").lower() or "unknown"
+    is_raw = f".{ext}" in RAW_EXTENSIONS
+
+    camera_make: str | None = None
+    camera_model: str | None = None
+    lens_model: str | None = None
+    orientation: int | None = None
+    raw_exif = row["exif_json"]
+    if isinstance(raw_exif, str) and raw_exif:
+        try:
+            exif = json.loads(raw_exif)
+            if isinstance(exif, dict):
+                camera_make = str(exif["Make"]).strip() if exif.get("Make") else None
+                camera_model = str(exif["Model"]).strip() if exif.get("Model") else None
+                lens_model = str(exif["LensModel"]).strip() if exif.get("LensModel") else None
+                if exif.get("Orientation") is not None:
+                    orientation = int(exif["Orientation"])
+        except Exception:  # noqa: BLE001
+            pass
+
+    info: dict[str, Any] = {
+        "name": anonymize_filename(str(file_path)),
+        "format": ext,
+        "is_raw": is_raw,
+        "size_bytes": int(row["file_size"]) if row["file_size"] is not None else None,
+        "width": w,
+        "height": h,
+        "megapixels": round((w * h) / 1_000_000, 1) if w and h else None,
+        "orientation": orientation,
+        "has_companion": companion_path is not None,
+        "companion_used": companion_used,
+    }
+    if companion_path is not None:
+        info["companion_format"] = (
+            companion_path.suffix.lower().lstrip(".")
+            or str(row["companion_format"] or "").lower()
+            or None
+        )
+        info["companion_size_bytes"] = (
+            int(row["companion_size"]) if row["companion_size"] is not None else None
+        )
+    if camera_make:
+        info["camera_make"] = camera_make
+    if camera_model:
+        info["camera_model"] = camera_model
+    if lens_model:
+        info["lens_model"] = lens_model
+    return info
 
 
 @dataclass
@@ -85,6 +152,7 @@ async def _analyze_photo(
     Returns:
         AnalysisOutcome（含 from_cache 标志）
     """
+    t_total_start = time.perf_counter()
     if not pipeline.is_ready:
         msg = "Pipeline not ready; core models not loaded"
         raise RuntimeError(msg)
@@ -104,6 +172,7 @@ async def _analyze_photo(
     if row is None:
         msg = f"Photo not found: {photo_id}"
         raise RuntimeError(msg)
+    library_id = str(row["library_id"])
     file_path = Path(str(row["file_path"]))
     companion_raw = row["companion_path"]
     companion_path = Path(str(companion_raw)) if companion_raw else None
@@ -117,6 +186,7 @@ async def _analyze_photo(
         raise SourceChangedError(photo_id, revision, "Source requires a folder rescan")
     if expected_input_revision is not None and revision != expected_input_revision:
         raise StalePhotoInputError(f"Photo changed after task claim: {photo_id}")
+    t_fp_start = time.perf_counter()
     before = await asyncio.to_thread(source_fingerprint, file_path, companion_path)
     if row["previous_fingerprint"] and before != row["previous_fingerprint"]:
         raise SourceChangedError(photo_id, revision, "Recorded source identity changed")
@@ -136,26 +206,55 @@ async def _analyze_photo(
             row["companion_mtime"] is not None and comp_mtime != row["companion_mtime"]
         ):
             raise SourceChangedError(photo_id, revision, "Companion source metadata changed")
+    t_fp_ms = (time.perf_counter() - t_fp_start) * 1000
     analyzed_source = file_path
     current_version = pipeline.pipeline_version
 
+    t_cache_ms = 0.0
     if not force_rerun:
+        t_cache_start = time.perf_counter()
         cached = await get_result_for_version(db, photo_id, current_version)
+        t_cache_ms = (time.perf_counter() - t_cache_start) * 1000
         if cached is not None:
-            await logger.ainfo(
-                "Cache hit",
-                photo_id=photo_id,
-                pipeline_version=current_version,
-            )
             # 命中仍需确保 active（可能被手动切换过）
             if before != await asyncio.to_thread(source_fingerprint, file_path, companion_path):
                 raise SourceChangedError(photo_id, revision, "Photo changed during cache lookup")
+            t_store_start = time.perf_counter()
             await store_result(
                 db,
                 photo_id,
                 cached,
                 expected_input_revision=revision,
                 fingerprint=before,
+            )
+            t_store_ms = (time.perf_counter() - t_store_start) * 1000
+            total_ms = (time.perf_counter() - t_total_start) * 1000
+            await logger.ainfo(
+                "photo_analysis_done",
+                category="task_metric",
+                library_id=library_id,
+                photo_id=photo_id,
+                pipeline_version=current_version,
+                from_cache=True,
+                file=_build_anonymized_file_info(
+                    row,
+                    file_path,
+                    companion_path,
+                    width=cached.image_width or primary_width,
+                    height=cached.image_height or primary_height,
+                    companion_used=cached.companion_used,
+                ),
+                stages_ms={
+                    "fingerprint": round(t_fp_ms, 1),
+                    "cache_lookup": round(t_cache_ms, 1),
+                    "db_store": round(t_store_ms, 1),
+                    "total": round(total_ms, 1),
+                },
+                outcome={
+                    "bird_count": cached.bird_count,
+                    "grade": cached.best.grade.value if cached.best else None,
+                    "yolo_cpu_fallback": cached.yolo_cpu_fallback,
+                },
             )
             return AnalysisOutcome(result=cached, from_cache=True)
 
@@ -164,12 +263,6 @@ async def _analyze_photo(
         msg = f"File not found on disk: {file_path}"
         raise FileNotFoundError(msg)
 
-    await logger.ainfo(
-        "Running pipeline inference",
-        photo_id=photo_id,
-        pipeline_version=current_version,
-        force_rerun=force_rerun,
-    )
     try:
         result = await pipeline.analyze(file_path, photo_id=photo_id)
     except (OSError, ValueError) as e:
@@ -181,6 +274,20 @@ async def _analyze_photo(
         # 不 fallback:模型 abort / MPS GPU 错误 / 内存爆 / 算法异常 — 这些跟主/同伴
         # 文件无关,fallback 也是浪费,直接 raise 让 task_queue 记 DEAD。
         if companion_path is None or not companion_path.exists():  # noqa: ASYNC240
+            await logger.awarning(
+                "photo_analysis_failed",
+                category="task_metric",
+                library_id=library_id,
+                photo_id=photo_id,
+                file=_build_anonymized_file_info(row, file_path, companion_path),
+                stages_ms={
+                    "fingerprint": round(t_fp_ms, 1),
+                    "cache_lookup": round(t_cache_ms, 1),
+                    "total": round((time.perf_counter() - t_total_start) * 1000, 1),
+                },
+                error_stage="decode",
+                error_type=type(e).__name__,
+            )
             raise
         await logger.awarning(
             "Pipeline failed on primary, trying companion fallback",
@@ -222,6 +329,22 @@ async def _analyze_photo(
             photo_id=photo_id,
             companion=str(companion_path),
         )
+    except Exception as exc:
+        await logger.aerror(
+            "photo_analysis_failed",
+            category="task_metric",
+            library_id=library_id,
+            photo_id=photo_id,
+            file=_build_anonymized_file_info(row, file_path, companion_path),
+            stages_ms={
+                "fingerprint": round(t_fp_ms, 1),
+                "cache_lookup": round(t_cache_ms, 1),
+                "total": round((time.perf_counter() - t_total_start) * 1000, 1),
+            },
+            error_stage="inference",
+            error_type=type(exc).__name__,
+        )
+        raise
 
     after = await asyncio.to_thread(source_fingerprint, file_path, companion_path)
     if before != after:
@@ -238,6 +361,7 @@ async def _analyze_photo(
         source_hash = recorded_hash
     else:
         source_hash = await asyncio.to_thread(_sha256_file, analyzed_source)
+    t_store_start = time.perf_counter()
     await store_result(
         db,
         photo_id,
@@ -246,6 +370,42 @@ async def _analyze_photo(
         source_path=str(analyzed_source),
         source_hash=source_hash,
         fingerprint=before,
+    )
+    t_store_ms = (time.perf_counter() - t_store_start) * 1000
+    total_ms = (time.perf_counter() - t_total_start) * 1000
+
+    stages = dict(result.stage_timings)
+    stages["fingerprint"] = round(t_fp_ms, 1)
+    stages["cache_lookup"] = round(t_cache_ms, 1)
+    stages["db_store"] = round(t_store_ms, 1)
+    stages["total"] = round(total_ms, 1)
+    top_state = (
+        result.best.species_candidates[0].recognition_state
+        if result.best and result.best.species_candidates
+        else None
+    )
+    await logger.ainfo(
+        "photo_analysis_done",
+        category="task_metric",
+        library_id=library_id,
+        photo_id=photo_id,
+        pipeline_version=current_version,
+        from_cache=False,
+        file=_build_anonymized_file_info(
+            row,
+            file_path,
+            companion_path,
+            width=result.image_width or primary_width,
+            height=result.image_height or primary_height,
+            companion_used=result.companion_used,
+        ),
+        stages_ms=stages,
+        outcome={
+            "bird_count": result.bird_count,
+            "grade": result.best.grade.value if result.best else None,
+            "yolo_cpu_fallback": result.yolo_cpu_fallback,
+            "species_state": top_state,
+        },
     )
 
     return AnalysisOutcome(result=result, from_cache=False)

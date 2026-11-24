@@ -19,6 +19,7 @@ import re
 import shutil
 import stat
 import threading
+import time
 import unicodedata
 import uuid
 from contextlib import suppress
@@ -1933,6 +1934,7 @@ async def _run_job(
     photos: list[ExportPhoto],
 ) -> None:
     """后台跑完一次导出,把终态写回 job(SSE 生成器据此收流)。"""
+    export_t0 = time.perf_counter()
     try:
         result = await asyncio.to_thread(
             _run_export,
@@ -1947,15 +1949,24 @@ async def _run_job(
     except ExportError as exc:
         job.finish(JOB_FAILED, code=exc.code, message=str(exc), context=exc.context)
         await logger.aerror(
-            "Export job failed",
+            "export_job_failed",
+            category="task_metric",
             job_id=job.job_id,
             library_id=library_id,
             code=exc.code,
+            stages_ms={"total": round((time.perf_counter() - export_t0) * 1000, 1)},
             **exc.context,
         )
     except Exception as exc:
         job.finish(JOB_FAILED, code="internal_error", message=str(exc))
-        await logger.aexception("Export job crashed", job_id=job.job_id, library_id=library_id)
+        await logger.aexception(
+            "export_job_failed",
+            category="task_metric",
+            job_id=job.job_id,
+            library_id=library_id,
+            code="internal_error",
+            stages_ms={"total": round((time.perf_counter() - export_t0) * 1000, 1)},
+        )
     else:
         status = (
             JOB_CANCELLED
@@ -1971,7 +1982,8 @@ async def _run_job(
             message="Some photos could not be exported" if status == JOB_FAILED else None,
         )
         await logger.ainfo(
-            "Export job finished",
+            "export_job_done",
+            category="task_metric",
             job_id=job.job_id,
             library_id=library_id,
             status=status,
@@ -1980,7 +1992,7 @@ async def _run_job(
             xmp=result.xmp_count,
             missing=result.skipped_missing,
             failed=result.failed_count,
-            output_dir=result.output_dir,
+            stages_ms={"total": round((time.perf_counter() - export_t0) * 1000, 1)},
         )
 
 

@@ -18,6 +18,7 @@ import asyncio
 import contextlib
 import io
 import os
+import time
 import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -401,6 +402,7 @@ async def generate_library_thumbnails(
 
     # 取所有照片（不止 thumb_grid IS NULL 的），但分页处理：
     # 真实图片解码由 semaphore 控制并发，DB 记录和 coroutine 也不一次性堆整库。
+    batch_t0 = time.perf_counter()
     last_rowid = 0
     while True:
         async with db.conn.execute(
@@ -450,5 +452,15 @@ async def generate_library_thumbnails(
             )
 
     report = {"built": built, "skipped": skipped, "failed": failed}
+    if built > 0 or failed > 0:
+        await logger.ainfo(
+            "thumbnail_batch_done",
+            category="task_metric",
+            library_id=library_id,
+            built=built,
+            skipped=skipped,
+            failed=failed,
+            stages_ms={"total": round((time.perf_counter() - batch_t0) * 1000, 1)},
+        )
     publish_library_event(library_id, "thumbnail_complete", report)
     return report

@@ -16,6 +16,7 @@ from pydantic import BaseModel
 
 from engine.core.config import settings
 from engine.core.database import Database
+from engine.core.logging import get_logging_state, reconfigure_logging
 from engine.services import archive_cache
 from engine.services.thumbnail import thumbnail_cache_root
 
@@ -42,6 +43,21 @@ class ModelVersionsResponse(BaseModel):
 
 class ClearHistoryRequest(BaseModel):
     confirm: bool = False
+
+
+class LoggingConfigRequest(BaseModel):
+    enabled: bool
+    level: str | None = None
+    device_id: str | None = None
+    session_id: str | None = None
+    reopen: bool = False
+
+
+class LoggingConfigResponse(BaseModel):
+    enabled: bool
+    level: str
+    device_id: str | None = None
+    session_id: str | None = None
 
 
 class ClearHistoryResponse(BaseModel):
@@ -277,4 +293,42 @@ async def clear_local_history(request: Request, body: ClearHistoryRequest) -> Cl
         species_overrides_deleted=counts["photo_species_overrides"],
         tasks_deleted=counts["task_queue"],
         thumbnails_deleted=thumbnails_deleted,
+    )
+
+
+@router.get("/logging", response_model=LoggingConfigResponse)
+async def read_logging_settings() -> LoggingConfigResponse:
+    """Return current runtime file-logging state."""
+    state = get_logging_state()
+    return LoggingConfigResponse(
+        enabled=bool(state["enabled"]),
+        level=str(state["level"]),
+        device_id=state["device_id"],
+        session_id=state["session_id"],
+    )
+
+
+@router.post("/logging", response_model=LoggingConfigResponse)
+async def update_logging_settings(body: LoggingConfigRequest) -> LoggingConfigResponse:
+    """Hot-toggle file logging and log level without restarting the engine."""
+    state = reconfigure_logging(
+        enabled=body.enabled,
+        log_level=body.level,
+        device_id=body.device_id,
+        session_id=body.session_id,
+        reopen=body.reopen,
+    )
+    if state["enabled"]:
+        await logger.ainfo(
+            "engine_logging_reconfigured",
+            category="lifecycle",
+            enabled=state["enabled"],
+            level=state["level"],
+            reopen=body.reopen,
+        )
+    return LoggingConfigResponse(
+        enabled=bool(state["enabled"]),
+        level=str(state["level"]),
+        device_id=state["device_id"],
+        session_id=state["session_id"],
     )

@@ -98,6 +98,11 @@ async def cancel_all_workers(wait_seconds: float = 5.0) -> bool:
     return True
 
 
+def get_active_worker_count() -> int:
+    """Return number of currently running library analysis workers."""
+    return sum(1 for task in _workers.values() if not task.done())
+
+
 def _has_active_tasks(stats: dict[str, int]) -> bool:
     return (
         stats.get(TaskStatus.PENDING.value, 0)

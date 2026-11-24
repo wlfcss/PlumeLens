@@ -1,5 +1,11 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import { BENCHMARK_TRACE_ARGUMENT, type EngineBenchmarkTiming } from '../shared/benchmark-trace'
+import {
+  type ClearLogsResult,
+  type ExportDiagnosticsResult,
+  type LoggingStatusSnapshot,
+  type RendererLogInput,
+} from '../shared/client-log'
 import { engineRequestTimeout } from '../shared/engine-request-timeout'
 import {
   LIBRARY_SUMMARY_BATCH_MEDIA_TYPE,
@@ -7,6 +13,23 @@ import {
 } from '../shared/library-summary-stream'
 
 const benchmarkTraceEnabled = process.argv?.includes(BENCHMARK_TRACE_ARGUMENT) === true
+
+function generateRequestId(): string {
+  const bytes = new Uint8Array(4)
+  if (typeof globalThis.crypto?.getRandomValues === 'function') {
+    globalThis.crypto.getRandomValues(bytes)
+    return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')
+  }
+  return Math.random().toString(16).slice(2, 10).padEnd(8, '0')
+}
+
+function sendPreloadLog(entry: RendererLogInput): void {
+  try {
+    ipcRenderer.send('client-log:batch', [{ ...entry, ts: new Date().toISOString() }], 'preload')
+  } catch {
+    /* best effort */
+  }
+}
 
 // 与 main.ts 的 EngineStatusPayload 对应 — 改动需同步两边。
 export type EngineStatusPayload =
@@ -149,19 +172,27 @@ async function performEngineRequest(
 ): Promise<EngineResponse> {
   const { url, token } = await ensureAuth()
   const enginePath = normalizeEnginePath(path)
+  const pathnameOnly = enginePath.split('?', 1)[0] ?? enginePath
+  const requestId = generateRequestId()
+  const method = (init.method ?? 'GET').toUpperCase()
   const headers = new Headers(init.headers ?? {})
   if (token && !headers.has('Authorization')) {
     headers.set('Authorization', `Bearer ${token}`)
+  }
+  if (!headers.has('X-PlumeLens-Request-Id')) {
+    headers.set('X-PlumeLens-Request-Id', requestId)
   }
   if (init.body && !headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json')
   }
   const ctrl = new AbortController()
-  const timer = setTimeout(() => ctrl.abort(), init.timeoutMs ?? engineRequestTimeout(enginePath))
+  const timeoutMs = init.timeoutMs ?? engineRequestTimeout(enginePath)
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs)
+  const startedAt = performance.now()
   try {
     const fetchStart = benchmarkTraceEnabled ? performance.now() : undefined
     const res = await fetch(`${url}${enginePath}`, {
-      method: init.method ?? 'GET',
+      method,
       headers,
       body: init.body ?? undefined,
       signal: ctrl.signal,
@@ -178,6 +209,24 @@ async function performEngineRequest(
       await readSummaryLines(res.body, receiveSummaryLine)
     } else {
       body = await res.text()
+    }
+    const durationMs = Math.round((performance.now() - startedAt) * 10) / 10
+    if (res.status >= 500 || res.status === 401) {
+      sendPreloadLog({
+        level: res.status >= 500 ? 'error' : 'warn',
+        scope: 'engine-http',
+        category: 'error',
+        event: 'engine_http_error',
+        meta: { method, path: pathnameOnly, status: res.status, durationMs, requestId },
+      })
+    } else if (durationMs >= 1500) {
+      sendPreloadLog({
+        level: 'info',
+        scope: 'engine-http',
+        category: 'ui_perf',
+        event: 'engine_http_slow',
+        meta: { method, path: pathnameOnly, status: res.status, durationMs, requestId },
+      })
     }
     const benchmarkTiming =
       fetchStart !== undefined && headersAt !== undefined
@@ -196,6 +245,20 @@ async function performEngineRequest(
       contentType,
       ...(benchmarkTiming && { benchmarkTiming }),
     }
+  } catch (err) {
+    const durationMs = Math.round((performance.now() - startedAt) * 10) / 10
+    sendPreloadLog({
+      level: 'warn',
+      scope: 'engine-http',
+      category: 'error',
+      event: ctrl.signal.aborted ? 'engine_http_timeout' : 'engine_http_transport_error',
+      meta: { method, path: pathnameOnly, durationMs, timeoutMs, requestId },
+      error: {
+        name: err instanceof Error ? err.name : 'Error',
+        message: err instanceof Error ? err.message : String(err),
+      },
+    })
+    throw err
   } finally {
     clearTimeout(timer)
   }
@@ -341,8 +404,37 @@ contextBridge.exposeInMainWorld('plumelens', {
   openFolder: (): Promise<string | null> => ipcRenderer.invoke('dialog:open-folder'),
   selectExportDirectory: (): Promise<string | null> =>
     ipcRenderer.invoke('dialog:select-export-directory'),
-  /** 打开 logs 目录 — 用户在 fatal 状态点 banner 触发,Finder/Explorer 弹窗。 */
+  /** 打开 logs 目录 — 用户在 fatal 状态点 banner 或设置页触发,Finder/Explorer 弹窗。 */
   openLogsDir: (): Promise<string> => ipcRenderer.invoke('open-logs-dir'),
+  /** 批量上报渲染进程结构化日志（单向非阻塞 IPC）。 */
+  logBatch: (entries: RendererLogInput[]): void => {
+    if (!Array.isArray(entries) || entries.length === 0) return
+    ipcRenderer.send('client-log:batch', entries, 'renderer')
+  },
+  /** 查询日志开关、知情同意状态、设备标识与日志体积统计。 */
+  getLoggingStatus: (): Promise<LoggingStatusSnapshot> => ipcRenderer.invoke('logs:get-status'),
+  /** 记录首次启动时的日志授权选择并立即生效。 */
+  setLoggingConsent: (enabled: boolean): Promise<LoggingStatusSnapshot> =>
+    ipcRenderer.invoke('logs:set-consent', enabled),
+  /** 设置页实时开启或关闭本地日志（无需重启引擎）。 */
+  setLoggingEnabled: (enabled: boolean): Promise<LoggingStatusSnapshot> =>
+    ipcRenderer.invoke('logs:set-enabled', enabled),
+  /** 设置页切换日志级别（info / debug）。 */
+  setLoggingLevel: (level: 'info' | 'debug'): Promise<LoggingStatusSnapshot> =>
+    ipcRenderer.invoke('logs:set-level', level),
+  /** 导出脱敏后的诊断日志 ZIP 包（含硬件配置、数据库摘要与任务耗时统计）。 */
+  exportDiagnosticsBundle: (): Promise<ExportDiagnosticsResult> =>
+    ipcRenderer.invoke('logs:export-bundle'),
+  /** 清空历史日志文件。 */
+  clearLogs: (): Promise<ClearLogsResult> => ipcRenderer.invoke('logs:clear'),
+  /** 监听主进程日志状态变化（开关/级别/清理后同步 UI 与前端队列行为）。 */
+  onLoggingStateChanged: (cb: (status: LoggingStatusSnapshot) => void): (() => void) => {
+    const handler = (_event: unknown, status: LoggingStatusSnapshot): void => cb(status)
+    ipcRenderer.on('logging-state-changed', handler)
+    return (): void => {
+      ipcRenderer.removeListener('logging-state-changed', handler)
+    }
+  },
   /** 在 Finder 中打开指定本地路径。 */
   openPathInFinder: (
     path: string,

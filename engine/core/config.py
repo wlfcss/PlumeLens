@@ -15,6 +15,9 @@ class Settings(BaseSettings):
     port: int = 0
     parent_pid: int | None = Field(default=None, ge=2)
     log_level: str = "INFO"
+    logging_enabled: bool = True
+    device_id: str | None = None
+    session_id: str | None = None
     data_dir: Path = Path.home() / ".plumelens"
     # Optional local API bearer token. Electron sets this per process launch; when unset
     # (pytest / standalone development), auth is disabled for convenience.

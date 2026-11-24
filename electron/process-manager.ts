@@ -2,12 +2,10 @@ import { ChildProcess, spawn } from 'child_process'
 import { randomBytes } from 'crypto'
 import { EventEmitter } from 'events'
 import {
-  appendFileSync,
   createWriteStream,
   existsSync,
   mkdirSync,
   readdirSync,
-  renameSync,
   statSync,
   unlinkSync,
   type WriteStream,
@@ -18,6 +16,7 @@ import { readUserSettings } from './user-settings'
 import { EngineStartupProtocol } from './engine-startup-protocol'
 import { engineStartupTimeout } from '../shared/engine-request-timeout'
 import { terminateEngine } from './engine-shutdown'
+import { getClientLogger, getScopedLogger } from './logger'
 
 /**
  * 拉起并守护 Python engine 子进程。
@@ -28,16 +27,16 @@ import { terminateEngine } from './engine-shutdown'
  * 端口握手协议：engine 启动后会打印 `PLUMELENS_PORT <n>`（stdout），收到即可知道
  * 实际监听端口；不依赖 uvicorn 的 banner 文本（更稳定，frozen 下 uvicorn 输出格式可能变）。
  *
- * 日志持久化：
+ * 日志持久化（仅在用户开启本地日志后落盘）：
  * - engine 子进程 stderr → logs/engine.stderr.{startup_ts}.log（每次启动新文件，
  *   保留最近 MAX_STARTUP_LOGS 个，旧的自动删）。这是 PyInstaller / uvicorn /
  *   segfault 等 raw 输出唯一落点，崩溃时关键。
- * - process-manager 自身事件 → logs/electron.log（append，简单 5MB 截断）。
- * - 后端 structlog 事件单独走 logs/engine.jsonl（由 engine.core.logging 配置）。
+ * - process-manager 自身事件 → logs/client.jsonl（由 electron/logger.ts 统一管理）。
+ * - 后端 structlog 事件单独走 logs/engine.jsonl（由 engine.core.logging 配置，
+ *   通过 PLUMELENS_DEVICE_ID / PLUMELENS_SESSION_ID 与客户端日志关联）。
  */
 
 const MAX_STARTUP_LOGS = 10
-const ELECTRON_LOG_MAX_BYTES = 5 * 1024 * 1024
 const ENGINE_READY_TIMEOUT_MS = engineStartupTimeout(process.platform)
 
 export class ProcessManager extends EventEmitter {
@@ -56,6 +55,8 @@ export class ProcessManager extends EventEmitter {
   private readonly terminating = new Map<ChildProcess, Promise<void>>()
   // 持久化日志根目录（{userData}/logs），lazy 创建
   private readonly logsDir = join(app.getPath('userData'), 'logs')
+  private readonly pmLog = getScopedLogger('engine-pm')
+  private readonly healthLog = getScopedLogger('engine-health')
 
   // graceful degrade: species 推理设备。auto = 让后端自选(MPS on Mac);
   // cpu = 显式强制 CPU。累计崩溃 N 次后下次 spawn 自动切到 cpu — PyTorch MPS
@@ -70,12 +71,80 @@ export class ProcessManager extends EventEmitter {
   // 系统性问题(MPS 并发 / 资源耗尽),自动降级避免反复打扰用户。
   private readonly cpuFallbackThreshold = 2
 
+  constructor() {
+    super()
+    getClientLogger()?.registerSecret(this.authToken)
+  }
+
   getUrl(): string | null {
     return this.url
   }
 
   getAuthToken(): string {
     return this.authToken
+  }
+
+  /**
+   * 同步客户端日志开关/级别/设备标识到正在运行的 Python Engine，无需重启模型。
+   */
+  async syncLoggingToEngine(options: {
+    enabled: boolean
+    level: 'info' | 'debug'
+    deviceId?: string | null
+    sessionId?: string
+    reopen?: boolean
+  }): Promise<boolean> {
+    if (!this.url) return false
+    const ctrl = new AbortController()
+    const timer = setTimeout(() => ctrl.abort(), 3000)
+    try {
+      const response = await fetch(`${this.url}/settings/logging`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${this.authToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          enabled: options.enabled,
+          level: options.level.toUpperCase(),
+          ...(options.deviceId ? { device_id: options.deviceId } : {}),
+          ...(options.sessionId ? { session_id: options.sessionId } : {}),
+          reopen: Boolean(options.reopen),
+        }),
+        signal: ctrl.signal,
+      })
+      return response.ok
+    } catch {
+      return false
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
+  /**
+   * 以内部认证令牌拉取 Engine 只读诊断 JSON（用于导出日志包时拉取 /health 或 /diagnostics/db-summary）。
+   */
+  async fetchEngineJson(path: string, timeoutMs = 3000): Promise<Record<string, unknown> | null> {
+    if (!this.url) return null
+    const ctrl = new AbortController()
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs)
+    try {
+      const response = await fetch(`${this.url}${path}`, {
+        method: 'GET',
+        headers: { Authorization: `Bearer ${this.authToken}` },
+        signal: ctrl.signal,
+      })
+      if (!response.ok) return null
+      const payload = (await response.json()) as unknown
+      if (typeof payload === 'object' && payload !== null && !Array.isArray(payload)) {
+        return payload as Record<string, unknown>
+      }
+      return null
+    } catch {
+      return null
+    } finally {
+      clearTimeout(timer)
+    }
   }
 
   /** 当前 engine 子进程 PID(spawn 时 detached:true,pgid == pid)。
@@ -103,34 +172,30 @@ export class ProcessManager extends EventEmitter {
       if (!existsSync(this.logsDir)) mkdirSync(this.logsDir, { recursive: true })
       return true
     } catch (err) {
-      process.stderr.write(`[engine-pm] cannot create logs dir: ${(err as Error).message}\n`)
+      this.pmLog.warn('cannot_create_logs_dir', undefined, err)
       return false
     }
   }
 
-  /** 简单 append 一行到 electron.log；超过 5MB 自动截断成 .log.old + 新建。 */
-  private writeElectronLog(message: string): void {
-    if (!this.ensureLogsDir()) return
-    const logPath = join(this.logsDir, 'electron.log')
-    try {
-      if (existsSync(logPath) && statSync(logPath).size > ELECTRON_LOG_MAX_BYTES) {
-        const archive = `${logPath}.old`
-        try {
-          unlinkSync(archive)
-        } catch {
-          /* ignore: file may not exist */
-        }
-        try {
-          renameSync(logPath, archive)
-        } catch {
-          /* ignore */
-        }
-      }
-      const ts = new Date().toISOString()
-      appendFileSync(logPath, `${ts} ${message}\n`, 'utf-8')
-    } catch (err) {
-      process.stderr.write(`[engine-pm] electron.log write failed: ${(err as Error).message}\n`)
+  /** 统一写入主进程结构化日志 client.jsonl（遵循用户日志开关与脱敏策略）。 */
+  private writeElectronLog(
+    message: string,
+    level: 'info' | 'warn' | 'error' = 'info',
+    meta?: Record<string, unknown>,
+  ): void {
+    const logger = getClientLogger()
+    if (logger) {
+      logger.log({
+        level,
+        process: 'main',
+        scope: 'engine-pm',
+        category: level === 'error' ? 'error' : 'lifecycle',
+        event: message,
+        meta,
+      })
+      return
     }
+    this.pmLog[level](message, meta)
   }
 
   /** 删除多余的 engine.stderr.{ts}.log，保留最近 MAX_STARTUP_LOGS 个。 */
@@ -153,24 +218,22 @@ export class ProcessManager extends EventEmitter {
     }
   }
 
-  /** 为本次 spawn 新建 engine.stderr.{startup_ts}.log 写入流。
-   *
-   * timestamp 保留毫秒精度（20260429T120000123Z），避免 1 秒内连续两次 spawn
-   * （崩溃重启 / 快速 dev 循环）撞同名 → createWriteStream 走 append flag 把两次
-   * 启动日志混到一个文件里。 */
+  /** 为本次 spawn 新建 engine.stderr.{startup_ts}.log 写入流（仅当用户开启日志时落盘）。 */
   private openStderrLog(): WriteStream | null {
+    const logger = getClientLogger()
+    if (logger && !logger.isEnabled()) return null
     if (!this.ensureLogsDir()) return null
     const ts = new Date().toISOString().replace(/[-:.]/g, '')
     const path = join(this.logsDir, `engine.stderr.${ts}.log`)
     try {
-      const stream = createWriteStream(path, { flags: 'a', encoding: 'utf-8' })
+      const stream = createWriteStream(path, { flags: 'a', encoding: 'utf-8', mode: 0o600 })
       stream.on('error', (err) =>
-        this.writeElectronLog(`engine stderr log unavailable: ${err.message}`),
+        this.writeElectronLog('engine_stderr_log_unavailable', 'warn', { message: err.message }),
       )
       stream.write(`# === engine spawn @ ${new Date().toISOString()} ===\n`)
       return stream
     } catch (err) {
-      process.stderr.write(`[engine-pm] cannot open stderr log: ${(err as Error).message}\n`)
+      this.pmLog.warn('cannot_open_stderr_log', undefined, err)
       return null
     }
   }
@@ -201,6 +264,12 @@ export class ProcessManager extends EventEmitter {
     let command: string
     let args: string[]
     let cwd: string
+    const clientLog = getClientLogger()
+    const loggingEnabled = clientLog ? clientLog.isEnabled() : false
+    const logLevel = clientLog ? clientLog.getLevel().toUpperCase() : 'INFO'
+    const deviceId = clientLog?.getDeviceId()
+    const sessionId = clientLog?.getSessionId()
+
     const env: NodeJS.ProcessEnv = {
       ...process.env,
       PYTHONUNBUFFERED: '1',
@@ -218,6 +287,10 @@ export class ProcessManager extends EventEmitter {
       PLUMELENS_DATA_DIR: app.getPath('userData'),
       PLUMELENS_API_TOKEN: this.authToken,
       PLUMELENS_PARENT_PID: String(process.pid),
+      PLUMELENS_LOGGING_ENABLED: loggingEnabled ? '1' : '0',
+      PLUMELENS_LOG_LEVEL: logLevel,
+      ...(deviceId ? { PLUMELENS_DEVICE_ID: deviceId } : {}),
+      ...(sessionId ? { PLUMELENS_SESSION_ID: sessionId } : {}),
     }
 
     // graceful degrade: 已经决定切 CPU 后,后续每次 spawn 都强制传这个 env。
@@ -232,11 +305,22 @@ export class ProcessManager extends EventEmitter {
     // 失败/缺失静默忽略 — 走离线 cities1000 兜底,不影响启动。
     try {
       const userSettings = await readUserSettings()
-      if (userSettings.amapKey) env.PLUMELENS_AMAP_KEY = userSettings.amapKey
-      if (userSettings.baiduAk) env.PLUMELENS_BAIDU_AK = userSettings.baiduAk
-      if (userSettings.tencentKey) env.PLUMELENS_TENCENT_KEY = userSettings.tencentKey
+      if (userSettings.amapKey) {
+        env.PLUMELENS_AMAP_KEY = userSettings.amapKey
+        clientLog?.registerSecret(userSettings.amapKey)
+      }
+      if (userSettings.baiduAk) {
+        env.PLUMELENS_BAIDU_AK = userSettings.baiduAk
+        clientLog?.registerSecret(userSettings.baiduAk)
+      }
+      if (userSettings.tencentKey) {
+        env.PLUMELENS_TENCENT_KEY = userSettings.tencentKey
+        clientLog?.registerSecret(userSettings.tencentKey)
+      }
     } catch (err) {
-      this.writeElectronLog(`failed to read user settings: ${(err as Error).message}`)
+      this.writeElectronLog('read_user_settings_failed', 'warn', {
+        message: (err as Error).message,
+      })
     }
 
     if (this.stopped || this.process !== null || generation !== this.lifecycleGeneration) {
@@ -270,7 +354,11 @@ export class ProcessManager extends EventEmitter {
     // detached: true + 后续按进程组 kill (-pid) → 杀掉整个 engine 子树（含 torch /
     // transformers / pyarrow 内部 spawn 的 helper 进程）。否则 SIGTERM 只杀主进程，
     // helper（如 multiprocessing resource_tracker）会成为孤儿继续吃 RAM。
-    this.writeElectronLog(`spawn engine: cmd=${command} cwd=${cwd} dev=${isDev}`)
+    const spawnStartedAt = Date.now()
+    this.writeElectronLog('engine_spawn', 'info', {
+      dev: isDev,
+      speciesDevice: this.speciesDevice,
+    })
     // 闭包局部 proc — 关键防 restart 竞态:老 proc exit handler 闭包到自己的 proc,
     // 触发时检查 `this.process !== proc` 就能判断"是否已被新 spawn 替换",
     // 防止老 proc 的 exit 把新 spawn 的 url/state 给清掉(误报 fatal banner)。
@@ -286,7 +374,7 @@ export class ProcessManager extends EventEmitter {
     } catch (err) {
       closeStderrStream()
       const message = err instanceof Error ? err.message : String(err)
-      this.writeElectronLog(`engine spawn threw: ${message}`)
+      this.writeElectronLog('engine_spawn_threw', 'error', { message })
       this.emit('error', `Engine spawn 失败: ${message}`)
       return
     }
@@ -305,7 +393,19 @@ export class ProcessManager extends EventEmitter {
       this.clearReadyTimer(proc)
       this.url = url
       this.restartCount = 0
-      this.writeElectronLog(`engine ready url=${url}`)
+      const startupMs = Date.now() - spawnStartedAt
+      getClientLogger()?.log({
+        level: 'info',
+        process: 'main',
+        scope: 'engine-pm',
+        category: 'task_metric',
+        event: 'engine_startup_timing',
+        meta: {
+          stages_ms: { engine_spawn_to_ready: startupMs },
+          speciesDevice: this.speciesDevice,
+          dev: isDev,
+        },
+      })
       this.emit('ready', url)
       this.startHealthCheck()
     })
@@ -464,11 +564,9 @@ export class ProcessManager extends EventEmitter {
     if (proc.exitCode !== null || proc.signalCode !== null) return Promise.resolve()
 
     const pid = proc.pid
-    const killMsg = `kill engine pgid=${pid} reason=${reason}`
-    process.stderr.write(`[engine-pm] ${killMsg}\n`)
-    this.writeElectronLog(killMsg)
+    this.writeElectronLog('kill_engine', 'info', { pgid: pid, reason })
     const pending = terminateEngine(proc, () =>
-      this.writeElectronLog(`engine pgid=${pid} shutdown timed out, SIGKILL`),
+      this.writeElectronLog('engine_shutdown_timeout_sigkill', 'warn', { pgid: pid }),
     )
     this.terminating.set(proc, pending)
     // Retain unreaped PIDs for the synchronous process-exit fallback.
@@ -545,18 +643,20 @@ export class ProcessManager extends EventEmitter {
       } catch (e) {
         if (this.url !== checkedUrl || this.process !== checkedProcess) return
         consecutiveFailures += 1
-        const failMsg = `health failure ${consecutiveFailures}/${FAIL_THRESHOLD}: ${(e as Error).message}`
-        process.stderr.write(`[engine-health] ${failMsg}\n`)
-        this.writeElectronLog(failMsg)
+        this.healthLog.warn('engine_health_failure', {
+          consecutiveFailures,
+          threshold: FAIL_THRESHOLD,
+          message: (e as Error).message,
+        })
         // 连续失败累积时,前端 UI 提前看到"后端无响应",别等 60s 才告知用户
         this.emit('unhealthy', { consecutiveFailures, threshold: FAIL_THRESHOLD })
         if (consecutiveFailures >= FAIL_THRESHOLD) {
           consecutiveFailures = 0
           this.stopHealthCheck()
           this.url = null
-          this.writeElectronLog(
-            `engine connected ${FAIL_THRESHOLD} health failures, triggering restart`,
-          )
+          this.writeElectronLog('engine_health_threshold_restart', 'error', {
+            threshold: FAIL_THRESHOLD,
+          })
           if (this.restartCount < this.maxRestarts) {
             this.emit('crashed', {
               code: null,

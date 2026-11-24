@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import threading
+import time
 from typing import TypeAlias
 
 import numpy as np
@@ -226,6 +228,11 @@ class PoseDetector:
         # Cache input/output names
         self._input_name: str = session.get_inputs()[0].name  # type: ignore[union-attr]
         self._output_name: str = session.get_outputs()[0].name  # type: ignore[union-attr]
+        self._tls = threading.local()
+
+    def last_flight_ms(self) -> float:
+        """Return flight-classifier duration (ms) for the most recent `detect()` on this thread."""
+        return float(getattr(self._tls, "flight_ms", 0.0))
 
     def detect(
         self,
@@ -561,11 +568,14 @@ class PoseDetector:
         kpts: dict[str, tuple[float, float, float]],
     ) -> tuple[str, float, str]:
         """Prefer v2.1 flight classifier; fall back to geometric heuristic."""
+        self._tls.flight_ms = 0.0
         if self._flight_classifier is not None:
+            t0 = time.perf_counter()
             try:
                 classified = self._flight_classifier.classify(crop_image)
             except Exception:
                 classified = None
+            self._tls.flight_ms = (time.perf_counter() - t0) * 1000
             if classified is not None:
                 return classified
 

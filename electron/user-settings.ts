@@ -1,6 +1,9 @@
 import { app, safeStorage } from 'electron'
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'fs'
 import { join } from 'path'
+import { getScopedLogger } from './logger'
+
+const log = () => getScopedLogger('user-settings')
 
 /**
  * 用户设置(reverse geocoding 第三方 API keys)的持久化层。
@@ -86,10 +89,7 @@ async function decryptValue(
   }
   if (!isEncryptedField(value)) return { shouldReEncrypt: false, undecryptable: false }
   if (!(await isSafeStorageAvailable())) {
-    process.stderr.write(
-      `[user-settings] cannot decrypt — safeStorage not available; ` +
-        `key value will appear missing until reset\n`,
-    )
+    log().warn('safe_storage_unavailable_on_decrypt')
     return { shouldReEncrypt: false, undecryptable: true }
   }
   try {
@@ -109,9 +109,7 @@ async function decryptValue(
       undecryptable: false,
     }
   } catch (err) {
-    process.stderr.write(
-      `[user-settings] safeStorage decrypt failed: ${(err as Error).message}\n`,
-    )
+    log().warn('safe_storage_decrypt_failed', undefined, err)
     return { shouldReEncrypt: false, undecryptable: true }
   }
 }
@@ -131,7 +129,7 @@ function readRawSettingsOnDisk(): SettingsOnDisk {
     }
     return out
   } catch (err) {
-    process.stderr.write(`[user-settings] settings.json parse failed: ${(err as Error).message}\n`)
+    log().warn('settings_json_parse_failed', undefined, err)
     return {}
   }
 }
@@ -181,9 +179,7 @@ export async function readUserSettings(): Promise<UserSettings> {
       }
       writeRawSettingsAtomically(nextOnDisk)
     } catch (err) {
-      process.stderr.write(
-        `[user-settings] failed to re-encrypt settings: ${(err as Error).message}\n`,
-      )
+      log().warn('settings_reencrypt_failed', undefined, err)
     }
   }
   return out

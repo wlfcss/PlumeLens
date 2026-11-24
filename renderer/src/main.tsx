@@ -5,7 +5,9 @@ import './i18n'
 import './app.css'
 import App from './App'
 import { ApiError } from '@/lib/api-client'
+import { installGlobalErrorLogging } from '@/lib/logger'
 
+installGlobalErrorLogging()
 document.documentElement.dataset.platform = window.plumelens?.platform ?? 'web'
 
 const queryClient = new QueryClient({

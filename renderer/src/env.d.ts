@@ -1,6 +1,12 @@
 /// <reference types="vite/client" />
 
 import type { EngineBenchmarkTiming } from '../../shared/benchmark-trace'
+import type {
+  ClearLogsResult,
+  ExportDiagnosticsResult,
+  LoggingStatusSnapshot,
+  RendererLogInput,
+} from '../../shared/client-log'
 import type { BenchmarkTraceEvent } from '@/lib/benchmark-trace'
 
 // 与 electron/preload.ts 的 EngineStatusPayload 保持一致
@@ -81,6 +87,14 @@ interface PlumeLensAPI {
   openFolder(): Promise<string | null>
   selectExportDirectory(): Promise<string | null>
   openLogsDir(): Promise<string>
+  logBatch?: (entries: RendererLogInput[]) => void
+  getLoggingStatus?: () => Promise<LoggingStatusSnapshot>
+  setLoggingConsent?: (enabled: boolean) => Promise<LoggingStatusSnapshot>
+  setLoggingEnabled?: (enabled: boolean) => Promise<LoggingStatusSnapshot>
+  setLoggingLevel?: (level: 'info' | 'debug') => Promise<LoggingStatusSnapshot>
+  exportDiagnosticsBundle?: () => Promise<ExportDiagnosticsResult>
+  clearLogs?: () => Promise<ClearLogsResult>
+  onLoggingStateChanged?: (cb: (status: LoggingStatusSnapshot) => void) => () => void
   openPathInFinder(
     path: string,
   ): Promise<

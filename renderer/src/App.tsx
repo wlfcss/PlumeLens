@@ -103,6 +103,7 @@ import {
 } from '@/lib/workspace-projection'
 import { logger } from '@/lib/logger'
 import { benchmarkTrace } from '@/lib/benchmark-trace'
+import { LoggingConsentModal } from '@/components/logging-consent-modal'
 
 export {
   applyNewSpeciesMarkers,
@@ -1366,6 +1367,9 @@ function AppShell({
           </Suspense>
         </ErrorBoundary>
       ) : null}
+      <ErrorBoundary resetKey="logging-consent" t={t}>
+        <LoggingConsentModal />
+      </ErrorBoundary>
     </div>
   )
 }

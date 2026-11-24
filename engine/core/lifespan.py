@@ -5,6 +5,7 @@ import inspect
 import os
 import signal
 import sys
+import time
 from collections.abc import AsyncGenerator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
@@ -392,16 +393,86 @@ async def _watch_parent(parent_pid: int) -> None:
         return
 
 
+async def _resource_heartbeat_loop(app: FastAPI, db: Database) -> None:
+    """Emit periodic resource heartbeats (every 30s) ONLY while analysis workers are active."""
+    from engine.api.routes.analysis import get_active_worker_count
+
+    while True:
+        await asyncio.sleep(30.0)
+        try:
+            active_workers = get_active_worker_count()
+            if active_workers <= 0:
+                continue
+            rss_bytes: int | None = None
+            try:
+                import resource
+
+                usage = resource.getrusage(resource.RUSAGE_SELF)
+                # macOS reports ru_maxrss in bytes; Linux in KiB.
+                rss_bytes = (
+                    int(usage.ru_maxrss)
+                    if sys.platform == "darwin"
+                    else int(usage.ru_maxrss) * 1024
+                )
+            except Exception:  # noqa: BLE001
+                pass
+
+            torch_mem: dict[str, int] = {}
+            torch_mod = sys.modules.get("torch")
+            if torch_mod is not None:
+                try:
+                    if hasattr(torch_mod, "mps") and torch_mod.backends.mps.is_available():
+                        torch_mem["mps_allocated_bytes"] = int(
+                            torch_mod.mps.current_allocated_memory()
+                        )
+                    elif torch_mod.cuda.is_available():
+                        torch_mem["cuda_allocated_bytes"] = int(torch_mod.cuda.memory_allocated(0))
+                        torch_mem["cuda_reserved_bytes"] = int(torch_mod.cuda.memory_reserved(0))
+                except Exception:  # noqa: BLE001
+                    pass
+
+            pending_count = 0
+            async with (
+                db.read_snapshot() as conn,
+                conn.execute(
+                    "SELECT COUNT(*) FROM task_queue WHERE status IN ('pending', 'processing')"
+                ) as cur,
+            ):
+                row = await cur.fetchone()
+                pending_count = int(row[0]) if row else 0
+
+            await logger.ainfo(
+                "resource_heartbeat",
+                category="resource",
+                active_workers=active_workers,
+                queued_tasks=pending_count,
+                rss_bytes=rss_bytes,
+                **torch_mem,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            continue
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
+    startup_t0 = time.perf_counter()
     # Startup — 提前确保 data_dir 存在，再 setup_logging 让文件日志落到 data_dir/logs/
     # 这样所有后续步骤（孤儿清理、模型加载、崩溃 traceback）都能进 engine.jsonl 文件。
     settings.data_dir.mkdir(parents=True, exist_ok=True)
-    setup_logging(log_level=settings.log_level, logs_dir=settings.data_dir / "logs")
+    setup_logging(
+        log_level=settings.log_level,
+        logs_dir=settings.data_dir / "logs",
+        enabled=settings.logging_enabled,
+        device_id=settings.device_id,
+        session_id=settings.session_id,
+    )
     await logger.ainfo(
         "Engine logging initialized",
         data_dir=str(settings.data_dir),
         logs_dir=str(settings.data_dir / "logs"),
+        logging_enabled=settings.logging_enabled,
     )
 
     # 把 PIL 的 decompression bomb 上限提到 256 MP — 既能解码鸟摄高分辨率
@@ -430,14 +501,30 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     await logger.ainfo("Configured default thread pool", max_workers=worker_threads)
 
     # Open SQLite database (WAL + schema migration)
+    t_db = time.perf_counter()
     db = Database(settings.data_dir / "plumelens.db")
     await db.connect()
+    db_connect_ms = (time.perf_counter() - t_db) * 1000
     app.state.db = db
 
     # Load ONNX pipeline
+    t_pipe = time.perf_counter()
     pipeline = PipelineManager(settings)
     await pipeline.initialize()
+    pipeline_init_ms = (time.perf_counter() - t_pipe) * 1000
     app.state.pipeline = pipeline
+
+    await logger.ainfo(
+        "engine_startup_timing",
+        category="task_metric",
+        stages_ms={
+            "db_connect": round(db_connect_ms, 1),
+            "pipeline_init": round(pipeline_init_ms, 1),
+            "total": round((time.perf_counter() - startup_t0) * 1000, 1),
+        },
+        pipeline_version=pipeline.pipeline_version,
+        models=pipeline.model_providers,
+    )
 
     # 断点续跑：把崩溃前残留的 processing 重置为 pending（不计 attempts）
     recovered = await recover_on_startup(db)
@@ -456,6 +543,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     # Background：reverse geocoding 全库 backfill(GPS → 省市区地名),
     # 羽迹三级地图聚合用。一次性后台扫,完成后该 library 所有有 GPS 的照片都填充好。
     geocode_task = asyncio.create_task(_backfill_locations(db))
+    heartbeat_task = asyncio.create_task(_resource_heartbeat_loop(app, db))
     parent_task = (
         asyncio.create_task(_watch_parent(settings.parent_pid)) if settings.parent_pid else None
     )
@@ -483,6 +571,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     refresh_task.cancel()
     sweep_task.cancel()
     geocode_task.cancel()
+    heartbeat_task.cancel()
     if parent_task is not None:
         parent_task.cancel()
         await _await_cancelled_task(parent_task, "parent_liveness")
@@ -490,6 +579,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     await _await_cancelled_task(refresh_task, "refresh_all_thumbnails")
     await _await_cancelled_task(sweep_task, "sweep_stuck_tasks")
     await _await_cancelled_task(geocode_task, "backfill_locations")
+    await _await_cancelled_task(heartbeat_task, "resource_heartbeat")
 
     from engine.api.routes.analysis import cancel_all_workers
 

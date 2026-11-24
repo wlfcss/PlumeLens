@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import math
+import threading
+import time
 from typing import TypeAlias
 
 import numpy as np
@@ -69,6 +71,14 @@ class QualityAssessor:
         self._clip_out: str = clipiqa_session.get_outputs()[0].name  # type: ignore[union-attr]
         self._hyper_in: str = hyperiqa_session.get_inputs()[0].name  # type: ignore[union-attr]
         self._hyper_out: str = hyperiqa_session.get_outputs()[0].name  # type: ignore[union-attr]
+        self._tls = threading.local()
+
+    def last_timings_ms(self) -> tuple[float, float]:
+        """Return (clipiqa_ms, hyperiqa_ms) for the most recent `assess()` call on this thread."""
+        return (
+            float(getattr(self._tls, "clipiqa_ms", 0.0)),
+            float(getattr(self._tls, "hyperiqa_ms", 0.0)),
+        )
 
     def assess(
         self,
@@ -91,17 +101,23 @@ class QualityAssessor:
         )
 
         # CLIPIQA+: semantic / composition quality, output [1, 1]
+        t_clip = time.perf_counter()
         clip_out = self._clipiqa.run(  # type: ignore[union-attr]
             [self._clip_out],
             {self._clip_in: semantic_tensor},
         )
+        clip_ms = (time.perf_counter() - t_clip) * 1000
         clip_score = float(clip_out[0].flat[0])
 
         # HyperIQA: technical subject quality, output [1, 1]
+        t_hyper = time.perf_counter()
         hyper_out = self._hyperiqa.run(  # type: ignore[union-attr]
             [self._hyper_out],
             {self._hyper_in: technical_tensor},
         )
+        hyper_ms = (time.perf_counter() - t_hyper) * 1000
+        self._tls.clipiqa_ms = clip_ms
+        self._tls.hyperiqa_ms = hyper_ms
         hyper_score = float(hyper_out[0].flat[0])
 
         # Clamp scores to [0, 1]. NaN/Inf must be handled before max/min:

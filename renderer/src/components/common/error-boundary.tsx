@@ -10,7 +10,9 @@
 import { Component, type ErrorInfo, type ReactNode } from 'react'
 import type { useTranslation } from 'react-i18next'
 
-import { logger } from '@/lib/logger'
+import { createLogger } from '@/lib/logger'
+
+const boundaryLog = createLogger('error-boundary')
 
 interface Props {
   children: ReactNode
@@ -30,7 +32,14 @@ export class ErrorBoundary extends Component<Props, State> {
   }
 
   componentDidCatch(error: Error, info: ErrorInfo): void {
-    logger.error('[ErrorBoundary] uncaught render error', error, info.componentStack)
+    boundaryLog.error(
+      'uncaught_render_error',
+      {
+        resetKey: this.props.resetKey,
+        componentStack: info.componentStack?.slice(0, 1500),
+      },
+      error,
+    )
   }
 
   componentDidUpdate(prevProps: Props): void {

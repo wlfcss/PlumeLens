@@ -105,6 +105,8 @@ export async function launchApp(
   if (disableCloseConfirm) {
     launchEnv.PLUMELENS_E2E_DISABLE_CLOSE_CONFIRM = '1'
   }
+  // 默认跳过首次启动的本地日志知情同意弹窗，避免阻挡既有 E2E 交互路径。
+  launchEnv.PLUMELENS_E2E_SKIP_LOG_CONSENT ??= '1'
   const app = await _electron.launch({
     executablePath: APP_PATH,
     args: [
