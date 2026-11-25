@@ -100,16 +100,20 @@ test('Packaged app: real inference, thumbnails, offline artwork, export and clea
     const analyzedPhotos = analyzed.photos as Array<{
       grade: string | null
       bird_count: number | null
-      composite_score: number | null
+      quality_score: number | null
     }>
-    const validGrades = new Set(['select', 'usable', 'record', 'reject', 'no_bird'])
+    const validBirdGrades = new Set(['select', 'usable', 'record', 'reject'])
     for (const p of analyzedPhotos) {
-      expect(p.grade, JSON.stringify(p)).toBeTruthy()
-      expect(validGrades.has(p.grade ?? ''), JSON.stringify(p)).toBe(true)
+      if ((p.bird_count ?? 0) >= 1) {
+        expect(validBirdGrades.has(p.grade ?? ''), JSON.stringify(p)).toBe(true)
+        expect(typeof p.quality_score === 'number' && Number.isFinite(p.quality_score), JSON.stringify(p)).toBe(true)
+      } else {
+        expect(p.grade === null || p.grade === 'no_bird', JSON.stringify(p)).toBe(true)
+      }
     }
     if (existsSync(join(baseFixtureDir, '.source'))) {
       const birdPhotos = analyzedPhotos.filter(
-        (p) => (p.bird_count ?? 0) >= 1 && typeof p.composite_score === 'number',
+        (p) => (p.bird_count ?? 0) >= 1 && typeof p.quality_score === 'number',
       )
       expect(birdPhotos.length, JSON.stringify(analyzedPhotos)).toBeGreaterThan(0)
     }
