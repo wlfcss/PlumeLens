@@ -1,16 +1,31 @@
 import { contextBridge, ipcRenderer } from 'electron'
-import { BENCHMARK_TRACE_ARGUMENT, type EngineBenchmarkTiming } from '../shared/benchmark-trace'
+import { BENCHMARK_TRACE_ARGUMENT } from '../shared/benchmark-trace'
 import {
   type ClearLogsResult,
   type ExportDiagnosticsResult,
   type LoggingStatusSnapshot,
   type RendererLogInput,
 } from '../shared/client-log'
+import {
+  type EngineRequestInit,
+  type EngineResponse,
+  type EngineSseBridgeEvent,
+  type EngineStatusPayload,
+  type UpdateCheckResult,
+} from '../shared/ipc'
 import { engineRequestTimeout } from '../shared/engine-request-timeout'
 import {
   LIBRARY_SUMMARY_BATCH_MEDIA_TYPE,
   readSummaryLines,
 } from '../shared/library-summary-stream'
+
+export type {
+  EngineRequestInit,
+  EngineResponse,
+  EngineSseBridgeEvent,
+  EngineStatusPayload,
+  UpdateCheckResult,
+}
 
 const benchmarkTraceEnabled = process.argv?.includes(BENCHMARK_TRACE_ARGUMENT) === true
 
@@ -30,68 +45,6 @@ function sendPreloadLog(entry: RendererLogInput): void {
     /* best effort */
   }
 }
-
-// 与 main.ts 的 EngineStatusPayload 对应 — 改动需同步两边。
-export type EngineStatusPayload =
-  | { kind: 'ready'; url: string }
-  | { kind: 'unhealthy'; consecutiveFailures: number; threshold: number }
-  | {
-      kind: 'crashed'
-      code: number | null
-      signal: string | null
-      restartCount: number
-      maxRestarts: number
-    }
-  | { kind: 'fatal'; message: string }
-  | { kind: 'cpu-fallback' }
-
-/**
- * Engine 响应元数据跨 contextBridge 返回。图库分批模式通过回调传递有界行，
- * 普通响应仍用 body 字符串。
- */
-export interface EngineResponse {
-  ok: boolean
-  status: number
-  statusText: string
-  body: string
-  contentType: string | null
-  benchmarkTiming?: EngineBenchmarkTiming
-}
-
-export interface EngineRequestInit {
-  method?: string
-  /** 已 JSON.stringify 过的 body 字符串;binary upload 暂不支持。 */
-  body?: string | null
-  /** caller 显式 headers,会与 preload 注入的 Authorization / Content-Type merge。 */
-  headers?: Record<string, string>
-  /** 单次请求超时(毫秒);默认 60000。 */
-  timeoutMs?: number
-  /** 可选调用方请求 ID，配合 `engineCancelRequest(requestId)` 实现跨桥真取消。 */
-  requestId?: string
-}
-
-export type EngineSseBridgeEvent =
-  | { type: 'open' }
-  | { type: 'message'; event: string; data: string }
-  | { type: 'error'; message: string; status?: number }
-
-export type UpdateCheckResult =
-  | {
-      ok: true
-      currentVersion: string
-      latestVersion: string
-      hasUpdate: boolean
-      releaseUrl: string
-      releaseName: string | null
-      publishedAt: string | null
-    }
-  | {
-      ok: false
-      currentVersion: string
-      /** rate_limited 时 message 是配额重置时刻的毫秒时间戳字符串(拿不到则为空串)。 */
-      reason: 'network' | 'invalid_response' | 'rate_limited' | 'not_found'
-      message: string
-    }
 
 function isEditorTool(value: unknown): value is 'topaz' | 'photoshop' {
   return value === 'topaz' || value === 'photoshop'

@@ -9,9 +9,10 @@
 
 import { execFile } from 'child_process'
 import { createHmac, randomUUID } from 'crypto'
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'fs'
+import { existsSync, readFileSync } from 'fs'
 import { basename, extname, join } from 'path'
 import { promisify } from 'util'
+import { writeJsonAtomicSync } from './atomic-file'
 
 const execFileAsync = promisify(execFile)
 
@@ -164,10 +165,7 @@ function readCachedDeviceId(cachePath: string): DeviceIdRecord | null {
 
 function writeCachedDeviceId(cachePath: string, record: DeviceIdRecord): void {
   try {
-    mkdirSync(join(cachePath, '..'), { recursive: true })
-    const tmp = `${cachePath}.${process.pid}.${Date.now()}.tmp`
-    writeFileSync(tmp, JSON.stringify(record, null, 2), { encoding: 'utf-8', mode: 0o600 })
-    renameSync(tmp, cachePath)
+    writeJsonAtomicSync(cachePath, record, 0o600)
   } catch {
     /* non-critical cache failure */
   }

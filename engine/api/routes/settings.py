@@ -243,7 +243,7 @@ async def clear_local_history(request: Request, body: ClearHistoryRequest) -> Cl
         raise HTTPException(status_code=400, detail="Explicit confirmation is required")
 
     db = await _db(request)
-    from engine.api.routes.analysis import cancel_all_workers
+    from engine.services.analysis_worker import cancel_all_workers
     from engine.services.exporter import (
         cancel_all_export_jobs,
         clear_export_job_history,

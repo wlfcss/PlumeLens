@@ -80,12 +80,12 @@ async def test_clear_history_rejects_when_workers_are_still_stopping(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     client, _, _ = settings_client
-    from engine.api.routes import analysis
+    from engine.services import analysis_worker
 
     async def fake_cancel_all_workers() -> bool:
         return False
 
-    monkeypatch.setattr(analysis, "cancel_all_workers", fake_cancel_all_workers)
+    monkeypatch.setattr(analysis_worker, "cancel_all_workers", fake_cancel_all_workers)
 
     response = await client.post("/settings/history/clear", json={"confirm": True})
 

@@ -9,11 +9,10 @@ import {
   session,
   shell,
 } from 'electron'
-import { spawn } from 'child_process'
 import { pathToFileURL } from 'url'
-import { chmodSync, existsSync, mkdirSync, readFileSync } from 'fs'
+import { chmodSync, existsSync, mkdirSync } from 'fs'
 import { readdir, realpath, stat } from 'fs/promises'
-import { homedir, platform as osPlatform } from 'os'
+import { platform as osPlatform } from 'os'
 import { join, resolve } from 'path'
 import { BENCHMARK_TRACE_ARGUMENT } from '../shared/benchmark-trace'
 import {
@@ -24,9 +23,12 @@ import {
   type LoggingStatusSnapshot,
   type SystemProfileSnapshot,
 } from '../shared/client-log'
+import type { EngineStatusPayload } from '../shared/ipc'
 import { ProcessManager } from './process-manager'
 import { forceTerminateEngineTreeSync } from './engine-shutdown'
-import { findWindowsEditor } from './windows-editors'
+import { requestCloseConfirmation } from './close-prompt'
+import { listResolvedEditors, openFileInEditor, resolveEditors } from './editors'
+import { checkForUpdates, GITHUB_REPO_PATH } from './updater'
 import { isWithinDirectory, prepareCacheDirectory } from './cache-paths'
 import {
   mergeUserSettings,
@@ -72,7 +74,6 @@ let mainWindow: BrowserWindow | null = null
 let processManager: ProcessManager | null = null
 let allowAppQuit = false
 let allowWindowClose = false
-let closePromptOpen = false
 let cachedDeviceRecord: DeviceIdRecord | null = null
 let cachedSystemProfile: SystemProfileSnapshot | null = null
 let systemProfilePromise: Promise<SystemProfileSnapshot | null> | null = null
@@ -96,10 +97,6 @@ const windowBounds = {
 const REALPATH_CACHE_TTL_MS = 60_000
 const REALPATH_CACHE_MAX = 2048
 const SPECIES_ARTWORK_EXTENSIONS = ['.webp', '.jpg', '.png'] as const
-const GITHUB_REPO = 'wlfcss/PlumeLens'
-const GITHUB_REPO_PATH = `/${GITHUB_REPO.toLowerCase()}`
-const GITHUB_LATEST_RELEASE_API = `https://api.github.com/repos/${GITHUB_REPO}/releases/latest`
-const SKIP_CLOSE_CONFIRM = process.env['PLUMELENS_E2E_DISABLE_CLOSE_CONFIRM'] === '1'
 
 const realpathCache = new Map<string, { value: string; expiresAt: number }>()
 const realpathInFlight = new Map<string, Promise<string>>()
@@ -190,116 +187,6 @@ async function serveLocalCacheFile(
     realpathCache.delete(resolved)
     getScopedLogger(logPrefix).warn('serve_local_cache_failed', { logPrefix }, err)
     return new Response('Not found', { status: 404 })
-  }
-}
-
-function parseVersion(version: string): number[] {
-  return version
-    .trim()
-    .replace(/^v/i, '')
-    .split(/[.-]/)
-    .slice(0, 3)
-    .map((part) => {
-      const parsed = Number.parseInt(part, 10)
-      return Number.isFinite(parsed) ? parsed : 0
-    })
-}
-
-function compareVersions(a: string, b: string): number {
-  const av = parseVersion(a)
-  const bv = parseVersion(b)
-  for (let i = 0; i < Math.max(av.length, bv.length, 3); i += 1) {
-    const left = av[i] ?? 0
-    const right = bv[i] ?? 0
-    if (left > right) return 1
-    if (left < right) return -1
-  }
-  return 0
-}
-
-type UpdateCheckResult =
-  | {
-      ok: true
-      currentVersion: string
-      latestVersion: string
-      hasUpdate: boolean
-      releaseUrl: string
-      releaseName: string | null
-      publishedAt: string | null
-    }
-  | {
-      ok: false
-      currentVersion: string
-      /** rate_limited 时 message 是配额重置时刻的毫秒时间戳字符串(拿不到则为空串)。 */
-      reason: 'network' | 'invalid_response' | 'rate_limited' | 'not_found'
-      message: string
-    }
-
-async function checkForUpdates(): Promise<UpdateCheckResult> {
-  const currentVersion = app.getVersion()
-  try {
-    const response = await net.fetch(GITHUB_LATEST_RELEASE_API, {
-      headers: {
-        Accept: 'application/vnd.github+json',
-        'User-Agent': `PlumeLens/${currentVersion}`,
-      },
-    })
-    if (!response.ok) {
-      // GitHub 未认证接口是 60 次/小时/IP,超限返回 403 或 429 并带
-      // x-ratelimit-remaining: 0。这跟"网络不通"完全是两回事(等一会儿就好),
-      // 直接把 "403" 抛给用户看什么也说明不了。
-      const remaining = response.headers.get('x-ratelimit-remaining')
-      if ((response.status === 403 || response.status === 429) && remaining === '0') {
-        const resetEpoch = Number(response.headers.get('x-ratelimit-reset') ?? '')
-        return {
-          ok: false,
-          currentVersion,
-          reason: 'rate_limited',
-          message: Number.isFinite(resetEpoch) && resetEpoch > 0 ? String(resetEpoch * 1000) : '',
-        }
-      }
-      if (response.status === 404) {
-        return {
-          ok: false,
-          currentVersion,
-          reason: 'not_found',
-          message: `${response.status} ${response.statusText}`,
-        }
-      }
-      return {
-        ok: false,
-        currentVersion,
-        reason: 'network',
-        message: `${response.status} ${response.statusText}`,
-      }
-    }
-    const payload = (await response.json()) as Record<string, unknown>
-    const tagName = payload['tag_name']
-    const htmlUrl = payload['html_url']
-    if (typeof tagName !== 'string' || typeof htmlUrl !== 'string') {
-      return {
-        ok: false,
-        currentVersion,
-        reason: 'invalid_response',
-        message: 'GitHub release response missing tag_name/html_url',
-      }
-    }
-    return {
-      ok: true,
-      currentVersion,
-      latestVersion: tagName.replace(/^v/i, ''),
-      hasUpdate: compareVersions(tagName, currentVersion) > 0,
-      releaseUrl: htmlUrl,
-      releaseName: typeof payload['name'] === 'string' ? payload['name'] : null,
-      publishedAt: typeof payload['published_at'] === 'string' ? payload['published_at'] : null,
-    }
-  } catch (err) {
-    return {
-      ok: false,
-      currentVersion,
-      reason: 'network',
-      message: err instanceof Error ? err.message : String(err),
-    }
   }
 }
 
@@ -457,299 +344,6 @@ function existingDirectoryOrUndefined(dirPath: string | undefined): string | und
   }
 }
 
-type ClosePromptContent = {
-  title: string
-  detail: string
-  confirmLabel: string
-}
-
-const CLOSE_PROMPT_SCHEME = 'plumelens-close-prompt:'
-
-function escapeHtml(value: string): string {
-  return value
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;')
-    .replaceAll("'", '&#39;')
-}
-
-function buildClosePromptHtml(content: ClosePromptContent): string {
-  const title = escapeHtml(content.title)
-  const detail = escapeHtml(content.detail)
-  const confirmLabel = escapeHtml(content.confirmLabel)
-
-  return `<!doctype html>
-<html lang="zh-CN">
-  <head>
-    <meta charset="utf-8" />
-    <meta
-      http-equiv="Content-Security-Policy"
-      content="default-src 'none'; style-src 'unsafe-inline';"
-    />
-    <title>${title}</title>
-    <style>
-      :root {
-        color-scheme: dark;
-        --bg: #050505;
-        --panel: #101010;
-        --panel-low: #080808;
-        --fg: #f4f4f4;
-        --muted: #a3a3a3;
-        --border: rgba(255, 255, 255, 0.14);
-        --border-strong: rgba(255, 255, 255, 0.28);
-        --accent: #ff1f2d;
-      }
-
-      * {
-        box-sizing: border-box;
-      }
-
-      html,
-      body {
-        width: 100%;
-        height: 100%;
-        margin: 0;
-        overflow: hidden;
-        background: transparent;
-        color: var(--fg);
-        font-family:
-          -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'PingFang SC',
-          'Hiragino Sans GB', 'Microsoft YaHei UI', 'Microsoft YaHei', system-ui, sans-serif;
-        text-rendering: optimizeLegibility;
-        user-select: none;
-        -webkit-font-smoothing: antialiased;
-      }
-
-      .overlay {
-        display: grid;
-        width: 100vw;
-        height: 100vh;
-        place-items: center;
-        padding: 24px;
-        background:
-          radial-gradient(circle at 50% 46%, rgba(255, 255, 255, 0.04), transparent 34%),
-          rgba(0, 0, 0, 0.58);
-        backdrop-filter: blur(8px);
-      }
-
-      .panel {
-        width: min(374px, calc(100vw - 48px));
-        border: 1px solid var(--border);
-        border-radius: 18px;
-        background:
-          linear-gradient(180deg, rgba(255, 255, 255, 0.055), rgba(255, 255, 255, 0.018)),
-          linear-gradient(180deg, var(--panel), var(--panel-low));
-        box-shadow:
-          0 30px 90px rgba(0, 0, 0, 0.58),
-          0 0 0 1px rgba(0, 0, 0, 0.72),
-          inset 0 1px 0 rgba(255, 255, 255, 0.055);
-        padding: 18px;
-      }
-
-      h1 {
-        margin: 0;
-        color: var(--fg);
-        font-size: 17px;
-        font-weight: 650;
-        letter-spacing: 0;
-        line-height: 1.25;
-      }
-
-      p {
-        margin: 9px 0 0;
-        color: var(--muted);
-        font-size: 13px;
-        font-weight: 450;
-        letter-spacing: 0;
-        line-height: 1.62;
-      }
-
-      .actions {
-        display: grid;
-        grid-template-columns: 1fr 1fr;
-        gap: 8px;
-        margin-top: 18px;
-      }
-
-      .action {
-        display: inline-flex;
-        height: 36px;
-        align-items: center;
-        justify-content: center;
-        border: 1px solid var(--border);
-        border-radius: 9px;
-        color: var(--fg);
-        font-size: 13px;
-        font-weight: 600;
-        letter-spacing: 0;
-        text-decoration: none;
-        transition:
-          border-color 140ms ease,
-          background-color 140ms ease,
-          color 140ms ease,
-          transform 140ms ease;
-      }
-
-      .action:focus-visible {
-        outline: 0;
-        box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.44);
-      }
-
-      .action:hover {
-        transform: translateY(-1px);
-      }
-
-      .action--primary {
-        border-color: rgba(255, 255, 255, 0.82);
-        background: #f2f2f2;
-        color: var(--bg);
-      }
-
-      .action--secondary {
-        background: rgba(255, 255, 255, 0.045);
-        color: color-mix(in srgb, var(--fg) 86%, transparent);
-      }
-
-      .action--secondary:hover {
-        border-color: color-mix(in srgb, var(--accent) 44%, var(--border-strong));
-        background: color-mix(in srgb, var(--accent) 9%, rgba(255, 255, 255, 0.045));
-        color: var(--fg);
-      }
-    </style>
-  </head>
-  <body>
-    <main class="overlay">
-      <section class="panel" role="dialog" aria-modal="true" aria-labelledby="close-title">
-        <h1 id="close-title">${title}</h1>
-        <p>${detail}</p>
-        <div class="actions">
-          <a class="action action--primary" href="${CLOSE_PROMPT_SCHEME}//cancel">继续使用</a>
-          <a class="action action--secondary" href="${CLOSE_PROMPT_SCHEME}//confirm">${confirmLabel}</a>
-        </div>
-      </section>
-    </main>
-  </body>
-</html>`
-}
-
-async function showClosePromptWindow(
-  owner: BrowserWindow,
-  content: ClosePromptContent,
-): Promise<boolean> {
-  if (owner.isDestroyed()) return false
-  if (owner.isMinimized()) owner.restore()
-  if (!owner.isVisible()) owner.show()
-
-  const bounds = owner.getBounds()
-  if (bounds.width < 320 || bounds.height < 200 || bounds.x < -10_000 || bounds.y < -10_000) {
-    const result = await dialog.showMessageBox(owner, {
-      type: 'question',
-      title: content.title,
-      message: content.title,
-      detail: content.detail,
-      buttons: ['继续使用', content.confirmLabel],
-      defaultId: 0,
-      cancelId: 0,
-      noLink: true,
-    })
-    return result.response === 1
-  }
-  const promptWindow = new BrowserWindow({
-    parent: owner,
-    modal: true,
-    show: false,
-    frame: false,
-    transparent: true,
-    resizable: false,
-    minimizable: false,
-    maximizable: false,
-    fullscreenable: false,
-    skipTaskbar: true,
-    movable: false,
-    x: bounds.x,
-    y: bounds.y,
-    width: bounds.width,
-    height: bounds.height,
-    backgroundColor: '#00000000',
-    hasShadow: false,
-    title: content.title,
-    webPreferences: {
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: true,
-    },
-  })
-
-  const promptUrl = `data:text/html;charset=utf-8,${encodeURIComponent(buildClosePromptHtml(content))}`
-
-  return new Promise((resolve) => {
-    let settled = false
-
-    const settle = (value: boolean): void => {
-      if (settled) return
-      settled = true
-      resolve(value)
-      if (!promptWindow.isDestroyed()) promptWindow.close()
-    }
-
-    promptWindow.webContents.on('will-navigate', (event, target) => {
-      if (target.startsWith('data:text/html')) return
-      event.preventDefault()
-      if (!target.startsWith(CLOSE_PROMPT_SCHEME)) return
-      const action = new URL(target).host
-      settle(action === 'confirm')
-    })
-    promptWindow.webContents.on('before-input-event', (event, input) => {
-      if (input.type === 'keyDown' && input.key === 'Escape') {
-        event.preventDefault()
-        settle(false)
-      }
-    })
-    promptWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
-    promptWindow.once('closed', () => settle(false))
-    promptWindow.once('ready-to-show', () => {
-      if (owner.isDestroyed()) {
-        settle(false)
-        return
-      }
-      promptWindow.show()
-      promptWindow.focus()
-    })
-    promptWindow.loadURL(promptUrl).catch(() => settle(false))
-  })
-}
-
-async function requestCloseConfirmation(): Promise<boolean> {
-  if (SKIP_CLOSE_CONFIRM) return true
-  if (closePromptOpen) return false
-  closePromptOpen = true
-
-  const content: ClosePromptContent = {
-    title: '确定要退出鉴翎吗？',
-    detail: '本地引擎会停止；历史记录和已完成的筛选会保留。',
-    confirmLabel: '退出',
-  }
-  const owner = mainWindow && !mainWindow.isDestroyed() ? mainWindow : null
-
-  try {
-    if (owner) return await showClosePromptWindow(owner, content)
-    const result = await dialog.showMessageBox({
-      type: 'question',
-      title: content.title,
-      message: content.title,
-      detail: content.detail,
-      buttons: ['继续使用', content.confirmLabel],
-      defaultId: 0,
-      cancelId: 0,
-      noLink: true,
-    })
-    return result.response === 1
-  } finally {
-    closePromptOpen = false
-  }
-}
-
 function quitWithoutConfirmation(): void {
   allowAppQuit = true
   app.quit()
@@ -885,7 +479,7 @@ function createWindow(): void {
     if (allowWindowClose || allowAppQuit) return
     event.preventDefault()
 
-    void requestCloseConfirmation().then((confirmed) => {
+    void requestCloseConfirmation(mainWindow).then((confirmed) => {
       if (!confirmed) return
       allowAppQuit = true
       app.quit()
@@ -948,205 +542,14 @@ ipcMain.handle('dialog:select-export-directory', async (event) => {
   return result.filePaths[0]
 })
 
-// 外部编辑器集成 — 信息抽屉 / 复核屏 "用 Topaz/PS 打开"
-//
-// 探测策略:macOS 应用安装在 /Applications/{Name}.app 或 ~/Applications/{Name}.app。
-// 启动期一次性扫描,缓存结果。卸载/安装通常需要重启应用才能感知 — 简单可接受。
-//
-// 启动方式:Photoshop 走 macOS `open -a`,Topaz Photo 则走 bundle executable。
-// Topaz 的外部编辑入口对 `open -a` 的 RAW 路径处理不稳定,会退化成 basename。
-type EditorTool = 'topaz' | 'photoshop'
-
-interface EditorEntry {
-  /** macOS LaunchServices 识别的应用名(/Applications/{name}.app) */
-  appNames: string[]
-  /** 探测到的实际应用文件名(用于 open -a 启动);null = 未安装 */
-  resolved: string | null
-  /** 探测到的 .app 绝对路径;Adobe 系应用常放在 /Applications/AppName/AppName.app */
-  appPath: string | null
-}
-
-const EDITOR_REGISTRY: Record<EditorTool, EditorEntry> = {
-  topaz: {
-    // Topaz 2024 年统一改名去掉 "AI" 后缀(Topaz Photo AI → Topaz Photo)。
-    // 探测优先新名,fallback 到老名 + 单功能产品(用户可能装多个)。
-    appNames: [
-      'Topaz Photo', // 现行综合产品(2024+)
-      'Topaz Photo AI', // 老综合产品名(2022-2023)
-      'Topaz Sharpen AI', // 单功能,锐化
-      'Topaz DeNoise AI', // 单功能,降噪
-      'Topaz Gigapixel AI', // 单功能,放大
-      'Topaz Gigapixel', // 改名后的 Gigapixel
-    ],
-    resolved: null,
-    appPath: null,
-  },
-  photoshop: {
-    // 探测最近几年版本顺序;装多个版本时挑最新
-    appNames: [
-      'Adobe Photoshop 2026',
-      'Adobe Photoshop 2025',
-      'Adobe Photoshop 2024',
-      'Adobe Photoshop 2023',
-      'Adobe Photoshop',
-    ],
-    resolved: null,
-    appPath: null,
-  },
-}
-
-function isEditorTool(value: unknown): value is EditorTool {
-  return value === 'topaz' || value === 'photoshop'
-}
-
-function parseOpenInEditorArgs(args: unknown): { tool: EditorTool; filePath: string } | null {
-  if (typeof args !== 'object' || args === null || Array.isArray(args)) return null
-  const maybeArgs = args as { tool?: unknown; path?: unknown }
-  if (!isEditorTool(maybeArgs.tool)) return null
-  if (typeof maybeArgs.path !== 'string') return null
-  const filePath = maybeArgs.path.trim()
-  if (!filePath || filePath.includes('\0')) return null
-  return { tool: maybeArgs.tool, filePath }
-}
-
-function findEditorAppPath(root: string, name: string): string | null {
-  const candidates = [
-    join(root, `${name}.app`),
-    // Adobe 系应用通常安装为:
-    // /Applications/Adobe Photoshop 2026/Adobe Photoshop 2026.app
-    join(root, name, `${name}.app`),
-  ]
-  return candidates.find((candidate) => existsSync(candidate)) ?? null
-}
-
-function resolveEditors(): void {
-  if (process.platform === 'win32') {
-    for (const tool of Object.keys(EDITOR_REGISTRY) as EditorTool[]) {
-      const entry = EDITOR_REGISTRY[tool]
-      entry.appPath = findWindowsEditor(tool)
-      entry.resolved = entry.appPath
-        ? tool === 'photoshop'
-          ? 'Adobe Photoshop'
-          : 'Topaz Photo'
-        : null
-    }
-    return
-  }
-  const roots = ['/Applications', join(homedir(), 'Applications')]
-  for (const tool of Object.keys(EDITOR_REGISTRY) as EditorTool[]) {
-    const entry = EDITOR_REGISTRY[tool]
-    for (const name of entry.appNames) {
-      const appPath = roots.map((root) => findEditorAppPath(root, name)).find(Boolean) ?? null
-      if (appPath) {
-        entry.resolved = name
-        entry.appPath = appPath
-        break
-      }
-    }
-  }
-  getScopedLogger('main').info('editors_detected', {
-    topaz: Boolean(EDITOR_REGISTRY.topaz.resolved),
-    photoshop: Boolean(EDITOR_REGISTRY.photoshop.resolved),
-  })
-}
-
-function findEditorExecutablePath(entry: EditorEntry): string | null {
-  if (!entry.appPath || !entry.resolved) return null
-  if (process.platform === 'win32') return entry.appPath
-  const executableNames = [entry.resolved]
-  try {
-    const plist = readFileSync(join(entry.appPath, 'Contents', 'Info.plist'), 'utf-8')
-    const match = plist.match(/<key>CFBundleExecutable<\/key>\s*<string>([^<]+)<\/string>/)
-    if (match?.[1] && !executableNames.includes(match[1])) {
-      executableNames.unshift(match[1])
-    }
-  } catch {
-    /* ignore: fallback to resolved app name */
-  }
-  for (const name of executableNames) {
-    const executablePath = join(entry.appPath, 'Contents', 'MacOS', name)
-    if (existsSync(executablePath)) return executablePath
-  }
-  return null
-}
-
-function spawnDetached(command: string, args: string[]): Promise<void> {
-  return new Promise((resolveSpawn, rejectSpawn) => {
-    const child = spawn(command, args, {
-      detached: true,
-      stdio: 'ignore',
-    })
-    let settled = false
-    const settle = (callback: () => void): void => {
-      if (settled) return
-      settled = true
-      callback()
-    }
-    child.once('error', (error) => {
-      settle(() => rejectSpawn(error))
-    })
-    child.once('spawn', () => {
-      child.unref()
-      settle(() => resolveSpawn())
-    })
-  })
-}
-
 ipcMain.handle('list-editors', (event) => {
   assertTrustedIpcSender(event)
-  return {
-    topaz: EDITOR_REGISTRY.topaz.resolved,
-    photoshop: EDITOR_REGISTRY.photoshop.resolved,
-  }
+  return listResolvedEditors()
 })
 
 ipcMain.handle('open-in-editor', async (event, args: unknown) => {
   assertTrustedIpcSender(event)
-  const parsed = parseOpenInEditorArgs(args)
-  if (!parsed) {
-    return { ok: false, reason: 'invalid_args' as const }
-  }
-  const { tool, filePath } = parsed
-  const entry = EDITOR_REGISTRY[tool]
-  if (!entry || !entry.resolved) {
-    return { ok: false, reason: 'not_installed' as const }
-  }
-  let canonicalPath: string
-  try {
-    canonicalPath = await realpath(filePath)
-    const fileStat = await stat(canonicalPath)
-    if (!fileStat.isFile()) {
-      return { ok: false, reason: 'file_missing' as const }
-    }
-  } catch {
-    return { ok: false, reason: 'file_missing' as const }
-  }
-  // detached + unref 让外部编辑器跟主进程脱钩,关闭鉴翎不会拖死编辑器
-  try {
-    if (process.platform === 'win32' && entry.appPath) {
-      await spawnDetached(entry.appPath, [canonicalPath])
-      return { ok: true, app: entry.resolved }
-    }
-    if (tool === 'topaz') {
-      const executablePath = findEditorExecutablePath(entry)
-      if (executablePath) {
-        const topazArgs = entry.resolved.startsWith('Topaz Photo')
-          ? ['--editor=PlumeLens', canonicalPath]
-          : [canonicalPath]
-        await spawnDetached(executablePath, topazArgs)
-        return { ok: true, app: entry.resolved }
-      }
-    }
-    const appSpecifier = entry.appPath ?? entry.resolved
-    if (!appSpecifier) {
-      return { ok: false, reason: 'app_missing' as const }
-    }
-    await spawnDetached('open', ['-a', appSpecifier, canonicalPath])
-    return { ok: true, app: entry.resolved }
-  } catch (err) {
-    getScopedLogger('main').warn('open_in_editor_failed', { tool }, err)
-    return { ok: false, reason: 'spawn_failed' as const }
-  }
+  return openFileInEditor(args)
 })
 
 ipcMain.handle('open-path-in-finder', async (event, targetPath: unknown) => {
@@ -1676,19 +1079,6 @@ app.whenReady().then(async () => {
   //  - unhealthy      health check 累积失败,准备重启
   //  - crashed        子进程 abort/exit,即将重启 (含尝试次数)
   //  - fatal          重启上限达到 / 启动期失败,需用户介入
-  type EngineStatusPayload =
-    | { kind: 'ready'; url: string }
-    | { kind: 'unhealthy'; consecutiveFailures: number; threshold: number }
-    | {
-        kind: 'crashed'
-        code: number | null
-        signal: string | null
-        restartCount: number
-        maxRestarts: number
-      }
-    | { kind: 'fatal'; message: string }
-    | { kind: 'cpu-fallback' }
-
   const sendToMain = (channel: string, payload: unknown): void => {
     if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed()) return
     mainWindow.webContents.send(channel, payload)
@@ -1770,7 +1160,7 @@ app.on('before-quit', (event) => {
   // 真正退出（cmd-Q / 关闭整个应用）才杀 engine。
   if (!allowAppQuit) {
     event.preventDefault()
-    void requestCloseConfirmation().then((confirmed) => {
+    void requestCloseConfirmation(mainWindow).then((confirmed) => {
       if (!confirmed) return
       allowAppQuit = true
       app.quit()

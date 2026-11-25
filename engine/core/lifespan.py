@@ -41,9 +41,8 @@ async def _resume_pending_workers(app: FastAPI, db: Database) -> None:
         await logger.ainfo("Skipping queue resume: pipeline not ready")
         return
 
-    # 延迟 import 避免循环依赖（analysis route 也 import services）
-    from engine.api.routes.analysis import start_library_worker
     from engine.core.config import settings
+    from engine.services.analysis_worker import start_library_worker
 
     async with (
         db.read_snapshot() as conn,
@@ -118,7 +117,7 @@ async def _sweep_stuck_tasks(app: FastAPI, db: Database) -> None:
        每个 sweep 周期顺手扫:有 PENDING 的 library 但 worker registry 里没活跃 task →
        重启 worker 兜底。复用 _resume_pending_workers 同款 query。
     """
-    from engine.api.routes.analysis import get_library_worker, start_library_worker
+    from engine.services.analysis_worker import get_library_worker, start_library_worker
 
     sweep_interval_sec = 15
 
@@ -395,7 +394,7 @@ async def _watch_parent(parent_pid: int) -> None:
 
 async def _resource_heartbeat_loop(app: FastAPI, db: Database) -> None:
     """Emit periodic resource heartbeats (every 30s) ONLY while analysis workers are active."""
-    from engine.api.routes.analysis import get_active_worker_count
+    from engine.services.analysis_worker import get_active_worker_count
 
     while True:
         await asyncio.sleep(30.0)
@@ -581,7 +580,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     await _await_cancelled_task(geocode_task, "backfill_locations")
     await _await_cancelled_task(heartbeat_task, "resource_heartbeat")
 
-    from engine.api.routes.analysis import cancel_all_workers
+    from engine.services.analysis_worker import cancel_all_workers
 
     workers_cancelled = await cancel_all_workers(wait_seconds=10.0)
     if not workers_cancelled:

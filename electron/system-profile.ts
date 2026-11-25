@@ -13,7 +13,7 @@
 
 import { app } from 'electron'
 import { execFile } from 'child_process'
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'fs'
+import { existsSync, readFileSync } from 'fs'
 import { statfs } from 'fs/promises'
 import { arch as osArch, cpus as osCpus, freemem, platform as osPlatform, release as osRelease, totalmem, version as osVersion } from 'os'
 import { dirname, join, parse as parsePath } from 'path'
@@ -25,6 +25,7 @@ import type {
   MemoryProfileInfo,
   SystemProfileSnapshot,
 } from '../shared/client-log'
+import { writeTextAtomicSync } from './atomic-file'
 import type { DeviceIdSource } from './device-id'
 import { redactText } from './log-redactor'
 
@@ -912,14 +913,11 @@ export function saveSystemProfileCache(
   deviceId?: string | null,
 ): void {
   try {
-    mkdirSync(logsDir, { recursive: true })
     const target = join(logsDir, 'system-profile.json')
-    const tmp = `${target}.${process.pid}.${Date.now()}.tmp`
     const payload = redactText(JSON.stringify(profile, null, 2), {
       deviceId: deviceId ?? profile.deviceId,
     })
-    writeFileSync(tmp, payload, { encoding: 'utf-8', mode: 0o600 })
-    renameSync(tmp, target)
+    writeTextAtomicSync(target, payload, 0o600)
   } catch {
     /* non-critical */
   }

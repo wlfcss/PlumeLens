@@ -41,6 +41,19 @@ export default defineConfig({
         input: {
           index: resolve(__dirname, 'renderer/index.html'),
         },
+        output: {
+          manualChunks(id) {
+            if (!id.includes('node_modules')) return undefined
+            if (id.includes('/echarts/') || id.includes('/zrender/')) return 'vendor-echarts'
+            if (id.includes('/pinyin-pro/')) return 'vendor-pinyin'
+            if (id.includes('/@tanstack/')) return 'vendor-tanstack'
+            if (id.includes('/lucide-react/')) return 'vendor-lucide'
+            if (id.includes('/react/') || id.includes('/react-dom/') || id.includes('/scheduler/')) {
+              return 'vendor-react'
+            }
+            return undefined
+          },
+        },
       },
     },
     resolve: {

@@ -72,7 +72,7 @@ async def test_resume_pending_workers_resumes_running_and_skips_paused_or_unread
 
         started: list[str] = []
         monkeypatch.setattr(
-            "engine.api.routes.analysis.start_library_worker",
+            "engine.services.analysis_worker.start_library_worker",
             lambda _db, _pipeline, lib_id, _conc: started.append(lib_id),
         )
 
@@ -112,9 +112,9 @@ async def test_sweep_stuck_tasks_fast_resets_dead_worker_processing_and_revives(
         await db.conn.commit()
 
         revived: list[str] = []
-        monkeypatch.setattr("engine.api.routes.analysis.get_library_worker", lambda _lib: None)
+        monkeypatch.setattr("engine.services.analysis_worker.get_library_worker", lambda _lib: None)
         monkeypatch.setattr(
-            "engine.api.routes.analysis.start_library_worker",
+            "engine.services.analysis_worker.start_library_worker",
             lambda _db, _pipeline, lib_id, _conc: revived.append(lib_id),
         )
 

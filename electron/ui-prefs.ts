@@ -8,8 +8,8 @@
  */
 
 import { app } from 'electron'
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'fs'
-import { dirname, join } from 'path'
+import { existsSync, readFileSync } from 'fs'
+import { join } from 'path'
 import {
   isValidConfigurableLogLevel,
   isValidConsentState,
@@ -17,6 +17,7 @@ import {
   type LoggingConsentState,
   type LoggingPreferences,
 } from '../shared/client-log'
+import { writeJsonAtomicSync } from './atomic-file'
 
 export interface UiPreferences {
   lastImportDir?: string
@@ -74,10 +75,7 @@ export function writeUiPreferences(
     ...readUiPreferences(path),
     ...patch,
   }
-  mkdirSync(dirname(path), { recursive: true })
-  const tmp = `${path}.${process.pid}.${Date.now()}.tmp`
-  writeFileSync(tmp, JSON.stringify(next, null, 2), { encoding: 'utf-8', mode: 0o600 })
-  renameSync(tmp, path)
+  writeJsonAtomicSync(path, next, 0o600)
   return next
 }
 
