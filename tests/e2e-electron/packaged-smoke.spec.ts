@@ -97,6 +97,22 @@ test('Packaged app: real inference, thumbnails, offline artwork, export and clea
 
     const analyzed = JSON.parse((await callEngine(handle.page, `/library/${library.id}`)).body)
     expect(analyzed.library.analyzed_count).toBe(photos.length)
+    const analyzedPhotos = analyzed.photos as Array<{
+      grade: string | null
+      bird_count: number | null
+      composite_score: number | null
+    }>
+    const validGrades = new Set(['select', 'usable', 'record', 'reject', 'no_bird'])
+    for (const p of analyzedPhotos) {
+      expect(p.grade, JSON.stringify(p)).toBeTruthy()
+      expect(validGrades.has(p.grade ?? ''), JSON.stringify(p)).toBe(true)
+    }
+    if (existsSync(join(baseFixtureDir, '.source'))) {
+      const birdPhotos = analyzedPhotos.filter(
+        (p) => (p.bird_count ?? 0) >= 1 && typeof p.composite_score === 'number',
+      )
+      expect(birdPhotos.length, JSON.stringify(analyzedPhotos)).toBeGreaterThan(0)
+    }
 
     // 3. 选片查询与导出（复制原片 + XMP 边车 + 清单）
     const selectionQuery = {

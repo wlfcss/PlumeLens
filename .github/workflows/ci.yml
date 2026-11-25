@@ -43,11 +43,12 @@ jobs:
           npm ci
           uv sync --locked --extra dev
 
-      - name: Frontend static checks & unit tests
+      - name: Frontend static checks, unit tests & production build
         run: |
           npm run typecheck
           npm run lint
           npm test
+          npm run build
 
       - name: Backend static checks & unit tests
         run: |

@@ -20,8 +20,8 @@ from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, co
 
 block_cipher = None
 
-# PyInstaller 从 spec 所在目录运行；计算项目根
-HERE = Path.cwd()
+# 以 spec 文件所在目录（scripts/）为基准计算项目根，不依赖调用方 cwd
+HERE = Path(globals().get("SPECPATH", Path.cwd() / "scripts")).resolve().parent
 ENGINE_ROOT = HERE / "engine"
 sys.path.insert(0, str(HERE))
 from scripts.windows_runtime_policy import include_rocm_runtime_file
@@ -189,6 +189,7 @@ _required_engine_modules = (
     'engine.core.config',
     'engine.core.database',
     'engine.pipeline.manager',
+    'engine.services.analysis_worker',
     'engine.services.queue',
     'engine.api.routes.library',
 )
@@ -252,6 +253,10 @@ def _cleanup_packaging_noise(root: Path) -> None:
     for rel in exact_rel_paths:
         _remove_path(root / rel)
 
+    preserved_rel_parts = (
+        "numpy/_pytesttester",
+        "torch/testing",
+    )
     blocked_name_parts = (
         "pytest_asyncio",
         "benchmark",
@@ -266,6 +271,9 @@ def _cleanup_packaging_noise(root: Path) -> None:
     for path in sorted(root.rglob("*"), key=lambda p: len(p.parts), reverse=True):
         rel = path.relative_to(root).as_posix().lower()
         name = path.name.lower()
+        # Keep runtime-imported helper modules that `_keep_runtime_toc_item` explicitly preserved.
+        if any(keep in rel for keep in preserved_rel_parts):
+            continue
         if any(part in rel for part in blocked_name_parts):
             _remove_path(path)
             continue

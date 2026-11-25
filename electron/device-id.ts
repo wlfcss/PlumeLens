@@ -32,6 +32,21 @@ export interface DeviceIdRecord {
 
 const DEVICE_ID_HMAC_KEY = 'plumelens:device:v1'
 const PROBE_TIMEOUT_MS = 2500
+const MAC_IOREG = '/usr/sbin/ioreg'
+
+function windowsRegPath(): string {
+  return join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'reg.exe')
+}
+
+function windowsPowershellPath(): string {
+  return join(
+    process.env.SystemRoot ?? 'C:\\Windows',
+    'System32',
+    'WindowsPowerShell',
+    'v1.0',
+    'powershell.exe',
+  )
+}
 
 export function deriveDeviceId(rawMachineCode: string): string {
   const normalized = rawMachineCode.trim().toLowerCase()
@@ -64,7 +79,7 @@ export function anonymizeFileName(filePathOrName: string, deviceId: string): str
 async function probeMacMachineCode(): Promise<{ raw: string; source: DeviceIdSource } | null> {
   try {
     const { stdout } = await execFileAsync(
-      'ioreg',
+      MAC_IOREG,
       ['-rd1', '-c', 'IOPlatformExpertDevice'],
       { timeout: PROBE_TIMEOUT_MS, encoding: 'utf-8' },
     )
@@ -85,7 +100,7 @@ async function probeMacMachineCode(): Promise<{ raw: string; source: DeviceIdSou
 async function probeWindowsMachineCode(): Promise<{ raw: string; source: DeviceIdSource } | null> {
   try {
     const { stdout } = await execFileAsync(
-      'reg.exe',
+      windowsRegPath(),
       ['query', 'HKLM\\SOFTWARE\\Microsoft\\Cryptography', '/v', 'MachineGuid'],
       { timeout: PROBE_TIMEOUT_MS, encoding: 'utf-8', windowsHide: true },
     )
@@ -98,7 +113,7 @@ async function probeWindowsMachineCode(): Promise<{ raw: string; source: DeviceI
   }
   try {
     const { stdout } = await execFileAsync(
-      'powershell.exe',
+      windowsPowershellPath(),
       [
         '-NoProfile',
         '-NonInteractive',

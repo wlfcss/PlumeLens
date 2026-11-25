@@ -181,7 +181,7 @@ export async function openFileInEditor(args: unknown): Promise<OpenInEditorResul
     if (!appSpecifier) {
       return { ok: false, reason: 'app_missing' }
     }
-    await spawnDetached('open', ['-a', appSpecifier, canonicalPath])
+    await spawnDetached('/usr/bin/open', ['-a', appSpecifier, canonicalPath])
     return { ok: true, app: entry.resolved }
   } catch (err) {
     getScopedLogger('main').warn('open_in_editor_failed', { tool }, err)

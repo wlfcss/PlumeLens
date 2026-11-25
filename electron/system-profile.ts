@@ -31,6 +31,20 @@ import { redactText } from './log-redactor'
 
 const execFileAsync = promisify(execFile)
 const PROBE_TIMEOUT_MS = 3500
+const MAC_DF = '/bin/df'
+const MAC_DISKUTIL = '/usr/sbin/diskutil'
+const MAC_SYSCTL = '/usr/sbin/sysctl'
+const MAC_SYSTEM_PROFILER = '/usr/sbin/system_profiler'
+
+function windowsPowershellPath(): string {
+  return join(
+    process.env.SystemRoot ?? 'C:\\Windows',
+    'System32',
+    'WindowsPowerShell',
+    'v1.0',
+    'powershell.exe',
+  )
+}
 
 async function runCommandSafe(
   command: string,
@@ -96,7 +110,7 @@ async function probeMacDiskMetadata(targetPath: string): Promise<Partial<DiskPro
     if (parent === probeTarget) break
     probeTarget = parent
   }
-  const dfOut = await runCommandSafe('df', ['-P', probeTarget], 2000)
+  const dfOut = await runCommandSafe(MAC_DF, ['-P', probeTarget], 2000)
   let mountPoint: string | null = null
   let deviceNode: string | null = null
   if (dfOut) {
@@ -110,7 +124,7 @@ async function probeMacDiskMetadata(targetPath: string): Promise<Partial<DiskPro
   }
 
   const target = mountPoint ?? deviceNode ?? probeTarget
-  const plist = await runCommandSafe('diskutil', ['info', '-plist', target], PROBE_TIMEOUT_MS)
+  const plist = await runCommandSafe(MAC_DISKUTIL, ['info', '-plist', target], PROBE_TIMEOUT_MS)
   if (!plist) {
     return {
       mountPoint,
@@ -174,7 +188,7 @@ async function probeWindowsDiskMetadata(targetPath: string): Promise<Partial<Dis
   ].join('; ')
 
   const raw = await runCommandSafe(
-    'powershell.exe',
+    windowsPowershellPath(),
     ['-NoProfile', '-NonInteractive', '-Command', psScript],
     PROBE_TIMEOUT_MS,
   )
@@ -257,7 +271,7 @@ async function probeCpuProfile(): Promise<CpuProfileInfo> {
   if (osPlatform() === 'darwin') {
     // Use `-i` so missing keys on Apple Silicon (e.g. hw.l3cachesize) are ignored
     // rather than causing the entire sysctl batch to exit non-zero.
-    const detailOut = await runCommandSafe('sysctl', [
+    const detailOut = await runCommandSafe(MAC_SYSCTL, [
       '-i',
       'machdep.cpu.brand_string',
       'hw.physicalcpu',
@@ -297,7 +311,7 @@ async function probeCpuProfile(): Promise<CpuProfileInfo> {
   }
 
   if (osPlatform() === 'win32') {
-    const out = await runCommandSafe('powershell.exe', [
+    const out = await runCommandSafe(windowsPowershellPath(), [
       '-NoProfile',
       '-NonInteractive',
       '-Command',
@@ -364,7 +378,7 @@ async function probeMemoryProfile(): Promise<MemoryProfileInfo> {
   }
 
   if (osPlatform() === 'darwin') {
-    const out = await runCommandSafe('system_profiler', ['SPMemoryDataType', '-json'], 4000)
+    const out = await runCommandSafe(MAC_SYSTEM_PROFILER, ['SPMemoryDataType', '-json'], 4000)
     if (out) {
       try {
         const parsed = JSON.parse(out) as { SPMemoryDataType?: Array<Record<string, unknown>> }
@@ -392,7 +406,7 @@ async function probeMemoryProfile(): Promise<MemoryProfileInfo> {
   }
 
   if (osPlatform() === 'win32') {
-    const out = await runCommandSafe('powershell.exe', [
+    const out = await runCommandSafe(windowsPowershellPath(), [
       '-NoProfile',
       '-NonInteractive',
       '-Command',
@@ -489,7 +503,7 @@ async function probeGpuProfile(): Promise<{
 
   // 2) Platform-specific enrichment (Apple Silicon GPU cores + Metal / Windows 64-bit VRAM)
   if (osPlatform() === 'darwin') {
-    const out = await runCommandSafe('system_profiler', ['SPDisplaysDataType', '-json'], 4000)
+    const out = await runCommandSafe(MAC_SYSTEM_PROFILER, ['SPDisplaysDataType', '-json'], 4000)
     if (out) {
       try {
         const parsed = JSON.parse(out) as { SPDisplaysDataType?: Array<Record<string, unknown>> }
@@ -547,7 +561,7 @@ async function probeGpuProfile(): Promise<{
     ].join('\n')
 
     const out = await runCommandSafe(
-      'powershell.exe',
+      windowsPowershellPath(),
       ['-NoProfile', '-NonInteractive', '-Command', psScript],
       PROBE_TIMEOUT_MS,
     )
@@ -637,7 +651,7 @@ async function probeWindowsHardwareBatch(
   ].join('\n')
 
   const raw = await runCommandSafe(
-    'powershell.exe',
+    windowsPowershellPath(),
     ['-NoProfile', '-NonInteractive', '-Command', psScript],
     6000,
   )

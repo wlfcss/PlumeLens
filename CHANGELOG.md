@@ -12,6 +12,27 @@
   - **全任务节点耗时与匿名图片特征**：在启动初始化、文件夹扫描、缩略图生成、单张照片推理（细分指纹校验、缓存查询、解码、YOLO、裁切、姿态、飞版分类、CLIPIQA+、HyperIQA、物种识别与入库耗时）、批量导出及活跃任务资源心跳中记录结构化指标；所有照片文件名均按设备盐做不可逆短哈希匿名（配对 JPG+RAW 同 stem 对齐），并就地脱敏本地路径、访问令牌与地图密钥。
   - **知情同意、热开关与设置页分栏**：首次打开应用时以清晰的中文弹窗说明日志范围与隐私边界，允许用户自由选择开启或暂不开启（未同意前不写日志文件）；设置弹窗升级为左侧四分栏导航，新增独立「日志与诊断」分栏，支持无需重启引擎即时开关日志、切换标准/调试级别、复制匿名设备标识、清空历史日志及**一键导出脱敏 ZIP 日志包**（内含中文 `SUMMARY.txt` 速览、硬件配置、任务耗时统计与脱敏数据库摘要）。
 
+### 修复与加固
+
+- **全栈审计稳定性与安全加固**：
+  - **缓存版本白名单与资产校验**：`PipelineManager._compute_version()` 切换为显式 31 字段白名单，彻底避免运行期诊断配置（如 `session_id`/`device_id`/`logging_enabled`）变动导致推理缓存失效；在加载 species v4 PyTorch 权重前先执行 `manifest.json` 完整性校验；为检测/姿态/画质坐标与尺寸补齐 NaN/Inf 及零宽高边界保护。
+  - **Windows 内存限流死锁修复**：修复 `windows_resources.py` 在可用内存位于 `[reserve, reserve + 1 GiB)` 区间时 `MemoryBoundLimiter` 与 `wait_for_memory` 条件不一致引起的永久阻塞。
+  - **主进程与跨桥安全收紧**：收紧所有敏感 IPC 的 `senderFrame === mainFrame` 校验；`shell.openPath` 显式拦截 macOS 可执行应用包（`.app`/`.pkg`/`.workflow` 等）；移除 `entitlements.mac.plist` 中的 `allow-dyld-environment-variables`；系统探测命令统一改用绝对系统路径；前端日志与后端脱敏正则全面改为严格线性时间语法消除 ReDoS 风险，并将 `SUMMARY.txt` 与 `system-profile.json` 纳入脱敏范围；日志收集器补充排空与退避重试，后端原生 stderr 增加大小上限与开关联动；配置、设备标识与硬件画像改用统一原子写盘。
+  - **打包与 CI 防护**：修复 `plumelens-engine.spec` 噪声清理误删 `torch/testing` 与 `numpy/_pytesttester` 的规则冲突并改为基于 `SPECPATH` 定位仓库根目录；`build-engine.cjs` 增补 `engine/data/` 数据资产追踪与 Python 版本戳校验；PR CI 纳入 `npm run build` 验证，打包冒烟测试加强真实检出与分档断言。
+
+### 性能与架构
+
+- **数据库与并发吞吐升级（Schema v14）**：
+  - SQLite 升级至 **Schema v14**，补充 7 条高频复合与部分索引（场景/地理/时间排序/待补哈希/队列领取与卡死扫描），启用 `cache_size = -64000` 与 `mmap_size = 256 MB`，读连接升级为 4 连接有界 `query_only=ON` 连接池并将业务只读路径全面迁移至非阻塞 `read_snapshot()`；羽迹 JSON 投影与地理聚合移入工作线程并消除冗余 Pydantic 往返校验；诊断统计改用 `os.scandir` + 10s TTL 缓存。
+  - 队列入队改写为 500 条分块集合化 SQL；删除图库前联动取消活跃分析与导出任务；`pause`/`resume`/`cancel` 按库加锁串行化；FastAPI 鉴权与追踪中间件由 `BaseHTTPMiddleware` 重构为纯 ASGI 中间件，且生产态彻底禁用 URL 查询串 token。
+- **推理与解码内存/速度优化**：
+  - RAW 解码新增纯 NumPy `orient_array()` 就地转正，避免 PIL 整幅 48MP 拷贝，峰值内存降低 **50%+**；`SpeciesClassifier` 加载期将 48 层 LoRA 权重融合至主干矩阵并新增 `classify_batch()` 多鸟批量推理；YOLO CPU 回退模型改为首次 GPU 失败时按需懒加载（常驻内存节省约 300 MB）；限流 CUDA/ROCm `empty_cache` 并关闭 OpenCV 内部多线程争用。
+- **前端大库流畅度与跨桥取消**：
+  - 网格卡片不再请求 1920px 预览图，缩略图缓存升级为有界 LRU（4096）并合并为单全局焦点/可见性监听；移除全局无限网格漂移背景动画与卡片入场 `blur()` 滤镜；滚动锚点捕获改为 180ms 停止后防抖；消除物种聚合与地图点位中的 $O(K^2)$ 查重；实现跨 Electron preload 边界的真实 `AbortSignal` 请求取消与 SSE 指数退避重连（1s→15s）。
+  - 异步化诊断 ZIP 打包（启用 Node 24 原生 `zlib.crc32` 与非阻塞文件读取）、物种封面索引内存缓存及 `Cache-Control: immutable`。
+- **工程解耦与包体优化**：
+  - 新增 `shared/ipc.ts` 统一主进程/Preload/渲染层 IPC 契约；将更新检查、外部编辑器、关闭确认与原子写盘从 `electron/main.ts` 拆分独立（主文件精简 600+ 行）；将后端后台分析 worker 从路由层抽离至 `engine/services/analysis_worker.py` 消除循环依赖；`electron.vite.config.ts` 配置 `manualChunks` 拆分第三方依赖，主入口包体由 **1,373 kB 降至 756 kB（-45%）**。
+
 ## 0.7.9
 
 发布日期：2026-11-24。桌面运行时升级至 Electron 45.4.1（macOS 最低基线 14.0+），全面升级 Python/JS 依赖，大幅提升 Apple Silicon 推理吞吐并完成全栈审计与 CI/测试体系重构。[发布说明](docs/releases/0.7.9.md)
