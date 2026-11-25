@@ -127,6 +127,7 @@ npm start
 npm run typecheck
 npm run lint
 npm test
+npm run build
 npm run test:e2e
 uv run ruff check .
 uv run pyright --pythonpath .venv/bin/python
@@ -149,7 +150,7 @@ npm run dist:win
 
 Windows 发行包解压后运行 `PlumeLens.exe`；首次启用原生 AMD 检测可先运行随包的 `prepare-windows-gpu.cmd`。应用会根据 CPU、内存和可用 GPU 后端设置并发，并在内存紧张时减少新任务。AMD 依赖版本、设备目标与手动覆盖见 [Windows 指南](WINDOWS.md)。
 
-产物位于 `release/`。PR 与主分支由 [CI 质量检查](.github/workflows/ci.yml) 在 Linux 上统一执行静态检查、单测与 Web Playwright E2E；主分支与手动操作分别触发 [macOS 构建](.github/workflows/mac-build.yml) 与 [Windows 构建](.github/workflows/windows-build.yml) 完成模型 SHA-256 校验、后端冻结、打包与实包冒烟验证；版本标签由 [协同发布工作流](.github/workflows/release.yml) 待双端构建与验收均通过后统一发布至 GitHub Release。
+产物位于 `release/`。PR 与主分支由 [CI 质量检查](.github/workflows/ci.yml) 在 Linux 上统一执行静态检查、前后端单元测试、生产构建与 Web Playwright E2E；主分支与手动操作分别触发 [macOS 构建](.github/workflows/mac-build.yml) 与 [Windows 构建](.github/workflows/windows-build.yml) 完成模型 SHA-256 校验、后端冻结、打包与实包冒烟验证；版本标签由 [协同发布工作流](.github/workflows/release.yml) 待双端构建与验收均通过后统一发布至 GitHub Release。
 
 ## 许可证
 

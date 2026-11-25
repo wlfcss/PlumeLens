@@ -153,7 +153,7 @@ bbox crop → square expand(+15%, no forced min side) → Resize(short edge=384)
 
 - RoPE fp16 路径会 NaN，纯 ONNX 导出后准确率明显退化
 - CoreML EP 对 ViT 覆盖度差，且旧双尺度 ONNX 路线在 Mac 上慢
-- 当前正式路线：torch + transformers；MPS 与 NVIDIA CUDA 使用 bf16，Windows ROCm 与 CPU 使用 fp32。Windows ROCm 使用 eager attention。
+- 当前正式路线：torch + transformers；加载权重前先执行 `manifest.json` 完整性校验，初始化时将 48 层 LoRA 权重融合至主干矩阵并支持多鸟批量推理（`classify_batch`）；MPS 与 NVIDIA CUDA 使用 bf16，Windows ROCm 与 CPU 使用 fp32（Windows ROCm 使用 eager attention）。
 
 **为什么 species v4 大文件不入 git**：
 

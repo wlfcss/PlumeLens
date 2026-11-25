@@ -15,10 +15,10 @@
 ### 修复与加固
 
 - **全栈审计稳定性与安全加固**：
-  - **缓存版本白名单与资产校验**：`PipelineManager._compute_version()` 切换为显式 31 字段白名单，彻底避免运行期诊断配置（如 `session_id`/`device_id`/`logging_enabled`）变动导致推理缓存失效；在加载 species v4 PyTorch 权重前先执行 `manifest.json` 完整性校验；为检测/姿态/画质坐标与尺寸补齐 NaN/Inf 及零宽高边界保护。
-  - **Windows 内存限流死锁修复**：修复 `windows_resources.py` 在可用内存位于 `[reserve, reserve + 1 GiB)` 区间时 `MemoryBoundLimiter` 与 `wait_for_memory` 条件不一致引起的永久阻塞。
-  - **主进程与跨桥安全收紧**：收紧所有敏感 IPC 的 `senderFrame === mainFrame` 校验；`shell.openPath` 显式拦截 macOS 可执行应用包（`.app`/`.pkg`/`.workflow` 等）；移除 `entitlements.mac.plist` 中的 `allow-dyld-environment-variables`；系统探测命令统一改用绝对系统路径；前端日志与后端脱敏正则全面改为严格线性时间语法消除 ReDoS 风险，并将 `SUMMARY.txt` 与 `system-profile.json` 纳入脱敏范围；日志收集器补充排空与退避重试，后端原生 stderr 增加大小上限与开关联动；配置、设备标识与硬件画像改用统一原子写盘。
-  - **打包与 CI 防护**：修复 `plumelens-engine.spec` 噪声清理误删 `torch/testing` 与 `numpy/_pytesttester` 的规则冲突并改为基于 `SPECPATH` 定位仓库根目录；`build-engine.cjs` 增补 `engine/data/` 数据资产追踪与 Python 版本戳校验；PR CI 纳入 `npm run build` 验证，打包冒烟测试加强真实检出与分档断言。
+  - **缓存版本白名单与资产校验**：`PipelineManager._compute_version()` 切换为显式 31 字段白名单，彻底避免运行期日志开关、设备/会话标识变动触发推理缓存失效；加载 species v4 PyTorch 权重前先执行 `manifest.json` 完整性校验；为检测、姿态与画质坐标补齐 NaN/Inf 及零宽高边界防护。
+  - **Windows 内存限流死锁修复**：修复 `windows_resources.py` 在可用内存落在保留线以上不足 1 GiB 区间时，入场准入与限流条件不一致导致的永久阻塞。
+  - **主进程与跨桥安全收紧**：全量收紧敏感 IPC 的 `senderFrame === mainFrame` 校验；`shell.openPath` 显式拦截 macOS 可执行应用包（`.app`/`.pkg`/`.workflow` 等）；移除 `entitlements.mac.plist` 中的 `allow-dyld-environment-variables`；系统硬件探测与外部打开命令统一改用绝对系统路径；前后端脱敏正则全部改为严格线性时间语法消除 ReDoS 风险，并将 `SUMMARY.txt` 与 `system-profile.json` 纳入脱敏范围；客户端日志补充排空与退避重试，后端原生 stderr 增加体积上限并与日志开关联动；配置、设备标识与硬件画像改用统一原子写盘。
+  - **打包与 CI 防护**：修复 `plumelens-engine.spec` 清理规则误删 `torch/testing` 与 `numpy/_pytesttester` 的冲突，并改为基于 `SPECPATH` 定位仓库根目录；`build-engine.cjs` 增补 `engine/data/` 数据资产追踪与 Python 版本戳校验；PR CI 纳入 `npm run build` 生产构建验证，实包冒烟测试加强真实检出与分档断言。
 
 ### 性能与架构
 
