@@ -40,6 +40,8 @@ export interface EngineRequestInit {
   headers?: Record<string, string>
   /** 单次请求超时(毫秒);默认 60000。 */
   timeoutMs?: number
+  /** 可选调用方请求 ID，配合 `engineCancelRequest` 跨桥取消在途请求。 */
+  requestId?: string
 }
 
 export type EngineSseBridgeEvent =
@@ -80,6 +82,8 @@ interface PlumeLensAPI {
     init?: EngineRequestInit,
     receiveSummaryLine?: (line: string) => void,
   ) => Promise<EngineResponse>
+  /** 取消指定 requestId 的在途 engineRequest。 */
+  engineCancelRequest?: (requestId: string) => void
   /** 订阅 engine SSE；Electron packaged 路径下 token 留在 preload Authorization header。 */
   engineSseSubscribe?: (path: string, onEvent: (event: EngineSseBridgeEvent) => void) => () => void
   getAppVersion(): Promise<string>

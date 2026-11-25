@@ -90,6 +90,7 @@ export function useAnalysisProgress(
 
   useEffect(() => {
     setEvent(null)
+    lastFrame.current = null
 
     if (!libraryId || !enabled) return undefined
     const detailQuery = { queryKey: LIBRARY_DETAIL_KEY(libraryId), exact: true }
@@ -101,8 +102,22 @@ export function useAnalysisProgress(
     let flushImmediately = false
     let detailInFlight = false
     let nextDetailAt = performance.now() + DETAIL_REFRESH_INTERVAL_MS
+    let nextLibrariesAt = 0
     let needsCatchUp = false
+    let librariesDirty = false
+    let reconnectAttempt = 0
     let cancelled = false
+
+    const maybeInvalidateLibraries = (force = false): void => {
+      const now = performance.now()
+      if (force || now >= nextLibrariesAt) {
+        nextLibrariesAt = now + 3000
+        librariesDirty = false
+        void qc.invalidateQueries({ queryKey: LIBRARIES_KEY }, { cancelRefetch: false })
+      } else {
+        librariesDirty = true
+      }
+    }
 
     const flushDetail = (): void => {
       if (cancelled || !detailDirty || detailInFlight) return
@@ -122,8 +137,13 @@ export function useAnalysisProgress(
 
       detailDirty = false
       flushImmediately = false
+      const shouldInvalidateLibraries = librariesDirty
+      librariesDirty = false
       detailInFlight = true
       nextDetailAt = performance.now() + DETAIL_REFRESH_INTERVAL_MS
+      if (shouldInvalidateLibraries) {
+        maybeInvalidateLibraries(true)
+      }
       void qc.invalidateQueries(detailQuery, { cancelRefetch: false }).finally(() => {
         detailInFlight = false
         if (cancelled) return
@@ -140,15 +160,16 @@ export function useAnalysisProgress(
 
     const scheduleDetail = (immediate = false): void => {
       detailDirty = true
+      librariesDirty = true
       flushImmediately ||= immediate
       if (detailTimer === null || immediate) flushDetail()
     }
 
     const handleOpen = (): void => {
+      reconnectAttempt = 0
       if (!needsCatchUp) return
       needsCatchUp = false
       scheduleDetail(true)
-      void qc.invalidateQueries({ queryKey: LIBRARIES_KEY }, { cancelRefetch: false })
     }
 
     const handleProgressFrame = (data: string): void => {
@@ -179,12 +200,13 @@ export function useAnalysisProgress(
           !parsed.desired_state && !active && previous && previous.pending + previous.processing > 0
 
         // Task starts and queue reordering should not fetch all photos. Results can wait for
-        // the next batch, while stopping and reconnection must eventually publish the tail.
+        // the next batch (which also coalesces LIBRARIES_KEY invalidation), while stopping and
+        // reconnection must immediately publish the tail.
         if (stopped || legacyFinished || (resultsChanged && (previous || active))) {
           scheduleDetail(Boolean(stopped || legacyFinished))
-          void qc.invalidateQueries({ queryKey: LIBRARIES_KEY }, { cancelRefetch: false })
+          maybeInvalidateLibraries(Boolean(stopped || legacyFinished))
         } else if (controlChanged) {
-          void qc.invalidateQueries({ queryKey: LIBRARIES_KEY }, { cancelRefetch: false })
+          maybeInvalidateLibraries(true)
         }
 
         if (parsed.desired_state !== undefined) {
@@ -210,10 +232,12 @@ export function useAnalysisProgress(
     const scheduleReconnect = (): void => {
       if (cancelled) return
       if (reconnectTimer !== null) clearTimeout(reconnectTimer)
+      const delayMs = Math.min(1000 * 2 ** reconnectAttempt, 15_000)
+      reconnectAttempt += 1
       reconnectTimer = setTimeout(() => {
         reconnectTimer = null
         connect()
-      }, 5000)
+      }, delayMs)
     }
 
     const connect = (): void => {

@@ -160,6 +160,13 @@ async function request<T>(
 
   if (typeof window !== 'undefined' && window.plumelens?.engineRequest) {
     init.signal?.throwIfAborted()
+    const bridgeRequestId = init.signal
+      ? `r-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+      : undefined
+    const onCallerAbort = (): void => {
+      if (bridgeRequestId) window.plumelens?.engineCancelRequest?.(bridgeRequestId)
+    }
+    init.signal?.addEventListener('abort', onCallerAbort, { once: true })
     let res: import('@/env').EngineResponse
     try {
       let firstRecord = true
@@ -170,6 +177,7 @@ async function request<T>(
           body: bodyStr,
           headers,
           timeoutMs,
+          ...(bridgeRequestId ? { requestId: bridgeRequestId } : {}),
         },
         receiveSummaryLine &&
           ((line) => {
@@ -181,10 +189,17 @@ async function request<T>(
           }),
       )
     } catch (err) {
+      if (init.signal?.aborted) {
+        throw init.signal.reason instanceof Error
+          ? init.signal.reason
+          : new DOMException('Aborted', 'AbortError')
+      }
       mark?.('api.transport_error')
       // 网络层失败(engine 重启 / 超时 / 偏移端口) — 包成 ApiError 让上层 banner 处理。
       const msg = err instanceof Error ? err.message : String(err)
       throw new ApiError(0, msg, err)
+    } finally {
+      init.signal?.removeEventListener('abort', onCallerAbort)
     }
     mark?.('api.transport_end', { status: res.status })
     if (mark && res.benchmarkTiming) {

@@ -643,7 +643,8 @@ export default function App() {
   const { data: realLibraries } = useLibraries()
   const allLibraryIds = useMemo(() => (realLibraries ?? []).map((l) => l.id), [realLibraries])
   const allDetails = useAllLibraryDetails(allLibraryIds, shouldLoadArchiveWorkspace)
-  useLibraryEvents(activeFolderId, Boolean(activeFolderId))
+  const engineSseKey = useEngineStore((s) => s.sseRestartKey)
+  useLibraryEvents(activeFolderId, Boolean(activeFolderId), engineSseKey)
   const importLibrary = useImportLibrary()
   const { mutateAsync: updateLibraryDisplayName } = useUpdateLibrary()
   const { mutateAsync: relinkLibrary } = useRelinkLibrary()
@@ -671,8 +672,6 @@ export default function App() {
   // 应对 SSE idle close（v0.1.0 后端 bug）/ 网络抖动 / 老连接卡住等场景，
   // 确保用户点「开始分析」后立刻能看到 pending 数变化。
   const [sseRestartKey, setSseRestartKey] = useState(0)
-  // engine 重启后端口可能变 — engineStore 在 'ready' 事件时也 bump 一次,两边相加。
-  const engineSseKey = useEngineStore((s) => s.sseRestartKey)
 
   // 引擎 cold-start 时 useLibraries 等 query 在 ~5s 模型加载窗口内多次失败 → 永远
   // 卡在 error state,recent folders 不显示。engineSseKey 在 engine 每次 'ready'
@@ -943,16 +942,31 @@ export default function App() {
     }
   }
 
-  function handleOpenReview(photoId: string) {
-    if (!reviewPhotoId)
-      setReviewOrder(
-        (route === 'archive' ? archivePhotos : flatSelectionPhotos).map((photo) => photo.id),
-      )
-    startTransition(() => {
-      setFocusedPhotoId(photoId)
-      setReviewPhotoId(photoId)
-    })
-  }
+  const reviewOrderContextRef = useRef({
+    reviewPhotoId,
+    route,
+    archivePhotos,
+    flatSelectionPhotos,
+  })
+  reviewOrderContextRef.current = { reviewPhotoId, route, archivePhotos, flatSelectionPhotos }
+
+  const handleOpenReview = useCallback(
+    (photoId: string) => {
+      const ctx = reviewOrderContextRef.current
+      if (!ctx.reviewPhotoId) {
+        setReviewOrder(
+          (ctx.route === 'archive' ? ctx.archivePhotos : ctx.flatSelectionPhotos).map(
+            (photo) => photo.id,
+          ),
+        )
+      }
+      startTransition(() => {
+        setFocusedPhotoId(photoId)
+        setReviewPhotoId(photoId)
+      })
+    },
+    [setFocusedPhotoId, setReviewPhotoId],
+  )
 
   useEffect(() => {
     if (route !== 'selection' || reviewPhotoId !== null) return

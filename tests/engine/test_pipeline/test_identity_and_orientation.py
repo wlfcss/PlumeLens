@@ -78,20 +78,26 @@ async def test_auto_coreml_uses_verified_digest_loads_fallback_and_releases_it(
     monkeypatch.setattr(onnxruntime, "InferenceSession", create_session)
     pipeline = PipelineManager(Settings(models_dir=tmp_path, yolo_provider="auto"))
     await pipeline.initialize()
-    assert len(sessions) == 2
-    assert sessions[1].get_providers() == ["CPUExecutionProvider"]
+    # CPU fallback is armed lazily on first GPU error to save ~300 MB permanent RAM.
+    assert len(sessions) == 1
+    assert pipeline.version_descriptor["detector_cpu_fallback"] is True
     assert pipeline.version_descriptor["assets"]["yolo"] == digest
     assert pipeline.version_descriptor["provider_details"]["yolo"]["options"] == {
         "CoreMLExecutionProvider": {"MLComputeUnits": "CPUAndGPU"},
     }
+    fallback = pipeline._get_or_load_detector_cpu_fallback()
+    assert fallback is not None
+    assert len(sessions) == 2
+    assert sessions[1].get_providers() == ["CPUExecutionProvider"]
     pipeline._detector.detect = MagicMock(side_effect=RuntimeError("CoreML failure"))
-    pipeline._detector_cpu_fallback.detect = MagicMock(return_value=[])
+    fallback.detect = MagicMock(return_value=[])
     image = tmp_path / "photo.jpg"
     Image.new("RGB", (32, 24)).save(image)
     assert (await pipeline.analyze(image)).bird_count == 0
-    pipeline._detector_cpu_fallback.detect.assert_called_once()
+    fallback.detect.assert_called_once()
     pipeline.close()
     assert pipeline._detector_cpu_fallback is None
+    assert pipeline._detector_cpu_fallback_path is None
     assert not pipeline.is_ready and not any(pipeline.model_status.values())
     assert pipeline.model_providers == {}
 

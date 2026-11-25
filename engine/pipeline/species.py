@@ -545,14 +545,15 @@ class SpeciesClassifier:
                     # Throttle cache flushes to avoid stalling multi-bird/batch throughput.
                     torch.cuda.empty_cache()
 
-        if probs is None or reject_score is None or not np.isfinite(probs).all():
-            return []
-        # reject_score 走 .item() 后是 Python float,可能是 NaN/Inf(极端 logits 输入)。
-        # SpeciesPolicy.decide 内有兜底但会静默把 NaN 当 unrecognized,丢失 top-K
-        # 候选不入复核。这里 log + 早 return 避免无声失败。
-        if not math.isfinite(reject_score):
+        return self._decode_predictions(probs, reject_score)
+
+    def _decode_predictions(
+        self, probs: NDArray[np.float32], reject_score: float
+    ) -> list[SpeciesCandidate]:
+        if not np.isfinite(probs).all() or not math.isfinite(reject_score):
             return []
 
+        probs = probs.copy()
         probs[~self._trained_mask] = 0.0
         ranked = np.argsort(probs)[::-1]
         k = min(self._top_k, probs.shape[0])
@@ -593,6 +594,63 @@ class SpeciesClassifier:
                 )
             )
         return candidates
+
+    @torch.inference_mode()
+    def classify_batch(
+        self,
+        crops: list[NDArray[np.float32] | NDArray[np.uint8]],
+        *,
+        max_batch: int = 8,
+    ) -> list[list[SpeciesCandidate]]:
+        """Classify multiple bird crops in batched GPU forward passes under one lock."""
+        if not crops:
+            return []
+        if len(crops) == 1:
+            return [self.classify(crops[0])]
+
+        cpu_tensors = [preprocess_for_dinov3(crop, self.image_size) for crop in crops]
+        results: list[list[SpeciesCandidate]] = []
+
+        for start in range(0, len(cpu_tensors), max(1, max_batch)):
+            chunk = cpu_tensors[start : start + max(1, max_batch)]
+            batch_cpu = torch.cat(chunk, dim=0)
+            tensors: dict[str, object] = {}
+            probs_batch: NDArray[np.float32] | None = None
+            reject_batch: NDArray[np.float32] | None = None
+            with self._infer_lock:
+                try:
+                    x = batch_cpu.to(self.device).to(self._dtype)
+                    tensors["x"] = x
+
+                    feat = self._model.forward_features(x).float()
+                    tensors["feat"] = feat
+                    species_logits = self._model.species_head(feat)
+                    reject_feat = feat.detach() if self._model.reject_detach_features else feat
+                    reject_logits = self._model.reject_head(reject_feat).squeeze(1)
+                    tensors["species_logits"] = species_logits
+                    tensors["reject_logits"] = reject_logits
+
+                    probs_t = torch.softmax(species_logits.float(), dim=1)
+                    tensors["probs_t"] = probs_t
+                    probs_batch = probs_t.cpu().numpy()
+                    reject_batch = torch.sigmoid(reject_logits.float()).cpu().numpy()
+                finally:
+                    tensors.clear()
+                    infer_count = getattr(self, "_infer_count", 0) + len(chunk)
+                    self._infer_count = infer_count
+                    if self.device == "mps" and infer_count % _MPS_EMPTY_CACHE_INTERVAL == 0:
+                        torch.mps.empty_cache()
+                    elif self.device == "cuda" and infer_count % _MPS_EMPTY_CACHE_INTERVAL == 0:
+                        torch.cuda.empty_cache()
+
+            if probs_batch is None or reject_batch is None:
+                results.extend([] for _ in chunk)
+                continue
+            for idx in range(len(chunk)):
+                results.append(
+                    self._decode_predictions(probs_batch[idx], float(reject_batch[idx]))
+                )
+        return results
 
     @property
     def num_heads(self) -> int:

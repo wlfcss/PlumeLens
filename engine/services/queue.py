@@ -178,7 +178,8 @@ async def enqueue_photos(
     force_rerun: bool = False,
 ) -> int:
     """Atomically enqueue one active task per photo and persist the run intent."""
-    if not photo_ids:
+    unique_ids = list(dict.fromkeys(photo_ids))
+    if not unique_ids:
         return 0
     async with db.transaction() as conn:
         await _attach_legacy_runs(db, library_id)
@@ -193,37 +194,44 @@ async def enqueue_photos(
         status = "paused" if run and run["desired_state"] == "paused" else "pending"
         inserted = 0
         run_created = run is not None
-        for pid in dict.fromkeys(photo_ids):
-            if current_pipeline_version and not force_rerun:
-                # 默认跳过已有有效 active 分析结果且源输入未变化的照片（含旧版本引擎
-                # 产出的历史结果），避免应用升级后仅新增少量照片却触发全库重跑；
-                # 需要用新引擎重跑时由调用方显式传 force_rerun=True。
-                async with conn.execute(
-                    "SELECT 1 FROM analysis_results ar JOIN photos p ON p.id=ar.photo_id "
-                    "WHERE ar.photo_id=? AND ar.is_active=1 "
-                    "AND ar.input_revision=p.input_revision "
-                    "AND (ar.input_hash IS p.file_hash OR ar.input_hash IS NULL)",
-                    (pid,),
-                ) as cur:
-                    if await cur.fetchone() is not None:
-                        continue
+        now_iso = _now_iso()
+
+        # 默认跳过已有有效 active 分析结果且源输入未变化的照片（含旧版本引擎
+        # 产出的历史结果），避免应用升级后仅新增少量照片却触发全库重跑；
+        # 需要用新引擎重跑时由调用方显式传 force_rerun=True。
+        skip_analyzed_clause = (
+            "AND NOT EXISTS ("
+            "SELECT 1 FROM analysis_results ar "
+            "WHERE ar.photo_id=p.id AND ar.is_active=1 "
+            "AND ar.input_revision=p.input_revision "
+            "AND (ar.input_hash IS p.file_hash OR ar.input_hash IS NULL))"
+            if current_pipeline_version and not force_rerun
+            else ""
+        )
+
+        # Set-based chunked insert (500 IDs/statement) keeps 50k libraries down to 100 SQL ops.
+        chunk_size = 500
+        for start in range(0, len(unique_ids), chunk_size):
+            chunk = unique_ids[start : start + chunk_size]
             if not run_created:
                 await conn.execute(
                     "INSERT INTO analysis_runs"
                     "(id,library_id,pipeline_version,force_rerun,created_at) "
                     "VALUES(?,?,?,?,?)",
-                    (run_id, library_id, current_pipeline_version, int(force_rerun), _now_iso()),
+                    (run_id, library_id, current_pipeline_version, int(force_rerun), now_iso),
                 )
                 run_created = True
+            placeholders = ",".join("?" for _ in chunk)
             async with conn.execute(
-                "INSERT INTO task_queue(id,photo_id,library_id,status,priority,attempts,created_at,"
-                "run_id,input_revision) SELECT ?,id,library_id,?,?,0,?,?,input_revision "
-                "FROM photos "
-                "WHERE id=? AND library_id=? AND input_needs_scan=0 "
+                "INSERT INTO task_queue(id,photo_id,library_id,status,priority,attempts,"
+                "created_at,run_id,input_revision) "
+                "SELECT lower(hex(randomblob(16))),p.id,p.library_id,?,?,0,?,?,p.input_revision "
+                f"FROM photos p WHERE p.id IN ({placeholders}) "
+                f"AND p.library_id=? AND p.input_needs_scan=0 {skip_analyzed_clause} "
                 "ON CONFLICT DO NOTHING RETURNING id",
-                (str(uuid.uuid4()), status, priority, _now_iso(), run_id, pid, library_id),
+                (status, priority, now_iso, run_id, *chunk, library_id),
             ) as cur:
-                inserted += int(await cur.fetchone() is not None)
+                inserted += len(list(await cur.fetchall()))
         if run is None and run_created and inserted == 0:
             await conn.execute("DELETE FROM analysis_runs WHERE id=?", (run_id,))
     await logger.ainfo(

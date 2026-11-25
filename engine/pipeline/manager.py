@@ -6,6 +6,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import threading
 import time
 from importlib import import_module
 from importlib.metadata import PackageNotFoundError
@@ -113,9 +114,11 @@ class PipelineManager:
         self._analysis_slots = MemoryBoundLimiter(settings.analysis_concurrency)
         self.resource_profile: dict[str, object] = {}
         self._detector: BirdDetector | None = None
-        # YOLO CPU fallback：CoreML EP 偶发 GatherElements 越界（onnxruntime 1.25 残留 bug，
-        # ~3% 输入触发）。预先加载一份 CPU session，单图崩了 fallback 重跑。
+        # YOLO CPU fallback：CoreML/AMD EP 偶发越界或内核异常（~3% 输入触发）。
+        # 首次异常时懒加载省 ~300 MB 常驻内存；记录 armed 路径以保持 pipeline_version 稳定。
         self._detector_cpu_fallback: BirdDetector | None = None
+        self._detector_cpu_fallback_path: Path | None = None
+        self._detector_cpu_fallback_lock = threading.Lock()
         self._assessor: QualityAssessor | None = None
         self._pose: PoseDetector | None = None
         self._flight_classifier: FlightClassifier | None = None
@@ -209,24 +212,13 @@ class PipelineManager:
             except Exception:
                 await logger.aexception("Failed to load YOLO detector")
 
-            # 如果主 session 是 CoreML，额外加载一份 CPU 备胎给 ~3% 崩溃图 fallback
+            # 主 session 为 CoreML / AMDGPU 时记录路径，异常时懒加载 CPU 备胎（省 ~300 MB）
             if self._detector is not None and self._model_providers.get("yolo") in {
                 "CoreMLExecutionProvider",
                 "AMDGPUExecutionProvider",
             }:
-                try:
-                    cpu_sess = create_session(
-                        str(yolo_path),
-                        providers=["CPUExecutionProvider"],
-                    )
-                    self._detector_cpu_fallback = BirdDetector(
-                        session=cpu_sess,
-                        input_size=self._settings.yolo_input_size,
-                        iou_dedup_threshold=self._settings.yolo_iou_dedup_threshold,
-                    )
-                    await logger.ainfo("Loaded YOLO CPU fallback session")
-                except Exception:
-                    await logger.aexception("Failed to load YOLO CPU fallback")
+                self._detector_cpu_fallback_path = yolo_path
+                await logger.ainfo("Armed lazy YOLO CPU fallback", path=str(yolo_path))
         else:
             await logger.awarning("YOLO detector not found", path=str(yolo_path))
 
@@ -617,15 +609,45 @@ class PipelineManager:
             "runtime": runtime,
             "providers": dict(sorted(self._model_providers.items())),
             "provider_details": copy.deepcopy(self._provider_details),
-            "detector_cpu_fallback": self._detector_cpu_fallback is not None,
+            "detector_cpu_fallback": (
+                self._detector_cpu_fallback is not None
+                or self._detector_cpu_fallback_path is not None
+            ),
         }
         encoded = json.dumps(self._version_descriptor, sort_keys=True, separators=(",", ":"))
         return f"v2-{hashlib.sha256(encoded.encode()).hexdigest()[:16]}"
+
+    def _get_or_load_detector_cpu_fallback(self) -> BirdDetector | None:
+        """Lazily initialize the CPU YOLO fallback session on first GPU exception."""
+        if self._detector_cpu_fallback is not None:
+            return self._detector_cpu_fallback
+        yolo_path = self._detector_cpu_fallback_path
+        if yolo_path is None or not yolo_path.exists():
+            return None
+        with self._detector_cpu_fallback_lock:
+            if self._detector_cpu_fallback is not None:
+                return self._detector_cpu_fallback
+            try:
+                cpu_sess = create_session(
+                    str(yolo_path),
+                    providers=["CPUExecutionProvider"],
+                )
+                self._detector_cpu_fallback = BirdDetector(
+                    session=cpu_sess,
+                    input_size=self._settings.yolo_input_size,
+                    iou_dedup_threshold=self._settings.yolo_iou_dedup_threshold,
+                )
+                logger.info("Lazily loaded YOLO CPU fallback session", path=str(yolo_path))
+            except Exception:
+                logger.exception("Failed to lazily load YOLO CPU fallback")
+                return None
+            return self._detector_cpu_fallback
 
     def close(self) -> None:
         """Release resources. Called during shutdown."""
         self._detector = None
         self._detector_cpu_fallback = None
+        self._detector_cpu_fallback_path = None
         self._assessor = None
         self._pose = None
         self._flight_classifier = None
@@ -738,14 +760,15 @@ class PipelineManager:
                 image, confidence_threshold=self._settings.yolo_confidence
             )
         except Exception as e:
-            if detector_cpu_fallback is not None:
+            fallback = detector_cpu_fallback or self._get_or_load_detector_cpu_fallback()
+            if fallback is not None:
                 yolo_cpu_fallback = True
                 logger.warning(
                     "YOLO GPU failed, falling back to CPU",
                     photo_id=photo_id,
                     error=str(e)[:120],
                 )
-                boxes = detector_cpu_fallback.detect(
+                boxes = fallback.detect(
                     image,
                     confidence_threshold=self._settings.yolo_confidence,
                 )
@@ -753,7 +776,7 @@ class PipelineManager:
                 raise
         t_yolo_ms = (time.perf_counter() - _t) * 1000
 
-        detections: list[BirdAnalysis] = []
+        staged_birds: list[tuple[Any, Any, QualityGrade, Any]] = []
         padding = self._settings.crop_padding_ratio
 
         for box in boxes:
@@ -843,20 +866,46 @@ class PipelineManager:
             iqa_grade = grade(scores.combined, self._settings.grade_thresholds)
             # Step 3c: pose 调整(降档:头不可见 -2 / 眼不可见 -1;升档:头眼齐 + 飞版 +1)
             bird_grade = apply_pose_adjustment(iqa_grade, pose_info)
+            staged_birds.append((box, scores, bird_grade, pose_info))
 
-            # Step 4: species classification (gated)
-            species_candidates: list[SpeciesCandidate] = []
-            _t = time.perf_counter()
-            if species_classifier is not None and self._should_run_species(pose_info, bird_grade):
-                species_crop = self._prepare_species_crop(
-                    image, box.x1, box.y1, box.x2, box.y2, img_w, img_h
+        # Step 4: species classification (gated; batch multi-bird photos in one GPU pass)
+        species_by_idx: dict[int, list[SpeciesCandidate]] = {}
+        if species_classifier is not None and staged_birds:
+            gated_indices: list[int] = []
+            gated_crops: list[Any] = []
+            for idx, (box, _scores, bird_grade, pose_info) in enumerate(staged_birds):
+                if self._should_run_species(pose_info, bird_grade):
+                    gated_indices.append(idx)
+                    gated_crops.append(
+                        self._prepare_species_crop(
+                            image, box.x1, box.y1, box.x2, box.y2, img_w, img_h
+                        )
+                    )
+            if gated_crops:
+                _t = time.perf_counter()
+                use_batch = len(gated_crops) > 1 and isinstance(
+                    species_classifier, SpeciesClassifier
                 )
-                try:
-                    species_candidates = species_classifier.classify(species_crop)
-                except Exception:
-                    logger.exception("Species classification failed", photo_id=photo_id)
-            t_species_ms += (time.perf_counter() - _t) * 1000
+                if use_batch:
+                    try:
+                        batched = species_classifier.classify_batch(gated_crops)
+                        for idx, cands in zip(gated_indices, batched, strict=False):
+                            species_by_idx[idx] = cands
+                    except Exception:
+                        logger.exception(
+                            "Batched species classification failed", photo_id=photo_id
+                        )
+                else:
+                    for idx, crop in zip(gated_indices, gated_crops, strict=False):
+                        try:
+                            species_by_idx[idx] = species_classifier.classify(crop)
+                        except Exception:
+                            logger.exception("Species classification failed", photo_id=photo_id)
+                t_species_ms += (time.perf_counter() - _t) * 1000
 
+        detections: list[BirdAnalysis] = []
+        for idx, (box, scores, bird_grade, pose_info) in enumerate(staged_birds):
+            species_candidates = species_by_idx.get(idx, [])
             top_candidate = species_candidates[0] if species_candidates else None
             species_name = None
             if top_candidate is not None and top_candidate.recognition_state == "recognized":

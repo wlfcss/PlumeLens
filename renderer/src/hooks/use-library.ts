@@ -145,7 +145,11 @@ export function useAllLibraryDetails(libraryIds: string[], enabled = true): Libr
   return details
 }
 
-export function useLibraryEvents(libraryId: string | null | undefined, enabled = true) {
+export function useLibraryEvents(
+  libraryId: string | null | undefined,
+  enabled = true,
+  restartKey = 0,
+) {
   const qc = useQueryClient()
 
   useEffect(() => {
@@ -156,6 +160,7 @@ export function useLibraryEvents(libraryId: string | null | undefined, enabled =
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null
     let refreshTimer: ReturnType<typeof setTimeout> | null = null
     let needsCatchUp = false
+    let reconnectAttempt = 0
     let cancelled = false
 
     const flushRefresh = () => {
@@ -178,6 +183,7 @@ export function useLibraryEvents(libraryId: string | null | undefined, enabled =
     }
 
     const handleOpen = () => {
+      reconnectAttempt = 0
       // GET already loads the initial snapshot. Reconnection can miss real notifications.
       if (!needsCatchUp) return
       needsCatchUp = false
@@ -187,10 +193,12 @@ export function useLibraryEvents(libraryId: string | null | undefined, enabled =
     const scheduleReconnect = (): void => {
       if (cancelled) return
       if (reconnectTimer !== null) clearTimeout(reconnectTimer)
+      const delayMs = Math.min(1000 * 2 ** reconnectAttempt, 15_000)
+      reconnectAttempt += 1
       reconnectTimer = setTimeout(() => {
         reconnectTimer = null
         connect()
-      }, 5000)
+      }, delayMs)
     }
 
     const connect = (): void => {
@@ -276,7 +284,7 @@ export function useLibraryEvents(libraryId: string | null | undefined, enabled =
       source = null
       if (refreshTimer !== null) clearTimeout(refreshTimer)
     }
-  }, [enabled, libraryId, qc])
+  }, [enabled, libraryId, qc, restartKey])
 }
 
 export function useImportLibrary() {

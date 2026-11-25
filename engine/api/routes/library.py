@@ -962,6 +962,12 @@ async def delete_library(request: Request, library_id: str) -> None:
     一没就再也定位不到那些文件 —— 那是永久泄漏。
     """
     db = await _db(request)
+    from engine.api.routes.analysis import cancel_library_worker
+    from engine.services.exporter import cancel_library_export_jobs
+
+    cancel_library_export_jobs(library_id)
+    await cancel_library_worker(library_id)
+
     async with db.transaction() as conn:
         async with conn.execute(
             "SELECT id FROM libraries WHERE id = ?",

@@ -17,7 +17,7 @@ def test_create_app_requires_api_token_when_guard_enabled(monkeypatch: pytest.Mo
         create_app()
 
 
-async def test_auth_guard_accepts_bearer_and_legacy_query_token(
+async def test_auth_guard_disables_query_token_in_production_and_allows_in_dev(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from engine.core.config import settings
@@ -31,8 +31,16 @@ async def test_auth_guard_accepts_bearer_and_legacy_query_token(
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         missing = await client.get("/health")
         bearer = await client.get("/health", headers={"Authorization": "Bearer secret-token"})
-        query = await client.get("/health?token=secret-token")
+        header = await client.get("/health", headers={"X-PlumeLens-Token": "secret-token"})
+        query_prod = await client.get("/health?token=secret-token")
 
     assert missing.status_code == 401
     assert bearer.status_code == 200
-    assert query.status_code == 200
+    assert header.status_code == 200
+    assert query_prod.status_code == 401
+
+    # Dev shell (require_api_token=False) still supports legacy EventSource ?token= fallback.
+    monkeypatch.setattr(settings, "require_api_token", False)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        query_dev = await client.get("/health?token=secret-token")
+    assert query_dev.status_code == 200

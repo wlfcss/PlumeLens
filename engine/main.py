@@ -1,13 +1,13 @@
 """PlumeLens Engine - FastAPI application entry point."""
 
 import hmac
-from collections.abc import Awaitable, Callable
+from urllib.parse import parse_qs
 
 import structlog
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from starlette.responses import Response
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from engine.api.routes.analysis import router as analysis_router
 from engine.api.routes.archive import router as archive_router
@@ -23,23 +23,68 @@ from engine.core.lifespan import lifespan
 from engine.services.selection import SelectionProjectionCache
 
 
-def _request_token(request: Request) -> str | None:
-    """Read token from supported local client channels.
+def _extract_scope_token(scope: Scope, *, allow_query: bool) -> str | None:
+    """Read token from Authorization header, X-PlumeLens-Token, or (dev-only) query param."""
+    headers = scope.get("headers") or ()
+    header_token: str | None = None
+    for raw_k, raw_v in headers:
+        key = raw_k.lower()
+        if key == b"authorization":
+            auth = raw_v.decode("latin-1")
+            scheme, _, value = auth.partition(" ")
+            if scheme.lower() == "bearer" and value:
+                return value
+        elif key == b"x-plumelens-token":
+            header_token = raw_v.decode("latin-1")
+    if header_token:
+        return header_token
+    if allow_query:
+        qs = (scope.get("query_string") or b"").decode("latin-1")
+        if qs:
+            vals = parse_qs(qs).get("token")
+            if vals and vals[0]:
+                return vals[0]
+    return None
 
-    Normal requests and packaged Electron SSE use Authorization from preload.
-    The query token path remains for legacy/native EventSource fallback in dev
-    shells. The server is loopback-only; the token prevents casual cross-origin
-    probes from talking to the random local port.
+
+def _extract_request_id(scope: Scope) -> str | None:
+    for raw_k, raw_v in scope.get("headers") or ():
+        if raw_k.lower() == b"x-plumelens-request-id":
+            return raw_v.decode("latin-1")[:32]
+    return None
+
+
+class _LocalAuthAndTraceMiddleware:
+    """Pure ASGI middleware for local bearer-token auth and X-PlumeLens-Request-Id binding.
+
+    Avoids Starlette BaseHTTPMiddleware streaming overhead and SSE cancellation issues.
     """
-    auth = request.headers.get("authorization", "")
-    scheme, _, value = auth.partition(" ")
-    if scheme.lower() == "bearer" and value:
-        return value
-    header_value = request.headers.get("x-plumelens-token")
-    if header_value:
-        return header_value
-    query_value = request.query_params.get("token")
-    return query_value
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        expected = settings.api_token
+        method = str(scope.get("method", "GET")).upper()
+        if expected and method != "OPTIONS":
+            # In packaged production (require_api_token=True), disable ?token= query auth
+            # so tokens can only travel in Authorization / X-PlumeLens-Token headers.
+            supplied = _extract_scope_token(scope, allow_query=not settings.require_api_token)
+            if supplied is None or not hmac.compare_digest(supplied, expected):
+                response = JSONResponse({"detail": "Unauthorized"}, status_code=401)
+                await response(scope, receive, send)
+                return
+
+        req_id = _extract_request_id(scope)
+        if req_id:
+            with structlog.contextvars.bound_contextvars(request_id=req_id):
+                await self.app(scope, receive, send)
+            return
+        await self.app(scope, receive, send)
 
 
 def create_app() -> FastAPI:
@@ -52,23 +97,7 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
     application.state.selection_projections = SelectionProjectionCache()
-
-    async def require_local_token(
-        request: Request,
-        call_next: Callable[[Request], Awaitable[Response]],
-    ) -> Response:
-        expected = settings.api_token
-        if expected and request.method != "OPTIONS":
-            supplied = _request_token(request)
-            if supplied is None or not hmac.compare_digest(supplied, expected):
-                return JSONResponse({"detail": "Unauthorized"}, status_code=401)
-        req_id = request.headers.get("x-plumelens-request-id")
-        if req_id:
-            with structlog.contextvars.bound_contextvars(request_id=req_id[:32]):
-                return await call_next(request)
-        return await call_next(request)
-
-    application.middleware("http")(require_local_token)
+    application.add_middleware(_LocalAuthAndTraceMiddleware)
 
     # Dev 环境允许 electron-vite 的渲染进程跨源请求。5173 被占用时 Vite 会自动
     # 递增到 5174/5175；这里放开 loopback 的任意端口，实际访问仍由一次性

@@ -71,6 +71,22 @@ def get_library_worker(library_id: str) -> asyncio.Task[None] | None:
     return _workers.get(library_id)
 
 
+async def cancel_library_worker(library_id: str, wait_seconds: float = 5.0) -> bool:
+    """Cancel and await one library's in-memory worker before deleting the library."""
+    task = _workers.get(library_id)
+    if task is None or task.done():
+        _workers.pop(library_id, None)
+        return True
+    task.cancel()
+    try:
+        await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), timeout=wait_seconds)
+    except TimeoutError:
+        logger.warning("Timed out waiting for library worker to cancel", library_id=library_id)
+        return False
+    _workers.pop(library_id, None)
+    return True
+
+
 async def cancel_all_workers(wait_seconds: float = 5.0) -> bool:
     """Cancel all in-memory analysis workers before destructive maintenance.
 
@@ -224,10 +240,26 @@ async def _run_one_task(
     force_rerun: bool = False,
 ) -> bool:
     """Pick one task and run it. Returns True if a task was processed, False if queue empty."""
+    import sqlite3
+
     from engine.core.windows_resources import wait_for_memory
 
     await wait_for_memory()
-    task = await pick_next(db, library_id=library_id)
+    task = None
+    for attempt in range(3):
+        try:
+            task = await pick_next(db, library_id=library_id)
+            break
+        except sqlite3.OperationalError as exc:
+            if attempt == 2:
+                raise
+            logger.warning(
+                "Transient SQLite error in pick_next, retrying",
+                library_id=library_id,
+                attempt=attempt + 1,
+                error=str(exc),
+            )
+            await asyncio.sleep(0.25)
     if task is None:
         return False
     try:
@@ -448,47 +480,53 @@ async def start_batch(
 @router.post("/library/{library_id}/pause", response_model=QueueStats)
 async def pause(request: Request, library_id: str) -> QueueStats:
     db = await _db(request)
-    await pause_library(db, library_id)
-    current_stats = await get_stats(db, library_id)
-    if _has_active_tasks(current_stats):
-        await _mark_library_analyzing(db, library_id)
-    else:
-        await _mark_library_analysis_idle(db, library_id)
-    return QueueStats(
-        library_id=library_id,
-        stats=current_stats,
-        **await get_library_control(db, library_id),
-    )
+    lock = _batch_locks.setdefault(library_id, asyncio.Lock())
+    async with lock:
+        await pause_library(db, library_id)
+        current_stats = await get_stats(db, library_id)
+        if _has_active_tasks(current_stats):
+            await _mark_library_analyzing(db, library_id)
+        else:
+            await _mark_library_analysis_idle(db, library_id)
+        return QueueStats(
+            library_id=library_id,
+            stats=current_stats,
+            **await get_library_control(db, library_id),
+        )
 
 
 @router.post("/library/{library_id}/resume", response_model=QueueStats)
 async def resume(request: Request, library_id: str) -> QueueStats:
     db = await _db(request)
     pipeline = await _pipeline(request)
-    await _ensure_library_source_available(db, library_id)
-    await resume_library(db, library_id)
-    await _mark_library_analyzing(db, library_id)
-    # 重启 drain worker
-    start_library_worker(db, pipeline, library_id, settings.analysis_concurrency)
-    return QueueStats(
-        library_id=library_id,
-        stats=await get_stats(db, library_id),
-        **await get_library_control(db, library_id),
-    )
+    lock = _batch_locks.setdefault(library_id, asyncio.Lock())
+    async with lock:
+        await _ensure_library_source_available(db, library_id)
+        await resume_library(db, library_id)
+        await _mark_library_analyzing(db, library_id)
+        # 重启 drain worker
+        start_library_worker(db, pipeline, library_id, settings.analysis_concurrency)
+        return QueueStats(
+            library_id=library_id,
+            stats=await get_stats(db, library_id),
+            **await get_library_control(db, library_id),
+        )
 
 
 @router.post("/library/{library_id}/cancel", response_model=QueueStats)
 async def cancel(request: Request, library_id: str) -> QueueStats:
     db = await _db(request)
-    await cancel_library(db, library_id)
-    stats = await get_stats(db, library_id)
-    if int(stats.get(TaskStatus.PROCESSING.value, 0)) > 0:
-        await _mark_library_analyzing(db, library_id)
-    else:
-        await _mark_library_analysis_idle(db, library_id)
-    return QueueStats(
-        library_id=library_id, stats=stats, **await get_library_control(db, library_id)
-    )
+    lock = _batch_locks.setdefault(library_id, asyncio.Lock())
+    async with lock:
+        await cancel_library(db, library_id)
+        stats = await get_stats(db, library_id)
+        if int(stats.get(TaskStatus.PROCESSING.value, 0)) > 0:
+            await _mark_library_analyzing(db, library_id)
+        else:
+            await _mark_library_analysis_idle(db, library_id)
+        return QueueStats(
+            library_id=library_id, stats=stats, **await get_library_control(db, library_id)
+        )
 
 
 @router.get("/library/{library_id}/stats", response_model=QueueStats)

@@ -369,6 +369,19 @@ def cancel_export_job(job_id: str) -> ExportJob | None:
     return job
 
 
+def cancel_library_export_jobs(library_id: str) -> int:
+    """Cancel any running export jobs targeting `library_id` before library deletion."""
+    with _JOBS_LOCK:
+        running = [
+            job
+            for job in _JOBS.values()
+            if job.library_id == library_id and job.status == JOB_RUNNING
+        ]
+    for job in running:
+        job.cancel()
+    return len(running)
+
+
 def cancel_all_export_jobs() -> int:
     """Shutdown 钩子:请求所有运行中的导出停下来。
 

@@ -64,9 +64,10 @@ export interface EngineRequestInit {
   body?: string | null
   /** caller 显式 headers,会与 preload 注入的 Authorization / Content-Type merge。 */
   headers?: Record<string, string>
-  /** 单次请求超时(毫秒);默认 60000。caller 信号无法跨 contextBridge 传过来,所以
-   *  renderer 侧 caller 的 AbortSignal 不会传播;只能靠这里的本地超时兜底。 */
+  /** 单次请求超时(毫秒);默认 60000。 */
   timeoutMs?: number
+  /** 可选调用方请求 ID，配合 `engineCancelRequest(requestId)` 实现跨桥真取消。 */
+  requestId?: string
 }
 
 export type EngineSseBridgeEvent =
@@ -165,6 +166,16 @@ async function ensureAuth(): Promise<{ url: string; token: string | null }> {
   return { url: cachedBackendUrl, token: cachedAuthToken }
 }
 
+const inFlightRequests = new Map<string, AbortController>()
+
+function cancelEngineRequest(requestId: string): void {
+  const ctrl = inFlightRequests.get(requestId)
+  if (ctrl) {
+    inFlightRequests.delete(requestId)
+    ctrl.abort()
+  }
+}
+
 async function performEngineRequest(
   path: string,
   init: EngineRequestInit = {},
@@ -173,7 +184,7 @@ async function performEngineRequest(
   const { url, token } = await ensureAuth()
   const enginePath = normalizeEnginePath(path)
   const pathnameOnly = enginePath.split('?', 1)[0] ?? enginePath
-  const requestId = generateRequestId()
+  const requestId = init.requestId || generateRequestId()
   const method = (init.method ?? 'GET').toUpperCase()
   const headers = new Headers(init.headers ?? {})
   if (token && !headers.has('Authorization')) {
@@ -186,8 +197,13 @@ async function performEngineRequest(
     headers.set('Content-Type', 'application/json')
   }
   const ctrl = new AbortController()
+  inFlightRequests.set(requestId, ctrl)
   const timeoutMs = init.timeoutMs ?? engineRequestTimeout(enginePath)
-  const timer = setTimeout(() => ctrl.abort(), timeoutMs)
+  let timedOut = false
+  const timer = setTimeout(() => {
+    timedOut = true
+    ctrl.abort()
+  }, timeoutMs)
   const startedAt = performance.now()
   try {
     const fetchStart = benchmarkTraceEnabled ? performance.now() : undefined
@@ -247,20 +263,24 @@ async function performEngineRequest(
     }
   } catch (err) {
     const durationMs = Math.round((performance.now() - startedAt) * 10) / 10
-    sendPreloadLog({
-      level: 'warn',
-      scope: 'engine-http',
-      category: 'error',
-      event: ctrl.signal.aborted ? 'engine_http_timeout' : 'engine_http_transport_error',
-      meta: { method, path: pathnameOnly, durationMs, timeoutMs, requestId },
-      error: {
-        name: err instanceof Error ? err.name : 'Error',
-        message: err instanceof Error ? err.message : String(err),
-      },
-    })
+    // Caller-initiated aborts (rapid filter/folder switching) are normal and not logged as errors.
+    if (timedOut || !ctrl.signal.aborted) {
+      sendPreloadLog({
+        level: 'warn',
+        scope: 'engine-http',
+        category: 'error',
+        event: timedOut ? 'engine_http_timeout' : 'engine_http_transport_error',
+        meta: { method, path: pathnameOnly, durationMs, timeoutMs, requestId },
+        error: {
+          name: err instanceof Error ? err.name : 'Error',
+          message: err instanceof Error ? err.message : String(err),
+        },
+      })
+    }
     throw err
   } finally {
     clearTimeout(timer)
+    inFlightRequests.delete(requestId)
   }
 }
 
@@ -394,6 +414,12 @@ contextBridge.exposeInMainWorld('plumelens', {
     init?: EngineRequestInit,
     receiveSummaryLine?: (line: string) => void,
   ): Promise<EngineResponse> => performEngineRequest(path, init, receiveSummaryLine),
+  /** 取消在途的 engineRequest（配合 AbortSignal 避免快速切库/筛选堆积旧请求）。 */
+  engineCancelRequest: (requestId: string): void => {
+    if (typeof requestId === 'string' && requestId.length > 0) {
+      cancelEngineRequest(requestId)
+    }
+  },
   /** 订阅 engine SSE — fetch stream 在 preload 内注入 Authorization,token 不进 renderer。 */
   engineSseSubscribe: (
     path: string,
