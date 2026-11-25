@@ -17,7 +17,7 @@ const engineBin = path.join(
   process.platform === 'win32' ? 'plumelens-engine.exe' : 'plumelens-engine',
 )
 const specFile = path.join(repoRoot, 'scripts', 'plumelens-engine.spec')
-const stampFile = path.join(repoRoot, 'dist', 'plumelens-engine', '.build-stamp.json')
+const stampFile = path.join(repoRoot, 'dist', '.plumelens-engine-stamp.json')
 
 function walkFiles(dir, predicate, out = []) {
   if (!fs.existsSync(dir)) return out

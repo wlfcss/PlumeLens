@@ -9,7 +9,7 @@
 import { _electron, expect, type ElectronApplication, type Page } from '@playwright/test'
 import { dirname, join } from 'path'
 import { fileURLToPath } from 'url'
-import { mkdtempSync, readdirSync, readFileSync, rmSync, existsSync } from 'fs'
+import { mkdtempSync, readdirSync, readFileSync, rmSync, existsSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { engineStartupTimeout } from '../../../shared/engine-request-timeout.js'
 
@@ -58,6 +58,7 @@ export interface LaunchHandle {
 
 export interface LaunchOptions {
   disableCloseConfirm?: boolean
+  enableLogging?: boolean
   extraArgs?: string[]
 }
 
@@ -91,6 +92,26 @@ export async function launchApp(
   options: LaunchOptions = {},
 ): Promise<LaunchHandle> {
   const disableCloseConfirm = options.disableCloseConfirm ?? true
+  const enableLogging = options.enableLogging ?? true
+  if (enableLogging) {
+    const uiPrefsPath = join(dataDir, 'ui-prefs.json')
+    if (!existsSync(uiPrefsPath)) {
+      writeFileSync(
+        uiPrefsPath,
+        JSON.stringify(
+          {
+            loggingConsent: 'enabled',
+            loggingConsentVersion: 1,
+            loggingEnabled: true,
+            loggingLevel: 'info',
+          },
+          null,
+          2,
+        ),
+        'utf-8',
+      )
+    }
+  }
   const launchEnv: Record<string, string> = {}
   for (const [key, value] of Object.entries(process.env)) {
     // Strip ELECTRON_RUN_AS_NODE if inherited from an Electron-based IDE/harness,

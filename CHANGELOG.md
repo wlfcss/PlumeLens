@@ -2,7 +2,9 @@
 
 按版本记录主要功能、修复与兼容性变化。
 
-## 未发布
+## 0.7.9
+
+发布日期：2026-11-25。桌面运行时升级至 Electron 45.4.1（macOS 最低基线 14.0+），全面升级 Python/JS 依赖，新增隐私优先的客户端日志与诊断模块，升级 SQLite 至 Schema v14 并完成全栈深度审计与五波次性能/安全/架构优化。[发布说明](docs/releases/0.7.9.md)
 
 ### 新增
 
@@ -11,34 +13,6 @@
   - **硬件与运行环境画像**：异步采集程序所在磁盘与数据缓存盘（文件系统、容量/余量、SSD/HDD 介质、总线协议与型号）、CPU（含 Apple Silicon 性能核/能效核与缓存）、内存（含统一内存与进程占用）及显卡（含 macOS GPU 核数/Metal、Windows 64 位显存与推理后端绑定状态）。
   - **全任务节点耗时与匿名图片特征**：在启动初始化、文件夹扫描、缩略图生成、单张照片推理（细分指纹校验、缓存查询、解码、YOLO、裁切、姿态、飞版分类、CLIPIQA+、HyperIQA、物种识别与入库耗时）、批量导出及活跃任务资源心跳中记录结构化指标；所有照片文件名均按设备盐做不可逆短哈希匿名（配对 JPG+RAW 同 stem 对齐），并就地脱敏本地路径、访问令牌与地图密钥。
   - **知情同意、热开关与设置页分栏**：首次打开应用时以清晰的中文弹窗说明日志范围与隐私边界，允许用户自由选择开启或暂不开启（未同意前不写日志文件）；设置弹窗升级为左侧四分栏导航，新增独立「日志与诊断」分栏，支持无需重启引擎即时开关日志、切换标准/调试级别、复制匿名设备标识、清空历史日志及**一键导出脱敏 ZIP 日志包**（内含中文 `SUMMARY.txt` 速览、硬件配置、任务耗时统计与脱敏数据库摘要）。
-
-### 修复与加固
-
-- **全栈审计稳定性与安全加固**：
-  - **缓存版本白名单与资产校验**：`PipelineManager._compute_version()` 切换为显式 31 字段白名单，彻底避免运行期日志开关、设备/会话标识变动触发推理缓存失效；加载 species v4 PyTorch 权重前先执行 `manifest.json` 完整性校验；为检测、姿态与画质坐标补齐 NaN/Inf 及零宽高边界防护。
-  - **Windows 内存限流死锁修复**：修复 `windows_resources.py` 在可用内存落在保留线以上不足 1 GiB 区间时，入场准入与限流条件不一致导致的永久阻塞。
-  - **主进程与跨桥安全收紧**：全量收紧敏感 IPC 的 `senderFrame === mainFrame` 校验；`shell.openPath` 显式拦截 macOS 可执行应用包（`.app`/`.pkg`/`.workflow` 等）；移除 `entitlements.mac.plist` 中的 `allow-dyld-environment-variables`；系统硬件探测与外部打开命令统一改用绝对系统路径；前后端脱敏正则全部改为严格线性时间语法消除 ReDoS 风险，并将 `SUMMARY.txt` 与 `system-profile.json` 纳入脱敏范围；客户端日志补充排空与退避重试，后端原生 stderr 增加体积上限并与日志开关联动；配置、设备标识与硬件画像改用统一原子写盘。
-  - **打包与 CI 防护**：修复 `plumelens-engine.spec` 清理规则误删 `torch/testing` 与 `numpy/_pytesttester` 的冲突，并改为基于 `SPECPATH` 定位仓库根目录；`build-engine.cjs` 增补 `engine/data/` 数据资产追踪与 Python 版本戳校验；PR CI 纳入 `npm run build` 生产构建验证，实包冒烟测试加强真实检出与分档断言。
-
-### 性能与架构
-
-- **数据库与并发吞吐升级（Schema v14）**：
-  - SQLite 升级至 **Schema v14**，补充 7 条高频复合与部分索引（场景/地理/时间排序/待补哈希/队列领取与卡死扫描），启用 `cache_size = -64000` 与 `mmap_size = 256 MB`，读连接升级为 4 连接有界 `query_only=ON` 连接池并将业务只读路径全面迁移至非阻塞 `read_snapshot()`；羽迹 JSON 投影与地理聚合移入工作线程并消除冗余 Pydantic 往返校验；诊断统计改用 `os.scandir` + 10s TTL 缓存。
-  - 队列入队改写为 500 条分块集合化 SQL；删除图库前联动取消活跃分析与导出任务；`pause`/`resume`/`cancel` 按库加锁串行化；FastAPI 鉴权与追踪中间件由 `BaseHTTPMiddleware` 重构为纯 ASGI 中间件，且生产态彻底禁用 URL 查询串 token。
-- **推理与解码内存/速度优化**：
-  - RAW 解码新增纯 NumPy `orient_array()` 就地转正，避免 PIL 整幅 48MP 拷贝，峰值内存降低 **50%+**；`SpeciesClassifier` 加载期将 48 层 LoRA 权重融合至主干矩阵并新增 `classify_batch()` 多鸟批量推理；YOLO CPU 回退模型改为首次 GPU 失败时按需懒加载（常驻内存节省约 300 MB）；限流 CUDA/ROCm `empty_cache` 并关闭 OpenCV 内部多线程争用。
-- **前端大库流畅度与跨桥取消**：
-  - 网格卡片不再请求 1920px 预览图，缩略图缓存升级为有界 LRU（4096）并合并为单全局焦点/可见性监听；移除全局无限网格漂移背景动画与卡片入场 `blur()` 滤镜；滚动锚点捕获改为 180ms 停止后防抖；消除物种聚合与地图点位中的 $O(K^2)$ 查重；实现跨 Electron preload 边界的真实 `AbortSignal` 请求取消与 SSE 指数退避重连（1s→15s）。
-  - 异步化诊断 ZIP 打包（启用 Node 24 原生 `zlib.crc32` 与非阻塞文件读取）、物种封面索引内存缓存及 `Cache-Control: immutable`。
-- **工程解耦与包体优化**：
-  - 新增 `shared/ipc.ts` 统一主进程/Preload/渲染层 IPC 契约；将更新检查、外部编辑器、关闭确认与原子写盘从 `electron/main.ts` 拆分独立（主文件精简 600+ 行）；将后端后台分析 worker 从路由层抽离至 `engine/services/analysis_worker.py` 消除循环依赖；`electron.vite.config.ts` 配置 `manualChunks` 拆分第三方依赖，主入口包体由 **1,373 kB 降至 756 kB（-45%）**。
-
-## 0.7.9
-
-发布日期：2026-11-24。桌面运行时升级至 Electron 45.4.1（macOS 最低基线 14.0+），全面升级 Python/JS 依赖，大幅提升 Apple Silicon 推理吞吐并完成全栈审计与 CI/测试体系重构。[发布说明](docs/releases/0.7.9.md)
-
-### 新增
-
 - 深度复核新增同组 A/B 两帧并排对照（快捷键 `C` 开关），支持同步放大平移、`A`/`B` 焦点切换独立评级、帧 B 前后步进及 `Esc` 返回原复核位置；同时在复核面板直观解释当前有效档位、姿态升降档、人工覆盖及无鸟/失败原因。
 - 导出面板新增面向 Lightroom 的内置导出预设（标准导入 / 精选分档 / 仅 XMP 边车）及自定义命名预设管理。
 - 新增后端全局羽迹物种聚合接口 `/archive/species/summary`；羽迹页在已有个人确认记录时默认优先展示个人收集视图，保留一键切换完整图鉴，地图补齐离线待解析与加载失败重试状态。
@@ -60,12 +34,16 @@
   - **Web / 安全 / 序列化栈**：升级 `fastapi 0.165.0`、`starlette 1.10.0`、`anyio 4.16.0`、`pydantic 2.14.4`、`pydantic-core 2.50.5`、`pydantic-settings 2.16.3`、`certifi 2026.11.20`、`idna 3.20`、`filelock 4.3.1`、`uvicorn 0.54.0`、`structlog 26.1.0`、`pyinstaller 6.22.3`。
   - **前端与工具链**：升级 `echarts 6.1.0`（修复 tooltip XSS 并优化轴缩放性能）、`i18next 26.7.2`、`react 19.3.1`、`@tanstack/react-query 5.108.4`、`@tanstack/react-virtual 3.14.28`、`zustand 5.1.0`、`tailwindcss 4.3.5`、`vite 7.3.8`、`vitest 4.1.12`、`electron-builder 26.18.0`、`@playwright/test 1.65.1`、`@types/node 24`。
 
-### 修复
+### 修复与加固
 
-- **安全与主进程加固**：彻底移除向渲染层泄露 Bearer Token 的 `window.plumelens.engineSseUrl`；收紧 `isTrustedAppNavigation` 仅允许应用 `index.html`、`open-path-in-finder` 对文件改走 `showItemInFolder`、`open-in-editor` 校验常规文件；校验敏感 IPC sender；修复 `preload.ts` `ensureAuth()` 竞态、401 缓存失效与 SSE reader 清理；修复 `ProcessManager.restart()` 与崩溃重启竞态及日志流句柄泄漏；修复最小化窗口触发关闭确认弹窗卡死问题；收紧 macOS CI workflow 权限并将发布拆分至独立 `publish` job。
+- **全栈审计稳定性与安全加固**：
+  - **缓存版本白名单与资产校验**：`PipelineManager._compute_version()` 切换为显式 31 字段白名单，彻底避免运行期日志开关、设备/会话标识变动触发推理缓存失效；加载 species v4 PyTorch 权重前先执行 `manifest.json` 完整性校验；为检测、姿态与画质坐标补齐 NaN/Inf 及零宽高边界防护。
+  - **Windows 内存限流死锁修复**：修复 `windows_resources.py` 在可用内存落在保留线以上不足 1 GiB 区间时，入场准入与限流条件不一致导致的永久阻塞。
+  - **主进程与跨桥安全收紧**：全量收紧敏感 IPC 的 `senderFrame === mainFrame` 校验；`shell.openPath` 显式拦截 macOS 可执行应用包（`.app`/`.pkg`/`.workflow` 等）；移除 `entitlements.mac.plist` 与 `entitlements.mac.inherit.plist` 中的 `allow-dyld-environment-variables`；系统硬件探测与外部打开命令统一改用绝对系统路径；前后端脱敏正则全部改为严格线性时间语法消除 ReDoS 风险，并将 `SUMMARY.txt` 与 `system-profile.json` 纳入脱敏范围；客户端日志补充排空与退避重试，后端原生 stderr 增加体积上限并与日志开关联动；配置、设备标识与硬件画像改用统一原子写盘。
+  - **打包与 CI 防护**：修复 `plumelens-engine.spec` 清理规则误删 `torch/testing` 与 `numpy/_pytesttester` 的冲突，并改为基于 `SPECPATH` 定位仓库根目录；`build-engine.cjs` 增补 `engine/data/` 数据资产追踪与 Python 版本戳校验；PR CI 纳入 `npm run build` 生产构建验证，实包冒烟测试加强真实检出与分档断言。
+- **安全与主进程加固**：彻底移除向渲染层泄露 Bearer Token 的 `window.plumelens.engineSseUrl`；收紧 `isTrustedAppNavigation` 仅允许应用 `index.html`、`open-path-in-finder` 对文件改走 `showItemInFolder`、`open-in-editor` 校验常规文件；修复 `preload.ts` `ensureAuth()` 竞态、401 缓存失效与 SSE reader 清理；修复 `ProcessManager.restart()` 与崩溃重启竞态及日志流句柄泄漏；修复最小化窗口触发关闭确认弹窗卡死问题；收紧 macOS CI workflow 权限并将发布拆分至独立 `publish` job。
 - **后端全量审计修复**：修复并发数据库关闭锁顺序与停机清理顺序；修复多线程推理器热重载/关闭空指针；修复多鸟重排时清除人工物种误删他鸟标注；为羽迹缓存加入代际版本号防陈旧快照回写，并将地理聚合切换至非阻塞 WAL 只读快照；修复导出目标重名拼接、缺图/未使用同伴文件误中断与 XMP XML 1.0 控制字符清洗；修复清空本地历史残留 `selection_projections` 与导出任务；修复扫描器跨库路径冲突与大库哈希补算游标分页；修复批处理启动锁、暂停态库状态与 SSE 心跳/断连退出。
 - **前端逻辑与 UI/UX 优化**：修复首页因 `.start-screen` 纵向滚动与底部装饰鸟图负边距溢出导致页面可竖滚及 `.pipeline-bar` 脱离底边问题（改用 `overflow: clip` + 独立裁切容器 + 最近文件夹自适应内滚）；修复删除当前图库 404/SSE 残留、健康检查与队列轮询频率控制、物种墙与选片网格虚拟列表滚动偏移重排；修复导出预设样式、导出前检失败锁死表单、未定义 CSS 变量与动画名；修复深度复核 A/B 对照右栏未跟随帧 B 与双栏头高度错位、羽迹窄屏右侧详栏截断不可滚动、堆叠卡片嵌套按钮键盘陷阱；将全屏复核与地图点位详卡统一迁移至原生 `<dialog>`；补齐 IME 组合态保护、焦点环、ARIA 状态与中英文 i18n 文案。
-
 - 重新关联图库时验证照片及同伴文件的身份。同内容迁移可继续复用已有分析和人工修正，内容变化或身份无法核验的条目需要重扫。
 - 导出 JPEG 与 RAW `.xmp` 边车时均安全合并已有标准 XMP，保留原有 Lightroom 调色、关键词与编辑字段；遇到扩展、超限或损坏 XMP 时原样保留原文件/原边车，并在导出清单明确标注未写入新元数据。
 - 修复 macOS 锁定原片导致导出副本无法发布，以及 Windows 只读属性导致的 JPEG 元数据写入和暂存文件清理问题。
@@ -74,8 +52,18 @@
 - 修复底部任务栏在扫描、哈希、更新与导出阶段误用已分析比例的问题，改为展示各阶段真实计数或不定进度，并区分分析暂停与停止中状态。
 - 选片页在同文件夹切换筛选、排序或视图时保留滚动与照片锚点，锚点被筛掉时自动回退至最近存活邻图，结果为空时引导焦点至清除筛选入口，并在跨文件夹切换时恢复离开前的位置。
 
-### 性能
+### 性能与架构
 
+- **数据库与并发吞吐升级（Schema v14）**：
+  - SQLite 升级至 **Schema v14**，补充 7 条高频复合与部分索引（场景/地理/时间排序/待补哈希/队列领取与卡死扫描），启用 `cache_size = -64000` 与 `mmap_size = 256 MB`，读连接升级为 4 连接有界 `query_only=ON` 连接池并将业务只读路径全面迁移至非阻塞 `read_snapshot()`；羽迹 JSON 投影与地理聚合移入工作线程并消除冗余 Pydantic 往返校验；诊断统计改用 `os.scandir` + 10s TTL 缓存。
+  - 队列入队改写为 500 条分块集合化 SQL；删除图库前联动取消活跃分析与导出任务；`pause`/`resume`/`cancel` 按库加锁串行化；FastAPI 鉴权与追踪中间件由 `BaseHTTPMiddleware` 重构为纯 ASGI 中间件，且生产态彻底禁用 URL 查询串 token。
+- **推理与解码内存/速度优化**：
+  - RAW 解码新增纯 NumPy `orient_array()` 就地转正，避免 PIL 整幅 48MP 拷贝，峰值内存降低 **50%+**；`SpeciesClassifier` 加载期将 48 层 LoRA 权重融合至主干矩阵并新增 `classify_batch()` 多鸟批量推理；YOLO CPU 回退模型改为首次 GPU 失败时按需懒加载（常驻内存节省约 300 MB）；限流 CUDA/ROCm `empty_cache` 并关闭 OpenCV 内部多线程争用。
+- **前端大库流畅度与跨桥取消**：
+  - 网格卡片不再请求 1920px 预览图，缩略图缓存升级为有界 LRU（4096）并合并为单全局焦点/可见性监听；移除全局无限网格漂移背景动画与卡片入场 `blur()` 滤镜；滚动锚点捕获改为 180ms 停止后防抖；消除物种聚合与地图点位中的 $O(K^2)$ 查重；实现跨 Electron preload 边界的真实 `AbortSignal` 请求取消与 SSE 指数退避重连（1s→15s）。
+  - 异步化诊断 ZIP 打包（启用 Node 24 原生 `zlib.crc32` 与非阻塞文件读取）、物种封面索引内存缓存及 `Cache-Control: immutable`。
+- **工程解耦与包体优化**：
+  - 新增 `shared/ipc.ts` 统一主进程/Preload/渲染层 IPC 契约；将更新检查、外部编辑器、关闭确认与原子写盘从 `electron/main.ts` 拆分独立（主文件精简 600+ 行）；将后端后台分析 worker 从路由层抽离至 `engine/services/analysis_worker.py` 消除循环依赖；`electron.vite.config.ts` 配置 `manualChunks` 拆分第三方依赖，主入口包体由 **1,373 kB 降至 756 kB（-45%）**。
 - **macOS Apple Silicon 推理管线大幅提速与冷启动优化**：
   - CoreML Execution Provider 全面切换为 CoreML 5+ `ModelFormat=MLProgram`（保持 YOLO/Pose/Flight `CPUAndGPU` 关 ANE，IQA 默认 `ALL`），将 YOLO 与 Pose 的 CoreML 子图分区从 11 段压减至 3 段（596/605 与 630/640 节点覆盖），同时 TopK/GatherElements 后处理自动留 CPU（仅 0.27 ms），单模型提速 **2.4×–5.5×** 且与 CPU 基准零漂移（YOLO IoU `1.0000` / Pose 关键点误差 `0.00 px`）；新增按 ORT 版本隔离的持久化 `ModelCacheDirectory`（损坏自愈回退），二次冷启动从 ~4.5s 缩短至 **~1.5s（-66%）**。
   - 优化 `SpeciesClassifier.classify`：将 CPU 侧 PIL 缩放归一化移出 `_infer_lock` 锁，取消每只鸟都触发 `torch.mps.empty_cache()` 改为每 64 次周期性清理，并发下额外提速 **+20%** 且输出比特级一致。

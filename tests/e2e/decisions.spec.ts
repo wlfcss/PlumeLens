@@ -1116,6 +1116,8 @@ test.describe('Photo stack interactions (mock backend)', () => {
     await expect(collapse).toBeVisible()
     await expect(stackGroup.locator('.photo-tile')).toHaveCount(3)
     await waitForSelectionScrollSettled(page)
+    // Move pointer away from the expand click coordinates so collapse starts unhovered.
+    await page.mouse.move(10, 10)
     await expect(collapse.locator('.photo-stack-action__hint')).toHaveCSS('opacity', '0')
 
     await collapse.hover()
@@ -1637,14 +1639,40 @@ test.describe('Photo decision flow (mock backend)', () => {
     const panel = page.locator('.settings-panel')
     await expect(panel).toBeVisible()
     const panelBox = await panel.boundingBox()
-    expect(panelBox?.width).toBeGreaterThan(900)
+    expect(panelBox?.width).toBeGreaterThan(800)
     expect(panelBox?.height).toBeLessThan(760)
 
-    const geocodingBox = await panel.locator('.settings-section--geocoding').boundingBox()
-    const aboutBox = await panel.locator('.settings-section--about').boundingBox()
-    const modelsBox = await panel.locator('.settings-section--models').boundingBox()
-    expect(geocodingBox?.x ?? 0).toBeLessThan(aboutBox?.x ?? 0)
-    expect(modelsBox?.width ?? 0).toBeGreaterThan(900)
+    const navBox = await panel.locator('.settings-nav').boundingBox()
+    const contentBox = await panel.locator('.settings-content').boundingBox()
+    expect(navBox?.x ?? 0).toBeLessThan(contentBox?.x ?? 0)
+    await expect(panel.locator('.settings-section--geocoding')).toBeVisible()
+
+    // 日志与诊断分栏
+    await panel.getByRole('tab', { name: '日志与诊断' }).click()
+    await expect(panel).toContainText('隐私保护说明')
+    await expect(panel).toContainText('诊断日志包')
+
+    // 模型与数据分栏：模型版本与清理本地记录二次确认
+    await panel.getByRole('tab', { name: '模型与数据' }).click()
+    await expect(panel.locator('.settings-model-list')).toBeVisible()
+    await expect(panel).toContainText('YOLOv26l-bird-det')
+    await expect(panel).toContainText('DINOv3 species')
+
+    const clearButton = panel.getByRole('button', { name: '清理本地记录' })
+    await clearButton.scrollIntoViewIfNeeded()
+    await clearButton.click()
+    const confirm = panel.locator('.settings-confirm')
+    await expect(confirm).toContainText('确认清理本地识别记录')
+    await confirm.getByRole('button', { name: '取消' }).click()
+    await expect(confirm).toHaveCount(0)
+
+    await clearButton.click()
+    await panel.getByRole('button', { name: '确认清理' }).click()
+    await expect(panel).toContainText('已清理')
+
+    // 关于与更新分栏
+    await panel.getByRole('tab', { name: '关于与更新' }).click()
+    await expect(panel.locator('.settings-section--about')).toBeVisible()
     await expect(panel).toContainText('汪淼 wlfcss')
     await expect(panel).toContainText('wlfcss@gmail.com')
     await expect(panel).toContainText('github.com/wlfcss/PlumeLens')
@@ -1659,20 +1687,6 @@ test.describe('Photo decision flow (mock backend)', () => {
       )
       .toContain('https://www.wlfcss.com')
     await expect(panel).toContainText('当前已是最新版本')
-    await expect(panel).toContainText('YOLOv26l-bird-det')
-    await expect(panel).toContainText('DINOv3 species')
-
-    const clearButton = page.getByRole('button', { name: '清理本地记录' })
-    await clearButton.scrollIntoViewIfNeeded()
-    await clearButton.click()
-    const confirm = page.locator('.settings-confirm')
-    await expect(confirm).toContainText('确认清理本地识别记录')
-    await confirm.getByRole('button', { name: '取消' }).click()
-    await expect(confirm).toHaveCount(0)
-
-    await clearButton.click()
-    await page.getByRole('button', { name: '确认清理' }).click()
-    await expect(panel).toContainText('已清理')
   })
 
   test('inspector defaults to shooting report and blank list click restores it', async ({

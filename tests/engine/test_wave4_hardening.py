@@ -13,12 +13,13 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 def test_macos_entitlements_do_not_allow_dyld_env_vars() -> None:
     """Hardened runtime must not grant allow-dyld-environment-variables."""
-    plist_path = REPO_ROOT / "build" / "entitlements.mac.plist"
-    with plist_path.open("rb") as f:
-        data = plistlib.load(f)
-    assert data.get("com.apple.security.cs.allow-dyld-environment-variables") is not True
-    assert data.get("com.apple.security.cs.allow-jit") is True
-    assert data.get("com.apple.security.cs.disable-library-validation") is True
+    for name in ("entitlements.mac.plist", "entitlements.mac.inherit.plist"):
+        plist_path = REPO_ROOT / "build" / name
+        with plist_path.open("rb") as f:
+            data = plistlib.load(f)
+        assert data.get("com.apple.security.cs.allow-dyld-environment-variables") is not True
+        assert data.get("com.apple.security.cs.allow-jit") is True
+        assert data.get("com.apple.security.cs.disable-library-validation") is True
 
 
 def test_pyinstaller_cleanup_preserves_torch_testing_and_numpy_pytesttester(tmp_path: Path) -> None:

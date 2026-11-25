@@ -59,8 +59,9 @@ macOS 可在下载目录执行 `shasum -a 256 -c PlumeLens-0.7.9-arm64.dmg.sha25
 ## 0.7.9 更新
 
 - 升级桌面运行时至 Electron 45.4.1（macOS 最低基线 14.0+）及全量 Python/JS 依赖（Pillow 13、LibRaw 0.22.2、ONNX Runtime 1.32、PyTorch 2.14.1、Transformers 5.24、ECharts 6.1 等，OSV 零已知漏洞）。
-- Apple Silicon 推理管线切换至 CoreML `MLProgram` + 版本隔离持久化缓存，结合物种锁外预处理、`uint8` 惰性管线与自适应并发，常规鸟图吞吐提升 65%–75%，二次冷启缩短 66%。
-- 新增深度复核 A/B 并排对照、Lightroom 导出预设与大库分页/紧凑摘要流，首屏主 bundle 瘦身 68%；完成全栈安全/并发审计与 CI/测试体系重构，升级原地保留历史记录并默认跳过已分析照片。
+- 新增隐私优先的客户端日志与诊断模块（首次启动知情同意、四分栏设置「日志与诊断」、单向 HMAC 设备标识、硬件画像、任务耗时与一键导出脱敏 ZIP 诊断包）。
+- Apple Silicon 推理管线切换至 CoreML `MLProgram` + 版本隔离持久化缓存，结合 48 层 LoRA 权重融合、多鸟批推理、RAW 纯 NumPy 原地转正（峰值内存降 50%+）、SQLite Schema v14 与 4 连接只读池，常规鸟图吞吐提升 65%–75%，二次冷启缩短 66%。
+- 新增深度复核 A/B 并排对照、Lightroom 导出预设与大库分页/紧凑摘要流，叠加 `manualChunks` 拆包使首屏主入口体积降至 756 kB；完成全栈安全/并发/架构审计五波次加固与 CI/测试体系重构，升级原地保留历史记录并默认跳过已分析照片。
 
 [0.7.9 发布说明](docs/releases/0.7.9.md) · [完整更新日志](CHANGELOG.md) · [GitHub Release](https://github.com/wlfcss/PlumeLens/releases/tag/v0.7.9)
 
